@@ -15,6 +15,7 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -381,16 +382,26 @@ def main(scr):
                 con.acp.p.terminate()
                 curses.endwin()
                 os.execv(sys.executable, [sys.executable, me])
-            while not con.inbox.empty():
-                con.handle(con.inbox.get())
-            con.watch_events()
+            try:
+                while not con.inbox.empty():
+                    con.handle(con.inbox.get())
+                con.watch_events()
+            except Exception as exc:  # keep the console alive; the traceback goes to stderr (console.err)
+                traceback.print_exc()
+                con.add("err", f"console error: {exc!r} (details in console.err)")
             con.draw(C)
             scr.timeout(100)
             try:
                 ch = scr.get_wch()
             except curses.error:
                 continue
-            con.key(ch)
+            try:
+                con.key(ch)
+            except SystemExit:
+                raise
+            except Exception as exc:
+                traceback.print_exc()
+                con.add("err", f"console error: {exc!r} (details in console.err)")
     except (SystemExit, KeyboardInterrupt):
         con.acp.p.terminate()
 
