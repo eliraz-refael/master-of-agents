@@ -69,7 +69,7 @@ def as_command(code):
     if CMD_RE.match(code + " "):
         return code
     m = MOACTL_RE.fullmatch(code)
-    return f"/{m.group(1)} {m.group(2)}" if m else None
+    return f"/{m.group(1)} {m.group(2)}" if m and " --" not in f" {m.group(2)}" else None
 
 
 class Style:
@@ -300,14 +300,15 @@ class Console:
         self.pending = {}          # request id -> what it was
         self.sid = None
         self.busy = False
-        self.perm = None           # a pending session/request_permission, and its feed entry
+        self.perms = []            # pending session/request_permission requests and their feed entries, oldest first
         self.buf, self.cur = [], 0
         self.history, self.hpos = [], 0
         self.scroll = 0
         self.streaming = None      # the agent entry being streamed into
+        self.replaying = False     # session/load is replaying today's thread
         self.turn = 0              # moa's replies group by turn
         self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
-        self.focus = None          # index into hits, while Tab-hopping
+        self.focus = None          # the focused hit (y, x0, x1, command), while Tab-hopping
         self.pal, self.pal_key, self.pal_items, self.pal_hits = 0, None, [], []
         self.pal_moved = False     # ↑↓ picked a row, so ↵ runs it even with nothing typed after the command
         self.cursor = self.conn.execute("SELECT coalesce(max(id),0) FROM events").fetchone()[0]
@@ -323,7 +324,9 @@ class Console:
     def add(self, kind, text, **kw):
         if kind == "you":
             self.turn += 1
-        e = {"kind": kind, "text": text, "ts": datetime.datetime.now().strftime("%H:%M"), "turn": self.turn, **kw}
+        # replayed history has no real time (ACP doesn't send one), so it's marked "earlier"
+        ts = "earlier" if self.replaying else datetime.datetime.now().strftime("%H:%M")
+        e = {"kind": kind, "text": text, "ts": ts, "turn": self.turn, **kw}
         self.feed.append(e)
         del self.feed[:-500]
         self.streaming = None if kind != "agent" else e
@@ -380,13 +383,15 @@ class Console:
         if "method" in m and "id" in m:                       # a request from the agent
             if m["method"] == "session/request_permission":
                 tc = m["params"].get("toolCall", {})
-                self.perm = (m, self.add("perm", tc.get("title") or "this"))
+                self.perms.append((m, self.add("perm", tc.get("title") or "this", rid=m["id"])))
                 self.focus = None
             else:
                 self.acp.respond(m["id"], error={"code": -32601, "message": "not supported by the console"})
             return
         if "id" in m:                                          # a response to us
             what = self.pending.pop(m["id"], None)
+            if what == "load":
+                self.replaying = False
             if "error" in m:
                 self.add("err", f"{what}: {m['error'].get('message')}")
                 if what == "load":
@@ -399,6 +404,7 @@ class Console:
                 if t.get("date") == datetime.date.today().isoformat() and r.get("agentCapabilities", {}).get("loadSession"):
                     self.sid = t["sid"]
                     self.pending[self.acp.request("session/load", {"sessionId": t["sid"], "cwd": MASTER_DIR, "mcpServers": []})] = "load"
+                    self.replaying = True
                 else:
                     self.new_thread()
             elif what == "new":
@@ -407,7 +413,7 @@ class Console:
                 self.add("sys", f"new thread {self.sid[:8]} for today")
                 self.prompt(OPENING, show=False)
             elif what == "load":
-                self.add("sys", f"resumed today's thread {self.sid[:8]}")
+                self.add("sys", f"resumed today's thread {self.sid[:8]}: everything above is from earlier")
             elif what == "prompt":
                 self.busy = False
                 if r.get("stopReason") not in (None, "end_turn"):
@@ -432,6 +438,7 @@ class Console:
                 self.tools[u["toolCallId"]] = self.add("tool", u.get("title") or "tool", status=u.get("status"), raw=u.get("rawInput") or {})
             elif kind == "tool_call_update" and u.get("toolCallId") in self.tools:
                 e = self.tools[u["toolCallId"]]
+                e.pop("_key", None)
                 if u.get("title"):
                     e["text"] = u["title"]
                 if u.get("status"):
@@ -439,14 +446,18 @@ class Console:
                 if u.get("rawInput"):
                     e["raw"] = u["rawInput"]
 
-    def answer(self, ch):
-        msg, entry = self.perm
+    def answer(self, ch, rid=None):
+        """Answer the permission request `rid` (the oldest pending one if None)."""
+        found = next((p for p in self.perms if rid is None or p[0]["id"] == rid), None)
+        if not found:
+            return
+        msg, entry = found
         want = {"y": "allow_once", "a": "allow_always", "n": "reject_once"}[ch]
         opts = msg["params"]["options"]
         opt = next((o for o in opts if o["kind"] == want), opts[0])
         self.acp.respond(msg["id"], {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}})
         entry["answered"] = opt["name"]
-        self.perm = None
+        self.perms.remove(found)
 
     # sessions reporting in
     def watch_events(self):
@@ -475,7 +486,13 @@ class Console:
         if not line.startswith("/"):
             self.prompt(line)
             return
-        cmd, *args = shlex.split(line[1:]) if line.count('"') % 2 == 0 else line[1:].split()
+        try:
+            parts = shlex.split(line[1:])
+        except ValueError:  # an unbalanced quote, e.g. /resume Eliraz's idea
+            parts = line[1:].split()
+        if not parts:
+            return
+        cmd, *args = parts
         if cmd == "help":
             self.add("help", "", title="commands")
         elif cmd == "quit":
@@ -503,8 +520,8 @@ class Console:
         """A button was clicked or Entered."""
         self.focus = None
         if cmd.startswith("!perm "):
-            if self.perm:
-                self.answer(cmd[-1])
+            _, rid, ch = cmd.split(" ")
+            self.answer(ch, json.loads(rid))
         elif cmd.startswith("!fill "):
             self.fill(cmd[6:])
         else:
@@ -535,24 +552,25 @@ class Console:
                              for n, node in cfg["layouts"].items() if n.startswith(q)]
                 except (OSError, ValueError, KeyError):
                     items = []
-        self.pal_key, self.pal_items = text, items[:8]
+        self.pal_key, self.pal_items = text, items[:max(8, len(COMMANDS))]
         self.pal = min(self.pal, max(0, len(self.pal_items) - 1))
         return self.pal_items
 
     def key(self, ch):
         if ch == curses.KEY_MOUSE:
             return self.mouse()
-        if self.perm and not self.buf and ch in ("y", "a", "n"):
+        if self.perms and not self.buf and ch in ("y", "a", "n"):
             return self.answer(ch)
         pal = self.palette()
         if ch in ("\t", curses.KEY_BTAB) and pal:
             self.fill(pal[self.pal][2])
         elif ch in ("\t", curses.KEY_BTAB) and not self.buf and self.hits:
             step = 1 if ch == "\t" else -1
-            self.focus = 0 if self.focus is None and step == 1 else ((self.focus or 0) + step) % len(self.hits)
+            at = self.hits.index(self.focus) if self.focus in self.hits else None
+            self.focus = self.hits[0 if at is None and step == 1 else ((at or 0) + step) % len(self.hits)]
         elif ch in ("\n", "\r", curses.KEY_ENTER):
-            if self.focus is not None and not self.buf and self.focus < len(self.hits):
-                return self.press(self.hits[self.focus][3])
+            if self.focus is not None and not self.buf:
+                return self.press(self.focus[3])
             if pal and "".join(self.buf).strip() != pal[self.pal][2].strip() and pal[self.pal][2].endswith(" "):
                 return self.fill(pal[self.pal][2])  # a command that needs an argument: complete it first
             typed = "".join(self.buf)
@@ -662,8 +680,9 @@ class Console:
             if e.get("answered"):
                 rows = head + [[(f"→ {e['answered']}", S.dim)]]
             else:
-                rows = head + [[(" y  once ", S.chipwarn, "!perm y"), ("  ", 0), (" a  always ", S.chipwarn, "!perm a"),
-                                ("  ", 0), (" n  no ", S.chip, "!perm n")]]
+                rid = json.dumps(e["rid"])
+                rows = head + [[(" y  once ", S.chipwarn, f"!perm {rid} y"), ("  ", 0), (" a  always ", S.chipwarn, f"!perm {rid} a"),
+                                ("  ", 0), (" n  no ", S.chip, f"!perm {rid} n")]]
             return self.card("⚠ permission", rows, width, S.warn)
         if k == "err":
             return wrap([(e["text"], S.err)], width, [("✗ ", S.err)], [("  ", 0)])
@@ -693,8 +712,8 @@ class Console:
         return [top] + [[("│ ", attr)] + r for r in rows] + [[("╰" + "─" * (width - 1), attr)]]
 
     def cached_rows(self, e, width):
-        if e["kind"] == "tool" or (e["kind"] == "agent" and e is self.streaming and self.busy):
-            return self.entry_rows(e, width)  # spinners and live text: no cache
+        if e["kind"] == "tool" and e.get("status") == "in_progress":
+            return self.entry_rows(e, width)  # a spinner: no cache
         key = (width, len(e["text"]), e.get("status"), e.get("answered"))
         if e.get("_key") != key:
             e["_key"], e["_rows"] = key, self.entry_rows(e, width)
@@ -739,7 +758,7 @@ class Console:
         W = w - 1
         scr.erase()
         screen = []  # (y, segments)
-        if self.perm:
+        if self.perms:
             state = [("⚠ answer y / a / n", S.warn | curses.A_BOLD)]
         elif not self.sid:
             state = [("connecting…", S.dim)]
@@ -756,12 +775,15 @@ class Console:
         for y, segs in enumerate(lines[max(0, end - body):end], start=1):
             screen.append((y, segs))
         pal, self.pal_hits = self.palette(), []
-        if pal:  # the command list floats over the bottom of the feed
-            top = h - 3 - len(pal) - 1
+        room = max(1, h - 6)  # a short pane shows a window of the list around the pick
+        first = min(max(0, self.pal - room + 1), max(0, len(pal) - room))
+        shown = pal[first:first + room]
+        if shown:  # the command list floats over the bottom of the feed
+            top = h - 3 - len(shown) - 1
             screen.append((top, [("╭─ ", S.dim), ("↑↓ pick · Tab complete · ↵ run", S.dim), (" " + "─" * W, S.dim)]))
             col = max(len(p[0]) for p in pal) + 2
-            for n, (label, detail, ins) in enumerate(pal):
-                attr = S.focus if n == self.pal else curses.A_BOLD
+            for n, (label, detail, ins) in enumerate(shown):
+                attr = S.focus if first + n == self.pal else curses.A_BOLD
                 row = fit([("│ ", S.dim), (f" {label} ".ljust(col), attr), (f"  {detail}", S.dim)], W)
                 screen.append((top + 1 + n, row + [(" " * (W - seg_len(row)), 0)]))
                 self.pal_hits.append((top + 1 + n, 0, W, ins if not ins.endswith(" ") else "!fill " + ins))
@@ -784,12 +806,13 @@ class Console:
                 if len(s) > 2 and s[2]:
                     (bar_hits if y == h - 1 else feed_hits).append((y, x, x + len(s[0]), s[2]))
                 x += len(s[0])
-        if pal:
-            feed_hits = [hit for hit in feed_hits if hit[0] < h - 4 - len(pal)]
+        if shown:
+            feed_hits = [hit for hit in feed_hits if hit[0] < h - 4 - len(shown)]
         self.hits = sorted(feed_hits, key=lambda hit: (-hit[0], hit[1])) + bar_hits  # bottom row first, left to right
-        if self.focus is not None and self.focus >= len(self.hits):
-            self.focus = None
-        focused = self.hits[self.focus][:2] if self.focus is not None else None
+        if self.focus is not None and self.focus not in self.hits:  # the feed moved: follow the same button
+            same = [hit for hit in self.hits if hit[3] == self.focus[3]]
+            self.focus = min(same, key=lambda hit: abs(hit[0] - self.focus[0])) if same else None
+        focused = self.focus[:2] if self.focus is not None else None
         for y, segs in screen:
             x = 0
             for s in segs:

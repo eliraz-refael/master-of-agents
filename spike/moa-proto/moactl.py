@@ -496,7 +496,7 @@ def main():
             if a.op == "list":
                 cfg = layout.load()
                 for n, node in cfg["layouts"].items():
-                    print(f"{'*' if n == cfg.get('current') else ' '} {n}: {' · '.join(layout.leaves(node))}")
+                    print(f"{'▸' if n == cfg.get('current') else ' '} {n}: {' · '.join(layout.leaves(node))}")
                 print(f"(config: {layout.CONFIG})")
             elif a.op == "show":
                 print(json.dumps(layout.load()["layouts"][a.args[0]], indent=2))
