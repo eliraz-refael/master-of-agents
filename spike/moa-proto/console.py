@@ -38,7 +38,7 @@ HELP = """/attention       what needs you, ranked (instant, no LLM)
 /new             start a fresh moa thread
 /quit
 anything else goes to moa · Esc cancels its turn · PgUp/PgDn scroll
-Ctrl-] anywhere: the moa menu
+Ctrl-a anywhere: the moa menu (Ctrl-a a: a real Ctrl-a)
 when it asks permission: y once · a always · n no"""
 
 
@@ -98,7 +98,7 @@ class Console:
         self.pending[self.acp.request("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})] = "init"
-        self.add("sys", "moa · type /help, or Ctrl-] for the menu · connecting…")
+        self.add("sys", "moa · type /help, or Ctrl-a for the menu · connecting…")
         self.run_ctl("attention", header="needs you right now:")
 
     # feed
@@ -139,7 +139,7 @@ class Console:
 
     def handle(self, m):
         if m.get("_exit"):
-            self.add("err", "moa's agent process exited; reopen the console from the menu (Ctrl-])")
+            self.add("err", "moa's agent process exited; reopen the console from the menu (Ctrl-a)")
             self.busy = False
             return
         if "method" in m and "id" in m:                       # a request from the agent
