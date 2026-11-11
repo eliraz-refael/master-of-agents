@@ -10,6 +10,10 @@ if ! "${T[@]}" has-session -t moa 2>/dev/null; then
   # A placeholder window; `moactl layout apply` builds the current cockpit layout
   # (~/.config/moa/layouts.json) in its place.
   "${T[@]}" new-session -d -s moa -n moa -x "$(tput cols)" -y "$(tput lines)" "sleep 2147483647"
-  "$here/moactl" layout apply >/dev/null
+  # A broken layouts.json must not leave a blank cockpit: fall back to the console alone.
+  if ! "$here/moactl" layout apply >/dev/null; then
+    "${T[@]}" respawn-pane -k -t moa:moa "python3 '$here/console.py' 2>>'$here/console.err'"
+    "${T[@]}" set -p -t moa:moa @moa_panel console
+  fi
 fi
 exec "${T[@]}" attach -t moa

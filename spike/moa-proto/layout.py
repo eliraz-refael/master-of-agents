@@ -81,10 +81,10 @@ def validate(node, path="layout"):
     if not isinstance(node, dict):
         raise ValueError(f"{path}: must be an object")
     size = node.get("size")
-    if size is not None and not (isinstance(size, int) or re.fullmatch(r"\d{1,2}%", str(size))):
+    if size is not None and not ((type(size) is int and size > 0) or (isinstance(size, str) and re.fullmatch(r"\d{1,2}%", size))):
         raise ValueError(f"{path}: size must be a number of cells or like \"30%\"")
     if "panel" in node:
-        if node["panel"] not in PANELS:
+        if not isinstance(node["panel"], str) or node["panel"] not in PANELS:
             raise ValueError(f"{path}: unknown panel {node['panel']!r} (panels: {', '.join(PANELS)})")
         return
     if node.get("split") not in ("h", "v"):
@@ -94,7 +94,7 @@ def validate(node, path="layout"):
         raise ValueError(f"{path}: a split needs at least 2 children")
     for i, k in enumerate(kids):
         validate(k, f"{path}.children[{i}]")
-    panels = [p for p in leaves(node)]
+    panels = leaves(node)
     if panels.count("console") > 1 or panels.count("agent") > 1:
         raise ValueError(f"{path}: at most one console and one agent panel")
 
@@ -116,6 +116,11 @@ def alive(pane):
     return bool(pane) and tmux("display-message", "-p", "-t", pane, "#{pane_id}").returncode == 0
 
 
+def panel_of(pane):
+    """The pane's @moa_panel tag ("" for an untagged pane such as a plain agent window)."""
+    return out("display-message", "-p", "-t", pane, "#{@moa_panel}")
+
+
 def tag(pane, panel):
     tmux("set", "-p", "-t", pane, "@moa_panel", panel)
 
@@ -133,7 +138,7 @@ def window_exists():
         "moa" in out("list-windows", "-t", SESSION, "-F", "#{window_name}").splitlines()
 
 
-def apply(name=None, focus_pane=None, session_title=lambda pane: None):
+def apply(name=None, session_title=lambda pane: None):
     """Build layout `name` (default: the current one) in a fresh window, move the live
     console and agent panes into it, and retire the old cockpit window."""
     cfg = load()
@@ -145,10 +150,8 @@ def apply(name=None, focus_pane=None, session_title=lambda pane: None):
     every = panes()
     old_win = next((p["window"] for p in every if p["wname"] == "moa"), None)
     console = next((p["pane"] for p in every if p["panel"] == "console"), None)
-    agent = focus_pane if alive(focus_pane) else None
-    if not agent:
-        current = next((p for p in every if p["panel"] == "agent" and p["window"] == old_win), None)
-        agent = current["pane"] if current else None
+    current = next((p for p in every if p["panel"] == "agent" and p["window"] == old_win), None)
+    agent = current["pane"] if current else None
     new_win, root = out("new-window", "-d", "-t", f"{SESSION}:", "-n", "moa-building", "-P", "-F",
                         "#{window_id} #{pane_id}", PLACEHOLDER).split()
     stray = []  # placeholders that ended up in other windows after a swap
@@ -187,10 +190,13 @@ def apply(name=None, focus_pane=None, session_title=lambda pane: None):
     build(node, root)
     used_agent = "agent" in leaves(node) and alive(agent)
     if old_win:
-        # Agents still in the old cockpit go back to windows of their own before it closes.
+        # Agents (and the console, if this layout has no spot for it) still in the old
+        # cockpit go back to windows of their own before it closes.
         for p in panes(old_win):
             if p["panel"] == "agent" and not (used_agent and p["pane"] == agent):
                 tmux("break-pane", "-d", "-s", p["pane"], "-n", (session_title(p["pane"]) or "agent")[:24])
+            elif p["panel"] == "console":
+                tmux("break-pane", "-d", "-s", p["pane"], "-n", "console")
         tmux("kill-window", "-t", old_win)
     for p in stray:
         if alive(p):
@@ -222,7 +228,6 @@ def focus(target, title_of=lambda pane: None):
             tmux("kill-pane", "-t", s["pane"])
         else:
             tmux("rename-window", "-t", home, (title_of(s["pane"]) or "agent")[:24])
-    tmux("set", "-g", "@moa_focus", target)
     tmux("select-window", "-t", WINDOW)
     tmux("select-pane", "-t", target)
     return "brought it into the cockpit"

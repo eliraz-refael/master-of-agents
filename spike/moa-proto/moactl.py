@@ -104,7 +104,9 @@ def title_of(conn):
 
 
 def resume(conn, s, bg):
-    if pane_alive(s["pane"]):
+    # A stale pane ID (tmux restarts numbering after a server restart) can point at a
+    # cockpit panel; only an untagged pane or an agent pane is this session's.
+    if pane_alive(s["pane"]) and layout.panel_of(s["pane"]) in ("", "agent"):
         print(f"already running in pane {s['pane']}" + ("" if bg else "; " + layout.focus(s["pane"], title_of(conn))))
         return
     if s["state"] == "elsewhere":
@@ -112,7 +114,10 @@ def resume(conn, s, bg):
     if not s["cwd"] or not os.path.isdir(s["cwd"]):
         sys.exit(f"its folder {s['cwd']} is gone")
     args = ["new-window", "-d", "-P", "-F", "#{pane_id}", "-n", window_name(s["title"] or s["project"]), "-c", s["cwd"]]
-    pane = tmux(*args, f"env MOA_TRACK=1 {launch_cmd(s['account'], resume=s['session_id'])}").stdout.strip()
+    r = tmux(*args, f"env MOA_TRACK=1 {launch_cmd(s['account'], resume=s['session_id'])}")
+    if r.returncode:
+        sys.exit(f"tmux failed: {r.stderr.strip()} (is the moa tmux server running?)")
+    pane = r.stdout.strip()
     conn.execute("UPDATE sessions SET pane=? WHERE session_id=?", (pane, s["session_id"]))
     conn.commit()
     log_ui(conn, f"resumed {s['title'] or s['session_id'][:8]}")
@@ -160,9 +165,17 @@ def adopt(conn, pane, title, group):
             sys.exit(f"can't find {account} conversations; pass a session the brain can resume")
         slot = os.path.join(os.path.expanduser(CONFIG_DIRS[account]), "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
         files = sorted(glob.glob(os.path.join(slot, "*.jsonl")), key=os.path.getmtime)
+        # Skip conversations another live pane already holds (two agents in one folder).
+        taken = {row["session_id"] for row in conn.execute(
+            "SELECT session_id, pane FROM sessions WHERE pane IS NOT NULL AND pane != ? AND state != 'ended'", (pane,))
+            if pane_alive(row["pane"])}
+        files = [f for f in files if os.path.basename(f)[:-len(".jsonl")] not in taken]
         if not files:
-            sys.exit(f"no conversation found for {cwd} in {account}")
+            sys.exit(f"no untracked conversation found for {cwd} in {account}")
         sid = os.path.basename(files[-1])[:-len(".jsonl")]
+    holder = conn.execute("SELECT pane FROM sessions WHERE session_id=?", (sid,)).fetchone()
+    if holder and holder["pane"] and holder["pane"] != pane and pane_alive(holder["pane"]):
+        sys.exit(f"session {sid[:8]} is already tracked in live pane {holder['pane']}")
     if group:
         conn.execute("INSERT OR IGNORE INTO groups(path) VALUES(?)", (group,))
     conn.execute("""INSERT INTO sessions(session_id,account,cwd,project_id,title,grp,state,pane,first_seen,last_seen)
@@ -356,8 +369,13 @@ def main():
             return next((x["pane"] for x in layout.panes(layout.WINDOW) if x["panel"] in (a.panel, "agent-slot" if a.panel == "agent" else a.panel)),
                         None) if layout.window_exists() else None
         pane = find_panel()
-        if not pane:
-            layout.apply(session_title=title_of(conn))
+        cfg = layout.load()
+        node = cfg.get("layouts", {}).get(cfg.get("current", "cockpit"))
+        if not pane and (node is None or a.panel in layout.leaves(node)):
+            try:
+                layout.apply(session_title=title_of(conn))
+            except (ValueError, KeyError) as exc:
+                sys.exit(f"layout: {exc}")
             pane = find_panel()
         if not pane:
             sys.exit(f"the current layout has no {a.panel} panel (moactl layout list)")
