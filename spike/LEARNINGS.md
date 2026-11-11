@@ -59,3 +59,19 @@
   First real one: hot / waiting on you / stale, then 3 proposed goals.
 - Tree editing needs empty groups to exist, so groups got their own table, not just
   `sessions.grp`.
+
+## Not a tmux user (2026-11-11)
+- Eliraz doesn't use tmux and would have to learn it. **tmux must be invisible
+  plumbing**: moa's own keys, discoverable from one menu key, with no prefix chords to
+  memorize. tmux features (join-pane, popups, menus) are implementation details.
+- The console died silently once (no logging). Every pane must log its errors and
+  survive a bad message, and there must be an obvious way to bring a pane back.
+
+## Cockpit layouts (2026-11-11)
+- Shown three layouts (cockpit, herdr-style focus, polished classic), Eliraz liked all of
+  them: "can we have multiple views and change with a config or a keystroke?" → **the
+  cockpit is assembled from panels**, layouts are config, and moa can edit them.
+- tmux makes this cheap: each panel is a pane tagged with @moa_panel; a live agent
+  session joins the cockpit by swap-pane, keeping its process. Rebuilding a layout moves
+  the console instead of restarting it.
+- The central agent is named **moa**, not "master" (confusing next to git).

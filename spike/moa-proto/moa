@@ -1,5 +1,5 @@
 #!/bin/bash
-# THROWAWAY PROTOTYPE launcher: the master on the left, the picture on the right,
+# THROWAWAY PROTOTYPE launcher: the moa cockpit (a layout of panels) in window 0,
 # agent sessions in their own windows, all on a private tmux server (-L moa).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -7,9 +7,9 @@ chat="$here/../master-chat"
 T=(tmux -L moa -f "$here/tmux.conf")
 [ -f "$chat/brain.db" ] || "$chat/seed.sh"
 if ! "${T[@]}" has-session -t moa 2>/dev/null; then
-  "${T[@]}" new-session -d -s moa -n master -c "$here" -x "$(tput cols)" -y "$(tput lines)" "python3 '$here/console.py' 2>>'$here/console.err'"
-  "${T[@]}" split-window -h -t moa:master -l 42% -c "$here" "python3 '$here/picture.py'"
-  "${T[@]}" select-pane -t moa:master.0
-  "${T[@]}" bind-key m select-window -t moa:master
+  # A placeholder window; `moactl layout apply` builds the current cockpit layout
+  # (~/.config/moa/layouts.json) in its place.
+  "${T[@]}" new-session -d -s moa -n moa -x "$(tput cols)" -y "$(tput lines)" "sleep 2147483647"
+  "$here/moactl" layout apply >/dev/null
 fi
 exec "${T[@]}" attach -t moa

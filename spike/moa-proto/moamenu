@@ -1,0 +1,6 @@
+#!/bin/bash
+# THROWAWAY PROTOTYPE: run a brain API command from the tmux menu and show its last
+# line of output (the result or the error) as a tmux message.
+here=$(dirname "$(readlink -f "$0")")
+out=$("$here/moactl" "$@" 2>&1)
+tmux -L "${MOA_TMUX:-moa}" display-message -d 4000 "moa: ${out##*$'\n'}"

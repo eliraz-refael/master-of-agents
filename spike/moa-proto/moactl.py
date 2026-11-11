@@ -10,6 +10,11 @@ Groups:   group add PATH | group rename OLD NEW | group rm PATH
 Brain:    note TEXT [--project P] [--kind K] | suggest TEXT
           task add PROJECT TITLE [--today] | task set ID [--status S] [--today|--not-today] [--blocked-on X]
           adopt PANE [--title T] [--group G]   (a running agent pane that isn't tracked)
+          focus Q                (show it: in the cockpit's agent spot if the layout has one)
+          goto PANEL             (console, tree, today, agent…; reopens it if it was closed)
+Layouts:  layout list | layout show NAME | layout apply [NAME] | layout set NAME JSON
+          JSON: {"split":"h"|"v","children":[...]} or {"panel":NAME}, each optionally with
+          "size": cells or "NN%". Panels: console, tree, today, activity, projects, picture, agent
 Setup:    import-herdr
 """
 import argparse
@@ -23,6 +28,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from picture import connect, tmux, pane_alive, log_ui  # noqa: E402
+import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
 LAUNCH = {"claude-lead": "claude-lead", "claude-neeo": "claude-neeo", "claude-work": "claude-work",
@@ -80,33 +86,38 @@ def open_session(conn, path, account, title, group, prompt, bg):
     if group:
         env["MOA_GROUP"] = group
     envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-    args = ["new-window", "-P", "-F", "#{pane_id}", "-n", window_name(title or os.path.basename(path)), "-c", path]
-    if bg:
-        args.insert(1, "-d")
+    args = ["new-window", "-d", "-P", "-F", "#{pane_id}", "-n", window_name(title or os.path.basename(path)), "-c", path]
     r = tmux(*args, f"env {envs} {launch_cmd(account, prompt=prompt)}")
     if r.returncode:
         sys.exit(f"tmux failed: {r.stderr.strip()} (is the moa tmux server running?)")
+    pane = r.stdout.strip()
     log_ui(conn, f"opened a {account} session in {path}" + (f" ({title})" if title else ""))
-    print(f"opened {account} in {path} as pane {r.stdout.strip()}" + (" in the background" if bg else ""))
+    how = "in the background" if bg else layout.focus(pane, title_of(conn))
+    print(f"opened {account} in {path} as pane {pane}; {how}")
+
+
+def title_of(conn):
+    def title(pane):
+        row = conn.execute("SELECT title, session_id FROM sessions WHERE pane=? ORDER BY last_seen DESC LIMIT 1", (pane,)).fetchone()
+        return (row["title"] or row["session_id"][:8]) if row else None
+    return title
 
 
 def resume(conn, s, bg):
     if pane_alive(s["pane"]):
-        if not bg:
-            tmux("select-window", "-t", s["pane"])
-            tmux("select-pane", "-t", s["pane"])
-        print(f"already running in pane {s['pane']}" + ("" if bg else "; switched to it"))
+        print(f"already running in pane {s['pane']}" + ("" if bg else "; " + layout.focus(s["pane"], title_of(conn))))
         return
     if s["state"] == "elsewhere":
         sys.exit("it's running in herdr right now; close it there first")
     if not s["cwd"] or not os.path.isdir(s["cwd"]):
         sys.exit(f"its folder {s['cwd']} is gone")
-    args = ["new-window", "-n", window_name(s["title"] or s["project"]), "-c", s["cwd"]]
-    if bg:
-        args.insert(1, "-d")
-    tmux(*args, f"env MOA_TRACK=1 {launch_cmd(s['account'], resume=s['session_id'])}")
+    args = ["new-window", "-d", "-P", "-F", "#{pane_id}", "-n", window_name(s["title"] or s["project"]), "-c", s["cwd"]]
+    pane = tmux(*args, f"env MOA_TRACK=1 {launch_cmd(s['account'], resume=s['session_id'])}").stdout.strip()
+    conn.execute("UPDATE sessions SET pane=? WHERE session_id=?", (pane, s["session_id"]))
+    conn.commit()
     log_ui(conn, f"resumed {s['title'] or s['session_id'][:8]}")
-    print(f"resumed {s['session_id']} in {s['cwd']}")
+    how = "in the background" if bg else layout.focus(pane, title_of(conn))
+    print(f"resumed {s['session_id']} in {s['cwd']}; {how}")
 
 
 def close(conn, s):
@@ -324,6 +335,9 @@ def main():
     p = sub.add_parser("archive"); p.add_argument("ids", nargs="+")
     sub.add_parser("import-herdr")
     p = sub.add_parser("adopt"); p.add_argument("pane"); p.add_argument("--title"); p.add_argument("--group")
+    p = sub.add_parser("focus"); p.add_argument("q")
+    p = sub.add_parser("goto"); p.add_argument("panel")
+    p = sub.add_parser("layout"); p.add_argument("op", choices=["list", "show", "apply", "set"]); p.add_argument("args", nargs="*")
     sub.add_parser("brief"); sub.add_parser("attention")
     p = sub.add_parser("find"); p.add_argument("q")
     p = sub.add_parser("project"); p.add_argument("name")
@@ -337,7 +351,44 @@ def main():
     a = ap.parse_args()
     conn = connect()
     pid = lambda name: conn.execute("SELECT id FROM projects WHERE lower(name)=lower(?)", (name,)).fetchone()
-    if a.cmd == "adopt":
+    if a.cmd == "goto":
+        def find_panel():
+            return next((x["pane"] for x in layout.panes(layout.WINDOW) if x["panel"] in (a.panel, "agent-slot" if a.panel == "agent" else a.panel)),
+                        None) if layout.window_exists() else None
+        pane = find_panel()
+        if not pane:
+            layout.apply(session_title=title_of(conn))
+            pane = find_panel()
+        if not pane:
+            sys.exit(f"the current layout has no {a.panel} panel (moactl layout list)")
+        tmux("select-window", "-t", layout.WINDOW)
+        tmux("select-pane", "-t", pane)
+        print(a.panel)
+    elif a.cmd == "focus":
+        resume(conn, find(conn, a.q), False)
+    elif a.cmd == "layout":
+        try:
+            if a.op == "list":
+                cfg = layout.load()
+                for n, node in cfg["layouts"].items():
+                    print(f"{'*' if n == cfg.get('current') else ' '} {n}: {' · '.join(layout.leaves(node))}")
+                print(f"(config: {layout.CONFIG})")
+            elif a.op == "show":
+                print(json.dumps(layout.load()["layouts"][a.args[0]], indent=2))
+            elif a.op == "set":
+                node = json.loads(" ".join(a.args[1:]))
+                layout.validate(node)
+                cfg = layout.load()
+                cfg["layouts"][a.args[0]] = node
+                layout.save(cfg)
+                print(f"saved layout {a.args[0]}; apply it with: moactl layout apply {a.args[0]}")
+            elif a.op == "apply":
+                name = layout.apply(a.args[0] if a.args else None, session_title=title_of(conn))
+                log_ui(conn, f"layout → {name}")
+                print(f"layout {name} applied")
+        except (ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
+            sys.exit(f"layout: {exc}")
+    elif a.cmd == "adopt":
         adopt(conn, a.pane, a.title, a.group)
     elif a.cmd == "brief":
         print(brief(conn))

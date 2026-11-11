@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""THROWAWAY PROTOTYPE: the console. A feed of what the master says and what tracked
+"""THROWAWAY PROTOTYPE: the console. A feed of what moa says and what tracked
 sessions do, plus one input line: /commands run instantly through the brain API
-(moactl); anything else goes to the master agent over ACP (claude-agent-acp on the
-claude-lead account). Not product code."""
+(moactl); anything else goes to moa, the central agent, over ACP (claude-agent-acp on
+the claude-lead account). Not product code."""
 import curses
 import datetime
 import json
@@ -28,14 +28,17 @@ OPENING = ("(The console just opened a new thread for today.) Give me your openi
            "at most 6 short lines, what's hot, what's waiting on me, what's going stale, "
            "then propose 1-3 goals for today and ask which.")
 HELP = """/attention       what needs you, ranked (instant, no LLM)
-/brief           the master's brief
+/brief           moa's brief
 /ls              live sessions
 /open PATH [title…]   start an agent there and switch to it
 /resume Q        resume or jump to a session (title, project or ID)
+/focus Q         bring a session into the cockpit's agent spot
+/layout [NAME]   list layouts, or switch to one (cockpit, focus, classic, …)
 /close Q · /archive Q
-/new             start a fresh master thread
+/new             start a fresh moa thread
 /quit
-anything else goes to the master · Esc cancels its turn · PgUp/PgDn scroll
+anything else goes to moa · Esc cancels its turn · PgUp/PgDn scroll
+Ctrl-Space anywhere: the moa menu
 when it asks permission: y once · a always · n no"""
 
 
@@ -95,7 +98,7 @@ class Console:
         self.pending[self.acp.request("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})] = "init"
-        self.add("sys", "moa console · type /help · connecting to the master…")
+        self.add("sys", "moa · type /help, or Ctrl-Space for the menu · connecting…")
         self.run_ctl("attention", header="needs you right now:")
 
     # feed
@@ -113,7 +116,7 @@ class Console:
             self.add("sys", header)
         self.add("ctl", out or "ok")
 
-    # master (ACP)
+    # moa (ACP)
     def thread_meta(self, value=None):
         if value is None:
             row = self.conn.execute("SELECT value FROM meta WHERE key='console_thread'").fetchone()
@@ -127,7 +130,7 @@ class Console:
 
     def prompt(self, text, show=True):
         if not self.sid:
-            self.add("sys", "the master isn't connected yet")
+            self.add("sys", "moa isn't connected yet")
             return
         if show:
             self.add("you", text)
@@ -136,7 +139,7 @@ class Console:
 
     def handle(self, m):
         if m.get("_exit"):
-            self.add("err", "the master's process exited; restart the console")
+            self.add("err", "moa's agent process exited; reopen the console from the menu (Ctrl-Space)")
             self.busy = False
             return
         if "method" in m and "id" in m:                       # a request from the agent
@@ -245,7 +248,9 @@ class Console:
             self.run_ctl(cmd)
         elif cmd == "open" and args:
             self.run_ctl("open", args[0], *(["--title", " ".join(args[1:])] if args[1:] else []))
-        elif cmd in ("resume", "close", "archive") and args:
+        elif cmd == "layout":
+            self.run_ctl("layout", *(["apply", args[0]] if args else ["list"]))
+        elif cmd in ("resume", "close", "archive", "focus") and args:
             self.run_ctl(cmd, " ".join(args))
         else:
             self.add("sys", f"unknown command /{cmd} (try /help)")
@@ -344,7 +349,7 @@ class Console:
         state = (f"{icon('working')} thinking… (Esc cancels)" if self.busy else "ready") if self.sid else "connecting…"
         if self.perm:
             state = "⚠ waiting for your y / a / n"
-        head = f" moa console · master {self.sid[:8] if self.sid else '…'} · {state}"
+        head = f" moa · thread {self.sid[:8] if self.sid else '…'} · {state}"
         scr.addnstr(0, 0, head.ljust(w - 1), w - 1, C["head"] | curses.A_REVERSE)
         body = h - 3
         lines = self.lines(w - 1, C)
@@ -359,7 +364,7 @@ class Console:
         view_start = max(0, self.cur - (w - 4))
         scr.addnstr(h - 1, 0, "› " + text[view_start:view_start + w - 4], w - 1, curses.A_BOLD)
         if not text:
-            scr.addnstr(h - 1, 2, "ask the master, or /help", w - 3, C["dim"])
+            scr.addnstr(h - 1, 2, "ask moa, or /help", w - 3, C["dim"])
         scr.move(h - 1, min(w - 2, 2 + self.cur - view_start))
         scr.refresh()
 
