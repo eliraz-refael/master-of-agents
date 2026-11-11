@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash /Users/elirazk/private/master-of-agents/spike/master-chat/master/hooks/briefing.sh", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash /Users/elirazk/private/master-of-agents/spike/master-chat/master/hooks/since.sh", "timeout": 10 }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3:*)",
+      "Bash(/Users/elirazk/private/master-of-agents/spike/moa-proto/moactl:*)",
+      "Bash(git -C:*)",
+      "Bash(ls:*)",
+      "Read(/Users/elirazk/private/**)",
+      "Read(/Users/elirazk/.claude-lead/projects/**)",
+      "Read(/Users/elirazk/.claude-neeo/projects/**)"
+    ]
+  }
+}

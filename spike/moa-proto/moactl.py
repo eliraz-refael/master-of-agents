@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""THROWAWAY PROTOTYPE: the brain API. The one way agents (and the console) read and
+change the brain and drive sessions on the prototype's tmux server (-L moa).
+Not product code. A session ID can be any unique prefix, a title or a project name.
+
+Read:     brief | attention | ls [--all] | find Q | project NAME
+Sessions: open PATH [--account A] [--title T] [--group G] [--prompt P] [--bg]
+          resume Q [--bg] | close Q | archive Q... | set Q [--title T] [--group G]
+Groups:   group add PATH | group rename OLD NEW | group rm PATH
+Brain:    note TEXT [--project P] [--kind K] | suggest TEXT
+          task add PROJECT TITLE [--today] | task set ID [--status S] [--today|--not-today] [--blocked-on X]
+Setup:    import-herdr
+"""
+import argparse
+import datetime
+import json
+import os
+import shlex
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from picture import connect, tmux, pane_alive, log_ui  # noqa: E402
+
+LIVE = ("working", "idle", "waiting")
+LAUNCH = {"claude-lead": "claude-lead", "claude-neeo": "claude-neeo", "claude-work": "claude-work",
+          "claude-personal": "claude-personal"}
+
+
+def launch_cmd(account, resume=None, prompt=None):
+    if account == "codex":
+        return f"codex resume {resume}" if resume else "codex"
+    cmd = LAUNCH.get(account or "", "claude-lead")
+    if resume:
+        cmd += f" --resume {resume}"
+    if prompt:
+        cmd += " " + shlex.quote(prompt)
+    return cmd
+
+
+SESS = "SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
+
+
+def candidates(conn, q):
+    rows = conn.execute(SESS + "WHERE s.session_id LIKE ?", (q + "%",)).fetchall()
+    if rows:
+        return rows
+    like = f"%{q.lower()}%"
+    rows = conn.execute(SESS + """WHERE coalesce(s.state,'') != 'archived' AND
+        (lower(coalesce(s.title,'')) LIKE ? OR lower(coalesce(p.name,'')) LIKE ? OR lower(coalesce(s.grp,'')) LIKE ?)
+        ORDER BY s.last_seen DESC""", (like, like, like)).fetchall()
+    exact = [r for r in rows if (r["title"] or "").lower() == q.lower()]
+    return exact or rows
+
+
+def find(conn, q):
+    rows = candidates(conn, q)
+    if len(rows) == 1:
+        return rows[0]
+    if not rows:
+        sys.exit(f"no session matches {q!r}")
+    sys.exit(f"{len(rows)} sessions match {q!r}; be more specific:\n" + "\n".join(
+        f"  {r['session_id'][:8]}  {r['title'] or '-'}  ({r['grp'] or r['project'] or '-'}, {r['state']})" for r in rows[:8]))
+
+
+def window_name(text):
+    return (text or "agent")[:24]
+
+
+def open_session(conn, path, account, title, group, prompt, bg):
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        os.makedirs(path)
+        print(f"created {path}")
+    env = {"MOA_TRACK": "1"}
+    if title:
+        env["MOA_TITLE"] = title
+    if group:
+        env["MOA_GROUP"] = group
+    envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    args = ["new-window", "-P", "-F", "#{pane_id}", "-n", window_name(title or os.path.basename(path)), "-c", path]
+    if bg:
+        args.insert(1, "-d")
+    r = tmux(*args, f"env {envs} {launch_cmd(account, prompt=prompt)}")
+    if r.returncode:
+        sys.exit(f"tmux failed: {r.stderr.strip()} (is the moa tmux server running?)")
+    log_ui(conn, f"opened a {account} session in {path}" + (f" ({title})" if title else ""))
+    print(f"opened {account} in {path} as pane {r.stdout.strip()}" + (" in the background" if bg else ""))
+
+
+def resume(conn, s, bg):
+    if pane_alive(s["pane"]):
+        if not bg:
+            tmux("select-window", "-t", s["pane"])
+            tmux("select-pane", "-t", s["pane"])
+        print(f"already running in pane {s['pane']}" + ("" if bg else "; switched to it"))
+        return
+    if s["state"] == "elsewhere":
+        sys.exit("it's running in herdr right now; close it there first")
+    if not s["cwd"] or not os.path.isdir(s["cwd"]):
+        sys.exit(f"its folder {s['cwd']} is gone")
+    args = ["new-window", "-n", window_name(s["title"] or s["project"]), "-c", s["cwd"]]
+    if bg:
+        args.insert(1, "-d")
+    tmux(*args, f"env MOA_TRACK=1 {launch_cmd(s['account'], resume=s['session_id'])}")
+    log_ui(conn, f"resumed {s['title'] or s['session_id'][:8]}")
+    print(f"resumed {s['session_id']} in {s['cwd']}")
+
+
+def close(conn, s):
+    if pane_alive(s["pane"]):
+        tmux("kill-pane", "-t", s["pane"])
+    conn.execute("UPDATE sessions SET state='ended' WHERE session_id=?", (s["session_id"],))
+    log_ui(conn, f"closed {s['title'] or s['session_id'][:8]}")
+    print("closed")
+
+
+def ls(conn, show_all):
+    where = "" if show_all else "WHERE s.state IN ('working','idle','waiting','elsewhere') OR s.last_seen >= datetime('now','localtime','-2 days')"
+    for s in conn.execute("SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
+                          f"{where} ORDER BY s.last_seen DESC"):
+        alive = "live" if pane_alive(s["pane"]) else s["state"]
+        print(f"{s['session_id'][:8]}  {alive:<9} {s['account'] or '':<12} {(s['grp'] or s['project'] or '-'):<22} "
+              f"{(s['title'] or (s['last_prompt'] or '')[:40]):<34} {s['cwd']}  last {s['last_seen']}")
+
+
+def age(ts):
+    if not ts:
+        return "?"
+    try:
+        d = (datetime.datetime.now() - datetime.datetime.fromisoformat(ts)).total_seconds()
+    except ValueError:
+        return ts
+    return f"{int(d // 60)}m" if d < 3600 else f"{int(d // 3600)}h" if d < 86400 else f"{int(d // 86400)}d"
+
+
+def label(s):
+    return f"{s['title'] or (s['last_prompt'] or '')[:50] or s['session_id'][:8]} [{s['grp'] or s['project'] or '-'}]"
+
+
+def brief(conn):
+    today = datetime.date.today().isoformat()
+    out = [f"# Brief ({datetime.datetime.now():%a %d %b %H:%M}). More: moactl attention | project NAME | ls | find Q"]
+    tasks = conn.execute("SELECT t.*, p.name AS project FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE t.today=?",
+                         (today,)).fetchall()
+    out.append("## Today: " + ("; ".join(f"#{t['id']} {t['project'] or '-'}: {t['title']} [{t['status']}]" for t in tasks)
+                               if tasks else "nothing set yet"))
+    out.append("## Needs attention")
+    out += attention_lines(conn, limit=8) or ["- nothing"]
+    hot = conn.execute("SELECT name FROM projects WHERE last_activity >= date('now','localtime','-7 days') ORDER BY last_activity DESC").fetchall()
+    out.append("## Active this week: " + (", ".join(r["name"] for r in hot) or "none"))
+    out.append("## Live sessions")
+    live = conn.execute(SESS + "WHERE s.state IN ('working','idle','waiting','elsewhere') ORDER BY s.last_seen DESC LIMIT 12").fetchall()
+    out += [f"- {r['session_id'][:8]} {label(r)} {r['state']} {age(r['last_seen'])}" for r in live] or ["- none"]
+    out.append("## What you know about Eliraz (latest notes)")
+    for n in conn.execute("SELECT kind, text FROM notes WHERE kind IN ('preference','routine','fact') ORDER BY id DESC LIMIT 10"):
+        out.append(f"- ({n['kind']}) {n['text'][:200]}")
+    last = conn.execute("SELECT text, created_at FROM notes WHERE kind='thread-summary' ORDER BY id DESC LIMIT 1").fetchone()
+    if last:
+        out.append(f"## Last thread ({last['created_at'][:10]}): {last['text'][:600]}")
+    return "\n".join(out)
+
+
+def attention_lines(conn, limit=20):
+    today = datetime.date.today().isoformat()
+    out = []
+    for s in conn.execute(SESS + "WHERE s.state='waiting' ORDER BY s.last_seen"):
+        out.append(f"- ⚠ {label(s)} is blocked on you (permission/question) for {age(s['last_seen'])}  → moactl resume {s['session_id'][:8]}")
+    for s in conn.execute(SESS + "WHERE s.state='idle' AND s.last_seen >= datetime('now','localtime','-1 day') ORDER BY s.last_seen"):
+        out.append(f"- ● {label(s)} finished its turn {age(s['last_seen'])} ago; your move  → moactl resume {s['session_id'][:8]}")
+    for t in conn.execute("""SELECT t.*, p.name AS project FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
+                             WHERE t.today=? AND t.status NOT IN ('done','dropped')""", (today,)):
+        out.append(f"- ▸ today: {t['project'] or '-'}: {t['title']} [{t['status']}]")
+    for t in conn.execute("""SELECT t.*, p.name AS project FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
+                             WHERE t.status='blocked'"""):
+        out.append(f"- ⧗ blocked: {t['project'] or '-'}: {t['title']} on {t['blocked_on'] or '?'}")
+    for p in conn.execute("""SELECT p.name, p.last_activity, count(t.id) AS n FROM projects p JOIN tasks t ON t.project_id=p.id
+                             AND t.status IN ('todo','active','waiting') WHERE p.last_activity < date('now','localtime','-7 days')
+                             GROUP BY p.id ORDER BY p.last_activity"""):
+        out.append(f"- ◷ {p['name']}: {p['n']} open task(s), untouched since {p['last_activity']}")
+    for s in conn.execute("SELECT * FROM suggestions WHERE status='open' ORDER BY id"):
+        out.append(f"- ? suggestion #{s['id']}: {s['text']}")
+    return out[:limit]
+
+
+def project(conn, name):
+    p = conn.execute("SELECT * FROM projects WHERE lower(name)=lower(?) OR lower(name) LIKE lower(?) ORDER BY lower(name)=lower(?) DESC LIMIT 1",
+                     (name, f"%{name}%", name)).fetchone()
+    if not p:
+        sys.exit(f"no project matches {name!r}")
+    print(f"{p['name']} [{p['status']}] {p['path']}  last activity {p['last_activity']}\n{p['summary'] or ''}")
+    for t in conn.execute("SELECT * FROM tasks WHERE project_id=? AND status NOT IN ('done','dropped')", (p["id"],)):
+        print(f"  task #{t['id']} {t['title']} [{t['status']}]" + (f" blocked on {t['blocked_on']}" if t["blocked_on"] else ""))
+    for s in conn.execute(SESS + "WHERE s.project_id=? ORDER BY s.last_seen DESC LIMIT 10", (p["id"],)):
+        print(f"  session {s['session_id'][:8]} {label(s)} {s['state']} {age(s['last_seen'])}  last prompt: {(s['last_prompt'] or '')[:80]}")
+    for n in conn.execute("SELECT * FROM notes WHERE project_id=? ORDER BY id DESC LIMIT 10", (p["id"],)):
+        print(f"  note ({n['kind']}) {n['text'][:200]}")
+    return p
+
+
+def set_session(conn, s, title, group):
+    if title:
+        conn.execute("UPDATE sessions SET title=? WHERE session_id=?", (title, s["session_id"]))
+    if group:
+        conn.execute("INSERT OR IGNORE INTO groups(path) VALUES(?)", (group,))
+        conn.execute("UPDATE sessions SET grp=? WHERE session_id=?", (group, s["session_id"]))
+    conn.commit()
+    log_ui(conn, f"session {title or s['title'] or s['session_id'][:8]}" + (f" → {group}" if group else " renamed"))
+
+
+def group_cmd(conn, op, args):
+    if op == "add":
+        conn.execute("INSERT OR IGNORE INTO groups(path) VALUES(?)", (args[0],))
+        log_ui(conn, f"new group {args[0]}")
+    elif op == "rename":
+        old, new = args
+        conn.execute("UPDATE sessions SET grp = ? || substr(grp, length(?) + 1) WHERE grp = ? OR grp LIKE ? || '/%'", (new, old, old, old))
+        conn.execute("UPDATE groups SET path = ? || substr(path, length(?) + 1) WHERE path = ? OR path LIKE ? || '/%'", (new, old, old, old))
+        conn.execute("INSERT OR IGNORE INTO groups(path) VALUES(?)", (new,))
+        log_ui(conn, f"group {old} → {new}")
+    elif op == "rm":
+        n = conn.execute("SELECT count(*) FROM sessions WHERE (grp = ? OR grp LIKE ? || '/%') AND state != 'archived'",
+                         (args[0], args[0])).fetchone()[0]
+        if n:
+            sys.exit(f"{args[0]} still has {n} session(s); move or archive them first")
+        conn.execute("DELETE FROM groups WHERE path = ? OR path LIKE ? || '/%'", (args[0], args[0]))
+        log_ui(conn, f"removed group {args[0]}")
+    conn.commit()
+    print("ok")
+
+
+def local(ts):
+    if not ts:
+        return None
+    t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+    return t.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def import_herdr(conn):
+    data = json.load(open(os.path.expanduser("~/.local/state/herdr-sessions/sessions.json")))
+    n = skipped = 0
+    for h in data["sessions"]:
+        group = h.get("group") or ""
+        if group.startswith("Work") or not h.get("conversation_id"):
+            skipped += 1
+            continue
+        path = h["path"]
+        conn.execute("""INSERT INTO sessions(session_id,account,cwd,project_id,title,grp,state,first_seen,last_seen)
+            VALUES(:sid, :acct, :path,
+                   (SELECT id FROM projects WHERE :path = path OR :path LIKE path || '/%' OR :path LIKE path || '-worktrees/%'
+                    ORDER BY length(path) DESC LIMIT 1),
+                   :title, :grp, :state, :first, :last)
+            ON CONFLICT(session_id) DO UPDATE SET title=coalesce(sessions.title, excluded.title),
+              grp=coalesce(sessions.grp, excluded.grp)""",
+                     {"sid": h["conversation_id"], "acct": h["profile"], "path": path, "title": h["title"],
+                      "grp": group or "Private", "state": "elsewhere" if h.get("live") else "ended",
+                      "first": local(h.get("created_at")), "last": local(h.get("last_active_at"))})
+        n += 1
+    conn.commit()
+    log_ui(conn, f"imported {n} sessions from herdr-sessions (skipped {skipped}: Work/* or no conversation ID)")
+    print(f"imported {n}, skipped {skipped}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="moactl")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("ls"); p.add_argument("--all", action="store_true")
+    p = sub.add_parser("open"); p.add_argument("path"); p.add_argument("--account", default="claude-lead")
+    p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--prompt"); p.add_argument("--bg", action="store_true")
+    p = sub.add_parser("resume"); p.add_argument("id"); p.add_argument("--bg", action="store_true")
+    p = sub.add_parser("close"); p.add_argument("id")
+    p = sub.add_parser("archive"); p.add_argument("ids", nargs="+")
+    sub.add_parser("import-herdr")
+    sub.add_parser("brief"); sub.add_parser("attention")
+    p = sub.add_parser("find"); p.add_argument("q")
+    p = sub.add_parser("project"); p.add_argument("name")
+    p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("--title"); p.add_argument("--group")
+    p = sub.add_parser("group"); p.add_argument("op", choices=["add", "rename", "rm"]); p.add_argument("args", nargs="+")
+    p = sub.add_parser("note"); p.add_argument("text"); p.add_argument("--project"); p.add_argument("--kind", default="fact")
+    p = sub.add_parser("suggest"); p.add_argument("text")
+    p = sub.add_parser("task"); p.add_argument("op", choices=["add", "set"]); p.add_argument("args", nargs="+")
+    p.add_argument("--today", action="store_true"); p.add_argument("--not-today", action="store_true")
+    p.add_argument("--status"); p.add_argument("--blocked-on")
+    a = ap.parse_args()
+    conn = connect()
+    pid = lambda name: conn.execute("SELECT id FROM projects WHERE lower(name)=lower(?)", (name,)).fetchone()
+    if a.cmd == "brief":
+        print(brief(conn))
+    elif a.cmd == "attention":
+        print("\n".join(attention_lines(conn)) or "nothing needs you right now")
+    elif a.cmd == "find":
+        for r in candidates(conn, a.q)[:15]:
+            print(f"{r['session_id'][:8]}  {label(r)}  {r['state']}  {age(r['last_seen'])}  {r['cwd']}")
+    elif a.cmd == "project":
+        project(conn, a.name)
+    elif a.cmd == "set":
+        set_session(conn, find(conn, a.id), a.title, a.group)
+        print("ok")
+    elif a.cmd == "group":
+        group_cmd(conn, a.op, a.args)
+    elif a.cmd == "note":
+        p = pid(a.project) if a.project else None
+        conn.execute("INSERT INTO notes(project_id,kind,text) VALUES(?,?,?)", (p[0] if p else None, a.kind, a.text))
+        conn.commit(); print("noted")
+    elif a.cmd == "suggest":
+        conn.execute("INSERT INTO suggestions(text) VALUES(?)", (a.text,)); conn.commit(); print("suggested")
+    elif a.cmd == "task" and a.op == "add":
+        p = pid(a.args[0])
+        if not p:
+            sys.exit(f"no project {a.args[0]!r} (moactl project NAME to check)")
+        conn.execute("INSERT INTO tasks(project_id,title,today,status) VALUES(?,?,?,?)",
+                     (p[0], " ".join(a.args[1:]), datetime.date.today().isoformat() if a.today else None, a.status or "todo"))
+        conn.commit(); print("task added")
+    elif a.cmd == "task" and a.op == "set":
+        tid = int(a.args[0])
+        if a.status:
+            conn.execute("UPDATE tasks SET status=?, updated_at=datetime('now','localtime') WHERE id=?", (a.status, tid))
+        if a.today or a.not_today:
+            conn.execute("UPDATE tasks SET today=? WHERE id=?", (datetime.date.today().isoformat() if a.today else None, tid))
+        if a.blocked_on:
+            conn.execute("UPDATE tasks SET blocked_on=?, status='blocked' WHERE id=?", (a.blocked_on, tid))
+        conn.commit(); print("ok")
+    elif a.cmd == "ls":
+        ls(conn, a.all)
+    elif a.cmd == "open":
+        open_session(conn, a.path, a.account, a.title, a.group, a.prompt, a.bg)
+    elif a.cmd == "resume":
+        resume(conn, find(conn, a.id), a.bg)
+    elif a.cmd == "close":
+        close(conn, find(conn, a.id))
+    elif a.cmd == "archive":
+        for i in a.ids:
+            s = find(conn, i)
+            conn.execute("UPDATE sessions SET state='archived' WHERE session_id=?", (s["session_id"],))
+            log_ui(conn, f"archived {s['title'] or s['session_id'][:8]}")
+        conn.commit()
+        print(f"archived {len(a.ids)}")
+    elif a.cmd == "import-herdr":
+        import_herdr(conn)
+
+
+if __name__ == "__main__":
+    main()

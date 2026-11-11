@@ -1,0 +1,5 @@
+.superpowers/
+# Local-only design context (machine and employer specifics): never commit.
+docs/context.md
+.DS_Store
+__pycache__/
