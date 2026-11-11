@@ -75,3 +75,15 @@
   session joins the cockpit by swap-pane, keeping its process. Rebuilding a layout moves
   the console instead of restarting it.
 - The central agent is named **moa**, not "master" (confusing next to git).
+
+## The console needs structure, not a transcript (2026-11-11)
+- Plain streamed text from moa read as a wall: "not decorated enough… I would want to
+  see it more structured, and the / commands as buttons". The console now renders
+  Markdown (headings, lists, tables, quotes, code), groups each moa turn under one
+  header with its tool calls collapsed, and puts command output in cards.
+- **Next steps are buttons.** A command in backticks (`/resume ID`, `/focus Q`) becomes
+  a button you click or reach with Tab; session events carry resume/answer buttons; a
+  button bar sits under the input; typing `/` opens a command list that also completes
+  session titles and layout names. moa is told to end suggestions with the button.
+- For this, the brain API grew structured output (`moactl ls --json`): a UI shouldn't
+  parse column text.
