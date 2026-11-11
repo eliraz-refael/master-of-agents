@@ -32,14 +32,17 @@ from picture import connect, tmux, pane_alive, log_ui  # noqa: E402
 import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
-LAUNCH = {"claude-lead": "claude-lead", "claude-neeo": "claude-neeo", "claude-work": "claude-work",
+LAUNCH = {"claude": "claude", "claude-lead": "claude-lead", "claude-neeo": "claude-neeo", "claude-work": "claude-work",
           "claude-personal": "claude-personal"}
 
 
 def launch_cmd(account, resume=None, prompt=None):
     if account == "codex":
         return f"codex resume {resume}" if resume else "codex"
-    cmd = LAUNCH.get(account or "", "claude-lead")
+    if (account or "").startswith("/"):  # adopted under a CLAUDE_CONFIG_DIR moa has no name for
+        cmd = f"CLAUDE_CONFIG_DIR={shlex.quote(account)} claude"
+    else:
+        cmd = LAUNCH.get(account or "", "claude-lead")
     if resume:
         cmd += f" --resume {resume}"
     if prompt:
@@ -147,30 +150,47 @@ def private(path):
     return any(path == r or path.startswith(r + "/") for r in PRIVATE_ROOTS)
 
 
-def pane_agent(pane):
+PANE_FMT = "#{pane_id}\t#{pane_current_path}\t#{pane_start_command}\t#{pane_pid}"
+
+
+def pane_agent(pane, info=None):
     """What agent a pane runs: {cwd, account, sid, title, group}, or None if it isn't one.
     Reads the launch command when moa started the pane; otherwise (an agent typed into a
-    plain shell) looks at the shell's child process and its environment."""
-    r = tmux("display-message", "-p", "-t", pane, "#{pane_current_path}\t#{pane_start_command}\t#{pane_pid}")
-    if r.returncode:
-        return None
-    cwd, cmd, pid = (r.stdout.rstrip("\n").split("\t") + ["", ""])[:3]
+    plain shell) looks at the shell's child processes and their environment. `info` is the
+    pane's PANE_FMT line when the caller already listed it."""
+    if info is None:
+        r = tmux("display-message", "-p", "-t", pane, PANE_FMT)
+        if r.returncode:
+            return None
+        info = r.stdout.rstrip("\n")
+    _, cwd, cmd, pid = (info.split("\t") + ["", "", ""])[:4]
     if "console.py" in cmd or "picture.py" in cmd:
         return None
     if len(cmd) >= 2 and cmd[0] == cmd[-1] == '"':
         cmd = cmd[1:-1].replace('\\"', '"')  # tmux shows the start command wrapped in quotes
-    env = {}
     if not cmd.strip():
-        kids = subprocess.run(["pgrep", "-P", pid], capture_output=True, text=True).stdout.split()
-        if not kids:
+        if not pid:
             return None
-        ps = subprocess.run(["ps", "eww", "-o", "command=", "-p", kids[0]], capture_output=True, text=True).stdout
-        cmd = ps.strip()
-        env = dict(m.groups() for m in re.finditer(r"\b(CLAUDE_CONFIG_DIR|MOA_TITLE|MOA_GROUP)=(\S+)", ps))
+        kids = subprocess.run(["pgrep", "-P", pid], capture_output=True, text=True).stdout.split()
+        return next((a for a in (child_agent(cwd, k) for k in kids) if a), None)
     try:
         words = shlex.split(cmd)
     except ValueError:
         return None
+    return agent_from(cwd, words, {})
+
+
+def child_agent(cwd, pid):
+    """A shell's child process as an agent. ps prints argv unquoted, so it's split on
+    whitespace (not shlex); the environment, which `ps e` appends after argv, is read
+    separately so its words never land in argv."""
+    argv = subprocess.run(["ps", "-ww", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout.split()
+    ps = subprocess.run(["ps", "eww", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout
+    env = dict(m.groups() for m in re.finditer(r"\b(CLAUDE_CONFIG_DIR|MOA_TITLE|MOA_GROUP)=(\S+)", ps))
+    return agent_from(cwd, argv, env)
+
+
+def agent_from(cwd, words, env):
     args = []
     for w in words:
         if not args and re.fullmatch(r"[A-Z_][A-Z0-9_]*=.*", w):
@@ -209,15 +229,16 @@ def untracked_panes(conn):
     """Agent panes in private folders on the moa tmux server that the brain doesn't track.
     A row whose pane ID is reused by a pane in another folder (pane IDs restart with the
     tmux server) doesn't count as tracking it."""
-    r = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}")
-    held = {row["pane"]: row["cwd"] for row in conn.execute(
-        "SELECT pane, cwd FROM sessions WHERE pane IS NOT NULL AND state != 'ended'")}
+    r = tmux("list-panes", "-a", "-F", PANE_FMT)
+    held = {}
+    for row in conn.execute("SELECT pane, cwd FROM sessions WHERE pane IS NOT NULL AND state != 'ended'"):
+        held.setdefault(row["pane"], []).append(row["cwd"])
     out = []
     for line in r.stdout.splitlines():
         pane, cwd = (line.split("\t") + [""])[:2]
-        if not private(cwd) or (pane in held and related(held[pane], cwd)):
+        if not private(cwd) or any(related(c, cwd) for c in held.get(pane, ())):
             continue
-        agent = pane_agent(pane)
+        agent = pane_agent(pane, line)
         if agent:
             out.append((pane, agent))
     return out

@@ -5,6 +5,7 @@ import curses
 import datetime
 import locale
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -271,7 +272,9 @@ def build(conn, view, expanded, collapsed, width, C):
 def account_cmd(account, resume):
     if account == "codex":
         return f"codex resume {resume}"
-    return f"{account if account in ('claude-lead', 'claude-neeo', 'claude-work') else 'claude-lead'} --resume {resume}"
+    if (account or "").startswith("/"):  # adopted under a CLAUDE_CONFIG_DIR moa has no name for
+        return f"CLAUDE_CONFIG_DIR={shlex.quote(account)} claude --resume {resume}"
+    return f"{account if account in ('claude', 'claude-lead', 'claude-neeo', 'claude-work') else 'claude-lead'} --resume {resume}"
 
 
 def log_ui(conn, text):
