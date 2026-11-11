@@ -24,6 +24,7 @@ PANELS = {
     "today": _py("picture.py", "--panel", "today", log="picture.err"),
     "activity": _py("picture.py", "--panel", "activity", log="picture.err"),
     "projects": _py("picture.py", "--panel", "projects", log="picture.err"),
+    "plan": _py("picture.py", "--panel", "plan", log="picture.err"),
     "picture": _py("picture.py", log="picture.err"),
     "agent": None,  # a live agent session's own pane, moved in
 }
@@ -37,20 +38,19 @@ DEFAULTS = {
         "cockpit": {"split": "h", "children": [
             {"panel": "tree", "size": "26%"},
             {"panel": "console"},
-            {"panel": "today", "size": "28%"}]},
+            {"panel": "plan", "size": "30%"}]},
         "focus": {"split": "h", "children": [
             {"split": "v", "size": "24%", "children": [
                 {"panel": "tree"},
-                {"panel": "today", "size": "35%"}]},
+                {"panel": "plan", "size": "45%"}]},
             {"split": "v", "children": [
                 {"panel": "agent"},
                 {"panel": "console", "size": "30%"}]}]},
         "classic": {"split": "h", "children": [
             {"panel": "console"},
             {"split": "v", "size": "42%", "children": [
-                {"panel": "today", "size": "30%"},
-                {"panel": "tree"},
-                {"panel": "activity", "size": "20%"}]}]},
+                {"panel": "plan"},
+                {"panel": "tree", "size": "40%"}]}]},
     },
 }
 

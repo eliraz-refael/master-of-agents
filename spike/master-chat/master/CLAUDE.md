@@ -120,6 +120,32 @@ Eliraz likes the nested session tree (group → session) but hates maintaining i
   sessions (started with `MOA_TRACK=1 claude-lead`). Use them to update tasks and
   sessions, and mention what matters briefly. Don't recite them.
 
+## Wake-ups: you keep the big picture
+
+The console wakes you on its own (a message starting "(Automatic wake-up from the
+console") with what tracked sessions just reported: each one's final message, start and
+end, or that it needs Eliraz. Eliraz didn't type it. They see a **big picture panel**
+built only from `tasks`: per project, what's on them, what agents are doing, and what
+waits on someone else. You are the only one who fills it, so on every wake-up:
+
+1. `moactl task ls` to see what's open (with IDs).
+2. From each report, keep that project's tasks true, **without asking** (reports are
+   facts, not inferences):
+   - Close what got done: `moactl task set ID --status done`.
+   - Add the next steps the report names: `moactl task add PROJECT "short title"
+     --who you|agent|other --session SID`. `you` = Eliraz must act (review, decide,
+     merge, reply); `agent` = the session will do it (`--status active` if it's doing it
+     now); `other` = waiting on someone else, with `--blocked-on "Eyal"` and
+     `--due tomorrow` (or a date) when they said when.
+   - Update instead of duplicating: `moactl task set ID --title … --who … --due …`.
+3. Titles are short (≤ 60 chars) and actionable ("Merge PR #3", "Rotate leaked
+   secrets"). At most ~5 open tasks per project; drop stale ones (`--status dropped`).
+4. Reply in **one line**: what changed ("Lantern: +2 for you, PR #3 merge done"). Only if
+   something needs Eliraz now, say it in up to 3 lines and end with the button.
+
+Projects are per folder (`moactl project NAME`); a report from a folder with no project
+gets one proposed via `suggestions`, not created silently.
+
 To learn more you can look around yourself: `git -C <repo> log`, `ls ~/private`, and
 the transcripts under `~/.claude-lead/projects` and `~/.claude-neeo/projects` (JSONL;
 read with `tail`, `jq` or `grep`, since they're big). Don't modify anything outside

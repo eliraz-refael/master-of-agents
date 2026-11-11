@@ -87,3 +87,16 @@
   session titles and layout names. moa is told to end suggestions with the button.
 - For this, the brain API grew structured output (`moactl ls --json`): a UI shouldn't
   parse column text.
+
+## The big picture is moa's job, fed by session reports (2026-11-12)
+- The Today and Activity panels repeated the tree. Eliraz: "I don't have a clear vision
+  yet", but wanted "a picture being built… by project/session of tasks that need to be
+  done", reported by the other agents. Trying it as a spike to find out.
+- Sessions already say what's next at the **end** of their final message; the hook kept
+  only the first 500 characters. It now keeps the start and the end.
+- **moa wakes on its own**: the console batches session reports (45 s to settle, at most
+  one wake every 3 min) and sends them as a hidden prompt; moa updates tasks per project
+  (who: you / agent / other, due dates, linked session) and replies in one line unless
+  something needs Eliraz. Each wake is an LLM turn: the cost to watch.
+- The **plan** panel replaces Today in the presets: per project, what's on you, what
+  agents are doing, what waits on someone else; projects needing you sort first.

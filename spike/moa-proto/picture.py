@@ -8,13 +8,14 @@ import os
 import shlex
 import sqlite3
 import subprocess
+import textwrap
 import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get("MOA_DB", os.path.normpath(os.path.join(HERE, "..", "master-chat", "brain.db")))
 SOCK = os.environ.get("MOA_TMUX", "moa")
-VIEWS = ["Today", "Projects", "Sessions", "Activity"]
+VIEWS = ["Plan", "Today", "Projects", "Sessions", "Activity"]
 ICON = {"working": "◐", "idle": "●", "waiting": "⚠", "ended": "○", "elsewhere": "◌", "archived": "·"}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -29,7 +30,7 @@ def icon(state):
 LIVE = ("working", "idle", "waiting")
 STRIP = 7
 PANEL = None  # set by --panel: show one view only (a cockpit panel), no tabs or activity strip
-PANEL_VIEW = {"tree": "Sessions", "today": "Today", "activity": "Activity", "projects": "Projects"}
+PANEL_VIEW = {"tree": "Sessions", "today": "Today", "activity": "Activity", "projects": "Projects", "plan": "Plan"}
 
 SETUP = """
 CREATE TABLE IF NOT EXISTS groups (path TEXT PRIMARY KEY, created_at TEXT DEFAULT (datetime('now','localtime')));
@@ -68,9 +69,10 @@ CREATE TRIGGER IF NOT EXISTS a_event AFTER INSERT ON events WHEN NEW.kind != 'st
 def connect():
     conn = sqlite3.connect(DB, timeout=2)
     conn.row_factory = sqlite3.Row
-    for col in ("pane", "tmux", "grp"):
+    for table, col in (("sessions", "pane"), ("sessions", "tmux"), ("sessions", "grp"),
+                       ("tasks", "who"), ("tasks", "due")):  # tasks.who: you | agent | other; tasks.due: YYYY-MM-DD
         try:
-            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
             pass
     conn.executescript(SETUP)
@@ -192,9 +194,101 @@ def session_line(s, indent=""):
 SESSIONS_SQL = """SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id"""
 
 
+def when(day):
+    """A due date in words: today, tomorrow, Fri, 3 Dec; overdue ones say so."""
+    try:
+        d = datetime.date.fromisoformat(day)
+    except (TypeError, ValueError):
+        return day or ""
+    delta = (d - datetime.date.today()).days
+    if delta < 0:
+        return f"{-delta}d overdue"
+    return "today" if delta == 0 else "tomorrow" if delta == 1 else f"{d:%a}" if delta < 7 else f"{d:%-d %b}"
+
+
+def plan(conn, width, C):
+    """The big picture: each project's open tasks and whose move each one is, the projects
+    that need you first. moa keeps the tasks (moactl task …) from what sessions report."""
+    today = datetime.date.today().isoformat()
+    done = conn.execute("SELECT count(*) FROM tasks WHERE status='done' AND date(updated_at)=?", (today,)).fetchone()[0]
+    head = f"BIG PICTURE · {datetime.date.today():%a %d %b}" + (f" · ✓ {done} done today" if done else "")
+    rows = [Row(head, C["head"])]
+    tasks = conn.execute("""SELECT t.*, p.name AS project, s.state AS sstate, s.title AS stitle FROM tasks t
+        LEFT JOIN projects p ON p.id=t.project_id LEFT JOIN sessions s ON s.session_id=t.session_id
+        WHERE t.status NOT IN ('done','dropped','idea')""").fetchall()
+    waiting = conn.execute(SESSIONS_SQL + " WHERE s.state='waiting'").fetchall()
+    by = {}
+    for t in tasks:
+        by.setdefault(t["project"] or "-", {"tasks": [], "waiting": []})["tasks"].append(t)
+    for w in waiting:
+        by.setdefault(w["project"] or "-", {"tasks": [], "waiting": []})["waiting"].append(w)
+
+    def kind(t):
+        if t["status"] in ("waiting", "blocked") or t["who"] == "other":
+            return "wait"
+        if t["who"] == "agent" or t["status"] == "active":
+            return "agent"
+        return "you"
+
+    def rank(name):
+        g = by[name]
+        mine = [t for t in g["tasks"] if kind(t) == "you"]
+        due = min((t["due"] for t in g["tasks"] if t["due"]), default="9999")
+        return (not g["waiting"], not mine, due, name)
+
+    def item(mark, title, tail, attr, kind=None, data=None):
+        """A task wraps under its mark; only its first row is selectable."""
+        text = f"{title}  ({tail})" if tail else title
+        lines = textwrap.wrap(text, max(10, width - 5)) or [""]
+        rows.append(Row(f"  {mark} {lines[0]}", attr, kind, data))
+        rows.extend(Row(f"    {ln}", attr) for ln in lines[1:])
+
+    if not by:
+        rows.append(Row("  nothing tracked yet: moa fills this in as sessions report", C["dim"]))
+    for name in sorted(by, key=rank):
+        g = by[name]
+        n_you = sum(kind(t) == "you" for t in g["tasks"]) + len(g["waiting"])
+        n_agent = sum(kind(t) == "agent" for t in g["tasks"])
+        n_wait = sum(kind(t) == "wait" for t in g["tasks"])
+        counts = " · ".join(x for x in (n_you and f"{n_you} on you", n_agent and f"{n_agent} with agents",
+                                        n_wait and f"{n_wait} waiting") if x)
+        title = f"{name} "
+        rows.append(Row(""))
+        rows.append(Row(f"{title}{'─' * max(2, width - len(title) - len(counts) - 3)} {counts}",
+                        C["group"] if n_you else C["head"]))
+        for w in g["waiting"]:
+            item(icon("waiting"), f"{w['title'] or w['project']}: the session needs you", "", C["warn"] | curses.A_BOLD, "session", w)
+        for t in sorted(g["tasks"], key=lambda t: ({"you": 0, "agent": 1, "wait": 2}[kind(t)], t["due"] or "9999", t["id"])):
+            k = kind(t)
+            if k == "wait":
+                on = t["blocked_on"] or ("someone else" if t["who"] == "other" else "")
+                tail = ", ".join(x for x in (on, when(t["due"])) if x)
+                item("◷", t["title"], tail, C["dim"], "task", t)
+            elif k == "agent":
+                mark = icon("working") if t["sstate"] == "working" else "◐"
+                tail = "agent working" if t["sstate"] == "working" else "agent"
+                item(mark, t["title"], tail, C["ok"], "task", t)
+            else:
+                due = when(t["due"])
+                late = due.endswith("overdue") or due == "today"
+                item("▸", t["title"], due, C["warn"] if late else 0, "task", t)
+    quiet = conn.execute("""SELECT name FROM projects p WHERE last_activity >= date('now','localtime','-7 days')
+        AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.project_id=p.id AND t.status NOT IN ('done','dropped','idea'))
+        ORDER BY last_activity DESC""").fetchall()
+    quiet = [q["name"] for q in quiet if q["name"] not in by]
+    if quiet:
+        rows.append(Row(""))
+        rows.extend(Row(ln, C["dim"]) for ln in textwrap.wrap("no open tasks: " + ", ".join(quiet), max(10, width - 1)))
+    rows.append(Row(""))
+    rows.append(Row("↵ jump to its session · d done · x drop", C["dim"]))
+    return rows
+
+
 def build(conn, view, expanded, collapsed, width, C):
     rows = []
     today = datetime.date.today().isoformat()
+    if view == "Plan":
+        return plan(conn, width, C)
     if view == "Today":
         rows.append(Row(f"TODAY · {datetime.date.today():%a %d %b}", C["head"]))
         tasks = conn.execute("""SELECT t.*, p.name AS project FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
@@ -495,13 +589,13 @@ def main(scr):
             continue
         if k == ord("q") and not PANEL:
             return
-        if PANEL and k in (ord("\t"), curses.KEY_RIGHT, ord("l"), curses.KEY_BTAB, curses.KEY_LEFT, ord("h")) + tuple(range(ord("1"), ord("5"))):
+        if PANEL and k in (ord("\t"), curses.KEY_RIGHT, ord("l"), curses.KEY_BTAB, curses.KEY_LEFT, ord("h")) + tuple(range(ord("1"), ord("6"))):
             continue
         if k in (ord("\t"), curses.KEY_RIGHT, ord("l")):
             view, sel, top = (view + 1) % 4, 0, 0
         elif k in (curses.KEY_BTAB, curses.KEY_LEFT, ord("h")):
             view, sel, top = (view - 1) % 4, 0, 0
-        elif ord("1") <= k <= ord("4"):
+        elif ord("1") <= k <= ord("5"):
             view, sel, top = k - ord("1"), 0, 0
         elif k in (ord("j"), curses.KEY_DOWN) and selectable:
             sel = next((i for i in selectable if i > sel), sel)
@@ -518,6 +612,15 @@ def main(scr):
                 collapsed ^= {cur.data}
             elif cur.kind == "session":
                 msg = ctl("focus", cur.data["session_id"]) if cur.data["state"] != "elsewhere" else act_session(conn, cur.data)
+            elif cur.kind == "task" and cur.data["session_id"]:
+                msg = ctl("focus", cur.data["session_id"])
+            elif cur.kind == "task":
+                msg = "no session linked to this task"
+        elif k in (ord("d"), ord("x")) and cur and cur.kind == "task" and VIEWS[view] == "Plan":
+            status = "done" if k == ord("d") else "dropped"
+            conn.execute("UPDATE tasks SET status=?, updated_at=datetime('now','localtime') WHERE id=?", (status, cur.data["id"]))
+            log_ui(conn, f"{status}: {cur.data['title']}")
+            msg = f"marked {status}"
         elif VIEWS[view] == "Sessions" and cur and k in (ord("n"), ord("+"), ord("m"), ord("r"), ord("D")):
             msg = tree_key(scr, conn, k, cur) or ""
         elif k in (ord("n"), ord("N")) and cur and cur.kind not in ("suggestion", "group"):
