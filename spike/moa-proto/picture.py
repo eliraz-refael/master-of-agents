@@ -12,7 +12,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get("MOA_DB", os.path.normpath(os.path.join(HERE, "..", "master-chat", "brain.db")))
-SOCK = "moa"
+SOCK = os.environ.get("MOA_TMUX", "moa")
 VIEWS = ["Today", "Projects", "Sessions", "Activity"]
 ICON = {"working": "◐", "idle": "●", "waiting": "⚠", "ended": "○", "elsewhere": "◌", "archived": "·"}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -27,6 +27,8 @@ def icon(state):
     return ICON.get(state, "·")
 LIVE = ("working", "idle", "waiting")
 STRIP = 7
+PANEL = None  # set by --panel: show one view only (a cockpit panel), no tabs or activity strip
+PANEL_VIEW = {"tree": "Sessions", "today": "Today", "activity": "Activity", "projects": "Projects"}
 
 SETUP = """
 CREATE TABLE IF NOT EXISTS groups (path TEXT PRIMARY KEY, created_at TEXT DEFAULT (datetime('now','localtime')));
@@ -126,8 +128,13 @@ def short_path(path):
 def tree_line(s, width):
     title = s["title"] or (s["last_prompt"] or "").replace("\n", " ")[:60] or s["session_id"][:8]
     acct = (s["account"] or "").replace("claude-", "")
-    tw = max(8, width - 37)
-    return f"{icon(s['state'])} {title[:tw]:<{tw}} {acct:<5} {short_path(s['cwd'])[:22]:<22} {ago(s['last_seen']):>4}"
+    # Narrow panels drop the path first, then the account, so titles stay readable.
+    cols = [(acct, 6)] if width >= 34 else []
+    if width >= 76:
+        cols.append((short_path(s["cwd"]), 23))
+    tw = max(8, width - 7 - sum(n for _, n in cols))
+    extra = "".join(f"{text[:n - 1]:<{n}}" for text, n in cols)
+    return f"{icon(s['state'])} {title[:tw]:<{tw}} {extra}{ago(s['last_seen']):>4}"
 
 
 def session_tree(sessions, groups, collapsed, width, C):
@@ -173,8 +180,10 @@ def session_tree(sessions, groups, collapsed, width, C):
 
 
 def session_line(s, indent=""):
-    proj = s["project"] or os.path.basename(s["cwd"] or "?")
+    proj = s["title"] or s["project"] or os.path.basename(s["cwd"] or "?")
     prompt = (s["last_prompt"] or "").replace("\n", " ")
+    if prompt.startswith("<"):
+        prompt = ""
     acct = (s["account"] or "").replace("claude-", "")
     return f"{indent}{icon(s['state'])} {proj} [{acct}] {ago(s['last_seen']):>3}  {prompt}"
 
@@ -190,7 +199,7 @@ def build(conn, view, expanded, collapsed, width, C):
         tasks = conn.execute("""SELECT t.*, p.name AS project FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
                                 WHERE t.today=? ORDER BY t.status='done', t.id""", (today,)).fetchall()
         if not tasks:
-            rows.append(Row("  (nothing yet: set today's goals with the master)", C["dim"]))
+            rows.append(Row("  (nothing yet: set today's goals with moa)", C["dim"]))
         for t in tasks:
             mark = "✓" if t["status"] == "done" else "▸"
             rows.append(Row(f"{mark} {t['project'] or '-'}: {t['title']}  [{t['status']}]",
@@ -416,6 +425,8 @@ def main(scr):
          "you": curses.color_pair(3), "group": curses.color_pair(6) | curses.A_BOLD}
     conn = connect()
     view, sel, top, expanded, collapsed, msg, confirm = 0, 0, 0, set(), set(), "", None
+    if PANEL:
+        view = VIEWS.index(PANEL_VIEW[PANEL])
     seen, rows, strip = -1, [], []
     me = os.path.abspath(__file__)
     code = os.stat(me).st_mtime_ns
@@ -423,7 +434,7 @@ def main(scr):
     while True:
         if os.stat(me).st_mtime_ns != code:
             curses.endwin()
-            os.execv(sys.executable, [sys.executable, me])
+            os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         scr.timeout(100 if animate else 300)
         m = db_mtime()
         if m != seen or animate:
@@ -437,29 +448,34 @@ def main(scr):
         if selectable and sel not in selectable:
             sel = min(selectable, key=lambda i: abs(i - sel))
         h, w = scr.getmaxyx()
-        body = max(1, h - STRIP - 3)
+        y_top = 0 if PANEL else 1
+        body = max(1, h - 2) if PANEL else max(1, h - STRIP - 3)
         if sel < top:
             top = sel
         elif sel >= top + body:
             top = sel - body + 1
         scr.erase()
-        tabs = "  ".join((f"[{n}]" if i == view else f" {n} ") for i, n in enumerate(VIEWS))
-        scr.addnstr(0, 0, tabs, w - 1, C["head"])
-        brand = f"moa {icon('working') if animate else '●'}"
-        if w > len(tabs) + len(brand) + 2:
-            scr.addnstr(0, w - len(brand) - 1, brand, len(brand), C["brain"] | curses.A_BOLD)
-        for y, r in enumerate(rows[top:top + body], start=1):
-            attr = r.attr | (curses.A_REVERSE if top + y - 1 == sel and r.kind else 0)
+        if not PANEL:
+            tabs = "  ".join((f"[{n}]" if i == view else f" {n} ") for i, n in enumerate(VIEWS))
+            scr.addnstr(0, 0, tabs, w - 1, C["head"])
+            brand = f"moa {icon('working') if animate else '●'}"
+            if w > len(tabs) + len(brand) + 2:
+                scr.addnstr(0, w - len(brand) - 1, brand, len(brand), C["brain"] | curses.A_BOLD)
+        for y, r in enumerate(rows[top:top + body], start=y_top):
+            attr = r.attr | (curses.A_REVERSE if top + y - y_top == sel and r.kind else 0)
             scr.addnstr(y, 0, r.text, w - 1, attr)
         y0 = h - STRIP - 2
-        scr.hline(y0, 0, curses.ACS_HLINE, w - 1)
-        scr.addnstr(y0, 1, " activity ", w - 2, C["dim"])
-        for i, a in enumerate(reversed(strip)):
+        if not PANEL:
+            scr.hline(y0, 0, curses.ACS_HLINE, w - 1)
+            scr.addnstr(y0, 1, " activity ", w - 2, C["dim"])
+        for i, a in enumerate([] if PANEL else reversed(strip)):
             new = fresh(a["ts"])
             line = f"{a['ts'][11:16]} {'✦' if new else ' '}{a['text']}"
             scr.addnstr(y0 + 1 + i, 0, line, w - 1, C.get(a["who"], 0) | (curses.A_BOLD | curses.A_STANDOUT if new and int(time.monotonic() * 4) % 2 else curses.A_BOLD if new else 0))
         keys = ("⏎ open · n new · + group · m move · r rename · D del group · a archive · x close"
-                if VIEWS[view] == "Sessions" else "1-4/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
+                if VIEWS[view] == "Sessions" else
+                "j/k · ⏎ open · y/n suggestion" if PANEL else
+                "1-4/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
         foot = confirm[0] if confirm else (msg or keys)
         scr.addnstr(h - 1, 0, foot, w - 1, C["warn"] if confirm or msg else C["dim"])
         scr.refresh()
@@ -474,8 +490,10 @@ def main(scr):
                 msg = confirm[1]()
             confirm, seen = None, -1
             continue
-        if k in (ord("q"),):
+        if k == ord("q") and not PANEL:
             return
+        if PANEL and k in (ord("\t"), curses.KEY_RIGHT, ord("l"), curses.KEY_BTAB, curses.KEY_LEFT, ord("h")) + tuple(range(ord("1"), ord("5"))):
+            continue
         if k in (ord("\t"), curses.KEY_RIGHT, ord("l")):
             view, sel, top = (view + 1) % 4, 0, 0
         elif k in (curses.KEY_BTAB, curses.KEY_LEFT, ord("h")):
@@ -496,7 +514,7 @@ def main(scr):
             elif cur.kind == "group":
                 collapsed ^= {cur.data}
             elif cur.kind == "session":
-                msg = act_session(conn, cur.data)
+                msg = ctl("focus", cur.data["session_id"]) if cur.data["state"] != "elsewhere" else act_session(conn, cur.data)
         elif VIEWS[view] == "Sessions" and cur and k in (ord("n"), ord("+"), ord("m"), ord("r"), ord("D")):
             msg = tree_key(scr, conn, k, cur) or ""
         elif k in (ord("n"), ord("N")) and cur and cur.kind not in ("suggestion", "group"):
@@ -527,6 +545,8 @@ def main(scr):
 
 
 if __name__ == "__main__":
+    if "--panel" in sys.argv:
+        PANEL = sys.argv[sys.argv.index("--panel") + 1]
     os.environ.setdefault("ESCDELAY", "25")
     locale.setlocale(locale.LC_ALL, "")
     curses.wrapper(main)

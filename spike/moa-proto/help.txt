@@ -1,0 +1,25 @@
+
+  moa keys                                              (q closes this)
+
+  Ctrl-a          the moa menu, from anywhere: console, sessions, new session,
+                  layouts, repair. It's the only key you need to remember.
+  Ctrl-a  a       a real Ctrl-a for the app (start of line)
+
+  In the sessions tree
+    j / k         move            Enter   open (into the cockpit's agent spot)
+    n             new session     +       new group
+    m             move to group   r       rename (session or group)
+    a             archive         x       close          D   delete empty group
+
+  In the console
+    type anything to talk to moa; /help lists the instant commands
+    /layout NAME  switch layout   /focus Q   show a session   /open PATH title
+
+  Layouts         cockpit (tree · console · today)
+                  focus   (tree · live agent · console)
+                  classic (console · today · tree · activity)
+                  Ask moa to change one: "make the tree narrower".
+
+  Moving around   Ctrl-a → c (console), t (tree), s (pick any session)
+                  In a raw agent window, Ctrl-a → m comes back to moa.
+                  (Ctrl-b then Space opens the same menu.)
