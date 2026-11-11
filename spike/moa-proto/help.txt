@@ -1,7 +1,7 @@
 
   moa keys                                              (q closes this)
 
-  Ctrl-Space      the moa menu, from anywhere: console, sessions, new session,
+  Ctrl-]          the moa menu, from anywhere: console, sessions, new session,
                   layouts, repair. It's the only key you need to remember.
 
   In the sessions tree
@@ -19,5 +19,6 @@
                   classic (console · today · tree · activity)
                   Ask moa to change one: "make the tree narrower".
 
-  Moving around   Ctrl-Space → c (console), t (tree), s (pick any session)
-                  In a raw agent window, Ctrl-Space → m comes back to moa.
+  Moving around   Ctrl-] → c (console), t (tree), s (pick any session)
+                  In a raw agent window, Ctrl-] → m comes back to moa.
+                  (Ctrl-b then Space opens the same menu.)
