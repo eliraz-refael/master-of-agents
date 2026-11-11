@@ -109,6 +109,14 @@ class Console:
         self.streaming = None if kind != "agent" else e
         return e
 
+    def error(self, exc):
+        """Log the traceback; show an error line, but the same one at most every 30 s."""
+        traceback.print_exc()
+        text, now = f"console error: {exc!r} (details in console.err)", time.monotonic()
+        if getattr(self, "_last_err", (None, 0))[0] != text or now - self._last_err[1] > 30:
+            self.add("err", text)
+            self._last_err = (text, now)
+
     def run_ctl(self, *args, header=None):
         r = subprocess.run([MOACTL, *args], capture_output=True, text=True)
         out = (r.stdout + r.stderr).strip()
@@ -208,7 +216,6 @@ class Console:
         m = db_mtime()
         if m == self.seen:
             return
-        self.seen = m
         rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name FROM events e
             LEFT JOIN sessions s ON s.session_id=e.session_id LEFT JOIN projects p ON p.id=s.project_id
             WHERE e.id > ? ORDER BY e.id""", (self.cursor,)).fetchall()
@@ -225,6 +232,7 @@ class Console:
                 self.add("event", f"▶ {name} started")
             elif e["kind"] == "end":
                 self.add("event", f"○ {name} ended")
+        self.seen = m  # only after every row was shown, so a failure retries instead of dropping events
 
     # input
     def submit(self, line):
@@ -392,8 +400,7 @@ def main(scr):
                     con.handle(con.inbox.get())
                 con.watch_events()
             except Exception as exc:  # keep the console alive; the traceback goes to stderr (console.err)
-                traceback.print_exc()
-                con.add("err", f"console error: {exc!r} (details in console.err)")
+                con.error(exc)
             con.draw(C)
             scr.timeout(100)
             try:
@@ -405,8 +412,7 @@ def main(scr):
             except SystemExit:
                 raise
             except Exception as exc:
-                traceback.print_exc()
-                con.add("err", f"console error: {exc!r} (details in console.err)")
+                con.error(exc)
     except (SystemExit, KeyboardInterrupt):
         con.acp.p.terminate()
 

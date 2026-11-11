@@ -9,7 +9,7 @@ Sessions: open PATH [--account A] [--title T] [--group G] [--prompt P] [--bg]
 Groups:   group add PATH | group rename OLD NEW | group rm PATH
 Brain:    note TEXT [--project P] [--kind K] | suggest TEXT
           task add PROJECT TITLE [--today] | task set ID [--status S] [--today|--not-today] [--blocked-on X]
-          adopt PANE [--title T] [--group G]   (a running agent pane that isn't tracked)
+          adopt PANE [--title T] [--group G] [--id ID]   (an untracked agent pane in a private folder)
           focus Q                (show it: in the cockpit's agent spot if the layout has one)
           goto PANEL             (console, tree, today, agent…; reopens it if it was closed)
 Layouts:  layout list | layout show NAME | layout apply [NAME] | layout set NAME JSON
@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -133,36 +134,107 @@ def close(conn, s):
     print("closed")
 
 
-CONFIG_DIRS = {"claude-lead": "~/.claude-lead", "claude-neeo": "~/.claude-neeo", "claude-work": "~/.claude-account1",
+CONFIG_DIRS = {"claude": "~/.claude", "claude-lead": "~/.claude-lead", "claude-neeo": "~/.claude-neeo", "claude-work": "~/.claude-account1",
                "claude-personal": "~/.claude-account2"}
 
 
+# Only these folders belong to this (private) brain; day-job panes are never listed or adopted.
+PRIVATE_ROOTS = [os.path.expanduser("~/private"), os.path.expanduser("~/.config")]
+ACCOUNTS = ("claude-lead", "claude-neeo", "claude-work", "claude-personal", "claude", "codex")
+
+
+def private(path):
+    return any(path == r or path.startswith(r + "/") for r in PRIVATE_ROOTS)
+
+
+def pane_agent(pane):
+    """What agent a pane runs: {cwd, account, sid, title, group}, or None if it isn't one.
+    Reads the launch command when moa started the pane; otherwise (an agent typed into a
+    plain shell) looks at the shell's child process and its environment."""
+    r = tmux("display-message", "-p", "-t", pane, "#{pane_current_path}\t#{pane_start_command}\t#{pane_pid}")
+    if r.returncode:
+        return None
+    cwd, cmd, pid = (r.stdout.rstrip("\n").split("\t") + ["", ""])[:3]
+    if "console.py" in cmd or "picture.py" in cmd:
+        return None
+    if len(cmd) >= 2 and cmd[0] == cmd[-1] == '"':
+        cmd = cmd[1:-1].replace('\\"', '"')  # tmux shows the start command wrapped in quotes
+    env = {}
+    if not cmd.strip():
+        kids = subprocess.run(["pgrep", "-P", pid], capture_output=True, text=True).stdout.split()
+        if not kids:
+            return None
+        ps = subprocess.run(["ps", "eww", "-o", "command=", "-p", kids[0]], capture_output=True, text=True).stdout
+        cmd = ps.strip()
+        env = dict(m.groups() for m in re.finditer(r"\b(CLAUDE_CONFIG_DIR|MOA_TITLE|MOA_GROUP)=(\S+)", ps))
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        return None
+    args = []
+    for w in words:
+        if not args and re.fullmatch(r"[A-Z_][A-Z0-9_]*=.*", w):
+            k, v = w.split("=", 1)
+            env[k] = v
+        elif not args and w == "env":
+            continue
+        else:
+            args.append(w)
+    if not args:
+        return None
+    prog = os.path.basename(args[0])
+    if prog in ("node", "bun") and len(args) > 1:  # `claude` running under its interpreter
+        prog, args = os.path.basename(args[1]), args[1:]
+    if prog not in ACCOUNTS:
+        return None
+    account = prog
+    if prog == "claude" and env.get("CLAUDE_CONFIG_DIR"):
+        cfg = env["CLAUDE_CONFIG_DIR"].rstrip("/")
+        account = next((a for a, d in CONFIG_DIRS.items() if os.path.expanduser(d) == cfg), cfg)
+    sid = None
+    if "--resume" in args[1:-1]:
+        sid = args[args.index("--resume") + 1]
+    elif prog == "codex" and len(args) > 2 and args[1] == "resume":
+        sid = args[2]
+    return {"cwd": cwd, "account": account, "sid": sid, "title": env.get("MOA_TITLE"), "group": env.get("MOA_GROUP")}
+
+
+def related(a, b):
+    """Same place: equal, or one inside the other (an agent may cd into a subfolder)."""
+    a, b = (a or "").rstrip("/"), (b or "").rstrip("/")
+    return bool(a and b) and (a == b or a.startswith(b + "/") or b.startswith(a + "/"))
+
+
 def untracked_panes(conn):
-    """Agent panes on the moa tmux server that the brain doesn't know about."""
-    r = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}\t#{pane_start_command}")
-    known = {row[0] for row in conn.execute("SELECT pane FROM sessions WHERE pane IS NOT NULL AND state != 'ended'")}
+    """Agent panes in private folders on the moa tmux server that the brain doesn't track.
+    A row whose pane ID is reused by a pane in another folder (pane IDs restart with the
+    tmux server) doesn't count as tracking it."""
+    r = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}")
+    held = {row["pane"]: row["cwd"] for row in conn.execute(
+        "SELECT pane, cwd FROM sessions WHERE pane IS NOT NULL AND state != 'ended'")}
     out = []
     for line in r.stdout.splitlines():
-        pane, cwd, cmd = (line.split("\t") + ["", ""])[:3]
-        if pane not in known and re.search(r"\b(claude[-\w]*|codex)\b", cmd) and "console.py" not in cmd:
-            out.append((pane, cwd, cmd))
+        pane, cwd = (line.split("\t") + [""])[:2]
+        if not private(cwd) or (pane in held and related(held[pane], cwd)):
+            continue
+        agent = pane_agent(pane)
+        if agent:
+            out.append((pane, agent))
     return out
 
 
-def adopt(conn, pane, title, group):
-    r = tmux("display-message", "-p", "-t", pane, "#{pane_current_path}\t#{pane_start_command}")
-    if r.returncode:
-        sys.exit(f"no pane {pane} on the moa server")
-    cwd, cmd = r.stdout.rstrip("\n").split("\t", 1)
-    account = next((a for a in ("claude-neeo", "claude-lead", "claude-work", "claude-personal", "codex") if a in cmd), "claude-lead")
-    title = title or (re.search(r"MOA_TITLE='([^']*)'", cmd) or re.search(r"MOA_TITLE=(\S+)", cmd) or [None, None])[1]
-    group = group or (re.search(r"MOA_GROUP='([^']*)'", cmd) or re.search(r"MOA_GROUP=(\S+)", cmd) or [None, None])[1]
-    resumed = re.search(r"--resume (\S+)", cmd)
-    if resumed:
-        sid = resumed.group(1)
-    else:
+def adopt(conn, pane, title, group, sid=None):
+    agent = pane_agent(pane)
+    if not agent:
+        sys.exit(f"pane {pane} isn't running an agent moa recognizes")
+    cwd, account = agent["cwd"], agent["account"]
+    if not private(cwd):
+        sys.exit(f"{cwd} isn't a private folder; this brain doesn't track it")
+    title, group = title or agent["title"], group or agent["group"]
+    sid = sid or agent["sid"]
+    if not sid:
         if account not in CONFIG_DIRS:
-            sys.exit(f"can't find {account} conversations; pass a session the brain can resume")
+            sys.exit(f"can't look up {account} conversations; pass the conversation ID with --id")
         slot = os.path.join(os.path.expanduser(CONFIG_DIRS[account]), "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
         files = sorted(glob.glob(os.path.join(slot, "*.jsonl")), key=os.path.getmtime)
         # Skip conversations another live pane already holds (two agents in one folder).
@@ -171,13 +243,15 @@ def adopt(conn, pane, title, group):
             if pane_alive(row["pane"])}
         files = [f for f in files if os.path.basename(f)[:-len(".jsonl")] not in taken]
         if not files:
-            sys.exit(f"no untracked conversation found for {cwd} in {account}")
+            sys.exit(f"no untracked conversation found for {cwd} in {account}; pass it with --id")
         sid = os.path.basename(files[-1])[:-len(".jsonl")]
-    holder = conn.execute("SELECT pane FROM sessions WHERE session_id=?", (sid,)).fetchone()
+    holder = conn.execute("SELECT pane, cwd FROM sessions WHERE session_id=?", (sid,)).fetchone()
     if holder and holder["pane"] and holder["pane"] != pane and pane_alive(holder["pane"]):
         sys.exit(f"session {sid[:8]} is already tracked in live pane {holder['pane']}")
     if group:
         conn.execute("INSERT OR IGNORE INTO groups(path) VALUES(?)", (group,))
+    # A stale row still pointing at this (reused) pane ID lets go of it.
+    conn.execute("UPDATE sessions SET pane=NULL WHERE pane=? AND session_id != ?", (pane, sid))
     conn.execute("""INSERT INTO sessions(session_id,account,cwd,project_id,title,grp,state,pane,first_seen,last_seen)
         VALUES(:sid,:acct,:cwd,(SELECT id FROM projects WHERE :cwd = path OR :cwd LIKE path || '/%' OR :cwd LIKE path || '-worktrees/%'
                ORDER BY length(path) DESC LIMIT 1),:title,:grp,'idle',:pane,datetime('now','localtime'),datetime('now','localtime'))
@@ -196,8 +270,9 @@ def ls(conn, show_all):
         alive = "live" if pane_alive(s["pane"]) else s["state"]
         print(f"{s['session_id'][:8]}  {alive:<9} {s['account'] or '':<12} {(s['grp'] or s['project'] or '-'):<22} "
               f"{(s['title'] or (s['last_prompt'] or '')[:40]):<34} {s['cwd']}  last {s['last_seen']}")
-    for pane, cwd, cmd in untracked_panes(conn):
-        print(f"UNTRACKED pane {pane} in {cwd}: {cmd[:80]}  → moactl adopt {pane}")
+    for pane, agent in untracked_panes(conn):
+        how = f"moactl adopt {pane}" if agent["sid"] or agent["account"] in CONFIG_DIRS else f"moactl adopt {pane} --id ID"
+        print(f"UNTRACKED pane {pane}: {agent['account']} in {agent['cwd']}  → {how}")
 
 
 def age(ts):
@@ -347,7 +422,7 @@ def main():
     p = sub.add_parser("close"); p.add_argument("id")
     p = sub.add_parser("archive"); p.add_argument("ids", nargs="+")
     sub.add_parser("import-herdr")
-    p = sub.add_parser("adopt"); p.add_argument("pane"); p.add_argument("--title"); p.add_argument("--group")
+    p = sub.add_parser("adopt"); p.add_argument("pane"); p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--id")
     p = sub.add_parser("focus"); p.add_argument("q")
     p = sub.add_parser("goto"); p.add_argument("panel")
     p = sub.add_parser("layout"); p.add_argument("op", choices=["list", "show", "apply", "set"]); p.add_argument("args", nargs="*")
@@ -407,7 +482,7 @@ def main():
         except (ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
             sys.exit(f"layout: {exc}")
     elif a.cmd == "adopt":
-        adopt(conn, a.pane, a.title, a.group)
+        adopt(conn, a.pane, a.title, a.group, a.id)
     elif a.cmd == "brief":
         print(brief(conn))
     elif a.cmd == "attention":
