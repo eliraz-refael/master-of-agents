@@ -7,7 +7,7 @@ chat="$here/../master-chat"
 T=(tmux -L moa -f "$here/tmux.conf")
 [ -f "$chat/brain.db" ] || "$chat/seed.sh"
 if ! "${T[@]}" has-session -t moa 2>/dev/null; then
-  "${T[@]}" new-session -d -s moa -n master -c "$here" -x "$(tput cols)" -y "$(tput lines)" "python3 '$here/console.py'"
+  "${T[@]}" new-session -d -s moa -n master -c "$here" -x "$(tput cols)" -y "$(tput lines)" "python3 '$here/console.py' 2>>'$here/console.err'"
   "${T[@]}" split-window -h -t moa:master -l 42% -c "$here" "python3 '$here/picture.py'"
   "${T[@]}" select-pane -t moa:master.0
   "${T[@]}" bind-key m select-window -t moa:master

@@ -9,12 +9,15 @@ Sessions: open PATH [--account A] [--title T] [--group G] [--prompt P] [--bg]
 Groups:   group add PATH | group rename OLD NEW | group rm PATH
 Brain:    note TEXT [--project P] [--kind K] | suggest TEXT
           task add PROJECT TITLE [--today] | task set ID [--status S] [--today|--not-today] [--blocked-on X]
+          adopt PANE [--title T] [--group G]   (a running agent pane that isn't tracked)
 Setup:    import-herdr
 """
 import argparse
 import datetime
+import glob
 import json
 import os
+import re
 import shlex
 import sys
 
@@ -114,6 +117,54 @@ def close(conn, s):
     print("closed")
 
 
+CONFIG_DIRS = {"claude-lead": "~/.claude-lead", "claude-neeo": "~/.claude-neeo", "claude-work": "~/.claude-account1",
+               "claude-personal": "~/.claude-account2"}
+
+
+def untracked_panes(conn):
+    """Agent panes on the moa tmux server that the brain doesn't know about."""
+    r = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}\t#{pane_start_command}")
+    known = {row[0] for row in conn.execute("SELECT pane FROM sessions WHERE pane IS NOT NULL AND state != 'ended'")}
+    out = []
+    for line in r.stdout.splitlines():
+        pane, cwd, cmd = (line.split("\t") + ["", ""])[:3]
+        if pane not in known and re.search(r"\b(claude[-\w]*|codex)\b", cmd) and "console.py" not in cmd:
+            out.append((pane, cwd, cmd))
+    return out
+
+
+def adopt(conn, pane, title, group):
+    r = tmux("display-message", "-p", "-t", pane, "#{pane_current_path}\t#{pane_start_command}")
+    if r.returncode:
+        sys.exit(f"no pane {pane} on the moa server")
+    cwd, cmd = r.stdout.rstrip("\n").split("\t", 1)
+    account = next((a for a in ("claude-neeo", "claude-lead", "claude-work", "claude-personal", "codex") if a in cmd), "claude-lead")
+    title = title or (re.search(r"MOA_TITLE='([^']*)'", cmd) or re.search(r"MOA_TITLE=(\S+)", cmd) or [None, None])[1]
+    group = group or (re.search(r"MOA_GROUP='([^']*)'", cmd) or re.search(r"MOA_GROUP=(\S+)", cmd) or [None, None])[1]
+    resumed = re.search(r"--resume (\S+)", cmd)
+    if resumed:
+        sid = resumed.group(1)
+    else:
+        if account not in CONFIG_DIRS:
+            sys.exit(f"can't find {account} conversations; pass a session the brain can resume")
+        slot = os.path.join(os.path.expanduser(CONFIG_DIRS[account]), "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
+        files = sorted(glob.glob(os.path.join(slot, "*.jsonl")), key=os.path.getmtime)
+        if not files:
+            sys.exit(f"no conversation found for {cwd} in {account}")
+        sid = os.path.basename(files[-1])[:-len(".jsonl")]
+    if group:
+        conn.execute("INSERT OR IGNORE INTO groups(path) VALUES(?)", (group,))
+    conn.execute("""INSERT INTO sessions(session_id,account,cwd,project_id,title,grp,state,pane,first_seen,last_seen)
+        VALUES(:sid,:acct,:cwd,(SELECT id FROM projects WHERE :cwd = path OR :cwd LIKE path || '/%' OR :cwd LIKE path || '-worktrees/%'
+               ORDER BY length(path) DESC LIMIT 1),:title,:grp,'idle',:pane,datetime('now','localtime'),datetime('now','localtime'))
+        ON CONFLICT(session_id) DO UPDATE SET pane=excluded.pane, state='idle', last_seen=excluded.last_seen,
+          title=coalesce(sessions.title, excluded.title), grp=coalesce(sessions.grp, excluded.grp)""",
+                 {"sid": sid, "acct": account, "cwd": cwd, "title": title, "grp": group, "pane": pane})
+    conn.commit()
+    log_ui(conn, f"adopted {title or sid[:8]} ({account}, {cwd})")
+    print(f"adopted {sid} ({account}) in {cwd} as {title or '-'} [{group or '-'}]")
+
+
 def ls(conn, show_all):
     where = "" if show_all else "WHERE s.state IN ('working','idle','waiting','elsewhere') OR s.last_seen >= datetime('now','localtime','-2 days')"
     for s in conn.execute("SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
@@ -121,6 +172,8 @@ def ls(conn, show_all):
         alive = "live" if pane_alive(s["pane"]) else s["state"]
         print(f"{s['session_id'][:8]}  {alive:<9} {s['account'] or '':<12} {(s['grp'] or s['project'] or '-'):<22} "
               f"{(s['title'] or (s['last_prompt'] or '')[:40]):<34} {s['cwd']}  last {s['last_seen']}")
+    for pane, cwd, cmd in untracked_panes(conn):
+        print(f"UNTRACKED pane {pane} in {cwd}: {cmd[:80]}  → moactl adopt {pane}")
 
 
 def age(ts):
@@ -270,6 +323,7 @@ def main():
     p = sub.add_parser("close"); p.add_argument("id")
     p = sub.add_parser("archive"); p.add_argument("ids", nargs="+")
     sub.add_parser("import-herdr")
+    p = sub.add_parser("adopt"); p.add_argument("pane"); p.add_argument("--title"); p.add_argument("--group")
     sub.add_parser("brief"); sub.add_parser("attention")
     p = sub.add_parser("find"); p.add_argument("q")
     p = sub.add_parser("project"); p.add_argument("name")
@@ -283,7 +337,9 @@ def main():
     a = ap.parse_args()
     conn = connect()
     pid = lambda name: conn.execute("SELECT id FROM projects WHERE lower(name)=lower(?)", (name,)).fetchone()
-    if a.cmd == "brief":
+    if a.cmd == "adopt":
+        adopt(conn, a.pane, a.title, a.group)
+    elif a.cmd == "brief":
         print(brief(conn))
     elif a.cmd == "attention":
         print("\n".join(attention_lines(conn)) or "nothing needs you right now")

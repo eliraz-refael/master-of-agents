@@ -3,3 +3,4 @@
 docs/context.md
 .DS_Store
 __pycache__/
+console.err
