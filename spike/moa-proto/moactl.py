@@ -284,16 +284,27 @@ def adopt(conn, pane, title, group, sid=None):
     print(f"adopted {sid} ({account}) in {cwd} as {title or '-'} [{group or '-'}]")
 
 
-def ls(conn, show_all):
+def ls(conn, show_all, as_json=False):
     where = "" if show_all else "WHERE s.state IN ('working','idle','waiting','elsewhere') OR s.last_seen >= datetime('now','localtime','-2 days')"
+    rows = []
     for s in conn.execute("SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
                           f"{where} ORDER BY s.last_seen DESC"):
         alive = "live" if pane_alive(s["pane"]) else s["state"]
+        if as_json:
+            rows.append({"id": s["session_id"], "alive": alive, "state": s["state"], "account": s["account"],
+                         "group": s["grp"] or s["project"], "title": s["title"] or (s["last_prompt"] or "")[:40],
+                         "cwd": s["cwd"], "last": s["last_seen"]})
+            continue
         print(f"{s['session_id'][:8]}  {alive:<9} {s['account'] or '':<12} {(s['grp'] or s['project'] or '-'):<22} "
               f"{(s['title'] or (s['last_prompt'] or '')[:40]):<34} {s['cwd']}  last {s['last_seen']}")
     for pane, agent in untracked_panes(conn):
+        if as_json:
+            rows.append({"untracked": pane, "account": agent["account"], "cwd": agent["cwd"]})
+            continue
         how = f"moactl adopt {pane}" if agent["sid"] or agent["account"] in CONFIG_DIRS else f"moactl adopt {pane} --id ID"
         print(f"UNTRACKED pane {pane}: {agent['account']} in {agent['cwd']}  → {how}")
+    if as_json:
+        print(json.dumps(rows))
 
 
 def age(ts):
@@ -436,7 +447,7 @@ def import_herdr(conn):
 def main():
     ap = argparse.ArgumentParser(prog="moactl")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("ls"); p.add_argument("--all", action="store_true")
+    p = sub.add_parser("ls"); p.add_argument("--all", action="store_true"); p.add_argument("--json", action="store_true")
     p = sub.add_parser("open"); p.add_argument("path"); p.add_argument("--account", default="claude-lead")
     p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--prompt"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("resume"); p.add_argument("id"); p.add_argument("--bg", action="store_true")
@@ -541,7 +552,7 @@ def main():
             conn.execute("UPDATE tasks SET blocked_on=?, status='blocked' WHERE id=?", (a.blocked_on, tid))
         conn.commit(); print("ok")
     elif a.cmd == "ls":
-        ls(conn, a.all)
+        ls(conn, a.all, a.json)
     elif a.cmd == "open":
         open_session(conn, a.path, a.account, a.title, a.group, a.prompt, a.bg)
     elif a.cmd == "resume":

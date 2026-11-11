@@ -2,24 +2,26 @@
 """THROWAWAY PROTOTYPE: the console. A feed of what moa says and what tracked
 sessions do, plus one input line: /commands run instantly through the brain API
 (moactl); anything else goes to moa, the central agent, over ACP (claude-agent-acp on
-the claude-lead account). Not product code."""
+the claude-lead account). moa's replies render as Markdown; commands show up as
+buttons (click, or Tab to one and press Enter). Not product code."""
 import curses
 import datetime
 import json
 import locale
 import os
 import queue
+import re
 import shlex
 import subprocess
 import sys
-import textwrap
 import threading
 import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from picture import connect, db_mtime, icon  # noqa: E402
+from picture import ICON, ago, connect, db_mtime, icon  # noqa: E402
+import layout  # noqa: E402
 
 MASTER_DIR = os.path.normpath(os.path.join(HERE, "..", "master-chat", "master"))
 MOACTL = os.path.join(HERE, "moactl")
@@ -27,19 +29,229 @@ ACCOUNT = os.path.expanduser("~/.claude-lead")
 OPENING = ("(The console just opened a new thread for today.) Give me your opening brief: "
            "at most 6 short lines, what's hot, what's waiting on me, what's going stale, "
            "then propose 1-3 goals for today and ask which.")
-HELP = """/attention       what needs you, ranked (instant, no LLM)
-/brief           moa's brief
-/ls              live sessions
-/open PATH [title…]   start an agent there and switch to it
-/resume Q        resume or jump to a session (title, project or ID)
-/focus Q         bring a session into the cockpit's agent spot
-/layout [NAME]   list layouts, or switch to one (cockpit, focus, classic, …)
-/close Q · /archive Q
-/new             start a fresh moa thread
-/quit
-anything else goes to moa · Esc cancels its turn · PgUp/PgDn scroll
+COMMANDS = [  # name, arguments, what it does
+    ("attention", "", "what needs you, ranked (instant, no LLM)"),
+    ("brief", "", "moa's brief"),
+    ("ls", "", "live sessions"),
+    ("open", "PATH [title…]", "start an agent there and switch to it"),
+    ("resume", "Q", "resume or jump to a session (title, project or ID)"),
+    ("focus", "Q", "bring a session into the cockpit's agent spot"),
+    ("layout", "[NAME]", "list layouts, or switch to one"),
+    ("close", "Q", "close a session's agent"),
+    ("archive", "Q", "archive a session"),
+    ("new", "", "start a fresh moa thread"),
+    ("help", "", "commands and keys"),
+    ("quit", "", "close the console"),
+]
+NEEDS_ARG = {n for n, a, _ in COMMANDS if a and not a.startswith("[")}
+BAR = [("attention", "/attention"), ("brief", "/brief"), ("ls", "/ls"), ("open…", "!fill /open "),
+       ("resume…", "!fill /resume "), ("layout", "/layout"), ("new", "/new"), ("help", "/help")]
+KEYS = """↵ send · Esc cancels moa's turn · PgUp/PgDn or the wheel scroll
+Tab hops between buttons, ↵ presses one; clicking works too
+/ opens the command list: ↑↓ pick, Tab completes, ↵ runs
 Ctrl-a anywhere: the moa menu (Ctrl-a a: a real Ctrl-a)
-when it asks permission: y once · a always · n no"""
+when moa asks permission: y once · a always · n no
+hold Shift to select text with the mouse"""
+
+CMD_RE = re.compile(r"/(" + "|".join(n for n, _, _ in COMMANDS) + r")(\s|$)")
+MOACTL_RE = re.compile(r"(?:moactl )(resume|focus|open|close|archive) (\S.*)")
+INLINE = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`|⟦[^⟧|]+\|[^⟧]+⟧|\[[^\]\n]+\]\([^)\n]+\)|[●⚠▸◐✓✗○◌])")
+# moactl prints "→ moactl resume ID"; the console shows a button instead
+ARROW_RE = re.compile(r"\s*→ moactl (resume|focus) (\S+)")
+
+
+def seg_len(segs):
+    return sum(len(s[0]) for s in segs)
+
+
+def as_command(code):
+    """A console command for an inline `code` span, if it is one (`/resume x`, `moactl focus y`)."""
+    if CMD_RE.match(code + " "):
+        return code
+    m = MOACTL_RE.fullmatch(code)
+    return f"/{m.group(1)} {m.group(2)}" if m else None
+
+
+class Style:
+    def __init__(self):
+        grey = 8 if curses.COLORS > 8 else curses.COLOR_WHITE
+        pairs = [(curses.COLOR_CYAN, -1), (grey, -1), (curses.COLOR_YELLOW, -1), (curses.COLOR_GREEN, -1),
+                 (curses.COLOR_BLUE, -1), (curses.COLOR_RED, -1), (curses.COLOR_MAGENTA, -1),
+                 (curses.COLOR_BLACK, curses.COLOR_CYAN), (curses.COLOR_BLACK, curses.COLOR_YELLOW),
+                 (curses.COLOR_BLACK, curses.COLOR_MAGENTA), (curses.COLOR_BLACK, curses.COLOR_WHITE)]
+        for i, (fg, bg) in enumerate(pairs, start=1):
+            curses.init_pair(i, fg, bg)
+        P = curses.color_pair
+        B, I = curses.A_BOLD, getattr(curses, "A_ITALIC", 0)
+        self.head, self.dim, self.warn, self.ok = P(1) | B, P(2), P(3), P(4)
+        self.you, self.err, self.brand, self.code = P(5) | B, P(6), P(7), P(1)
+        self.chip, self.chipwarn, self.pill, self.focus = P(8), P(9), P(10) | B, P(11) | B
+        self.italic = I
+        self.glyph = {"●": self.ok, "⚠": self.warn | B, "▸": self.brand, "◐": self.head, "✓": self.ok,
+                      "✗": self.err, "○": self.dim, "◌": self.dim}
+
+
+# text → rows of styled segments: (text, attr) or (text, attr, command) for a button
+def inline(text, attr, S):
+    out = []
+    for part in INLINE.split(text):
+        if not part:
+            continue
+        if len(part) > 4 and part.startswith("**") and part.endswith("**"):
+            out.append((part[2:-2], attr | curses.A_BOLD))
+        elif len(part) > 2 and part[0] == "`" and part[-1] == "`":
+            cmd = as_command(part[1:-1])
+            out.append((f" {part[1:-1]} ", S.chip, cmd) if cmd else (part[1:-1], S.code))
+        elif part[0] == "⟦":
+            label, cmd = part[1:-1].split("|", 1)
+            out.append((f" ↩ {label} ", S.chip, cmd))
+        elif part[0] == "[" and "](" in part:
+            out.append((part[1:part.index("](")], attr | curses.A_UNDERLINE))
+        elif part in S.glyph:
+            out.append((part, S.glyph[part]))
+        else:
+            out.append((part, attr))
+    return out
+
+
+def wrap(spans, width, lead=(), rest=()):
+    """Word-wrap styled spans; `lead` and `rest` are the prefixes of the first and later rows."""
+    rows, row, used, fresh = [], list(lead), seg_len(lead), True
+
+    def newline():
+        nonlocal row, used, fresh
+        rows.append(row)
+        row, used, fresh = list(rest), seg_len(rest), True
+
+    for seg in spans:
+        if len(seg) > 2:  # a button never splits
+            if used + len(seg[0]) > width and not fresh:
+                newline()
+            row.append(seg)
+            used, fresh = used + len(seg[0]), False
+            continue
+        text, attr = seg
+        for word in re.findall(r"\s*\S+|\s+", text):
+            if fresh and rows:
+                word = word.lstrip()
+            if used + len(word) > width and not fresh:
+                newline()
+                word = word.lstrip()
+            while word and used + len(word) > width:  # longer than a whole row: hard cut
+                cut = max(1, width - used)
+                row.append((word[:cut], attr))
+                newline()
+                word = word[cut:]
+            if word:
+                row.append((word, attr))
+                used, fresh = used + len(word), False
+    if not fresh or not rows:
+        rows.append(row)
+    return rows
+
+
+def fit(segs, width):
+    """Cut a row of segments to `width` cells, ending in … if anything was cut."""
+    out, used = [], 0
+    for s in segs:
+        if used + len(s[0]) <= width:
+            out.append(s)
+            used += len(s[0])
+        else:
+            if width - used > 1:
+                out.append((s[0][:width - used - 1] + "…", s[1]))
+            break
+    return out
+
+
+def plain(md):
+    return re.sub(r"\*\*|`", "", md)
+
+
+def table(lines, width, S):
+    cells = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in lines]
+    cells = [r for r in cells if not all(re.fullmatch(r":?-{2,}:?", c) for c in r if c)]
+    if not cells:
+        return []
+    n = max(len(r) for r in cells)
+    cells = [[plain(c) for c in r] + [""] * (n - len(r)) for r in cells]
+    widths = [max(len(r[j]) for r in cells) for j in range(n)]
+    if sum(widths) + 3 * (n - 1) <= width:
+        out = []
+        for k, r in enumerate(cells):
+            row = []
+            for j, c in enumerate(r):
+                if j:
+                    row.append((" │ ", S.dim))
+                row.append((c.ljust(widths[j]), curses.A_BOLD if k == 0 else 0))
+            out.append(row)
+            if k == 0 and len(cells) > 1:
+                out.append([("─┼─".join("─" * w for w in widths), S.dim)])
+        return out
+    out = []  # too wide for the pane: one bullet per row
+    for r in cells[1:] or cells:
+        out += wrap([(r[0], curses.A_BOLD)] + [(f" · {c}", 0) for c in r[1:] if c], width, [("• ", S.brand)], [("  ", 0)])
+    return out
+
+
+def markdown(text, width, S, base=0):
+    rows, lines, i, in_code = [], text.split("\n"), 0, False
+
+    def gap():
+        if rows and rows[-1]:
+            rows.append([])
+
+    while i < len(lines):
+        ln = lines[i]
+        s = ln.strip()
+        i += 1
+        if s.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            rows.append([("▏ ", S.dim), (ln[:max(1, width - 2)], S.code)])
+            continue
+        if not s:
+            gap()
+            continue
+        if s.startswith("|") and s.count("|") >= 2:
+            tbl = [s]
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                tbl.append(lines[i].strip())
+                i += 1
+            rows += table(tbl, width, S)
+            continue
+        m = re.match(r"(#{1,6})\s+(.*)", s)
+        if m:
+            gap()
+            if len(m.group(1)) <= 2:
+                rows += wrap(inline(m.group(2), S.head, S), width, [("▍", S.brand)], [(" ", 0)])
+            else:
+                rows += wrap(inline(m.group(2), curses.A_BOLD, S), width)
+            continue
+        if re.fullmatch(r"(-\s*){3,}|(\*\s*){3,}|(_\s*){3,}", s):
+            rows.append([("─" * min(width, 40), S.dim)])
+            continue
+        m = re.match(r"(\s*)([-*+]|\d+[.)])\s+(.*)", ln)
+        if m:
+            pad = "  " * min(len(m.group(1).expandtabs(4)) // 2, 4)
+            mark, body = m.group(2), m.group(3)
+            bullet, battr = (f"{mark} ", S.brand) if mark[0].isdigit() else ("•◦▪"[min(len(pad) // 2, 2)] + " ", S.brand)
+            check = re.match(r"\[([ xX])\]\s+(.*)", body)
+            if check:
+                bullet, battr, body = ("☑ ", S.ok) if check.group(1) != " " else ("☐ ", S.dim), check.group(2)
+            elif body[:1] in S.glyph:  # "- ● Website …": the status glyph is the bullet
+                bullet, battr, body = body[0] + " ", S.glyph[body[0]], body[1:].lstrip()
+            rows += wrap(inline(body, base, S), width, [(pad, 0), (bullet, battr)], [(pad + " " * len(bullet), 0)])
+            continue
+        if s.startswith(">"):
+            q = S.dim | S.italic
+            rows += wrap(inline(s[1:].strip(), q, S), width, [("▎ ", S.dim)], [("▎ ", S.dim)])
+            continue
+        rows += wrap(inline(s, base, S), width)
+    while rows and not rows[-1]:
+        rows.pop()
+    return rows
 
 
 class Acp:
@@ -80,31 +292,38 @@ class Acp:
 
 
 class Console:
-    def __init__(self, scr):
-        self.scr, self.conn = scr, connect()
+    def __init__(self, scr, S):
+        self.scr, self.S, self.conn = scr, S, connect()
         self.feed, self.tools = [], {}
         self.inbox = queue.Queue()
         self.acp = Acp(self.inbox)
         self.pending = {}          # request id -> what it was
         self.sid = None
         self.busy = False
-        self.perm = None           # a pending session/request_permission
+        self.perm = None           # a pending session/request_permission, and its feed entry
         self.buf, self.cur = [], 0
         self.history, self.hpos = [], 0
         self.scroll = 0
         self.streaming = None      # the agent entry being streamed into
+        self.turn = 0              # moa's replies group by turn
+        self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
+        self.focus = None          # index into hits, while Tab-hopping
+        self.pal, self.pal_key, self.pal_items, self.pal_hits = 0, None, [], []
+        self.pal_moved = False     # ↑↓ picked a row, so ↵ runs it even with nothing typed after the command
         self.cursor = self.conn.execute("SELECT coalesce(max(id),0) FROM events").fetchone()[0]
         self.seen = db_mtime()
         self._last_err = (None, 0.0)  # the last error line shown, and when
         self.pending[self.acp.request("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})] = "init"
-        self.add("sys", "moa · type /help, or Ctrl-a for the menu · connecting…")
-        self.run_ctl("attention", header="needs you right now:")
+        self.add("sys", "connecting to moa…")
+        self.run_ctl("attention", title="needs you right now")
 
     # feed
     def add(self, kind, text, **kw):
-        e = {"kind": kind, "text": text, "ts": datetime.datetime.now().strftime("%H:%M"), **kw}
+        if kind == "you":
+            self.turn += 1
+        e = {"kind": kind, "text": text, "ts": datetime.datetime.now().strftime("%H:%M"), "turn": self.turn, **kw}
         self.feed.append(e)
         del self.feed[:-500]
         self.streaming = None if kind != "agent" else e
@@ -118,12 +337,17 @@ class Console:
             self.add("err", text)
             self._last_err = (text, now)
 
-    def run_ctl(self, *args, header=None):
+    def run_ctl(self, *args, title=None):
+        title = title or "/" + " ".join(args)
+        if args == ("ls",):
+            r = subprocess.run([MOACTL, "ls", "--json"], capture_output=True, text=True)
+            try:
+                self.add("ctl", "", title=title, sessions=json.loads(r.stdout))
+                return
+            except ValueError:
+                pass
         r = subprocess.run([MOACTL, *args], capture_output=True, text=True)
-        out = (r.stdout + r.stderr).strip()
-        if header:
-            self.add("sys", header)
-        self.add("ctl", out or "ok")
+        self.add("ctl", (r.stdout + r.stderr).strip() or "ok", title=title)
 
     # moa (ACP)
     def thread_meta(self, value=None):
@@ -143,6 +367,8 @@ class Console:
             return
         if show:
             self.add("you", text)
+        else:
+            self.turn += 1
         self.busy = True
         self.pending[self.acp.request("session/prompt", {"sessionId": self.sid, "prompt": [{"type": "text", "text": text}]})] = "prompt"
 
@@ -153,9 +379,9 @@ class Console:
             return
         if "method" in m and "id" in m:                       # a request from the agent
             if m["method"] == "session/request_permission":
-                self.perm = m
                 tc = m["params"].get("toolCall", {})
-                self.add("perm", f"allow {tc.get('title') or 'this'}?  [y] once · [a] always · [n] no")
+                self.perm = (m, self.add("perm", tc.get("title") or "this"))
+                self.focus = None
             else:
                 self.acp.respond(m["id"], error={"code": -32601, "message": "not supported by the console"})
             return
@@ -194,6 +420,7 @@ class Console:
                 text = (u.get("content") or {}).get("text", "")
                 who = "agent" if kind == "agent_message_chunk" else "you"
                 if who == "you" and text.startswith(OPENING[:30]):
+                    self.turn += 1
                     return
                 if self.feed and self.feed[-1]["kind"] == who and (who == "you" or self.streaming is self.feed[-1]):
                     self.feed[-1]["text"] += text
@@ -212,6 +439,15 @@ class Console:
                 if u.get("rawInput"):
                     e["raw"] = u["rawInput"]
 
+    def answer(self, ch):
+        msg, entry = self.perm
+        want = {"y": "allow_once", "a": "allow_always", "n": "reject_once"}[ch]
+        opts = msg["params"]["options"]
+        opt = next((o for o in opts if o["kind"] == want), opts[0])
+        self.acp.respond(msg["id"], {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}})
+        entry["answered"] = opt["name"]
+        self.perm = None
+
     # sessions reporting in
     def watch_events(self):
         m = db_mtime()
@@ -224,14 +460,8 @@ class Console:
             name = e["name"] or os.path.basename(e["cwd"] or "") or "?"
             sid = (e["session_id"] or "")[:8]
             text = " ".join((e["text"] or "").split())
-            if e["kind"] == "stop":
-                self.add("done", f"● {name} finished: {text[:160]}", hint=f"/resume {sid}")
-            elif e["kind"] == "waiting":
-                self.add("wait", f"⚠ {name} needs you: {text[:120]}", hint=f"/resume {sid}")
-            elif e["kind"] == "start":
-                self.add("event", f"▶ {name} started")
-            elif e["kind"] == "end":
-                self.add("event", f"○ {name} ended")
+            if e["kind"] in ("stop", "waiting", "start", "end"):
+                self.add("event", text, what=e["kind"], name=name, sid=sid)
             self.cursor = e["id"]  # after it was shown, so a failing row is retried, not skipped
         self.seen = m  # only after every row was shown, so a failure retries instead of dropping events
 
@@ -247,7 +477,7 @@ class Console:
             return
         cmd, *args = shlex.split(line[1:]) if line.count('"') % 2 == 0 else line[1:].split()
         if cmd == "help":
-            self.add("ctl", HELP)
+            self.add("help", "", title="commands")
         elif cmd == "quit":
             raise SystemExit
         elif cmd == "new":
@@ -261,25 +491,86 @@ class Console:
             self.run_ctl("layout", *(["apply", args[0]] if args else ["list"]))
         elif cmd in ("resume", "close", "archive", "focus") and args:
             self.run_ctl(cmd, " ".join(args))
+        elif cmd in NEEDS_ARG:
+            self.fill(f"/{cmd} ")
         else:
             self.add("sys", f"unknown command /{cmd} (try /help)")
 
+    def fill(self, text):
+        self.buf, self.cur, self.focus, self.pal, self.pal_moved = list(text), len(text), None, 0, False
+
+    def press(self, cmd):
+        """A button was clicked or Entered."""
+        self.focus = None
+        if cmd.startswith("!perm "):
+            if self.perm:
+                self.answer(cmd[-1])
+        elif cmd.startswith("!fill "):
+            self.fill(cmd[6:])
+        else:
+            self.submit(cmd)
+
+    def palette(self):
+        """The command list under what's being typed: (label, detail, insert) rows."""
+        text = "".join(self.buf)
+        if text == self.pal_key:
+            return self.pal_items
+        items = []
+        if text.startswith("/") and " " not in text:
+            items = [(f"/{n}", f"{a}  {d}" if a else d, f"/{n} " if a else f"/{n}")
+                     for n, a, d in COMMANDS if n.startswith(text[1:])]
+        elif text.startswith("/"):
+            cmd, _, q = text[1:].partition(" ")
+            q = q.strip().lower()
+            if cmd in ("resume", "focus", "close", "archive"):
+                rows = self.conn.execute("SELECT session_id, title, grp, state, last_seen FROM sessions "
+                                         "WHERE state != 'archived' ORDER BY last_seen DESC").fetchall()
+                items = [(f"{ICON.get(r['state'], '·')} {r['title'] or r['session_id'][:8]}",
+                          f"{r['grp'] or ''}  {ago(r['last_seen'])}", f"/{cmd} {r['session_id'][:8]}")
+                         for r in rows if q in f"{r['title']} {r['grp']} {r['session_id']}".lower()]
+            elif cmd == "layout":
+                try:
+                    cfg = layout.load()
+                    items = [(n, "current" if n == cfg.get("current") else " · ".join(layout.leaves(node)), f"/layout {n}")
+                             for n, node in cfg["layouts"].items() if n.startswith(q)]
+                except (OSError, ValueError, KeyError):
+                    items = []
+        self.pal_key, self.pal_items = text, items[:8]
+        self.pal = min(self.pal, max(0, len(self.pal_items) - 1))
+        return self.pal_items
+
     def key(self, ch):
+        if ch == curses.KEY_MOUSE:
+            return self.mouse()
         if self.perm and not self.buf and ch in ("y", "a", "n"):
-            want = {"y": "allow_once", "a": "allow_always", "n": "reject_once"}[ch]
-            opts = self.perm["params"]["options"]
-            opt = next((o for o in opts if o["kind"] == want), opts[0])
-            self.acp.respond(self.perm["id"], {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}})
-            self.add("sys", f"→ {opt['name']}")
-            self.perm = None
-            return
-        if ch in ("\n", "\r", curses.KEY_ENTER):
-            line, self.buf, self.cur = "".join(self.buf), [], 0
+            return self.answer(ch)
+        pal = self.palette()
+        if ch in ("\t", curses.KEY_BTAB) and pal:
+            self.fill(pal[self.pal][2])
+        elif ch in ("\t", curses.KEY_BTAB) and not self.buf and self.hits:
+            step = 1 if ch == "\t" else -1
+            self.focus = 0 if self.focus is None and step == 1 else ((self.focus or 0) + step) % len(self.hits)
+        elif ch in ("\n", "\r", curses.KEY_ENTER):
+            if self.focus is not None and not self.buf and self.focus < len(self.hits):
+                return self.press(self.hits[self.focus][3])
+            if pal and "".join(self.buf).strip() != pal[self.pal][2].strip() and pal[self.pal][2].endswith(" "):
+                return self.fill(pal[self.pal][2])  # a command that needs an argument: complete it first
+            typed = "".join(self.buf)
+            picked = pal and (self.pal_moved or " " not in typed or typed.split(" ", 1)[1].strip())
+            line = pal[self.pal][2] if picked else typed
+            self.buf, self.cur = [], 0
             self.submit(line)
         elif ch == "\x1b":
-            if self.busy and self.sid:
+            if self.focus is not None:
+                self.focus = None
+            elif self.buf:
+                self.fill("")
+            elif self.busy and self.sid:
                 self.acp.notify("session/cancel", {"sessionId": self.sid})
                 self.add("sys", "cancelling…")
+        elif ch in (curses.KEY_UP, curses.KEY_DOWN) and pal:
+            self.pal = (self.pal + (1 if ch == curses.KEY_DOWN else -1)) % len(pal)
+            self.pal_moved = True
         elif ch in (curses.KEY_BACKSPACE, "\x7f", "\b"):
             if self.cur:
                 del self.buf[self.cur - 1]
@@ -302,92 +593,232 @@ class Console:
             self.buf, self.cur = list(left[:cut]) + self.buf[self.cur:], cut
         elif ch == curses.KEY_UP and self.history:
             self.hpos = max(0, self.hpos - 1)
-            self.buf = list(self.history[self.hpos])
-            self.cur = len(self.buf)
+            self.fill(self.history[self.hpos])
         elif ch == curses.KEY_DOWN and self.history:
             self.hpos = min(len(self.history), self.hpos + 1)
-            self.buf = list(self.history[self.hpos]) if self.hpos < len(self.history) else []
-            self.cur = len(self.buf)
+            self.fill(self.history[self.hpos] if self.hpos < len(self.history) else "")
         elif ch == curses.KEY_PPAGE:
             self.scroll += 10
         elif ch == curses.KEY_NPAGE:
             self.scroll = max(0, self.scroll - 10)
         elif isinstance(ch, str) and ch.isprintable():
+            self.focus = None
             self.buf.insert(self.cur, ch)
             self.cur += 1
+        if "".join(self.buf) != self.pal_key:
+            self.pal, self.pal_moved = 0, False
 
-    # drawing
-    def lines(self, width, C):
-        out = []
-        for e in self.feed:
-            k = e["kind"]
-            if k == "you":
-                first, rest, attr = "› ", "  ", C["you"]
-            elif k == "agent":
-                first, rest, attr = "  ", "  ", 0
-            elif k == "tool":
-                st = {"completed": "✓", "failed": "✗", "in_progress": icon("working")}.get(e.get("status"), "·")
-                cmd = (e.get("raw") or {}).get("command")
-                text = e["text"] if not cmd or cmd in e["text"] else f"{e['text']}: {cmd}"
-                text = text.replace(MOACTL, "moactl").replace(f"cd {os.path.dirname(MASTER_DIR)} && ", "").replace(os.path.expanduser("~"), "~")
-                out.append((f"    ⚙ {text}"[:width - 3] + f" {st}", C["dim"]))
-                continue
-            elif k in ("done", "wait", "event"):
-                first, rest, attr = f"{e['ts']} ", "      ", {"done": C["ok"], "wait": C["warn"] | curses.A_BOLD, "event": C["dim"]}[k]
-            elif k == "perm":
-                first, rest, attr = "⚠ ", "  ", C["warn"] | curses.A_BOLD
-            elif k == "err":
-                first, rest, attr = "✗ ", "  ", C["err"]
+    def mouse(self):
+        try:
+            _, x, y, _, bstate = curses.getmouse()
+        except curses.error:
+            return
+        if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+            self.scroll += 3
+        elif bstate & getattr(curses, "BUTTON5_PRESSED", 0x200000):
+            self.scroll = max(0, self.scroll - 3)
+        elif bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
+            for hy, x0, x1, cmd in self.hits + self.pal_hits:
+                if hy == y and x0 <= x < x1:
+                    return self.press(cmd)
+
+    # drawing: every entry becomes rows of segments
+    def entry_rows(self, e, width):
+        S, k = self.S, e["kind"]
+        if k == "agent":
+            return markdown(e["text"], width, S)
+        if k == "you":
+            return wrap(inline(e["text"], S.you, S), width, [("› ", S.you)], [("  ", 0)])
+        if k == "tool":
+            st = {"completed": ("✓", S.ok), "failed": ("✗", S.err), "in_progress": (icon("working"), S.brand)}.get(e.get("status"), ("·", S.dim))
+            cmd = (e.get("raw") or {}).get("command")
+            text = e["text"] if not cmd or cmd in e["text"] else f"{e['text']}: {cmd}"
+            text = text.replace(MOACTL, "moactl").replace(f"cd {os.path.dirname(MASTER_DIR)} && ", "").replace(os.path.expanduser("~"), "~")
+            return [fit([("⚙ ", S.dim), (text, S.dim)], width - 2) + [(" " + st[0], st[1])]]
+        if k == "ctl":
+            return self.card(e["title"], self.ctl_rows(e, width - 2), width)
+        if k == "help":
+            rows = []
+            col = max(len(n) + len(a) for n, a, _ in COMMANDS) + 5
+            for n, a, d in COMMANDS:
+                rows.append(fit([(f" /{n} ", S.chip, f"!fill /{n} " if n in NEEDS_ARG else f"/{n}"),
+                                 (f" {a}".ljust(col - len(n) - 3), S.dim), (d, 0)], width - 2))
+            rows += [[]] + [[(ln, S.dim)] for ln in KEYS.split("\n")]
+            return self.card("help", rows, width)
+        if k == "event":
+            what = e["what"]
+            glyph, attr, verb = {"stop": ("●", S.ok, "finished"), "waiting": ("⚠", S.warn | curses.A_BOLD, "needs you"),
+                                 "start": ("▶", S.dim, "started"), "end": ("○", S.dim, "ended")}[what]
+            spans = [(f"{glyph} ", attr), (e["name"], curses.A_BOLD if what in ("stop", "waiting") else S.dim),
+                     (f" {verb}", attr)]
+            if what in ("stop", "waiting") and e["text"]:
+                spans.append((": " + e["text"][:140], 0 if what == "stop" else S.warn))
+            if what in ("stop", "waiting") and e["sid"]:
+                spans += [(" ", 0), (" ↩ resume " if what == "stop" else " ↩ answer ", S.chip if what == "stop" else S.chipwarn,
+                                     f"/resume {e['sid']}")]
+            return wrap(spans, width, [(e["ts"] + " ", S.dim)], [("      ", 0)])
+        if k == "perm":
+            head = wrap([("moa wants to: ", S.warn | curses.A_BOLD), (e["text"], 0)], width - 2)
+            if e.get("answered"):
+                rows = head + [[(f"→ {e['answered']}", S.dim)]]
             else:
-                first, rest, attr = "", "", C["dim"]
-            text = e["text"] + (f"   {e['hint']}" if e.get("hint") else "")
-            lead = first
-            for para in text.split("\n"):
-                wrapped = textwrap.wrap(para, max(10, width - len(rest) - 1)) or [""]
-                for w in wrapped:
-                    out.append((lead + w, attr))
-                    lead = rest
-            if k in ("you", "agent"):
-                out.append(("", 0))
+                rows = head + [[(" y  once ", S.chipwarn, "!perm y"), ("  ", 0), (" a  always ", S.chipwarn, "!perm a"),
+                                ("  ", 0), (" n  no ", S.chip, "!perm n")]]
+            return self.card("⚠ permission", rows, width, S.warn)
+        if k == "err":
+            return wrap([(e["text"], S.err)], width, [("✗ ", S.err)], [("  ", 0)])
+        return wrap([(e["text"], S.dim | S.italic)], width, [("· ", S.dim)], [("  ", 0)])
+
+    def ctl_rows(self, e, width):
+        S = self.S
+        if "sessions" in e:
+            rows = []
+            for s in e["sessions"]:
+                if "untracked" in s:
+                    rows.append(fit([("? ", S.warn), (f"untracked pane {s['untracked']} ", S.warn),
+                                     (f"{s['account']} · {s['cwd'].replace(os.path.expanduser('~'), '~')}", S.dim)], width))
+                    continue
+                state = s["state"] if s["alive"] == "live" else s["alive"]
+                btn = (" ↩ resume ", S.chip, f"/resume {s['id'][:8]}")
+                left = fit([(f"{icon(state)} ", S.glyph.get(ICON.get(state), S.dim)), (s["title"] or s["id"][:8], curses.A_BOLD),
+                            (f"  {s['group'] or ''}", S.dim), (f"  {ago(s['last'])}", S.dim)], width - len(btn[0]) - 1)
+                rows.append(left + [(" " * (width - len(btn[0]) - seg_len(left)), 0), btn])
+            return rows or [[("no sessions", S.dim)]]
+        return markdown(ARROW_RE.sub(lambda m: f" ⟦{m.group(1)}|/{m.group(1)} {m.group(2)}⟧", e["text"]), width, S)
+
+    def card(self, title, rows, width, attr=None):
+        attr = attr if attr is not None else self.S.dim
+        top = [("╭─ ", attr), (title, self.S.head if attr == self.S.dim else attr | curses.A_BOLD),
+               (" " + "─" * max(0, width - len(title) - 4), attr)]
+        return [top] + [[("│ ", attr)] + r for r in rows] + [[("╰" + "─" * (width - 1), attr)]]
+
+    def cached_rows(self, e, width):
+        if e["kind"] == "tool" or (e["kind"] == "agent" and e is self.streaming and self.busy):
+            return self.entry_rows(e, width)  # spinners and live text: no cache
+        key = (width, len(e["text"]), e.get("status"), e.get("answered"))
+        if e.get("_key") != key:
+            e["_key"], e["_rows"] = key, self.entry_rows(e, width)
+        return e["_rows"]
+
+    def lines(self, width):
+        """The whole feed as rows: moa's turns grouped under one header, a gap between blocks."""
+        S, out, block, i = self.S, [], None, 0
+        feed = self.feed
+        while i < len(feed):
+            e = feed[i]
+            k = e["kind"]
+            b = ("moa", e["turn"]) if k in ("agent", "tool") else ("events",) if k == "event" else ("one", i)
+            if b != block:
+                if out:
+                    out.append([])
+                if b[0] == "moa":
+                    out.append([("◆ moa", S.brand | curses.A_BOLD), (f"  {e['ts']}", S.dim)])
+                block = b
+            if k == "tool":  # a run of tool calls: show the last two, count the rest
+                j = i
+                while j < len(feed) and feed[j]["kind"] == "tool" and feed[j]["turn"] == e["turn"]:
+                    j += 1
+                run = feed[i:j]
+                if len(run) > 3:
+                    done = sum(1 for t in run[:-2] if t.get("status") == "completed")
+                    out.append([("▏ ", S.brand), (f"⚙ {len(run) - 2} earlier steps", S.dim), (f"  {done} ✓", S.ok)])
+                    run = run[-2:]
+                out += [[("▏ ", S.brand)] + r for t in run for r in self.cached_rows(t, width - 2)]
+                i = j
+                continue
+            rows = self.cached_rows(e, width - (2 if b[0] == "moa" else 0))
+            out += [[("▏ ", S.brand)] + r for r in rows] if b[0] == "moa" else rows
+            i += 1
+        if self.busy:
+            out += [[], [(f"{icon('working')} moa is thinking… ", S.brand), ("Esc cancels", S.dim)]]
         return out
 
-    def draw(self, C):
-        scr = self.scr
+    def draw(self):
+        S, scr = self.S, self.scr
         h, w = scr.getmaxyx()
+        W = w - 1
         scr.erase()
-        state = (f"{icon('working')} thinking… (Esc cancels)" if self.busy else "ready") if self.sid else "connecting…"
+        screen = []  # (y, segments)
         if self.perm:
-            state = "⚠ waiting for your y / a / n"
-        head = f" moa · thread {self.sid[:8] if self.sid else '…'} · {state}"
-        scr.addnstr(0, 0, head.ljust(w - 1), w - 1, C["head"] | curses.A_REVERSE)
-        body = h - 3
-        lines = self.lines(w - 1, C)
+            state = [("⚠ answer y / a / n", S.warn | curses.A_BOLD)]
+        elif not self.sid:
+            state = [("connecting…", S.dim)]
+        elif self.busy:
+            state = [(f"{icon('working')} thinking", S.brand)]
+        else:
+            state = [("● ready", S.ok)]
+        head = [(" ◆ moa ", S.pill), (f"  thread {self.sid[:8]}" if self.sid else "", S.dim)]
+        screen.append((0, head + [(" " * max(1, W - seg_len(head) - seg_len(state) - 1), 0)] + state))
+        body = max(1, h - 4)
+        lines = self.lines(W)
         self.scroll = min(self.scroll, max(0, len(lines) - body))
         end = len(lines) - self.scroll
-        for y, (text, attr) in enumerate(lines[max(0, end - body):end], start=1):
-            scr.addnstr(y, 0, text, w - 1, attr)
-        scr.hline(h - 2, 0, curses.ACS_HLINE, w - 1)
+        for y, segs in enumerate(lines[max(0, end - body):end], start=1):
+            screen.append((y, segs))
+        pal, self.pal_hits = self.palette(), []
+        if pal:  # the command list floats over the bottom of the feed
+            top = h - 3 - len(pal) - 1
+            screen.append((top, [("╭─ ", S.dim), ("↑↓ pick · Tab complete · ↵ run", S.dim), (" " + "─" * W, S.dim)]))
+            col = max(len(p[0]) for p in pal) + 2
+            for n, (label, detail, ins) in enumerate(pal):
+                attr = S.focus if n == self.pal else curses.A_BOLD
+                row = fit([("│ ", S.dim), (f" {label} ".ljust(col), attr), (f"  {detail}", S.dim)], W)
+                screen.append((top + 1 + n, row + [(" " * (W - seg_len(row)), 0)]))
+                self.pal_hits.append((top + 1 + n, 0, W, ins if not ins.endswith(" ") else "!fill " + ins))
+        rule = [("─" * W, S.dim)]
         if self.scroll:
-            scr.addnstr(h - 2, 2, f" ↑ {self.scroll} lines · PgDn ", w - 4, C["dim"])
+            rule = [("──", S.dim), (f" ↑ {self.scroll} more · PgDn ", S.dim), ("─" * W, S.dim)]
+        screen.append((h - 3, rule))
+        bar, used = [], 0
+        for label, cmd in BAR:
+            if used + len(label) + 3 > W:
+                break
+            bar += [(f" {label} ", S.chip, cmd), (" ", 0)]
+            used += len(label) + 3
+        screen.append((h - 1, bar))
+        # buttons, in Tab order: the newest in the feed first, then the bar
+        feed_hits, bar_hits = [], []
+        for y, segs in screen:
+            x = 0
+            for s in segs:
+                if len(s) > 2 and s[2]:
+                    (bar_hits if y == h - 1 else feed_hits).append((y, x, x + len(s[0]), s[2]))
+                x += len(s[0])
+        if pal:
+            feed_hits = [hit for hit in feed_hits if hit[0] < h - 4 - len(pal)]
+        self.hits = sorted(feed_hits, key=lambda hit: (-hit[0], hit[1])) + bar_hits  # bottom row first, left to right
+        if self.focus is not None and self.focus >= len(self.hits):
+            self.focus = None
+        focused = self.hits[self.focus][:2] if self.focus is not None else None
+        for y, segs in screen:
+            x = 0
+            for s in segs:
+                n = min(len(s[0]), W - x)
+                if n > 0:
+                    attr = S.focus if focused == (y, x) and len(s) > 2 else s[1]
+                    try:
+                        scr.addnstr(y, x, s[0], n, attr)
+                    except curses.error:
+                        pass
+                x += len(s[0])
         text = "".join(self.buf)
         view_start = max(0, self.cur - (w - 4))
-        scr.addnstr(h - 1, 0, "› " + text[view_start:view_start + w - 4], w - 1, curses.A_BOLD)
+        scr.addnstr(h - 2, 0, "› " + text[view_start:view_start + w - 4], W, S.you if text.startswith("/") else curses.A_BOLD)
         if not text:
-            scr.addnstr(h - 1, 2, "ask moa, or /help", w - 3, C["dim"])
-        scr.move(h - 1, min(w - 2, 2 + self.cur - view_start))
+            hint = "Tab: buttons · ↵ press" if self.focus is not None else "ask moa, or / for commands"
+            scr.addnstr(h - 2, 2, hint, w - 3, S.dim)
+        scr.move(h - 2, min(w - 2, 2 + self.cur - view_start))
         scr.refresh()
 
 
 def main(scr):
     curses.use_default_colors()
-    for i, c in enumerate([curses.COLOR_CYAN, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, curses.COLOR_YELLOW,
-                           curses.COLOR_GREEN, curses.COLOR_MAGENTA, curses.COLOR_RED], start=1):
-        curses.init_pair(i, c, -1)
-    C = {"head": curses.color_pair(1) | curses.A_BOLD, "dim": curses.color_pair(2), "warn": curses.color_pair(3),
-         "ok": curses.color_pair(4), "you": curses.color_pair(5) | curses.A_BOLD, "err": curses.color_pair(6)}
+    S = Style()
     curses.curs_set(1)
     scr.keypad(True)
-    con = Console(scr)
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    curses.mouseinterval(0)
+    con = Console(scr, S)
     me = os.path.abspath(__file__)
     code = os.stat(me).st_mtime_ns
     try:
@@ -402,7 +833,10 @@ def main(scr):
                 con.watch_events()
             except Exception as exc:  # keep the console alive; the traceback goes to stderr (console.err)
                 con.error(exc)
-            con.draw(C)
+            try:
+                con.draw()
+            except Exception as exc:
+                con.error(exc)
             scr.timeout(100)
             try:
                 ch = scr.get_wch()
