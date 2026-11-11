@@ -95,6 +95,7 @@ class Console:
         self.streaming = None      # the agent entry being streamed into
         self.cursor = self.conn.execute("SELECT coalesce(max(id),0) FROM events").fetchone()[0]
         self.seen = db_mtime()
+        self._last_err = (None, 0.0)  # the last error line shown, and when
         self.pending[self.acp.request("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})] = "init"
@@ -108,6 +109,14 @@ class Console:
         del self.feed[:-500]
         self.streaming = None if kind != "agent" else e
         return e
+
+    def error(self, exc):
+        """Log the traceback; show an error line, but the same one at most every 30 s."""
+        traceback.print_exc()
+        text, now = f"console error: {exc!r} (details in console.err)", time.monotonic()
+        if self._last_err[0] != text or now - self._last_err[1] > 30:
+            self.add("err", text)
+            self._last_err = (text, now)
 
     def run_ctl(self, *args, header=None):
         r = subprocess.run([MOACTL, *args], capture_output=True, text=True)
@@ -208,12 +217,10 @@ class Console:
         m = db_mtime()
         if m == self.seen:
             return
-        self.seen = m
         rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name FROM events e
             LEFT JOIN sessions s ON s.session_id=e.session_id LEFT JOIN projects p ON p.id=s.project_id
             WHERE e.id > ? ORDER BY e.id""", (self.cursor,)).fetchall()
         for e in rows:
-            self.cursor = e["id"]
             name = e["name"] or os.path.basename(e["cwd"] or "") or "?"
             sid = (e["session_id"] or "")[:8]
             text = " ".join((e["text"] or "").split())
@@ -225,6 +232,8 @@ class Console:
                 self.add("event", f"▶ {name} started")
             elif e["kind"] == "end":
                 self.add("event", f"○ {name} ended")
+            self.cursor = e["id"]  # after it was shown, so a failing row is retried, not skipped
+        self.seen = m  # only after every row was shown, so a failure retries instead of dropping events
 
     # input
     def submit(self, line):
@@ -392,8 +401,7 @@ def main(scr):
                     con.handle(con.inbox.get())
                 con.watch_events()
             except Exception as exc:  # keep the console alive; the traceback goes to stderr (console.err)
-                traceback.print_exc()
-                con.add("err", f"console error: {exc!r} (details in console.err)")
+                con.error(exc)
             con.draw(C)
             scr.timeout(100)
             try:
@@ -405,8 +413,7 @@ def main(scr):
             except SystemExit:
                 raise
             except Exception as exc:
-                traceback.print_exc()
-                con.add("err", f"console error: {exc!r} (details in console.err)")
+                con.error(exc)
     except (SystemExit, KeyboardInterrupt):
         con.acp.p.terminate()
 
