@@ -421,6 +421,7 @@ class Console:
                 self.add("sys", f"new thread {self.sid[:8]} for today")
                 self.prompt(OPENING, show=False)
             elif what == "load":
+                self.hide_user = False
                 self.add("sys", f"resumed today's thread {self.sid[:8]}: everything above is from earlier")
             elif what == "prompt":
                 self.busy = False
@@ -489,9 +490,11 @@ class Console:
             if e["kind"] in ("stop", "waiting", "start", "end"):
                 self.add("event", text, what=e["kind"], name=name, sid=sid)
             if e["kind"] in ("stop", "waiting") and e["cwd"] != MASTER_DIR and (e["text"] or "").strip():
-                self.reports = [r for r in self.reports if r["sid"] != sid or r["kind"] != e["kind"]]
+                old = [r for r in self.reports if r["sid"] == sid and r["kind"] == e["kind"]]
+                self.reports = [r for r in self.reports if r not in old]
                 self.reports.append({"sid": sid, "name": name, "project": e["project"], "kind": e["kind"],
-                                     "ts": (e["ts"] or "")[11:16], "text": (e["text"] or "").strip()[:2600]})
+                                     "ts": (e["ts"] or "")[11:16], "text": (e["text"] or "").strip()[:2600],
+                                     "at": old[0]["at"] if old else time.monotonic()})  # a newer report keeps its place in line
                 self.report_at = time.monotonic()
             self.cursor = e["id"]  # after it was shown, so a failing row is retried, not skipped
         self.seen = m  # only after every row was shown, so a failure retries instead of dropping events
@@ -501,9 +504,10 @@ class Console:
         now = time.monotonic()
         if not (self.auto and self.reports and self.sid and not self.busy and not self.perms and not self.replaying):
             return
-        if now - self.report_at < SETTLE or now - self.last_wake < GAP:
+        settling = now - self.report_at < SETTLE and now - min(r["at"] for r in self.reports) < GAP  # a steady stream still wakes moa
+        if settling or now - self.last_wake < GAP:
             return
-        batch, self.reports, self.last_wake = self.reports[-8:], [], now
+        batch, self.reports, self.last_wake = self.reports[:8], self.reports[8:], now  # the rest go in the next wake
         words = {"stop": "finished a turn", "waiting": "needs Eliraz"}
         parts = [f"### {r['name']} · project {r['project'] or '(none)'} · session {r['sid']} · {words[r['kind']]} at {r['ts']}\n{r['text']}"
                  for r in batch]

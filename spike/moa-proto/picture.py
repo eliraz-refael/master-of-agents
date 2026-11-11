@@ -572,7 +572,7 @@ def main(scr):
         keys = ("⏎ open · n new · + group · m move · r rename · D del group · a archive · x close"
                 if VIEWS[view] == "Sessions" else
                 "j/k · ⏎ open · y/n suggestion" if PANEL else
-                "1-4/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
+                "1-5/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
         foot = confirm[0] if confirm else (msg or keys)
         scr.addnstr(h - 1, 0, foot, w - 1, C["warn"] if confirm or msg else C["dim"])
         scr.refresh()
@@ -592,9 +592,9 @@ def main(scr):
         if PANEL and k in (ord("\t"), curses.KEY_RIGHT, ord("l"), curses.KEY_BTAB, curses.KEY_LEFT, ord("h")) + tuple(range(ord("1"), ord("6"))):
             continue
         if k in (ord("\t"), curses.KEY_RIGHT, ord("l")):
-            view, sel, top = (view + 1) % 4, 0, 0
+            view, sel, top = (view + 1) % len(VIEWS), 0, 0
         elif k in (curses.KEY_BTAB, curses.KEY_LEFT, ord("h")):
-            view, sel, top = (view - 1) % 4, 0, 0
+            view, sel, top = (view - 1) % len(VIEWS), 0, 0
         elif ord("1") <= k <= ord("5"):
             view, sel, top = k - ord("1"), 0, 0
         elif k in (ord("j"), curses.KEY_DOWN) and selectable:
@@ -637,7 +637,7 @@ def main(scr):
             conn.execute("UPDATE sessions SET state='archived' WHERE session_id=?", (cur.data["session_id"],))
             log_ui(conn, f"archived {cur.data['title'] or cur.data['session_id'][:8]}")
             msg = "archived (still resumable by ID)"
-        elif k == ord("x") and cur and cur.kind == "session":
+        elif k == ord("x") and cur and cur.kind == "session" and VIEWS[view] != "Plan":  # in Plan, x only drops tasks
             s = cur.data
 
             def close(s=s):

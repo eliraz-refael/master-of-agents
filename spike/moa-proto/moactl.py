@@ -597,8 +597,12 @@ def main():
             sys.exit(f"no task #{tid}")
         fields = {"status": a.status, "title": a.title, "who": a.who, "due": due_date(a.due),
                   "session_id": session_id(conn, a.session), "note": a.note}
-        if a.blocked_on:
-            fields.update(blocked_on=a.blocked_on, status=a.status or "blocked")
+        if a.title == "":
+            sys.exit("--title can't be empty")
+        if a.blocked_on is not None:  # "" clears it
+            fields["blocked_on"] = a.blocked_on
+            if a.blocked_on:
+                fields["status"] = a.status or "blocked"
         if a.today or a.not_today:
             fields["today"] = datetime.date.today().isoformat() if a.today else ""
         for col, val in fields.items():
