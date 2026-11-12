@@ -119,3 +119,12 @@
   shows without any events. Focus reports (`focus-events`) were tried first: curses maps
   them to kxIN/kxOUT, but tmux only reports focus-out to panes it saw gain focus, which
   swap-pane and startup races break. The status bar got a spacer line and rounded pills.
+
+## Setup has to be one step (2026-11-12)
+- "When a user downloads this, you don't expect them to write a Python script to install
+  the hooks." moa now finds the Claude accounts itself (config folders with projects/ or
+  settings.json in $HOME), shows which have its hook, and asks per account: install,
+  only under some folders, or not now. In a terminal: `moactl setup`; in the console, a
+  card with buttons appears while an account isn't tracked (and `/setup` brings it back).
+- The hook commands carry a marker, so moa can find, update and remove only its own
+  hooks and leave the others (herdr, aoe) alone; the first write keeps a backup.

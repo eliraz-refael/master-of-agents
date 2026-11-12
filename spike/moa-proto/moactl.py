@@ -483,10 +483,58 @@ def import_herdr(conn):
     print(f"imported {n}, skipped {skipped}")
 
 
+def setup(conn, a):
+    """moactl setup: find Claude accounts, show whether moa's hook is in each, install or remove it."""
+    import setup_hooks
+    row = conn.execute("SELECT value FROM meta WHERE key='setup_skipped'").fetchone()
+    skipped = json.loads(row[0]) if row else []
+
+    def save_skipped(names):
+        conn.execute("INSERT INTO meta(key,value) VALUES('setup_skipped',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                     (json.dumps(sorted(set(names))),))
+        conn.commit()
+
+    accounts = setup_hooks.find_accounts(CONFIG_DIRS)
+    if a.op is None and sys.stdin.isatty():
+        save_skipped(setup_hooks.interactive(accounts, PRIVATE_ROOTS, skipped))
+        return
+    if a.op in (None, "list"):
+        for x in accounts:
+            x["skipped"] = x["name"] in skipped
+        if a.json:
+            print(json.dumps(accounts))
+            return
+        for x in accounts:
+            only = f" (only {', '.join(setup_hooks.short(f) for f in x['only'])})" if x["only"] else ""
+            print(f"{x['name']:<16} {setup_hooks.short(x['dir']):<22} {x['state']}{only}{'  [skipped]' if x['skipped'] else ''}")
+        return
+    acct = next((x for x in accounts if a.name in (x["name"], x["dir"], setup_hooks.short(x["dir"]))), None)
+    if not acct:
+        sys.exit(f"no Claude account {a.name!r} (moactl setup list)")
+    if a.op == "install":
+        setup_hooks.install(acct["dir"])
+        print(f"tracking installed for {acct['name']}; its running sessions pick it up when they restart")
+    elif a.op == "only":
+        folders = a.folders or PRIVATE_ROOTS
+        setup_hooks.install(acct["dir"], folders)
+        print(f"tracking installed for {acct['name']}, only under {', '.join(setup_hooks.short(f) for f in folders)}")
+    elif a.op == "remove":
+        n = setup_hooks.remove(acct["dir"])
+        print(f"removed moa's hook from {acct['name']}" if n else f"{acct['name']} had no moa hook")
+    elif a.op == "skip":
+        save_skipped(skipped + [acct["name"]])
+        print(f"won't ask about {acct['name']} again (moactl setup install {acct['name']} if you change your mind)")
+    if a.op in ("install", "only"):
+        save_skipped([n for n in skipped if n != acct["name"]])
+
+
 def main():
     ap = argparse.ArgumentParser(prog="moactl")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("ls"); p.add_argument("--all", action="store_true"); p.add_argument("--json", action="store_true")
+    p = sub.add_parser("setup", help="install moa's tracking hook in your Claude accounts (asks; no args = interactive)")
+    p.add_argument("op", nargs="?", choices=["list", "install", "only", "remove", "skip"])
+    p.add_argument("name", nargs="?"); p.add_argument("folders", nargs="*"); p.add_argument("--json", action="store_true")
     p = sub.add_parser("open"); p.add_argument("path"); p.add_argument("--account", default="claude-lead")
     p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--prompt"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("resume"); p.add_argument("id"); p.add_argument("--bg", action="store_true")
@@ -609,6 +657,8 @@ def main():
             if val is not None:
                 conn.execute(f"UPDATE tasks SET {col}=nullif(?,''), updated_at=datetime('now','localtime') WHERE id=?", (val, tid))
         conn.commit(); print("ok")
+    elif a.cmd == "setup":
+        setup(conn, a)
     elif a.cmd == "ls":
         ls(conn, a.all, a.json)
     elif a.cmd == "open":
