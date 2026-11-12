@@ -122,7 +122,7 @@ def panel_of(pane):
 
 
 FRAMED = {"console", "tree", "plan", "today", "activity", "projects"}  # panels that draw their own frame
-FRAME_IDLE, FRAME_ACTIVE = "fg=#3b4261", "fg=#7aa2f7"  # a framed panel's default colour: its frame
+FRAME_IDLE, FRAME_ACTIVE = "fg=#4c566a", "fg=#88c0d0"  # a framed panel's default colour: its frame
 LABELS = {"console": "◆ moa", "tree": "▤ sessions", "plan": "◷ big picture", "today": "☀ today",
           "activity": "≡ activity", "projects": "▦ projects", "picture": "◫ picture", "agent-slot": "○ agent spot"}
 

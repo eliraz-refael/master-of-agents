@@ -1,6 +1,6 @@
 # THROWAWAY PROTOTYPE: the moa menu (Ctrl-a Space, or Ctrl-a twice). Sourced by tmux.conf's key bindings;
 # $M is the moamenu path, a %hidden variable tmux.conf defines.
-display-menu -T "#[align=centre fg=#7aa2f7 bold] moa " -x C -y C \
+display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
   "Console"                 c "run-shell -b '$M goto console'" \
   "Sessions tree"           t "run-shell -b '$M goto tree'" \
   "Big picture"             p "run-shell -b '$M goto plan'" \

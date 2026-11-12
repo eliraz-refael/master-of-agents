@@ -1040,4 +1040,5 @@ def main(scr):
 if __name__ == "__main__":
     os.environ.setdefault("ESCDELAY", "25")
     locale.setlocale(locale.LC_ALL, "")
+    chrome.truecolor()
     curses.wrapper(main)

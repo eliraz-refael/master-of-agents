@@ -688,4 +688,6 @@ if __name__ == "__main__":
         PANEL = sys.argv[sys.argv.index("--panel") + 1]
     os.environ.setdefault("ESCDELAY", "25")
     locale.setlocale(locale.LC_ALL, "")
+    import chrome
+    chrome.truecolor()
     curses.wrapper(main)

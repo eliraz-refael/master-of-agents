@@ -128,3 +128,26 @@
   card with buttons appears while an account isn't tracked (and `/setup` brings it back).
 - The hook commands carry a marker, so moa can find, update and remove only its own
   hooks and leave the others (herdr, aoe) alone; the first write keeps a backup.
+
+## moa briefs; it doesn't relay (2026-11-12)
+- "moa master should not act as a replicant of the session he follows": the console
+  printed every finished turn, and moa's wake-up reply repeated it. Now a session's
+  turns fold into one line ("TS-BOOK · 6 turns since 21:10") and moa's reply is the
+  brief: one line on what's going on there, in its words, then only what's on Eliraz.
+  Q&A turns ("is this price OK?") tell moa what Eliraz is focused on; they aren't tasks.
+- moa inventing follow-up tasks from what it knows should happen next ("order author
+  copies once the book is live") was the moment it felt useful: "freaking awesome".
+- Due dates have to be data, not text: moa wrote "due around Nov 15" into a title. Now
+  `--due` is a column on the big picture (red overdue, yellow today), moa works dates out
+  from reports ("review takes 72h" → +3), and wake-ups carry what's due, so moa nags.
+  No timer: an active moa wakes often enough from session reports.
+- A shell variable (`M=moactl; $M …`) dodges permission rules, which match the command
+  as written, so every call asked for approval.
+
+## Colours: exact and lighter (2026-11-12)
+- Tokyo Night read as too dark and low-contrast. Nord, lightened (dim text #8c9ab3,
+  light frost blue #88c0d0 as the accent), reads better.
+- Part of the murk was the panels: curses was mapping the hex palette to the 256-colour
+  cube, which turns Nord's blue-greys neutral and its green olive. ncurses can do direct
+  colour with the `tmux-direct` terminfo (colour number = 0xRRGGBB), and tmux passes RGB
+  on to terminals that have it, so the panels now use the exact hex colours.
