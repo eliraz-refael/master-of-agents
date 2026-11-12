@@ -68,15 +68,17 @@ def seg_len(segs):
 
 
 SESSION_NAMES = {}  # session ID → the name a button shows (the console keeps it fresh from the brain)
+NAMES_GEN = [0]     # bumped when SESSION_NAMES changes, so cached feed rows re-render with the new names
 
 
 def button_label(cmd):
     """What a command button says: a session by its name, not its ID ("↩ Lantern · Rust scaffold")."""
     verb, _, arg = cmd[1:].partition(" ")
-    arg = arg.strip()
+    arg = arg.strip().lower()
     if verb in ("resume", "focus", "close", "archive") and len(arg) >= 6 and re.fullmatch(r"[0-9a-f-]+", arg):
-        name = next((n for sid, n in SESSION_NAMES.items() if sid.startswith(arg)), None)
-        if name:
+        names = [n for sid, n in SESSION_NAMES.items() if sid.startswith(arg)]
+        if len(names) == 1:  # an ambiguous prefix keeps its ID, as moactl would refuse it
+            name = names[0] if len(names[0]) <= 40 else names[0][:39] + "…"
             return f"↩ {name}" if verb == "resume" else f"{verb} {name}"
     return cmd
 
@@ -499,8 +501,10 @@ class Console:
             title = r["title"] or os.path.basename(r["cwd"] or "") or r["session_id"][:8]
             same = not leaf or leaf.lower() in title.lower() or title.lower() in leaf.lower()
             names[r["session_id"]] = title if same else f"{leaf} · {title}"
-        SESSION_NAMES.clear()
-        SESSION_NAMES.update(names)
+        if names != SESSION_NAMES:
+            SESSION_NAMES.clear()
+            SESSION_NAMES.update(names)
+            NAMES_GEN[0] += 1
 
     # sessions reporting in
     def watch_events(self):
@@ -788,7 +792,7 @@ class Console:
     def cached_rows(self, e, width):
         if e["kind"] == "tool" and e.get("status") == "in_progress":
             return self.entry_rows(e, width)  # a spinner: no cache
-        key = (width, len(e["text"]), e.get("status"), e.get("answered"))
+        key = (width, len(e["text"]), e.get("status"), e.get("answered"), NAMES_GEN[0])
         if e.get("_key") != key:
             e["_key"], e["_rows"] = key, self.entry_rows(e, width)
         return e["_rows"]
