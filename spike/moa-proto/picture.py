@@ -118,8 +118,9 @@ def ago(ts):
 
 
 class Row:
-    def __init__(self, text, attr=0, kind=None, data=None):
+    def __init__(self, text, attr=0, kind=None, data=None, right=None):
         self.text, self.attr, self.kind, self.data = text, attr, kind, data
+        self.right = right  # (text, attr) drawn against the right edge, like a task's due date
 
 
 def short_path(path):
@@ -194,13 +195,20 @@ def session_line(s, indent=""):
 SESSIONS_SQL = """SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id"""
 
 
+def days_left(day):
+    """Days from today to a YYYY-MM-DD due date (negative = overdue), None if it isn't one."""
+    try:
+        return (datetime.date.fromisoformat(day) - datetime.date.today()).days
+    except (TypeError, ValueError):
+        return None
+
+
 def when(day):
     """A due date in words: today, tomorrow, Fri, 3 Dec; overdue ones say so."""
-    try:
-        d = datetime.date.fromisoformat(day)
-    except (TypeError, ValueError):
+    delta = days_left(day)
+    if delta is None:
         return day or ""
-    delta = (d - datetime.date.today()).days
+    d = datetime.date.today() + datetime.timedelta(days=delta)
     if delta < 0:
         return f"{-delta}d overdue"
     return "today" if delta == 0 else "tomorrow" if delta == 1 else f"{d:%a}" if delta < 7 else f"{d:%-d %b}"
@@ -236,11 +244,26 @@ def plan(conn, width, C):
         due = min((t["due"] for t in g["tasks"] if t["due"]), default="9999")
         return (not g["waiting"], not mine, due, name)
 
-    def item(mark, title, tail, attr, kind=None, data=None):
-        """A task wraps under its mark; only its first row is selectable."""
+    def due_chip(day):
+        """A task's due date as its own column: overdue and today stand out, the rest fade with distance."""
+        words = when(day)
+        if not words:
+            return None
+        delta = days_left(day)
+        delta = 99 if delta is None else delta
+        attr = (C["late"] if delta < 0 else C["today"] if delta == 0 else
+                C["soon"] if delta < 7 else C["dim"])
+        return (f" {words} " if delta <= 0 else words, attr)
+
+    def item(mark, title, tail, attr, kind=None, data=None, due=None):
+        """A task wraps under its mark; only its first row is selectable. Its due date sits on the right."""
+        chip = due_chip(due)
+        if chip and width - 6 - len(chip[0]) < 16:  # too narrow for a date column: the date goes in the text
+            attr = C["warn"] if chip[0].startswith(" ") else attr  # overdue or today still stands out
+            tail, chip = ", ".join(x for x in (tail, chip[0].strip()) if x), None
         text = f"{title}  ({tail})" if tail else title
-        lines = textwrap.wrap(text, max(10, width - 5)) or [""]
-        rows.append(Row(f"  {mark} {lines[0]}", attr, kind, data))
+        lines = textwrap.wrap(text, max(10, width - 5 - (len(chip[0]) + 1 if chip else 0))) or [""]
+        rows.append(Row(f"  {mark} {lines[0]}", attr, kind, data, chip))
         rows.extend(Row(f"    {ln}", attr) for ln in lines[1:])
 
     if not by:
@@ -262,16 +285,13 @@ def plan(conn, width, C):
             k = kind(t)
             if k == "wait":
                 on = t["blocked_on"] or ("someone else" if t["who"] == "other" else "")
-                tail = ", ".join(x for x in (on, when(t["due"])) if x)
-                item("◷", t["title"], tail, C["dim"], "task", t)
+                item("◷", t["title"], on, C["dim"], "task", t, t["due"])
             elif k == "agent":
                 mark = icon("working") if t["sstate"] == "working" else "◐"
                 tail = "agent working" if t["sstate"] == "working" else "agent"
-                item(mark, t["title"], tail, C["ok"], "task", t)
+                item(mark, t["title"], tail, C["ok"], "task", t, t["due"])
             else:
-                due = when(t["due"])
-                late = due.endswith("overdue") or due == "today"
-                item("▸", t["title"], due, C["warn"] if late else 0, "task", t)
+                item("▸", t["title"], "", 0, "task", t, t["due"])
     quiet = conn.execute("""SELECT name FROM projects p WHERE last_activity >= date('now','localtime','-7 days')
         AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.project_id=p.id AND t.status NOT IN ('done','dropped','idea'))
         ORDER BY last_activity DESC""").fetchall()
@@ -518,7 +538,8 @@ def main(scr):
     curses.use_default_colors()
     c = chrome.color
     C = {"head": c("blue") | curses.A_BOLD, "dim": c("dim"), "warn": c("yellow"), "ok": c("green"),
-         "brain": c("magenta"), "session": c("dim"), "you": c("yellow"), "group": c("blue") | curses.A_BOLD}
+         "brain": c("magenta"), "session": c("dim"), "you": c("yellow"), "group": c("blue") | curses.A_BOLD,
+         "late": c("dark", "red") | curses.A_BOLD, "today": c("dark", "yellow") | curses.A_BOLD, "soon": c("blue")}
     selected = c("bright", "sel")
     if PANEL:
         chrome.use_palette(scr)
@@ -569,6 +590,10 @@ def main(scr):
             attr = (selected | (r.attr & curses.A_BOLD)) if on else r.attr
             text = r.text.ljust(iw - 1) if on else r.text  # the selection is a full-width bar
             scr.addnstr(oy + y, ox, text, iw - 1, attr)
+            if r.right and iw - 1 - len(r.right[0]) > len(r.text.rstrip()):
+                chip, cattr = r.right  # on the selection bar, a plain date takes the bar's colour; a padded (late/today) chip keeps its own
+                cattr = selected if on and not chip.startswith(" ") else cattr
+                scr.addnstr(oy + y, ox + iw - 1 - len(chip), chip, len(chip), cattr)
         y0 = h - STRIP - 2
         if not PANEL:
             scr.hline(y0, 0, curses.ACS_HLINE, w - 1)

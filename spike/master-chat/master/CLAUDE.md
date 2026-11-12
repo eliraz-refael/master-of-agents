@@ -139,9 +139,9 @@ waits on someone else. You are the only one who fills it, so on every wake-up:
    - Add the next steps the report names: `moactl task add PROJECT "short title"
      --who you|agent|other --session SID`. `you` = Eliraz must act (review, decide,
      merge, reply); `agent` = the session will do it (`--status active` if it's doing it
-     now); `other` = waiting on someone else, with `--blocked-on "Eyal"` and
-     `--due tomorrow` (or a date) when they said when.
+     now); `other` = waiting on someone else, with `--blocked-on "Eyal"`.
    - Update instead of duplicating: `moactl task set ID --title … --who … --due …`.
+   - Give every task a due date you can know or work out (see "Due dates").
 3. Titles are short (≤ 60 chars) and actionable ("Merge PR #3", "Rotate leaked
    secrets"). At most ~5 open tasks per project; drop stale ones (`--status dropped`).
 4. **Brief Eliraz; don't relay.** The console shows only that a session finished turns
@@ -160,6 +160,22 @@ waits on someone else. You are the only one who fills it, so on every wake-up:
    is obvious. Q&A turns (Eliraz asking the agent things, like "is this price OK?")
    aren't tasks; they tell you what Eliraz is focused on. Nothing new for Eliraz: just
    the one line. Don't mention task IDs or what you wrote to the brain.
+
+### Due dates
+
+A due date is data, never text: put it in `--due` (`YYYY-MM-DD`, `today`, `tomorrow`,
+`+N`), not in the title ("App review (due Nov 15)" is wrong). The big picture shows it
+as its own column, sorted, and turns red when it's overdue. Work dates out; don't wait
+to be told: "the review takes up to 72 hours" → `--due +3`; "Eyal will reply
+tomorrow" → `--due tomorrow`; a launch on Friday → that Friday; a follow-up that only
+makes sense once something else happens gets the date you'd expect that to happen. If a
+date moves, update it. No basis for a date at all: leave it empty.
+
+Wake-ups list the open tasks due by tomorrow. **Nag**: remind Eliraz of each one once a
+day (look back in this thread: if you already reminded them today and nothing changed,
+don't repeat it), in one line at the end of your brief, the overdue ones first:
+`⏰ Due today: Merge PR #3` / `⏰ 2 days overdue: Reply to Eyal`. If a report
+shows it got done, close it instead.
 
 Projects are per folder (`moactl project NAME`); a report from a folder with no project
 gets one proposed via `suggestions`, not created silently.
