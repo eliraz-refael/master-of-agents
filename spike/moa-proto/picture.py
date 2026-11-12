@@ -211,7 +211,7 @@ def plan(conn, width, C):
     that need you first. moa keeps the tasks (moactl task …) from what sessions report."""
     today = datetime.date.today().isoformat()
     done = conn.execute("SELECT count(*) FROM tasks WHERE status='done' AND date(updated_at)=?", (today,)).fetchone()[0]
-    head = f"BIG PICTURE · {datetime.date.today():%a %d %b}" + (f" · ✓ {done} done today" if done else "")
+    head = f"{datetime.date.today():%a %d %b}" + (f" · ✓ {done} done today" if done else "")
     rows = [Row(head, C["head"])]
     tasks = conn.execute("""SELECT t.*, p.name AS project, s.state AS sstate, s.title AS stitle FROM tasks t
         LEFT JOIN projects p ON p.id=t.project_id LEFT JOIN sessions s ON s.session_id=t.session_id
