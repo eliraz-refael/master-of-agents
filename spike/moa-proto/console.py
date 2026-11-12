@@ -67,6 +67,22 @@ def seg_len(segs):
     return sum(len(s[0]) for s in segs)
 
 
+SESSION_NAMES = {}  # session ID → the name a button shows (the console keeps it fresh from the brain)
+NAMES_GEN = [0]     # bumped when SESSION_NAMES changes, so cached feed rows re-render with the new names
+
+
+def button_label(cmd):
+    """What a command button says: a session by its name, not its ID ("↩ Lantern · Rust scaffold")."""
+    verb, _, arg = cmd[1:].partition(" ")
+    arg = arg.strip().lower()
+    if verb in ("resume", "focus", "close", "archive") and len(arg) >= 6 and re.fullmatch(r"[0-9a-f-]+", arg):
+        names = [n for sid, n in SESSION_NAMES.items() if sid.startswith(arg)]
+        if len(names) == 1:  # an ambiguous prefix keeps its ID, as moactl would refuse it
+            name = names[0] if len(names[0]) <= 40 else names[0][:39] + "…"
+            return f"↩ {name}" if verb == "resume" else f"{verb} {name}"
+    return cmd
+
+
 def as_command(code):
     """A console command for an inline `code` span, if it is one (`/resume x`, `moactl focus y`)."""
     if CMD_RE.match(code + " "):
@@ -104,7 +120,7 @@ def inline(text, attr, S):
             out.append((part[2:-2], attr | curses.A_BOLD))
         elif len(part) > 2 and part[0] == "`" and part[-1] == "`":
             cmd = as_command(part[1:-1])
-            out.append((f" {part[1:-1]} ", S.chip, cmd) if cmd else (part[1:-1], S.code))
+            out.append((f" {button_label(cmd)} ", S.chip, cmd) if cmd else (part[1:-1], S.code))
         elif part[0] == "⟦":
             label, cmd = part[1:-1].split("|", 1)
             out.append((f" ↩ {label} ", S.chip, cmd))
@@ -297,6 +313,7 @@ class Acp:
 class Console:
     def __init__(self, scr, S):
         self.scr, self.S, self.conn = scr, S, connect()
+        self.load_names()
         self.feed, self.tools = [], {}
         self.inbox = queue.Queue()
         self.acp = Acp(self.inbox)
@@ -475,11 +492,26 @@ class Console:
         entry["answered"] = opt["name"]
         self.perms.remove(found)
 
+    def load_names(self):
+        """Session names for buttons: the title, with the project in front when the title doesn't say it."""
+        names = {}
+        for r in self.conn.execute("""SELECT s.session_id, s.title, s.grp, s.cwd, p.name AS project FROM sessions s
+                                      LEFT JOIN projects p ON p.id=s.project_id"""):
+            leaf = (r["grp"] or "").rsplit("/", 1)[-1] or r["project"] or ""
+            title = r["title"] or os.path.basename(r["cwd"] or "") or r["session_id"][:8]
+            same = not leaf or leaf.lower() in title.lower() or title.lower() in leaf.lower()
+            names[r["session_id"]] = title if same else f"{leaf} · {title}"
+        if names != SESSION_NAMES:
+            SESSION_NAMES.clear()
+            SESSION_NAMES.update(names)
+            NAMES_GEN[0] += 1
+
     # sessions reporting in
     def watch_events(self):
         m = db_mtime()
         if m == self.seen:
             return
+        self.load_names()
         rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name, p.name AS project FROM events e
             LEFT JOIN sessions s ON s.session_id=e.session_id LEFT JOIN projects p ON p.id=s.project_id
             WHERE e.id > ? ORDER BY e.id""", (self.cursor,)).fetchall()
@@ -760,7 +792,7 @@ class Console:
     def cached_rows(self, e, width):
         if e["kind"] == "tool" and e.get("status") == "in_progress":
             return self.entry_rows(e, width)  # a spinner: no cache
-        key = (width, len(e["text"]), e.get("status"), e.get("answered"))
+        key = (width, len(e["text"]), e.get("status"), e.get("answered"), NAMES_GEN[0])
         if e.get("_key") != key:
             e["_key"], e["_rows"] = key, self.entry_rows(e, width)
         return e["_rows"]

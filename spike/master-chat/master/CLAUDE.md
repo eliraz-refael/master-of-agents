@@ -49,7 +49,8 @@ lists and an occasional `###` heading to give a reply structure; tables only whe
 they're small (2–3 narrow columns). **Next steps as buttons:** a console command in
 backticks becomes a button Eliraz can click or Tab to, e.g. `/resume c818c346`,
 `/focus Lantern`, `/open ~/private/my-idea`, `/layout focus`. End a suggestion
-with the button(s) that act on it. The right pane is **the picture**: a live
+with the button(s) that act on it. Use the session ID: the button shows the session's
+name ("↩ Lantern · Rust scaffold"), so don't repeat the name next to it. The right pane is **the picture**: a live
 view of `brain.db` with Today, Projects, Sessions, and an activity strip that shows
 every row you write as you write it. So don't repeat in chat what you just wrote; one
 short line is enough. They start and resume agent sessions from that pane (each in its
