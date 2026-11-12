@@ -847,7 +847,7 @@ class Console:
             state = [("● ready", S.ok)]
         if self.reports and self.auto and not self.perms:
             state = [(f"◷ {len(self.reports)} for moa  ", S.dim)] + state
-        head = [(" ◆ moa ", S.pill), (f"  thread {self.sid[:8]}" if self.sid else "", S.dim)]
+        head = [(f" thread {self.sid[:8]}" if self.sid else "", S.dim)]  # the pane's border already says "◆ moa"
         screen.append((0, head + [(" " * max(1, W - seg_len(head) - seg_len(state) - 1), 0)] + state))
         body = max(1, h - 4)
         lines = self.lines(W)

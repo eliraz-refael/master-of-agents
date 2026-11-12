@@ -121,8 +121,21 @@ def panel_of(pane):
     return out("display-message", "-p", "-t", pane, "#{@moa_panel}")
 
 
-def tag(pane, panel):
+LABELS = {"console": "◆ moa", "tree": "▤ sessions", "plan": "◷ big picture", "today": "☀ today",
+          "activity": "≡ activity", "projects": "▦ projects", "picture": "◫ picture", "agent-slot": "○ agent spot"}
+
+
+def tag(pane, panel, title=None):
+    """Mark what a pane is (@moa_panel) and the title its top border shows (@moa_label)."""
     tmux("set", "-p", "-t", pane, "@moa_panel", panel)
+    label(pane, f"● {title or 'agent'}" if panel == "agent" else LABELS.get(panel))
+
+
+def label(pane, text):
+    if text:
+        tmux("set", "-p", "-t", pane, "@moa_label", text)
+    else:  # an agent in its own window: the border shows the window's name
+        tmux("set", "-pu", "-t", pane, "@moa_label")
 
 
 def slot():
@@ -165,7 +178,8 @@ def apply(name=None, session_title=lambda pane: None):
         elif panel == "agent" and alive(agent):
             tmux("swap-pane", "-d", "-s", agent, "-t", pane)
             stray.append(pane)
-            pane = agent
+            tag(agent, "agent", session_title(agent))
+            return agent
         elif panel == "agent":
             tmux("respawn-pane", "-k", "-t", pane, EMPTY_SLOT)
             tag(pane, "agent-slot")
@@ -195,6 +209,7 @@ def apply(name=None, session_title=lambda pane: None):
         for p in panes(old_win):
             if p["panel"] == "agent" and not (used_agent and p["pane"] == agent):
                 tmux("break-pane", "-d", "-s", p["pane"], "-n", (session_title(p["pane"]) or "agent")[:24])
+                label(p["pane"], None)
             elif p["panel"] == "console":
                 tmux("break-pane", "-d", "-s", p["pane"], "-n", "console")
         tmux("kill-window", "-t", old_win)
@@ -223,11 +238,12 @@ def focus(target, title_of=lambda pane: None):
     if s["pane"] != target:
         home = out("display-message", "-p", "-t", target, "#{window_id}")
         tmux("swap-pane", "-d", "-s", target, "-t", s["pane"])
-        tag(target, "agent")
+        tag(target, "agent", title_of(target))
         if s["panel"] == "agent-slot":
             tmux("kill-pane", "-t", s["pane"])
         else:
             tmux("rename-window", "-t", home, (title_of(s["pane"]) or "agent")[:24])
+            label(s["pane"], None)
     tmux("select-window", "-t", WINDOW)
     tmux("select-pane", "-t", target)
     return "brought it into the cockpit"

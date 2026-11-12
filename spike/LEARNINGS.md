@@ -100,3 +100,15 @@
   something needs Eliraz. Each wake is an LLM turn: the cost to watch.
 - The **plan** panel replaces Today in the presets: per project, what's on you, what
   agents are doing, what waits on someone else; projects needing you sort first.
+
+## Looks and moving around (2026-11-12)
+- "It looks way better… starting to feel like an app." Next ask: thicker borders and
+  titles on them, like aoe. tmux does both natively: `pane-border-lines heavy` and
+  `pane-border-status top` with a format reading a per-pane label (@moa_label).
+- Moving between panes had no key (only the mouse). Ctrl-a became a key mode instead
+  of a menu: arrows move (and repeat), letters jump to panels, z zooms, Space or a
+  second Ctrl-a opens the menu, and the status line lists the keys while it's held.
+- moa is an app that uses tmux (its own server, config and keys), not a tmux plugin.
+- Testing note: panes started by a scratch tmux server inherit that server's
+  environment, not the shell's: a test cockpit reached the real moa account. Set
+  PATH/MOA_* with `set-environment -g` before building panes.
