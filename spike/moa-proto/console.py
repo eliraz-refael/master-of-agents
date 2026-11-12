@@ -23,6 +23,7 @@ sys.path.insert(0, HERE)
 from picture import ICON, ago, connect, db_mtime, icon  # noqa: E402
 import chrome  # noqa: E402
 import layout  # noqa: E402
+import setup_hooks  # noqa: E402
 
 MASTER_DIR = os.path.normpath(os.path.join(HERE, "..", "master-chat", "master"))
 MOACTL = os.path.join(HERE, "moactl")
@@ -44,6 +45,7 @@ COMMANDS = [  # name, arguments, what it does
     ("archive", "Q", "archive a session"),
     ("new", "", "start a fresh moa thread"),
     ("auto", "[on|off]", "moa reads session reports on its own (default on)"),
+    ("setup", "", "track sessions on your Claude accounts (installs moa's hook)"),
     ("help", "", "commands and keys"),
     ("quit", "", "close the console"),
 ]
@@ -338,6 +340,7 @@ class Console:
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})] = "init"
         self.add("sys", "connecting to moa…")
         self.run_ctl("attention", title="needs you right now")
+        self.offer_setup()
 
     # feed
     def add(self, kind, text, **kw):
@@ -358,6 +361,16 @@ class Console:
         if self._last_err[0] != text or now - self._last_err[1] > 30:
             self.add("err", text)
             self._last_err = (text, now)
+
+    def offer_setup(self, everyone=False):
+        """A card asking about Claude accounts moa can't follow yet (skipped ones only on /setup)."""
+        r = subprocess.run([MOACTL, "setup", "list", "--json"], capture_output=True, text=True)
+        try:
+            accounts = [x for x in json.loads(r.stdout) if x["state"] != "installed" and (everyone or not x["skipped"])]
+        except (ValueError, KeyError):
+            return
+        if accounts or everyone:
+            self.add("setup", "", accounts=accounts)
 
     def run_ctl(self, *args, title=None):
         title = title or "/" + " ".join(args)
@@ -574,6 +587,12 @@ class Console:
             self.auto = args[0] != "off" if args else not self.auto
             self.add("sys", "moa reads session reports on its own" if self.auto else
                      "moa won't read session reports until /auto on")
+        elif cmd == "setup" and args:
+            self.run_ctl("setup", *args)
+            if args[0] in ("install", "only", "skip"):
+                self.offer_setup()
+        elif cmd == "setup":
+            self.offer_setup(everyone=True)
         elif cmd in ("attention", "brief", "ls"):
             self.run_ctl(cmd)
         elif cmd == "open" and args:
@@ -730,6 +749,20 @@ class Console:
             return [fit([("⚙ ", S.dim), (text, S.dim)], width - 2) + [(" " + st[0], st[1])]]
         if k == "ctl":
             return self.card(e["title"], self.ctl_rows(e, width - 2), width)
+        if k == "setup":
+            if not e["accounts"]:
+                return self.card("set up tracking", [[("every account is tracked ✓", S.ok)]], width)
+            rows = wrap([("moa can't follow sessions on these accounts yet. Its hook reports only sessions moa "
+                          "starts; \"private only\" also limits it to ~/private, ~/.config.", S.dim)], width - 2) + [[]]
+            for x in e["accounts"]:
+                rows.append(fit([("● ", S.warn), (x["name"], curses.A_BOLD), (f"  {setup_hooks.short(x['dir'])}", S.dim)], width - 2))
+                if x["state"] != "not installed":
+                    rows.append([(f"    settings.json is {x['state']}; fix it, then /setup", S.err)])
+                    continue
+                rows.append([("    ", 0), (" track ", S.chip, f"/setup install {x['name']}"), ("  ", 0),
+                             (" private only ", S.chip, f"/setup only {x['name']}"), ("  ", 0),
+                             (" not now ", S.chip, f"/setup skip {x['name']}")])
+            return self.card("set up tracking", rows, width)
         if k == "help":
             rows = []
             col = max(len(n) + len(a) for n, a, _ in COMMANDS) + 5
