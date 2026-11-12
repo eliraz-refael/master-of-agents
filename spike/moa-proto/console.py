@@ -21,6 +21,7 @@ import traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from picture import ICON, ago, connect, db_mtime, icon  # noqa: E402
+import chrome  # noqa: E402
 import layout  # noqa: E402
 
 MASTER_DIR = os.path.normpath(os.path.join(HERE, "..", "master-chat", "master"))
@@ -92,20 +93,13 @@ def as_command(code):
 
 
 class Style:
+    """The console's colours, from the shared palette (chrome.py, the same as tmux.conf)."""
     def __init__(self):
-        grey = 8 if curses.COLORS > 8 else curses.COLOR_WHITE
-        pairs = [(curses.COLOR_CYAN, -1), (grey, -1), (curses.COLOR_YELLOW, -1), (curses.COLOR_GREEN, -1),
-                 (curses.COLOR_BLUE, -1), (curses.COLOR_RED, -1), (curses.COLOR_MAGENTA, -1),
-                 (curses.COLOR_BLACK, curses.COLOR_CYAN), (curses.COLOR_BLACK, curses.COLOR_YELLOW),
-                 (curses.COLOR_BLACK, curses.COLOR_MAGENTA), (curses.COLOR_BLACK, curses.COLOR_WHITE)]
-        for i, (fg, bg) in enumerate(pairs, start=1):
-            curses.init_pair(i, fg, bg)
-        P = curses.color_pair
-        B, I = curses.A_BOLD, getattr(curses, "A_ITALIC", 0)
-        self.head, self.dim, self.warn, self.ok = P(1) | B, P(2), P(3), P(4)
-        self.you, self.err, self.brand, self.code = P(5) | B, P(6), P(7), P(1)
-        self.chip, self.chipwarn, self.pill, self.focus = P(8), P(9), P(10) | B, P(11) | B
-        self.italic = I
+        c, B = chrome.color, curses.A_BOLD
+        self.head, self.dim, self.warn, self.ok = c("blue") | B, c("dim"), c("yellow"), c("green")
+        self.you, self.err, self.brand, self.code = c("cyan") | B, c("red"), c("magenta"), c("cyan")
+        self.chip, self.chipwarn, self.pill, self.focus = c("bright", "sel"), c("dark", "yellow"), c("dark", "magenta") | B, c("dark", "blue") | B
+        self.italic = getattr(curses, "A_ITALIC", 0)
         self.glyph = {"●": self.ok, "⚠": self.warn | B, "▸": self.brand, "◐": self.head, "✓": self.ok,
                       "✗": self.err, "○": self.dim, "◌": self.dim}
 
@@ -276,7 +270,8 @@ def markdown(text, width, S, base=0):
 class Acp:
     def __init__(self, inbox):
         env = dict(os.environ, CLAUDE_CONFIG_DIR=ACCOUNT)
-        self.p = subprocess.Popen(["claude-agent-acp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        # MOA_ACP: the agent command (tests point it at a stub; a pane's login shell resets PATH, not this)
+        self.p = subprocess.Popen([os.environ.get("MOA_ACP", "claude-agent-acp")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd=MASTER_DIR, env=env)
         self.inbox, self.ids = inbox, 0
         threading.Thread(target=self._read, daemon=True).start()
@@ -312,7 +307,8 @@ class Acp:
 
 class Console:
     def __init__(self, scr, S):
-        self.scr, self.S, self.conn = scr, S, connect()
+        self.outer, self.scr, self.S, self.conn = scr, scr, S, connect()
+        self.size = None
         self.load_names()
         self.feed, self.tools = [], {}
         self.inbox = queue.Queue()
@@ -714,6 +710,7 @@ class Console:
         elif bstate & getattr(curses, "BUTTON5_PRESSED", 0x200000):
             self.scroll = max(0, self.scroll - 3)
         elif bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
+            y, x = y - 1, x - 2  # into the feed window's coordinates
             for hy, x0, x1, cmd in self.hits + self.pal_hits:
                 if hy == y and x0 <= x < x1:
                     return self.press(cmd)
@@ -832,10 +829,19 @@ class Console:
         return out
 
     def draw(self):
-        S, scr = self.S, self.scr
+        S, outer = self.S, self.outer
+        H, WD = outer.getmaxyx()
+        if H < 6 or WD < 8:  # too small for the frame and the feed
+            outer.erase()
+            outer.refresh()
+            return
+        if (H, WD) != self.size:  # the feed lives in a window inside the frame, with a column of padding
+            self.size, self.scr = (H, WD), outer.derwin(max(1, H - 2), max(1, WD - 4), 1, 2)
+            chrome.use_palette(self.scr)
+        scr = self.scr
         h, w = scr.getmaxyx()
         W = w - 1
-        scr.erase()
+        outer.erase()
         screen = []  # (y, segments)
         if self.perms:
             state = [("⚠ answer y / a / n", S.warn | curses.A_BOLD)]
@@ -847,13 +853,13 @@ class Console:
             state = [("● ready", S.ok)]
         if self.reports and self.auto and not self.perms:
             state = [(f"◷ {len(self.reports)} for moa  ", S.dim)] + state
-        head = [(f" thread {self.sid[:8]}" if self.sid else "", S.dim)]  # the pane's border already says "◆ moa"
-        screen.append((0, head + [(" " * max(1, W - seg_len(head) - seg_len(state) - 1), 0)] + state))
-        body = max(1, h - 4)
+        thread = [(f" thread {self.sid[:8]} ", S.dim)] if self.sid else []
+        chrome.frame(outer, "◆ moa", thread + [(" ", 0)] + state + [(" ", 0)])
+        body = max(1, h - 3)
         lines = self.lines(W)
         self.scroll = min(self.scroll, max(0, len(lines) - body))
         end = len(lines) - self.scroll
-        for y, segs in enumerate(lines[max(0, end - body):end], start=1):
+        for y, segs in enumerate(lines[max(0, end - body):end]):
             screen.append((y, segs))
         pal, self.pal_hits = self.palette(), []
         room = max(1, h - 6)  # a short pane shows a window of the list around the pick
@@ -911,13 +917,18 @@ class Console:
         if not text:
             hint = "Tab: buttons · ↵ press" if self.focus is not None else "ask moa, or / for commands"
             scr.addnstr(h - 2, 2, hint, w - 3, S.dim)
-        scr.move(h - 2, min(w - 2, 2 + self.cur - view_start))
-        scr.refresh()
+        cx = min(w - 2, 2 + self.cur - view_start)
+        scr.move(h - 2, cx)
+        outer.move(1 + h - 2, 2 + cx)  # keys are read from the outer window, so its cursor is the one shown
+        outer.noutrefresh()
+        scr.noutrefresh()
+        curses.doupdate()
 
 
 def main(scr):
     curses.use_default_colors()
     S = Style()
+    chrome.use_palette(scr)
     curses.curs_set(1)
     scr.keypad(True)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)

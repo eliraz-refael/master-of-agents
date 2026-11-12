@@ -446,10 +446,10 @@ def ask(scr, label, default=""):
     try:
         while True:
             h, w = scr.getmaxyx()
+            y, x, n = (h - 2, 2, w - 4) if PANEL else (h - 1, 0, w - 1)  # the footer's cells (inside the frame)
             line = f"{label} {''.join(buf)}"
-            scr.move(h - 1, 0)
-            scr.clrtoeol()
-            scr.addnstr(h - 1, 0, line[-(w - 2):], w - 2, curses.A_BOLD)
+            scr.addnstr(y, x, " " * n, n)
+            scr.addnstr(y, x, line[-(n - 1):], n - 1, curses.A_BOLD)
             scr.refresh()
             ch = scr.get_wch()
             if ch in ("\n", "\r", curses.KEY_ENTER):
@@ -512,14 +512,16 @@ def tree_key(scr, conn, k, cur):
 
 
 def main(scr):
+    import chrome  # the shared palette and frame (imported here: moactl imports this module without curses)
+    from layout import LABELS
     curses.curs_set(0)
     curses.use_default_colors()
-    for i, c in enumerate([curses.COLOR_CYAN, 8 if curses.COLORS > 8 else curses.COLOR_WHITE,
-                           curses.COLOR_YELLOW, curses.COLOR_GREEN, curses.COLOR_MAGENTA, curses.COLOR_BLUE], start=1):
-        curses.init_pair(i, c, -1)
-    C = {"head": curses.color_pair(1) | curses.A_BOLD, "dim": curses.color_pair(2), "warn": curses.color_pair(3),
-         "ok": curses.color_pair(4), "brain": curses.color_pair(5), "session": curses.color_pair(2),
-         "you": curses.color_pair(3), "group": curses.color_pair(6) | curses.A_BOLD}
+    c = chrome.color
+    C = {"head": c("blue") | curses.A_BOLD, "dim": c("dim"), "warn": c("yellow"), "ok": c("green"),
+         "brain": c("magenta"), "session": c("dim"), "you": c("yellow"), "group": c("blue") | curses.A_BOLD}
+    selected = c("bright", "sel")
+    if PANEL:
+        chrome.use_palette(scr)
     conn = connect()
     view, sel, top, expanded, collapsed, msg, confirm = 0, 0, 0, set(), set(), "", None
     if PANEL:
@@ -534,9 +536,12 @@ def main(scr):
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         scr.timeout(100 if animate else 300)
         m = db_mtime()
+        h, w = scr.getmaxyx()
+        # a cockpit panel draws a rounded frame and keeps a column of padding inside it
+        oy, ox, ih, iw = (1, 2, max(1, h - 2), max(2, w - 3)) if PANEL else (0, 0, h, w)
         if m != seen or animate:
             seen = m
-            rows = build(conn, VIEWS[view], expanded, collapsed, scr.getmaxyx()[1], C)
+            rows = build(conn, VIEWS[view], expanded, collapsed, max(10, iw), C)
             strip = conn.execute("SELECT * FROM activity ORDER BY id DESC LIMIT ?", (STRIP,)).fetchall()
             animate = conn.execute("SELECT 1 FROM sessions WHERE state IN ('working','waiting') LIMIT 1").fetchone() is not None \
                 or any(fresh(a["ts"]) for a in strip)
@@ -544,14 +549,15 @@ def main(scr):
         selectable = [i for i, r in enumerate(rows) if r.kind]
         if selectable and sel not in selectable:
             sel = min(selectable, key=lambda i: abs(i - sel))
-        h, w = scr.getmaxyx()
         y_top = 0 if PANEL else 1
-        body = max(1, h - 2) if PANEL else max(1, h - STRIP - 3)
+        body = max(1, ih - 2) if PANEL else max(1, h - STRIP - 3)
         if sel < top:
             top = sel
         elif sel >= top + body:
             top = sel - body + 1
         scr.erase()
+        if PANEL:
+            chrome.frame(scr, LABELS.get(PANEL, PANEL))
         if not PANEL:
             tabs = "  ".join((f"[{n}]" if i == view else f" {n} ") for i, n in enumerate(VIEWS))
             scr.addnstr(0, 0, tabs, w - 1, C["head"])
@@ -559,8 +565,10 @@ def main(scr):
             if w > len(tabs) + len(brand) + 2:
                 scr.addnstr(0, w - len(brand) - 1, brand, len(brand), C["brain"] | curses.A_BOLD)
         for y, r in enumerate(rows[top:top + body], start=y_top):
-            attr = r.attr | (curses.A_REVERSE if top + y - y_top == sel and r.kind else 0)
-            scr.addnstr(y, 0, r.text, w - 1, attr)
+            on = top + y - y_top == sel and r.kind
+            attr = (selected | (r.attr & curses.A_BOLD)) if on else r.attr
+            text = r.text.ljust(iw - 1) if on else r.text  # the selection is a full-width bar
+            scr.addnstr(oy + y, ox, text, iw - 1, attr)
         y0 = h - STRIP - 2
         if not PANEL:
             scr.hline(y0, 0, curses.ACS_HLINE, w - 1)
@@ -574,7 +582,7 @@ def main(scr):
                 "j/k · ⏎ open · y/n suggestion" if PANEL else
                 "1-5/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
         foot = confirm[0] if confirm else (msg or keys)
-        scr.addnstr(h - 1, 0, foot, w - 1, C["warn"] if confirm or msg else C["dim"])
+        scr.addnstr(oy + ih - 1, ox, foot, iw - 1, C["warn"] if confirm or msg else C["dim"])
         scr.refresh()
 
         k = scr.getch()
