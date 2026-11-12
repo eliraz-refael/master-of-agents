@@ -8,6 +8,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 
@@ -43,9 +44,14 @@ def _settings(d):
         return p, json.load(f)
 
 
+def _is_moa(cmd):
+    # the marker, or a track.sh hook installed by hand before there was one
+    return MARK in cmd or "master-chat/hooks/track.sh" in cmd
+
+
 def _moa_commands(s):
     return [h.get("command", "") for groups in (s.get("hooks") or {}).values() for g in groups
-            for h in g.get("hooks", []) if MARK in h.get("command", "")]
+            for h in g.get("hooks", []) if _is_moa(h.get("command", ""))]
 
 
 def hook_state(d):
@@ -61,39 +67,51 @@ def hook_state(d):
     for c in cmds:
         for word in shlex.split(c.split(MARK)[0]):
             if word.startswith("MOA_ONLY_UNDER="):
-                only = [os.path.expandvars(x) for x in word.split("=", 1)[1].split(":") if x]
+                only = [os.path.expandvars(x).replace("\\$", "$").replace("\\`", "`") for x in word.split("=", 1)[1].split(":") if x]
     return "installed", only
+
+
+def _strip(s):
+    """Take moa's hooks out of settings `s` in place (other hooks stay). Returns how many."""
+    n = 0
+    for ev, groups in list((s.get("hooks") or {}).items()):
+        kept = []
+        for g in groups:
+            hooks = [h for h in g.get("hooks", []) if not _is_moa(h.get("command", ""))]
+            n += len(g.get("hooks", [])) - len(hooks)
+            if hooks or not g.get("hooks"):  # keep groups that never had hooks of moa's
+                kept.append({**g, "hooks": hooks} if hooks else g)
+        if kept:
+            s["hooks"][ev] = kept
+        else:
+            del s["hooks"][ev]
+    return n
 
 
 def remove(d):
     """Take moa's hooks out of this account's settings (other hooks stay). Returns how many."""
     p, s = _settings(d)
-    n = 0
-    for ev, groups in list((s.get("hooks") or {}).items()):
-        kept = []
-        for g in groups:
-            hooks = [h for h in g.get("hooks", []) if MARK not in h.get("command", "")]
-            n += len(g.get("hooks", [])) - len(hooks)
-            if hooks:
-                kept.append({**g, "hooks": hooks})
-        if kept:
-            s["hooks"][ev] = kept
-        else:
-            del s["hooks"][ev]
+    n = _strip(s)
     if n:
         _write(p, s)
     return n
 
 
+def _dq(text):
+    """Escape text for inside a double-quoted shell word."""
+    return re.sub(r'([\\"$`])', r"\\\1", text)
+
+
 def install(d, only=None):
     """(Re)install moa's hook for every event it uses; `only` limits it to those folders."""
-    remove(d)
     p, s = _settings(d)
+    _strip(s)
     env = ""
     if only:
         home = os.path.expanduser("~")
         roots = [os.path.abspath(os.path.expanduser(x)) for x in only]
-        env = 'MOA_ONLY_UNDER="' + ":".join("$HOME" + r[len(home):] if r.startswith(home + "/") else r for r in roots) + '" '
+        env = 'MOA_ONLY_UNDER="' + ":".join("$HOME" + _dq(r[len(home):]) if r.startswith(home + "/") else _dq(r)
+                                            for r in roots) + '" '
     hook = {"type": "command", "command": f"{env}bash {shlex.quote(TRACK)} {MARK}", "timeout": 5}
     for ev, matcher in EVENTS.items():
         group = {"hooks": [hook]}
@@ -104,19 +122,22 @@ def install(d, only=None):
 
 
 def _write(p, s):
+    p = os.path.realpath(p)  # a settings.json linked from a dotfiles repo stays a link
     backup = p + ".bak-moa"
     if os.path.exists(p) and not os.path.exists(backup):  # the settings as they were before moa first touched them
         shutil.copy(p, backup)
     tmp = p + ".moa-tmp"
     with open(tmp, "w") as f:
-        json.dump(s, f, indent=2)
+        json.dump(s, f, indent=2, ensure_ascii=False)
         f.write("\n")
+    if os.path.exists(p):
+        shutil.copymode(p, tmp)
     os.replace(tmp, p)
 
 
 def short(path):
     home = os.path.expanduser("~")
-    return "~" + path[len(home):] if path.startswith(home) else path
+    return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
 
 
 def ago(ts):
@@ -144,12 +165,10 @@ def interactive(accounts, default_only, skipped):
             ans = input(f"  {a['name']} ({short(a['dir'])}, {ago(a['last_used'])})? [y/f/n] ").strip().lower()
         except EOFError:
             break
-        if ans in ("y", "yes"):
-            install(a["dir"])
-            print("    installed")
-        elif ans in ("f", "folders"):
-            install(a["dir"], default_only)
-            print(f"    installed, only under {folders}")
+        if ans in ("y", "yes", "f", "folders"):
+            install(a["dir"], default_only if ans[0] == "f" else None)
+            skipped = [n for n in skipped if n != a["name"]]
+            print(f"    installed, only under {folders}" if ans[0] == "f" else "    installed")
         else:
             skipped = sorted(set(skipped) | {a["name"]})
             print("    skipped")

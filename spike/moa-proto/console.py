@@ -23,6 +23,7 @@ sys.path.insert(0, HERE)
 from picture import ICON, ago, connect, db_mtime, icon  # noqa: E402
 import chrome  # noqa: E402
 import layout  # noqa: E402
+import setup_hooks  # noqa: E402
 
 MASTER_DIR = os.path.normpath(os.path.join(HERE, "..", "master-chat", "master"))
 MOACTL = os.path.join(HERE, "moactl")
@@ -365,7 +366,7 @@ class Console:
         """A card asking about Claude accounts moa can't follow yet (skipped ones only on /setup)."""
         r = subprocess.run([MOACTL, "setup", "list", "--json"], capture_output=True, text=True)
         try:
-            accounts = [x for x in json.loads(r.stdout) if x["state"] == "not installed" and (everyone or not x["skipped"])]
+            accounts = [x for x in json.loads(r.stdout) if x["state"] != "installed" and (everyone or not x["skipped"])]
         except (ValueError, KeyError):
             return
         if accounts or everyone:
@@ -749,14 +750,15 @@ class Console:
         if k == "ctl":
             return self.card(e["title"], self.ctl_rows(e, width - 2), width)
         if k == "setup":
-            rows = [[("moa can't follow sessions on these accounts yet. Its hook reports only", S.dim)],
-                    [("sessions moa starts; \"private only\" also limits it to ~/private, ~/.config.", S.dim)], []]
             if not e["accounts"]:
-                rows.append([("every account is tracked ✓", S.ok)])
+                return self.card("set up tracking", [[("every account is tracked ✓", S.ok)]], width)
+            rows = wrap([("moa can't follow sessions on these accounts yet. Its hook reports only sessions moa "
+                          "starts; \"private only\" also limits it to ~/private, ~/.config.", S.dim)], width - 2) + [[]]
             for x in e["accounts"]:
-                home = os.path.expanduser("~")
-                where = x["dir"].replace(home, "~")
-                rows.append(fit([("● ", S.warn), (x["name"], curses.A_BOLD), (f"  {where}", S.dim)], width - 2))
+                rows.append(fit([("● ", S.warn), (x["name"], curses.A_BOLD), (f"  {setup_hooks.short(x['dir'])}", S.dim)], width - 2))
+                if x["state"] != "not installed":
+                    rows.append([(f"    settings.json is {x['state']}; fix it, then /setup", S.err)])
+                    continue
                 rows.append([("    ", 0), (" track ", S.chip, f"/setup install {x['name']}"), ("  ", 0),
                              (" private only ", S.chip, f"/setup only {x['name']}"), ("  ", 0),
                              (" not now ", S.chip, f"/setup skip {x['name']}")])

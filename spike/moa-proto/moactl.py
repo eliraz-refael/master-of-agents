@@ -508,6 +508,8 @@ def setup(conn, a):
             only = f" (only {', '.join(setup_hooks.short(f) for f in x['only'])})" if x["only"] else ""
             print(f"{x['name']:<16} {setup_hooks.short(x['dir']):<22} {x['state']}{only}{'  [skipped]' if x['skipped'] else ''}")
         return
+    if not a.name:
+        sys.exit(f"moactl setup {a.op} NAME (one of: {', '.join(x['name'] for x in accounts)})")
     acct = next((x for x in accounts if a.name in (x["name"], x["dir"], setup_hooks.short(x["dir"]))), None)
     if not acct:
         sys.exit(f"no Claude account {a.name!r} (moactl setup list)")
