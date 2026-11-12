@@ -67,9 +67,11 @@ def frame(win, title, right=()):
     if title:
         put(0, x, f" {title} ", edge | curses.A_BOLD)
         x += len(title) + 3
-    width = sum(len(t) for t, _ in right)
-    rx = w - 3 - width
-    if right and rx > x:
+    right = list(right)
+    while right and w - 3 - sum(len(t) for t, _ in right) <= x:  # too narrow: drop from the left
+        right.pop(0)
+    rx = w - 3 - sum(len(t) for t, _ in right)
+    if right:
         for text, attr in right:
             put(0, rx, text, attr)
             rx += len(text)

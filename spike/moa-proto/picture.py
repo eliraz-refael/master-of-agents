@@ -446,10 +446,10 @@ def ask(scr, label, default=""):
     try:
         while True:
             h, w = scr.getmaxyx()
-            y, x, w = (h - 2, 2, w - 3) if PANEL else (h - 1, 0, w)  # inside the panel's frame
+            y, x, n = (h - 2, 2, w - 4) if PANEL else (h - 1, 0, w - 1)  # the footer's cells (inside the frame)
             line = f"{label} {''.join(buf)}"
-            scr.addnstr(y, x, " " * (w - 2), w - 2)
-            scr.addnstr(y, x, line[-(w - 2):], w - 2, curses.A_BOLD)
+            scr.addnstr(y, x, " " * n, n)
+            scr.addnstr(y, x, line[-(n - 1):], n - 1, curses.A_BOLD)
             scr.refresh()
             ch = scr.get_wch()
             if ch in ("\n", "\r", curses.KEY_ENTER):
@@ -538,10 +538,10 @@ def main(scr):
         m = db_mtime()
         h, w = scr.getmaxyx()
         # a cockpit panel draws a rounded frame and keeps a column of padding inside it
-        oy, ox, ih, iw = (1, 2, max(1, h - 2), max(10, w - 3)) if PANEL else (0, 0, h, w)
+        oy, ox, ih, iw = (1, 2, max(1, h - 2), max(2, w - 3)) if PANEL else (0, 0, h, w)
         if m != seen or animate:
             seen = m
-            rows = build(conn, VIEWS[view], expanded, collapsed, iw, C)
+            rows = build(conn, VIEWS[view], expanded, collapsed, max(10, iw), C)
             strip = conn.execute("SELECT * FROM activity ORDER BY id DESC LIMIT ?", (STRIP,)).fetchall()
             animate = conn.execute("SELECT 1 FROM sessions WHERE state IN ('working','waiting') LIMIT 1").fetchone() is not None \
                 or any(fresh(a["ts"]) for a in strip)

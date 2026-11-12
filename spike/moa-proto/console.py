@@ -831,6 +831,10 @@ class Console:
     def draw(self):
         S, outer = self.S, self.outer
         H, WD = outer.getmaxyx()
+        if H < 6 or WD < 8:  # too small for the frame and the feed
+            outer.erase()
+            outer.refresh()
+            return
         if (H, WD) != self.size:  # the feed lives in a window inside the frame, with a column of padding
             self.size, self.scr = (H, WD), outer.derwin(max(1, H - 2), max(1, WD - 4), 1, 2)
             chrome.use_palette(self.scr)

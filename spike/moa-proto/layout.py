@@ -134,8 +134,10 @@ def tag(pane, panel, title=None):
     # moa's own panels draw a rounded frame with the title (chrome.py) in the default colour;
     # tmux leaves them a blank gutter and colours the frame by focus
     framed = panel in FRAMED
+    args = []
     for opt, val in (("@moa_framed", "1"), ("window-style", FRAME_IDLE), ("window-active-style", FRAME_ACTIVE)):
-        tmux("set", "-p" if framed else "-pu", "-t", pane, opt, *([val] if framed else []))
+        args += ["set", "-p" if framed else "-pu", "-t", pane, opt, *([val] if framed else []), ";"]
+    tmux(*args[:-1])  # one tmux call for all three
 
 
 def label(pane, text):
@@ -226,7 +228,8 @@ def apply(name=None, session_title=lambda pane: None):
     tmux("rename-window", "-t", new_win, "moa")
     tmux("move-window", "-s", new_win, "-t", f"{SESSION}:0")
     tmux("select-window", "-t", WINDOW)
-    console = console if alive(console) else next((p["pane"] for p in panes(new_win) if p["panel"] == "console"), None)
+    # the console in this layout (a respawned one if the old one died; none if the layout has no spot for it)
+    console = next((p["pane"] for p in panes(new_win) if p["panel"] == "console"), None)
     if console:
         tmux("select-pane", "-t", console)
     if cfg.get("current") != name:
