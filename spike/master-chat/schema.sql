@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   today       TEXT,                          -- YYYY-MM-DD when it's on that day's list
   session_id  TEXT,
   note        TEXT,
+  who         TEXT,                          -- you | agent | other: whose move it is
+  due         TEXT,                          -- YYYY-MM-DD: when it's expected (a wait) or due
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );

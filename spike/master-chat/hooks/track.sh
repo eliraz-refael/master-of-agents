@@ -18,7 +18,8 @@ case "$event" in
       tp=$(jq -r '.transcript_path // ""' <<<"$in")
       [ -f "$tp" ] && text=$(tail -n 60 "$tp" | jq -rs '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' 2>/dev/null)
     fi
-    text=$(head -c 500 <<<"$text") ;;
+    # the end of a reply is where "what's next" usually is: keep the start and the end
+    text=$(jq -Rrs 'if length > 2400 then .[:600] + "\n[…]\n" + .[-1800:] else . end' <<<"$text") ;;
   Notification)     kind=waiting; text=$(jq -r '.message // ""' <<<"$in") ;;
   SessionEnd)       kind=end;     text=$(jq -r '.reason // ""' <<<"$in") ;;
   *) exit 0 ;;

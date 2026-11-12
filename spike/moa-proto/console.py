@@ -29,6 +29,8 @@ ACCOUNT = os.path.expanduser("~/.claude-lead")
 OPENING = ("(The console just opened a new thread for today.) Give me your opening brief: "
            "at most 6 short lines, what's hot, what's waiting on me, what's going stale, "
            "then propose 1-3 goals for today and ask which.")
+WAKE = "(Automatic wake-up from the console"
+SETTLE, GAP = (int(os.environ.get(v, d)) for v, d in (("MOA_WAKE_SETTLE", 45), ("MOA_WAKE_GAP", 180)))  # wake moa 45 s after the last report, at most every 3 min
 COMMANDS = [  # name, arguments, what it does
     ("attention", "", "what needs you, ranked (instant, no LLM)"),
     ("brief", "", "moa's brief"),
@@ -40,6 +42,7 @@ COMMANDS = [  # name, arguments, what it does
     ("close", "Q", "close a session's agent"),
     ("archive", "Q", "archive a session"),
     ("new", "", "start a fresh moa thread"),
+    ("auto", "[on|off]", "moa reads session reports on its own (default on)"),
     ("help", "", "commands and keys"),
     ("quit", "", "close the console"),
 ]
@@ -307,6 +310,9 @@ class Console:
         self.streaming = None      # the agent entry being streamed into
         self.replaying = False     # session/load is replaying today's thread
         self.turn = 0              # moa's replies group by turn
+        self.auto_turns = set()    # turns moa took on its own (woken by session reports)
+        self.hide_user = False     # replay: skipping a hidden prompt's chunks
+        self.reports, self.report_at, self.last_wake, self.auto = [], 0.0, -GAP, True
         self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
         self.focus = None          # the focused hit (y, x0, x1, command), while Tab-hopping
         self.pal, self.pal_key, self.pal_items, self.pal_hits = 0, None, [], []
@@ -364,7 +370,7 @@ class Console:
     def new_thread(self):
         self.pending[self.acp.request("session/new", {"cwd": MASTER_DIR, "mcpServers": []})] = "new"
 
-    def prompt(self, text, show=True):
+    def prompt(self, text, show=True, auto=False):
         if not self.sid:
             self.add("sys", "moa isn't connected yet")
             return
@@ -372,6 +378,8 @@ class Console:
             self.add("you", text)
         else:
             self.turn += 1
+        if auto:
+            self.auto_turns.add(self.turn)
         self.busy = True
         self.pending[self.acp.request("session/prompt", {"sessionId": self.sid, "prompt": [{"type": "text", "text": text}]})] = "prompt"
 
@@ -413,6 +421,7 @@ class Console:
                 self.add("sys", f"new thread {self.sid[:8]} for today")
                 self.prompt(OPENING, show=False)
             elif what == "load":
+                self.hide_user = False
                 self.add("sys", f"resumed today's thread {self.sid[:8]}: everything above is from earlier")
             elif what == "prompt":
                 self.busy = False
@@ -425,9 +434,15 @@ class Console:
             if kind in ("agent_message_chunk", "user_message_chunk"):
                 text = (u.get("content") or {}).get("text", "")
                 who = "agent" if kind == "agent_message_chunk" else "you"
-                if who == "you" and text.startswith(OPENING[:30]):
-                    self.turn += 1
+                if who == "you" and (text.startswith(OPENING[:30]) or text.startswith(WAKE)):
+                    self.turn += 1  # a hidden prompt being replayed: skip it and the rest of its chunks
+                    if text.startswith(WAKE):
+                        self.auto_turns.add(self.turn)
+                    self.hide_user = True
                     return
+                if who == "you" and self.hide_user:
+                    return
+                self.hide_user = False
                 if self.feed and self.feed[-1]["kind"] == who and (who == "you" or self.streaming is self.feed[-1]):
                     self.feed[-1]["text"] += text
                 else:
@@ -435,6 +450,7 @@ class Console:
                     if who == "agent":
                         self.streaming = e
             elif kind == "tool_call":
+                self.hide_user = False
                 self.tools[u["toolCallId"]] = self.add("tool", u.get("title") or "tool", status=u.get("status"), raw=u.get("rawInput") or {})
             elif kind == "tool_call_update" and u.get("toolCallId") in self.tools:
                 e = self.tools[u["toolCallId"]]
@@ -464,7 +480,7 @@ class Console:
         m = db_mtime()
         if m == self.seen:
             return
-        rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name FROM events e
+        rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name, p.name AS project FROM events e
             LEFT JOIN sessions s ON s.session_id=e.session_id LEFT JOIN projects p ON p.id=s.project_id
             WHERE e.id > ? ORDER BY e.id""", (self.cursor,)).fetchall()
         for e in rows:
@@ -473,8 +489,34 @@ class Console:
             text = " ".join((e["text"] or "").split())
             if e["kind"] in ("stop", "waiting", "start", "end"):
                 self.add("event", text, what=e["kind"], name=name, sid=sid)
+            if e["kind"] in ("stop", "waiting") and e["cwd"] != MASTER_DIR and (e["text"] or "").strip():
+                old = [r for r in self.reports if r["sid"] == sid and r["kind"] == e["kind"]]
+                self.reports = [r for r in self.reports if r not in old]
+                self.reports.append({"sid": sid, "name": name, "project": e["project"], "kind": e["kind"],
+                                     "ts": (e["ts"] or "")[11:16], "text": (e["text"] or "").strip()[:2600],
+                                     "at": old[0]["at"] if old else time.monotonic()})  # a newer report keeps its place in line
+                self.report_at = time.monotonic()
             self.cursor = e["id"]  # after it was shown, so a failing row is retried, not skipped
         self.seen = m  # only after every row was shown, so a failure retries instead of dropping events
+
+    def tick(self):
+        """Wake moa with the session reports once they settle, so it keeps the big picture."""
+        now = time.monotonic()
+        if not (self.auto and self.reports and self.sid and not self.busy and not self.perms and not self.replaying):
+            return
+        settling = now - self.report_at < SETTLE and now - min(r["at"] for r in self.reports) < GAP  # a steady stream still wakes moa
+        if settling or now - self.last_wake < GAP:
+            return
+        batch, self.reports, self.last_wake = self.reports[:8], self.reports[8:], now  # the rest go in the next wake
+        words = {"stop": "finished a turn", "waiting": "needs Eliraz"}
+        parts = [f"### {r['name']} · project {r['project'] or '(none)'} · session {r['sid']} · {words[r['kind']]} at {r['ts']}\n{r['text']}"
+                 for r in batch]
+        text = (f"{WAKE}, not typed by Eliraz.) {len(batch)} session report(s) since your last look:\n\n" + "\n\n".join(parts) +
+                "\n\nUpdate the big picture (see \"Wake-ups\" in your instructions): `moactl task ls`, then add, update or "
+                "close tasks for these projects. Reply in ONE short line saying what changed. Only if something needs "
+                "Eliraz now, say it in at most 3 lines and end with the button.")
+        self.add("sys", f"moa is reading {len(batch)} session report{'s' if len(batch) > 1 else ''}…")
+        self.prompt(text, show=False, auto=True)
 
     # input
     def submit(self, line):
@@ -500,6 +542,10 @@ class Console:
         elif cmd == "new":
             self.add("sys", "starting a fresh thread…")
             self.new_thread()
+        elif cmd == "auto":
+            self.auto = args[0] != "off" if args else not self.auto
+            self.add("sys", "moa reads session reports on its own" if self.auto else
+                     "moa won't read session reports until /auto on")
         elif cmd in ("attention", "brief", "ls"):
             self.run_ctl(cmd)
         elif cmd == "open" and args:
@@ -731,7 +777,8 @@ class Console:
                 if out:
                     out.append([])
                 if b[0] == "moa":
-                    out.append([("◆ moa", S.brand | curses.A_BOLD), (f"  {e['ts']}", S.dim)])
+                    out.append([("◆ moa", S.brand | curses.A_BOLD), (f"  {e['ts']}", S.dim)] +
+                               ([("  · on its own", S.dim | S.italic)] if e["turn"] in self.auto_turns else []))
                 block = b
             if k == "tool":  # a run of tool calls: show the last two, count the rest
                 j = i
@@ -766,6 +813,8 @@ class Console:
             state = [(f"{icon('working')} thinking", S.brand)]
         else:
             state = [("● ready", S.ok)]
+        if self.reports and self.auto and not self.perms:
+            state = [(f"◷ {len(self.reports)} for moa  ", S.dim)] + state
         head = [(" ◆ moa ", S.pill), (f"  thread {self.sid[:8]}" if self.sid else "", S.dim)]
         screen.append((0, head + [(" " * max(1, W - seg_len(head) - seg_len(state) - 1), 0)] + state))
         body = max(1, h - 4)
@@ -854,6 +903,7 @@ def main(scr):
                 while not con.inbox.empty():
                     con.handle(con.inbox.get())
                 con.watch_events()
+                con.tick()
             except Exception as exc:  # keep the console alive; the traceback goes to stderr (console.err)
                 con.error(exc)
             try:

@@ -307,6 +307,45 @@ def ls(conn, show_all, as_json=False):
         print(json.dumps(rows))
 
 
+def due_date(text):
+    """--due: YYYY-MM-DD, today, tomorrow, +N days, or "" to clear."""
+    if text is None or text == "":
+        return text
+    today = datetime.date.today()
+    if text in ("today", "tomorrow"):
+        return (today + datetime.timedelta(days=text == "tomorrow")).isoformat()
+    if text.startswith("+") and text[1:].isdigit():
+        return (today + datetime.timedelta(days=int(text[1:]))).isoformat()
+    try:
+        return datetime.date.fromisoformat(text).isoformat()
+    except ValueError:
+        sys.exit(f"--due: {text!r} isn't YYYY-MM-DD, today, tomorrow or +N")
+
+
+def session_id(conn, q):
+    """--session: a full session ID from a prefix, title or project (via find)."""
+    return None if q is None else "" if q == "" else find(conn, q)["session_id"]
+
+
+def task_ls(conn, project=None, show_all=False):
+    """Open tasks by project, with IDs, for moa to update (moactl task set ID …)."""
+    where = "" if show_all else "WHERE t.status NOT IN ('done','dropped')"
+    if project:
+        where += (" AND" if where else "WHERE") + " lower(p.name)=lower(?)"
+    rows = conn.execute(f"""SELECT t.*, p.name AS project FROM tasks t LEFT JOIN projects p ON p.id=t.project_id {where}
+                            ORDER BY p.name, t.id""", (project,) if project else ()).fetchall()
+    last = None
+    for t in rows:
+        if t["project"] != last:
+            print(f"## {t['project'] or '-'}")
+            last = t["project"]
+        extra = [x for x in (t["who"] and f"who={t['who']}", t["due"] and f"due={t['due']}",
+                             t["blocked_on"] and f"on={t['blocked_on']}", t["session_id"] and f"session={t['session_id'][:8]}") if x]
+        print(f"- #{t['id']} [{t['status']}] {t['title']}" + (f"  ({', '.join(extra)})" if extra else ""))
+    if not rows:
+        print("no open tasks")
+
+
 def age(ts):
     if not ts:
         return "?"
@@ -465,9 +504,11 @@ def main():
     p = sub.add_parser("group"); p.add_argument("op", choices=["add", "rename", "rm"]); p.add_argument("args", nargs="+")
     p = sub.add_parser("note"); p.add_argument("text"); p.add_argument("--project"); p.add_argument("--kind", default="fact")
     p = sub.add_parser("suggest"); p.add_argument("text")
-    p = sub.add_parser("task"); p.add_argument("op", choices=["add", "set"]); p.add_argument("args", nargs="+")
+    p = sub.add_parser("task"); p.add_argument("op", choices=["add", "set", "ls"]); p.add_argument("args", nargs="*")
     p.add_argument("--today", action="store_true"); p.add_argument("--not-today", action="store_true")
-    p.add_argument("--status"); p.add_argument("--blocked-on")
+    p.add_argument("--status"); p.add_argument("--blocked-on"); p.add_argument("--title")
+    p.add_argument("--who", choices=["you", "agent", "other"]); p.add_argument("--due", help="YYYY-MM-DD, today, tomorrow or +N (days)")
+    p.add_argument("--session"); p.add_argument("--note"); p.add_argument("--all", action="store_true")
     a = ap.parse_args()
     conn = connect()
     pid = lambda name: conn.execute("SELECT id FROM projects WHERE lower(name)=lower(?)", (name,)).fetchone()
@@ -535,21 +576,38 @@ def main():
         conn.commit(); print("noted")
     elif a.cmd == "suggest":
         conn.execute("INSERT INTO suggestions(text) VALUES(?)", (a.text,)); conn.commit(); print("suggested")
+    elif a.cmd == "task" and a.op == "ls":
+        task_ls(conn, a.args[0] if a.args else None, a.all)
     elif a.cmd == "task" and a.op == "add":
+        if len(a.args) < 2:
+            sys.exit("moactl task add PROJECT TITLE… [--who you|agent|other] [--due DATE] [--session ID] [--status S]")
         p = pid(a.args[0])
         if not p:
             sys.exit(f"no project {a.args[0]!r} (moactl project NAME to check)")
-        conn.execute("INSERT INTO tasks(project_id,title,today,status) VALUES(?,?,?,?)",
-                     (p[0], " ".join(a.args[1:]), datetime.date.today().isoformat() if a.today else None, a.status or "todo"))
-        conn.commit(); print("task added")
+        cur = conn.execute("INSERT INTO tasks(project_id,title,today,status,who,due,session_id,note,blocked_on) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (p[0], " ".join(a.args[1:]), datetime.date.today().isoformat() if a.today else None,
+                            a.status or ("blocked" if a.blocked_on else "todo"), a.who or "you", due_date(a.due),
+                            session_id(conn, a.session), a.note, a.blocked_on))
+        conn.commit(); print(f"task #{cur.lastrowid} added")
     elif a.cmd == "task" and a.op == "set":
+        if not a.args:
+            sys.exit("moactl task set ID [--status S] [--title T] [--who W] [--due D] [--session ID] [--note N]")
         tid = int(a.args[0])
-        if a.status:
-            conn.execute("UPDATE tasks SET status=?, updated_at=datetime('now','localtime') WHERE id=?", (a.status, tid))
+        if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
+            sys.exit(f"no task #{tid}")
+        fields = {"status": a.status, "title": a.title, "who": a.who, "due": due_date(a.due),
+                  "session_id": session_id(conn, a.session), "note": a.note}
+        if a.title == "":
+            sys.exit("--title can't be empty")
+        if a.blocked_on is not None:  # "" clears it
+            fields["blocked_on"] = a.blocked_on
+            if a.blocked_on:
+                fields["status"] = a.status or "blocked"
         if a.today or a.not_today:
-            conn.execute("UPDATE tasks SET today=? WHERE id=?", (datetime.date.today().isoformat() if a.today else None, tid))
-        if a.blocked_on:
-            conn.execute("UPDATE tasks SET blocked_on=?, status='blocked' WHERE id=?", (a.blocked_on, tid))
+            fields["today"] = datetime.date.today().isoformat() if a.today else ""
+        for col, val in fields.items():
+            if val is not None:
+                conn.execute(f"UPDATE tasks SET {col}=nullif(?,''), updated_at=datetime('now','localtime') WHERE id=?", (val, tid))
         conn.commit(); print("ok")
     elif a.cmd == "ls":
         ls(conn, a.all, a.json)
