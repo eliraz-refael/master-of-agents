@@ -27,6 +27,14 @@ esac
 
 sid=$(jq -r '.session_id // ""' <<<"$in")
 cwd=$(jq -r '.cwd // ""' <<<"$in")
+# MOA_ONLY_UNDER (colon-separated folders), set in one account's hook command: report only
+# sessions under those folders, e.g. for an account that mostly works on things that
+# don't belong in this brain.
+if [ -n "${MOA_ONLY_UNDER:-}" ]; then
+  ok=""; IFS=: read -ra roots <<<"$MOA_ONLY_UNDER"
+  for r in "${roots[@]}"; do case "$cwd/" in "${r%/}"/*) ok=1 ;; esac; done
+  [ -n "$ok" ] || exit 0
+fi
 acct=$(basename "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" | sed 's/^\.//')
 pane="${TMUX_PANE:-}"; tsock="${TMUX%%,*}"; title="${MOA_TITLE:-}"; grp="${MOA_GROUP:-}"
 state=$(case $kind in start|stop) echo idle ;; prompt) echo working ;; waiting) echo waiting ;; end) echo ended ;; esac)
