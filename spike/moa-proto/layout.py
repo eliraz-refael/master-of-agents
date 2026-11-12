@@ -121,6 +121,8 @@ def panel_of(pane):
     return out("display-message", "-p", "-t", pane, "#{@moa_panel}")
 
 
+FRAMED = {"console", "tree", "plan", "today", "activity", "projects"}  # panels that draw their own frame
+FRAME_IDLE, FRAME_ACTIVE = "fg=#3b4261", "fg=#7aa2f7"  # a framed panel's default colour: its frame
 LABELS = {"console": "◆ moa", "tree": "▤ sessions", "plan": "◷ big picture", "today": "☀ today",
           "activity": "≡ activity", "projects": "▦ projects", "picture": "◫ picture", "agent-slot": "○ agent spot"}
 
@@ -129,6 +131,11 @@ def tag(pane, panel, title=None):
     """Mark what a pane is (@moa_panel) and the title its top border shows (@moa_label)."""
     tmux("set", "-p", "-t", pane, "@moa_panel", panel)
     label(pane, f"● {title or 'agent'}" if panel == "agent" else LABELS.get(panel))
+    # moa's own panels draw a rounded frame with the title (chrome.py) in the default colour;
+    # tmux leaves them a blank gutter and colours the frame by focus
+    framed = panel in FRAMED
+    for opt, val in (("@moa_framed", "1"), ("window-style", FRAME_IDLE), ("window-active-style", FRAME_ACTIVE)):
+        tmux("set", "-p" if framed else "-pu", "-t", pane, opt, *([val] if framed else []))
 
 
 def label(pane, text):
@@ -219,7 +226,8 @@ def apply(name=None, session_title=lambda pane: None):
     tmux("rename-window", "-t", new_win, "moa")
     tmux("move-window", "-s", new_win, "-t", f"{SESSION}:0")
     tmux("select-window", "-t", WINDOW)
-    if alive(console):
+    console = console if alive(console) else next((p["pane"] for p in panes(new_win) if p["panel"] == "console"), None)
+    if console:
         tmux("select-pane", "-t", console)
     if cfg.get("current") != name:
         cfg["current"] = name

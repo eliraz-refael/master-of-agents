@@ -112,3 +112,10 @@
 - Testing note: panes started by a scratch tmux server inherit that server's
   environment, not the shell's: a test cockpit reached the real moa account. Set
   PATH/MOA_* with `set-environment -g` before building panes.
+- Second pass ("spacing is tight… rounded corners… more shiny"): tmux can't round pane
+  borders, so borders became blank gutters (`pane-border-lines spaces`) and moa's panels
+  draw their own rounded frames. The frame is drawn in the *default* colour and tmux
+  colours it per pane (`window-style` / `window-active-style` as pane options), so focus
+  shows without any events. Focus reports (`focus-events`) were tried first: curses maps
+  them to kxIN/kxOUT, but tmux only reports focus-out to panes it saw gain focus, which
+  swap-pane and startup races break. The status bar got a spacer line and rounded pills.
