@@ -2,10 +2,25 @@
 # THROWAWAY SPIKE: opt-in session tracker, installed in ~/.claude-lead/settings.json.
 # Does nothing unless the session was started with MOA_TRACK=1.
 [ -n "${MOA_TRACK:-}" ] || exit 0
-db="${MOA_DB:-/Users/elirazk/private/master-of-agents/spike/master-chat/brain.db}"
+db="${MOA_DB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/brain.db}"  # the brain next to this hook
 [ -f "$db" ] || exit 0
 
 in=$(cat)
+sid=$(jq -r '.session_id // ""' <<<"$in")
+cwd=$(jq -r '.cwd // ""' <<<"$in")
+q() { printf "'%s'" "${1//\'/\'\'}"; }
+# MOA_ONLY_UNDER (colon-separated folders), set in one account's hook command: report only
+# sessions under those folders, e.g. for an account that mostly works on things that
+# don't belong in this brain. Checked before any other work; a session already tracked
+# stays tracked if it later moves out, so it doesn't freeze as "working".
+if [ -n "${MOA_ONLY_UNDER:-}" ]; then
+  ok=""; IFS=: read -ra roots <<<"$MOA_ONLY_UNDER"
+  for r in "${roots[@]}"; do
+    [ -n "$r" ] || continue   # an empty entry ("a::b", a trailing ":") must not match everything
+    case "$cwd/" in "${r%/}"/*) ok=1; break ;; esac
+  done
+  [ -n "$ok" ] || [ -n "$(sqlite3 "$db" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ] || exit 0
+fi
 event=$(jq -r '.hook_event_name // empty' <<<"$in")
 text=""
 case "$event" in
@@ -25,13 +40,10 @@ case "$event" in
   *) exit 0 ;;
 esac
 
-sid=$(jq -r '.session_id // ""' <<<"$in")
-cwd=$(jq -r '.cwd // ""' <<<"$in")
 acct=$(basename "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" | sed 's/^\.//')
 pane="${TMUX_PANE:-}"; tsock="${TMUX%%,*}"; title="${MOA_TITLE:-}"; grp="${MOA_GROUP:-}"
 state=$(case $kind in start|stop) echo idle ;; prompt) echo working ;; waiting) echo waiting ;; end) echo ended ;; esac)
 
-q() { printf "'%s'" "${1//\'/\'\'}"; }
 prompt_col=""; [ "$kind" = prompt ] && prompt_col=", last_prompt=excluded.last_prompt"
 
 sqlite3 "$db" <<SQL >/dev/null 2>&1
