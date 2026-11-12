@@ -328,6 +328,7 @@ class Console:
         self.auto_turns = set()    # turns moa took on its own (woken by session reports)
         self.hide_user = False     # replay: skipping a hidden prompt's chunks
         self.reports, self.report_at, self.last_wake, self.auto = [], 0.0, -GAP, True
+        self.nagged = set()        # (task id, due, day) moa was already told about, so it nags once a day per task
         self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
         self.focus = None          # the focused hit (y, x0, x1, command), while Tab-hopping
         self.pal, self.pal_key, self.pal_items, self.pal_hits = 0, None, [], []
@@ -577,6 +578,9 @@ class Console:
         due = self.conn.execute("""SELECT t.id, t.title, t.due, t.who, p.name AS project FROM tasks t
             LEFT JOIN projects p ON p.id=t.project_id WHERE t.status NOT IN ('done','dropped','idea')
             AND t.due != '' AND t.due <= date('now','localtime','+1 day') ORDER BY t.due""").fetchall()
+        today = datetime.date.today().isoformat()
+        due = [t for t in due if (t["id"], t["due"], today) not in self.nagged]
+        self.nagged.update((t["id"], t["due"], today) for t in due)
         if due:  # moa nags from its wake-ups: they come often enough while sessions are working
             parts.append("### Due by tomorrow (remind Eliraz once a day per task, see \"Due dates\")\n" + "\n".join(
                 f"- #{t['id']} {t['project'] or '-'}: {t['title']} · {t['who']} · due {t['due']}" for t in due))

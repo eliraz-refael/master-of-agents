@@ -195,13 +195,20 @@ def session_line(s, indent=""):
 SESSIONS_SQL = """SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id"""
 
 
+def days_left(day):
+    """Days from today to a YYYY-MM-DD due date (negative = overdue), None if it isn't one."""
+    try:
+        return (datetime.date.fromisoformat(day) - datetime.date.today()).days
+    except (TypeError, ValueError):
+        return None
+
+
 def when(day):
     """A due date in words: today, tomorrow, Fri, 3 Dec; overdue ones say so."""
-    try:
-        d = datetime.date.fromisoformat(day)
-    except (TypeError, ValueError):
+    delta = days_left(day)
+    if delta is None:
         return day or ""
-    delta = (d - datetime.date.today()).days
+    d = datetime.date.today() + datetime.timedelta(days=delta)
     if delta < 0:
         return f"{-delta}d overdue"
     return "today" if delta == 0 else "tomorrow" if delta == 1 else f"{d:%a}" if delta < 7 else f"{d:%-d %b}"
@@ -242,7 +249,8 @@ def plan(conn, width, C):
         words = when(day)
         if not words:
             return None
-        delta = (datetime.date.fromisoformat(day) - datetime.date.today()).days if words != day else 99
+        delta = days_left(day)
+        delta = 99 if delta is None else delta
         attr = (C["late"] if delta < 0 else C["today"] if delta == 0 else
                 C["soon"] if delta < 7 else C["dim"])
         return (f" {words} " if delta <= 0 else words, attr)
@@ -250,6 +258,9 @@ def plan(conn, width, C):
     def item(mark, title, tail, attr, kind=None, data=None, due=None):
         """A task wraps under its mark; only its first row is selectable. Its due date sits on the right."""
         chip = due_chip(due)
+        if chip and width - 6 - len(chip[0]) < 16:  # too narrow for a date column: the date goes in the text
+            attr = C["warn"] if chip[0].startswith(" ") else attr  # overdue or today still stands out
+            tail, chip = ", ".join(x for x in (tail, chip[0].strip()) if x), None
         text = f"{title}  ({tail})" if tail else title
         lines = textwrap.wrap(text, max(10, width - 5 - (len(chip[0]) + 1 if chip else 0))) or [""]
         rows.append(Row(f"  {mark} {lines[0]}", attr, kind, data, chip))
@@ -580,7 +591,9 @@ def main(scr):
             text = r.text.ljust(iw - 1) if on else r.text  # the selection is a full-width bar
             scr.addnstr(oy + y, ox, text, iw - 1, attr)
             if r.right and iw - 1 - len(r.right[0]) > len(r.text.rstrip()):
-                scr.addnstr(oy + y, ox + iw - 1 - len(r.right[0]), r.right[0], len(r.right[0]), r.right[1])
+                chip, cattr = r.right  # on the selection bar, a plain date takes the bar's colour; a padded (late/today) chip keeps its own
+                cattr = selected if on and not chip.startswith(" ") else cattr
+                scr.addnstr(oy + y, ox + iw - 1 - len(chip), chip, len(chip), cattr)
         y0 = h - STRIP - 2
         if not PANEL:
             scr.hline(y0, 0, curses.ACS_HLINE, w - 1)
