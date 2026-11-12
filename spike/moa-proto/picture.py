@@ -689,5 +689,4 @@ if __name__ == "__main__":
     os.environ.setdefault("ESCDELAY", "25")
     locale.setlocale(locale.LC_ALL, "")
     import chrome
-    chrome.truecolor()
-    curses.wrapper(main)
+    chrome.wrapper(main)

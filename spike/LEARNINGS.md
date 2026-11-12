@@ -150,4 +150,7 @@
 - Part of the murk was the panels: curses was mapping the hex palette to the 256-colour
   cube, which turns Nord's blue-greys neutral and its green olive. ncurses can do direct
   colour with the `tmux-direct` terminfo (colour number = 0xRRGGBB), and tmux passes RGB
-  on to terminals that have it, so the panels now use the exact hex colours.
+  on to terminals it knows have it (tmux.conf marks Ghostty; other terminals need a
+  `terminal-features` line), so the panels now use the exact hex colours. Only curses
+  starts on tmux-direct: TERM goes back before anything runs, since the system terminfo
+  lacks that entry and child processes (the agent's shell) would break on it.

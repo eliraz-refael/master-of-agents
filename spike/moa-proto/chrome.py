@@ -1,5 +1,5 @@
 """THROWAWAY PROTOTYPE: the shared look of moa's panels. One palette (Nord, lightened for
-contrast; the same hex colours as tmux.conf, exact where the terminal has true colour,
+contrast; the same hex colours as tmux.conf, exact where the terminal has true colour (`wrapper`),
 else mapped to the 256-colour cube) and a rounded frame with
 the title on its top edge. tmux can't round its own pane borders, so moa's panels draw
 their own. The frame is drawn in the terminal's *default* colour, which tmux sets per
@@ -33,17 +33,25 @@ def xterm256(hexcolor):
 _pairs = {}
 
 
-def truecolor():
-    """Call before curses starts. Inside tmux, ask for direct colour (tmux-direct terminfo), so
-    the palette's hex colours are exact; tmux maps them down itself for terminals without
-    true colour. Without that terminfo entry, the panel stays on 256 colours."""
-    if not os.environ.get("TMUX") or not os.environ.get("TERM", "").startswith("tmux"):
-        return
-    try:
-        curses.setupterm("tmux-direct")
-    except curses.error:
-        return
-    os.environ["TERM"] = "tmux-direct"
+def wrapper(main):
+    """curses.wrapper, in direct colour where it can be. Inside tmux, curses starts on the
+    tmux-direct terminfo, so the palette's hex colours are exact; tmux maps them down itself
+    for terminals without true colour. Without that terminfo entry, the panel stays on 256
+    colours. TERM is put back once curses has started: children (the agent, its shell
+    commands) keep the pane's TERM, as tmux-direct is missing from the system terminfo."""
+    term = os.environ.get("TERM", "")
+    if os.environ.get("TMUX") and term.startswith("tmux") and term != "tmux-direct":
+        try:
+            curses.setupterm("tmux-direct")
+        except curses.error:
+            pass
+        else:
+            os.environ["TERM"] = "tmux-direct"
+
+    def started(scr):
+        os.environ["TERM"] = "tmux-256color" if term == "tmux-direct" else term  # tmux-direct: left over from an older run
+        return main(scr)
+    return curses.wrapper(started)
 
 
 def color(fg, bg=None):
