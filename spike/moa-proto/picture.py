@@ -118,8 +118,9 @@ def ago(ts):
 
 
 class Row:
-    def __init__(self, text, attr=0, kind=None, data=None):
+    def __init__(self, text, attr=0, kind=None, data=None, right=None):
         self.text, self.attr, self.kind, self.data = text, attr, kind, data
+        self.right = right  # (text, attr) drawn against the right edge, like a task's due date
 
 
 def short_path(path):
@@ -236,11 +237,22 @@ def plan(conn, width, C):
         due = min((t["due"] for t in g["tasks"] if t["due"]), default="9999")
         return (not g["waiting"], not mine, due, name)
 
-    def item(mark, title, tail, attr, kind=None, data=None):
-        """A task wraps under its mark; only its first row is selectable."""
+    def due_chip(day):
+        """A task's due date as its own column: overdue and today stand out, the rest fade with distance."""
+        words = when(day)
+        if not words:
+            return None
+        delta = (datetime.date.fromisoformat(day) - datetime.date.today()).days if words != day else 99
+        attr = (C["late"] if delta < 0 else C["today"] if delta == 0 else
+                C["soon"] if delta < 7 else C["dim"])
+        return (f" {words} " if delta <= 0 else words, attr)
+
+    def item(mark, title, tail, attr, kind=None, data=None, due=None):
+        """A task wraps under its mark; only its first row is selectable. Its due date sits on the right."""
+        chip = due_chip(due)
         text = f"{title}  ({tail})" if tail else title
-        lines = textwrap.wrap(text, max(10, width - 5)) or [""]
-        rows.append(Row(f"  {mark} {lines[0]}", attr, kind, data))
+        lines = textwrap.wrap(text, max(10, width - 5 - (len(chip[0]) + 1 if chip else 0))) or [""]
+        rows.append(Row(f"  {mark} {lines[0]}", attr, kind, data, chip))
         rows.extend(Row(f"    {ln}", attr) for ln in lines[1:])
 
     if not by:
@@ -262,16 +274,13 @@ def plan(conn, width, C):
             k = kind(t)
             if k == "wait":
                 on = t["blocked_on"] or ("someone else" if t["who"] == "other" else "")
-                tail = ", ".join(x for x in (on, when(t["due"])) if x)
-                item("◷", t["title"], tail, C["dim"], "task", t)
+                item("◷", t["title"], on, C["dim"], "task", t, t["due"])
             elif k == "agent":
                 mark = icon("working") if t["sstate"] == "working" else "◐"
                 tail = "agent working" if t["sstate"] == "working" else "agent"
-                item(mark, t["title"], tail, C["ok"], "task", t)
+                item(mark, t["title"], tail, C["ok"], "task", t, t["due"])
             else:
-                due = when(t["due"])
-                late = due.endswith("overdue") or due == "today"
-                item("▸", t["title"], due, C["warn"] if late else 0, "task", t)
+                item("▸", t["title"], "", 0, "task", t, t["due"])
     quiet = conn.execute("""SELECT name FROM projects p WHERE last_activity >= date('now','localtime','-7 days')
         AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.project_id=p.id AND t.status NOT IN ('done','dropped','idea'))
         ORDER BY last_activity DESC""").fetchall()
@@ -518,7 +527,8 @@ def main(scr):
     curses.use_default_colors()
     c = chrome.color
     C = {"head": c("blue") | curses.A_BOLD, "dim": c("dim"), "warn": c("yellow"), "ok": c("green"),
-         "brain": c("magenta"), "session": c("dim"), "you": c("yellow"), "group": c("blue") | curses.A_BOLD}
+         "brain": c("magenta"), "session": c("dim"), "you": c("yellow"), "group": c("blue") | curses.A_BOLD,
+         "late": c("dark", "red") | curses.A_BOLD, "today": c("dark", "yellow") | curses.A_BOLD, "soon": c("blue")}
     selected = c("bright", "sel")
     if PANEL:
         chrome.use_palette(scr)
@@ -569,6 +579,8 @@ def main(scr):
             attr = (selected | (r.attr & curses.A_BOLD)) if on else r.attr
             text = r.text.ljust(iw - 1) if on else r.text  # the selection is a full-width bar
             scr.addnstr(oy + y, ox, text, iw - 1, attr)
+            if r.right and iw - 1 - len(r.right[0]) > len(r.text.rstrip()):
+                scr.addnstr(oy + y, ox + iw - 1 - len(r.right[0]), r.right[0], len(r.right[0]), r.right[1])
         y0 = h - STRIP - 2
         if not PANEL:
             scr.hline(y0, 0, curses.ACS_HLINE, w - 1)
