@@ -533,8 +533,10 @@ class Console:
             if e["kind"] in ("stop", "waiting") and e["cwd"] != MASTER_DIR and (e["text"] or "").strip():
                 old = [r for r in self.reports if r["sid"] == sid and r["kind"] == e["kind"]]
                 self.reports = [r for r in self.reports if r not in old]
+                # moa briefs on the thread of the work, so it gets every turn since its last look, not only the last
+                turns = (old[0]["turns"][-5:] if old and e["kind"] == "stop" else []) + [(e["text"] or "").strip()[:2600]]
                 self.reports.append({"sid": sid, "name": name, "project": e["project"], "kind": e["kind"],
-                                     "ts": (e["ts"] or "")[11:16], "text": (e["text"] or "").strip()[:2600],
+                                     "ts": (e["ts"] or "")[11:16], "turns": turns,
                                      "at": old[0]["at"] if old else time.monotonic()})  # a newer report keeps its place in line
                 self.report_at = time.monotonic()
             self.cursor = e["id"]  # after it was shown, so a failing row is retried, not skipped
@@ -544,19 +546,19 @@ class Console:
         """A session report. moa briefs on what sessions say, so the console doesn't repeat
         it: finished turns from one session fold into one line ("6 turns since 21:10") until
         moa or Eliraz says something, and the line moves down to the newest."""
+        now = datetime.datetime.now().strftime("%H:%M")
         if what == "stop" and sid:
             i = len(self.feed)
             while i and self.feed[i - 1]["kind"] == "event":
                 i -= 1
-            old = next((e for e in self.feed[i:] if e["what"] == "stop" and e["sid"] == sid), None)
-            if old:
-                self.feed.remove(old)
+            j = next((j for j in range(i, len(self.feed)) if self.feed[j]["what"] == "stop" and self.feed[j]["sid"] == sid), None)
+            if j is not None:  # by index: list.remove compares dicts by value and could take an equal, older line
+                old = self.feed.pop(j)
                 self.feed.append(old)
-                old.update(n=old["n"] + 1, ts=datetime.datetime.now().strftime("%H:%M"), name=name)
-                return old
+                old.update(n=old["n"] + 1, ts=now, name=name, text=text)
+                return
         e = self.add("event", text, what=what, name=name, sid=sid, n=1)
-        e["since"] = e["ts"]
-        return e
+        e["ts"] = e["since"] = now  # a live report, even while moa's thread replays ("earlier")
 
     def tick(self):
         """Wake moa with the session reports once they settle, so it keeps the big picture."""
@@ -568,7 +570,9 @@ class Console:
             return
         batch, self.reports, self.last_wake = self.reports[:8], self.reports[8:], now  # the rest go in the next wake
         words = {"stop": "finished a turn", "waiting": "needs Eliraz"}
-        parts = [f"### {r['name']} · project {r['project'] or '(none)'} · session {r['sid']} · {words[r['kind']]} at {r['ts']}\n{r['text']}"
+        parts = [f"### {r['name']} · project {r['project'] or '(none)'} · session {r['sid']} · {words[r['kind']]} at {r['ts']}"
+                 + (f" ({len(r['turns'])} turns; earlier ones shortened)" if len(r["turns"]) > 1 else "") + "\n"
+                 + "\n\n".join([f"(earlier) {t[:500]}{'…' if len(t) > 500 else ''}" for t in r["turns"][:-1]] + r["turns"][-1:])
                  for r in batch]
         text = (f"{WAKE}, not typed by Eliraz.) {len(batch)} session report(s) since your last look:\n\n" + "\n\n".join(parts) +
                 "\n\nUpdate the big picture (see \"Wake-ups\" in your instructions): `moactl task ls`, then add, update or "
@@ -799,8 +803,8 @@ class Console:
                 verb = f"· {e['n']} turns since {e['since']}" if e.get("n", 1) > 1 else "finished a turn"
             spans = [(f"{glyph} ", attr), (e["name"], curses.A_BOLD if what in ("stop", "waiting") else S.dim),
                      (f" {verb}", attr if what != "stop" else S.dim)]
-            if what == "waiting" and e["text"]:  # it's blocked on Eliraz: say on what
-                spans.append((": " + e["text"][:140], S.warn))
+            if e["text"] and (what == "waiting" or not self.auto):  # blocked on Eliraz, or nobody's briefing: say what
+                spans.append((": " + e["text"][:140], S.warn if what == "waiting" else 0))
             if what in ("stop", "waiting") and e["sid"]:
                 spans += [(" ", 0), (" ↩ open " if what == "stop" else " ↩ answer ", S.chip if what == "stop" else S.chipwarn,
                                      f"/resume {e['sid']}")]
@@ -844,7 +848,7 @@ class Console:
     def cached_rows(self, e, width):
         if e["kind"] == "tool" and e.get("status") == "in_progress":
             return self.entry_rows(e, width)  # a spinner: no cache
-        key = (width, len(e["text"]), e.get("status"), e.get("answered"), e.get("n"), e["ts"], NAMES_GEN[0])
+        key = (width, len(e["text"]), e.get("status"), e.get("answered"), e.get("n"), e["ts"], self.auto, NAMES_GEN[0])
         if e.get("_key") != key:
             e["_key"], e["_rows"] = key, self.entry_rows(e, width)
         return e["_rows"]
