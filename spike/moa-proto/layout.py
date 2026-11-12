@@ -128,7 +128,7 @@ LABELS = {"console": "◆ moa", "tree": "▤ sessions", "plan": "◷ big picture
 def tag(pane, panel, title=None):
     """Mark what a pane is (@moa_panel) and the title its top border shows (@moa_label)."""
     tmux("set", "-p", "-t", pane, "@moa_panel", panel)
-    label(pane, f"● {title}" if panel == "agent" and title else LABELS.get(panel))
+    label(pane, f"● {title or 'agent'}" if panel == "agent" else LABELS.get(panel))
 
 
 def label(pane, text):
