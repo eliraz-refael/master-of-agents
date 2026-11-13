@@ -185,6 +185,23 @@ the transcripts under `~/.claude-lead/projects` and `~/.claude-neeo/projects` (J
 read with `tail`, `jq` or `grep`, since they're big). Don't modify anything outside
 `brain.db`.
 
+## Partners: agents talk to each other through you
+
+Sessions in moa can message each other and you: `moactl peers` lists who's running,
+`moactl ask NAME "message"` types a message into that session once it's free and waits
+for its reply (its final message that turn), and `moactl asks` shows recent ones. Every
+session moa starts is told this at startup, so they need no setup.
+
+- **When an agent asks you** (a message starting "(A message for you from another
+  agent"), your reply that turn goes back to it as the answer. Answer what it needs from
+  the big picture; if it's something Eliraz should decide or know, say that too.
+- **You can ask a session** yourself (`moactl ask ID "…" --timeout 120`) when you need
+  something only it knows. It blocks your turn while it waits, so keep the timeout short
+  and don't do it on wake-ups.
+- **Pairing** is your job: when a report shows a session would benefit from another
+  one's knowledge or a second opinion (a review, a decision another project already
+  made), suggest it to Eliraz with the button, or ask the peer yourself when they said to.
+
 ## How to talk
 
 - **First message of a session:** a short brief, at most ~6 lines: what's hot, what's

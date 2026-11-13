@@ -73,3 +73,18 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Agents asking each other through moa (`moactl ask`). to_sid is a session ID, or 'moa'
+-- for moa itself. status: pending (waiting for the peer to be free) | sent (typed in) | received (its prompt
+-- was submitted; the turn it starts answers it) | answered. moa's own asks skip received.
+CREATE TABLE IF NOT EXISTS asks (
+  id          INTEGER PRIMARY KEY,
+  ts          TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  from_sid    TEXT,
+  from_name   TEXT,
+  to_sid      TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending',
+  reply       TEXT,
+  answered_at TEXT
+);

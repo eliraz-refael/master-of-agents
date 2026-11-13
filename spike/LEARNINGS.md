@@ -154,3 +154,19 @@
   `terminal-features` line), so the panels now use the exact hex colours. Only curses
   starts on tmux-direct: TERM goes back before anything runs, since the system terminfo
   lacks that entry and child processes (the agent's shell) would break on it.
+
+## Partners: agents talk through moa (2026-11-13)
+- The trigger: another session had something for moa and no way to reach it, so it sent it
+  to a design session instead. Agents need an address book and a way to talk.
+- What made herdr easy for agents (vs aoe, where they had to work out a protocol): every
+  pane has a name and a state, `agent prompt X --wait` sends and waits, and the CLI's help
+  speaks to agents. moa does the same: `moactl peers`, `moactl ask NAME "…"` (types into
+  the peer once it's idle, waits for its turn to end, prints its full final message), and
+  the SessionStart hook tells every session moa starts that this exists. Tested: a fresh
+  session told only "ask Peer B to pick a number" found `moactl peers` and asked, in 8 s.
+- Asking moa itself works the same way (`moactl ask moa`): the console puts the message
+  in moa's thread as a card and hands moa's reply back.
+- Asks are rows in the brain (who asked whom, what, the answer), which is what moa needs
+  to broker pairings later.
+- Codex has Claude-style hooks now (~/.codex/hooks.json, each hook trusted once), so the
+  same hook can track it; not installed yet.
