@@ -170,3 +170,27 @@
   to broker pairings later.
 - Codex has Claude-style hooks now (~/.codex/hooks.json, each hook trusted once), so the
   same hook can track it; not installed yet.
+
+## Thirty agents (2026-11-13)
+- "What happens when I have 30 agents?" A tab per window overflows at about six. The
+  status line now names only what's urgent (agents blocked on a permission prompt, or
+  that asked a question) after a pill for the window you're in, and counts the rest
+  (`⚠ 2  ? 2  ✓ 3  ◐ 4  ● 19`). tmux's window list can do this with no scripts: a window
+  format that expands to nothing hides that window, and the current window moved to
+  status-left so it stays first.
+- Finding a session became typing: Ctrl-a / opens a picker popup (part of a title, group
+  or folder; Enter jumps to it or resumes it), live ones first by urgency. fzf isn't
+  installed here; a small curses list in moa's palette was enough, and it can animate
+  the state glyphs.
+- workmux's dashboard and sidebar sort agents waiting > done > working > stale, and its
+  ✅ "done" clears when you focus the window. "Finished since you looked" is the useful
+  state at scale, more than idle. moa now shows five: needs you, asks you (the reply
+  ends in "?"), done (unseen), working, idle. "Seen" is a pane option set while the pane
+  is on screen; a tmux hook touches a file on window and pane switches, so panels notice
+  without polling.
+- The hook's "waiting" was noisy: Claude sends a Notification after a minute at the
+  prompt ("waiting for your input"), so every finished session turned ⚠. Only permission
+  prompts count as needing you now.
+- The status panel is its own panel (the triage layout, Ctrl-a 4), not a mode of the
+  tree: the tree answers "where is it" (by group, every session, editing), the status
+  panel answers "what needs me" (by urgency, live only).

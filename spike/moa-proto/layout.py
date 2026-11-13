@@ -10,7 +10,7 @@ import shlex
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.expanduser("~/.config/moa/layouts.json")
+CONFIG = os.environ.get("MOA_LAYOUTS") or os.path.expanduser("~/.config/moa/layouts.json")  # MOA_LAYOUTS: a test cockpit's own
 SESSION, WINDOW = "moa", "moa:moa"
 
 
@@ -25,6 +25,7 @@ PANELS = {
     "activity": _py("picture.py", "--panel", "activity", log="picture.err"),
     "projects": _py("picture.py", "--panel", "projects", log="picture.err"),
     "plan": _py("picture.py", "--panel", "plan", log="picture.err"),
+    "status": _py("picture.py", "--panel", "status", log="picture.err"),
     "picture": _py("picture.py", log="picture.err"),
     "agent": None,  # a live agent session's own pane, moved in
 }
@@ -51,6 +52,12 @@ DEFAULTS = {
             {"split": "v", "size": "42%", "children": [
                 {"panel": "plan"},
                 {"panel": "tree", "size": "40%"}]}]},
+        # many agents at once: the status panel (what each needs from you, most urgent
+        # first) in the tree's place
+        "triage": {"split": "h", "children": [
+            {"panel": "status", "size": "30%"},
+            {"panel": "console"},
+            {"panel": "plan", "size": "28%"}]},
     },
 }
 
@@ -68,7 +75,12 @@ def load():
     if not os.path.exists(CONFIG):
         save(DEFAULTS)
     with open(CONFIG) as f:
-        return json.load(f)
+        cfg = json.load(f)
+    # presets added to moa since the config was written appear too (so Ctrl-a 4 works on
+    # an old config); the price is that a preset deleted by hand comes back
+    cfg["layouts"] = {**{k: v for k, v in DEFAULTS["layouts"].items() if k not in cfg.get("layouts", {})},
+                      **cfg.get("layouts", {})}
+    return cfg
 
 
 def save(cfg):
@@ -121,10 +133,10 @@ def panel_of(pane):
     return out("display-message", "-p", "-t", pane, "#{@moa_panel}")
 
 
-FRAMED = {"console", "tree", "plan", "today", "activity", "projects"}  # panels that draw their own frame
+FRAMED = {"console", "tree", "plan", "today", "activity", "projects", "status"}  # panels that draw their own frame
 FRAME_IDLE, FRAME_ACTIVE = "fg=#4c566a", "fg=#88c0d0"  # a framed panel's default colour: its frame
 LABELS = {"console": "◆ moa", "tree": "▤ sessions", "plan": "◷ big picture", "today": "☀ today",
-          "activity": "≡ activity", "projects": "▦ projects", "picture": "◫ picture", "agent-slot": "○ agent spot"}
+          "activity": "≡ activity", "projects": "▦ projects", "status": "◉ status", "picture": "◫ picture", "agent-slot": "○ agent spot"}
 
 
 def tag(pane, panel, title=None):
