@@ -26,9 +26,10 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from picture import connect, tmux, pane_alive, log_ui  # noqa: E402
+from picture import connect, tmux, pane_alive, log_ui, SOCK  # noqa: E402
 import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
@@ -530,6 +531,110 @@ def setup(conn, a):
         save_skipped([n for n in skipped if n != acct["name"]])
 
 
+# --- partners: agents asking each other (and moa) through moa ------------------------------
+MOACTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moactl")  # the command, as the startup note names it
+MASTER_DIR = os.path.normpath(os.path.join(os.path.dirname(MOACTL), "..", "master-chat", "master"))
+ASK_WAIT = 540  # an agent's shell command times out at 10 minutes: answer before that
+
+
+def caller(conn):
+    """(session ID, name) of whoever runs this: the tracked session in this tmux pane, moa
+    itself (its folder), or (None, the folder's name) for an agent moa doesn't track."""
+    pane, tsock = os.environ.get("TMUX_PANE"), os.environ.get("TMUX", "").split(",")[0]
+    if pane:
+        row = conn.execute(SESS + "WHERE s.pane=? AND coalesce(s.tmux,'') IN (?, '') AND s.state != 'ended' "
+                           "ORDER BY s.last_seen DESC LIMIT 1", (pane, tsock)).fetchone()
+        if row:
+            return row["session_id"], row["title"] or label(row)
+    if os.path.realpath(os.getcwd()) == os.path.realpath(MASTER_DIR):
+        return "moa", "moa"
+    return None, os.path.basename(os.getcwd()) or "an agent outside moa"
+
+
+def peers(conn, as_json):
+    """The agents you can ask: moa, and every live session in moa but you."""
+    me = caller(conn)[0]
+    rows = [r for r in conn.execute(SESS + "WHERE s.state IN ('working','idle','waiting') ORDER BY s.last_seen DESC")
+            if r["session_id"] != me and pane_alive(r["pane"])]
+    if as_json:
+        print(json.dumps([{"name": "moa", "id": "moa", "state": "here", "about": "moa itself: the big picture"}] + [
+            {"name": r["title"] or label(r), "id": r["session_id"][:8], "state": r["state"], "project": r["project"],
+             "agent": "codex" if r["account"] == "codex" else "claude", "cwd": r["cwd"], "doing": (r["last_prompt"] or "")[:120]}
+            for r in rows], indent=1))
+        return
+    print("moa       moa itself: knows the big picture (projects, tasks, who's working on what)")
+    for r in rows:
+        doing = " ".join((r["last_prompt"] or "").split())[:70]
+        print(f"{r['session_id'][:8]}  {label(r)}  {r['state']}  {r['cwd'].replace(os.path.expanduser('~'), '~')}"
+              + (f"\n          last asked: {doing}" if doing else ""))
+    if not rows:
+        print("(no other agent sessions are running in moa)")
+    print('\nask one: moactl ask NAME-OR-ID "message"  (waits for the reply)')
+
+
+def deliver(conn, a, s):
+    """Type the message into the peer's pane (it's idle), framed so it knows who's asking and
+    that its final message goes back. Bracketed paste keeps a multi-line message one prompt."""
+    back = (f'To ask them something back: `{MOACTL} ask {a["from_sid"][:8] if a["from_sid"] != "moa" else "moa"} "…"`.'
+            if a["from_sid"] else "They aren't in moa, so you can only answer.")
+    msg = (f"[moa · message from {a['from_name']}]\n{a['text']}\n\n(Your final message this turn goes back to "
+           f"{a['from_name']} as the answer. {back})")
+    conn.execute("UPDATE asks SET status='sent' WHERE id=?", (a["id"],))  # before typing: its Stop hook answers 'sent' asks
+    conn.commit()
+    subprocess.run(["tmux", "-L", SOCK, "load-buffer", "-b", "moa-ask", "-"], input=msg, text=True)
+    tmux("paste-buffer", "-p", "-d", "-b", "moa-ask", "-t", s["pane"])
+    time.sleep(0.5)  # let the paste land before Enter submits it
+    tmux("send-keys", "-t", s["pane"], "Enter")
+
+
+def ask(conn, q, text, timeout):
+    me_sid, me_name = caller(conn)
+    if q.lower() == "moa":
+        to = "moa"
+    else:
+        s = find(conn, q)
+        if s["session_id"] == me_sid:
+            sys.exit("that's you")
+        if s["state"] not in LIVE or not pane_alive(s["pane"]):
+            sys.exit(f"{label(s)} isn't running in moa ({s['state']}); `moactl resume {s['session_id'][:8]}` starts it")
+        to = s["session_id"]
+    cur = conn.execute("INSERT INTO asks(from_sid,from_name,to_sid,text) VALUES(?,?,?,?)", (me_sid, me_name, to, text))
+    conn.commit()
+    wait_reply(conn, cur.lastrowid, timeout)
+
+
+def wait_reply(conn, ask_id, timeout):
+    """Deliver the ask once its peer is free (moa's own are delivered by the console), then
+    print the reply. Gives up after `timeout` seconds; `moactl reply ID` waits again."""
+    end = time.monotonic() + timeout
+    while True:
+        a = conn.execute("SELECT * FROM asks WHERE id=?", (ask_id,)).fetchone()
+        if not a:
+            sys.exit(f"no ask #{ask_id}")
+        if a["status"] == "answered":
+            print(a["reply"] or "(they finished without a reply)")
+            return
+        if a["status"] == "pending" and a["to_sid"] != "moa":
+            s = conn.execute(SESS + "WHERE s.session_id=?", (a["to_sid"],)).fetchone()
+            if s["state"] not in LIVE or not pane_alive(s["pane"]):
+                sys.exit(f"{label(s)} stopped running; ask #{ask_id} wasn't delivered")
+            if s["state"] == "idle":
+                deliver(conn, a, s)
+                continue
+        if time.monotonic() > end:
+            how = "they're working on it" if a["status"] == "sent" else "they're busy; it goes in when they're free"
+            print(f"no reply yet to ask #{ask_id} ({how}). `moactl reply {ask_id}` waits for it again.")
+            return
+        time.sleep(1)
+
+
+def asks_ls(conn):
+    for a in conn.execute("SELECT a.*, coalesce(s.title, a.to_sid) AS to_name FROM asks a "
+                          "LEFT JOIN sessions s ON s.session_id=a.to_sid ORDER BY a.id DESC LIMIT 20"):
+        print(f"#{a['id']} {a['ts'][5:16]}  {a['from_name']} → {a['to_name']}  {a['status']}: "
+              + " ".join(a["text"].split())[:80])
+
+
 def main():
     ap = argparse.ArgumentParser(prog="moactl")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -559,6 +664,18 @@ def main():
     p.add_argument("--status"); p.add_argument("--blocked-on"); p.add_argument("--title")
     p.add_argument("--who", choices=["you", "agent", "other"]); p.add_argument("--due", help="YYYY-MM-DD, today, tomorrow or +N (days)")
     p.add_argument("--session"); p.add_argument("--note"); p.add_argument("--all", action="store_true")
+    p = sub.add_parser("peers", help="the agents you can ask: moa and the other sessions running in moa")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("ask", help="send another agent (a session, or moa) a message and wait for its reply",
+                       description="Send another agent a message and wait for its reply (its final message that turn). "
+                                   "Are you an agent? `moactl peers` lists who you can ask. The message is typed into "
+                                   "their session once they're free, marked as from you. Waits up to 9 minutes; if it "
+                                   "gives up, `moactl reply ID` waits again.")
+    p.add_argument("to", help="moa, or a session's ID prefix, title or project"); p.add_argument("text")
+    p.add_argument("--timeout", type=int, default=ASK_WAIT, help="seconds to wait (default 540)")
+    p = sub.add_parser("reply", help="wait again for the reply to an ask"); p.add_argument("id", type=int)
+    p.add_argument("--timeout", type=int, default=ASK_WAIT)
+    sub.add_parser("asks", help="recent asks between agents")
     a = ap.parse_args()
     conn = connect()
     pid = lambda name: conn.execute("SELECT id FROM projects WHERE lower(name)=lower(?)", (name,)).fetchone()
@@ -610,6 +727,14 @@ def main():
         print(brief(conn))
     elif a.cmd == "attention":
         print("\n".join(attention_lines(conn)) or "nothing needs you right now")
+    elif a.cmd == "peers":
+        peers(conn, a.json)
+    elif a.cmd == "ask":
+        ask(conn, a.to, a.text, a.timeout)
+    elif a.cmd == "reply":
+        wait_reply(conn, a.id, a.timeout)
+    elif a.cmd == "asks":
+        asks_ls(conn)
     elif a.cmd == "find":
         for r in candidates(conn, a.q)[:15]:
             print(f"{r['session_id'][:8]}  {label(r)}  {r['state']}  {age(r['last_seen'])}  {r['cwd']}")

@@ -33,6 +33,7 @@ case "$event" in
       tp=$(jq -r '.transcript_path // ""' <<<"$in")
       [ -f "$tp" ] && text=$(tail -n 60 "$tp" | jq -rs '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' 2>/dev/null)
     fi
+    full="$text"  # an ask's reply goes back whole (see the asks UPDATE below)
     # the end of a reply is where "what's next" usually is: keep the start and the end
     text=$(jq -Rrs 'if length > 2400 then .[:600] + "\n[…]\n" + .[-1800:] else . end' <<<"$text") ;;
   Notification)     kind=waiting; text=$(jq -r '.message // ""' <<<"$in") ;;
@@ -59,4 +60,22 @@ ON CONFLICT(session_id) DO UPDATE SET state=excluded.state, last_seen=excluded.l
 UPDATE projects SET last_activity=date('now','localtime')
  WHERE id=(SELECT project_id FROM sessions WHERE session_id=$(q "$sid"));
 SQL
+# A turn that ends while another agent's message to this session is out (moactl ask) is
+# the answer to it. Last and on its own: a brain without the asks table yet only skips this.
+if [ "$kind" = stop ]; then
+  sqlite3 "$db" "PRAGMA busy_timeout=2000; UPDATE asks SET status='answered', reply=$(q "${full:-}"), answered_at=datetime('now','localtime')
+    WHERE id=(SELECT min(id) FROM asks WHERE to_sid=$(q "$sid") AND status='sent');" >/dev/null 2>&1
+fi
+# A new session learns it has peers (SessionStart output becomes context), so asking
+# another agent needs no setup.
+if [ "$kind" = start ]; then
+  ctl="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto" && pwd)/moactl"
+  cat <<EOF
+You're running inside moa (master-of-agents), alongside other agent sessions and moa itself, which keeps the big picture.
+- \`$ctl peers\` lists the agents you can talk to.
+- \`$ctl ask NAME "message"\` sends one a message and waits for its reply (up to 9 minutes; \`$ctl reply ID\` waits again).
+Use it when the user asks you to talk to another session, agent or moa, or when a peer clearly knows something you need.
+Messages from peers arrive as "[moa · message from …]"; your final message that turn is your answer to them.
+EOF
+fi
 exit 0

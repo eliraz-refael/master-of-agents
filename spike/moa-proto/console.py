@@ -32,6 +32,7 @@ OPENING = ("(The console just opened a new thread for today.) Give me your openi
            "at most 6 short lines, what's hot, what's waiting on me, what's going stale, "
            "then propose 1-3 goals for today and ask which.")
 WAKE = "(Automatic wake-up from the console"
+ASK = "(A message for you from another agent"
 SETTLE, GAP = (int(os.environ.get(v, d)) for v, d in (("MOA_WAKE_SETTLE", 45), ("MOA_WAKE_GAP", 180)))  # wake moa 45 s after the last report, at most every 3 min
 COMMANDS = [  # name, arguments, what it does
     ("attention", "", "what needs you, ranked (instant, no LLM)"),
@@ -328,6 +329,7 @@ class Console:
         self.auto_turns = set()    # turns moa took on its own (woken by session reports)
         self.hide_user = False     # replay: skipping a hidden prompt's chunks
         self.reports, self.report_at, self.last_wake, self.auto = [], 0.0, -GAP, True
+        self.answering = None      # (ask id, turn): moa is answering another agent's message (moactl ask moa)
         self.nagged = set()        # (task id, due, day) moa was already told about, so it nags once a day per task
         self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
         self.focus = None          # the focused hit (y, x0, x1, command), while Tab-hopping
@@ -452,6 +454,13 @@ class Console:
                 self.add("sys", f"resumed today's thread {self.sid[:8]}: everything above is from earlier")
             elif what == "prompt":
                 self.busy = False
+                if self.answering:  # what moa said that turn is the answer to the agent that asked
+                    ask_id, turn = self.answering
+                    reply = "".join(e["text"] for e in self.feed if e["kind"] == "agent" and e["turn"] == turn).strip()
+                    self.conn.execute("UPDATE asks SET status='answered', reply=?, answered_at=datetime('now','localtime') "
+                                      "WHERE id=?", (reply, ask_id))
+                    self.conn.commit()
+                    self.answering = None
                 if r.get("stopReason") not in (None, "end_turn"):
                     self.add("sys", f"(turn ended: {r['stopReason']})")
             return
@@ -461,7 +470,7 @@ class Console:
             if kind in ("agent_message_chunk", "user_message_chunk"):
                 text = (u.get("content") or {}).get("text", "")
                 who = "agent" if kind == "agent_message_chunk" else "you"
-                if who == "you" and (text.startswith(OPENING[:30]) or text.startswith(WAKE)):
+                if who == "you" and (text.startswith(OPENING[:30]) or text.startswith(WAKE) or text.startswith(ASK)):
                     self.turn += 1  # a hidden prompt being replayed: skip it and the rest of its chunks
                     if text.startswith(WAKE):
                         self.auto_turns.add(self.turn)
@@ -561,8 +570,27 @@ class Console:
         e = self.add("event", text, what=what, name=name, sid=sid, n=1)
         e["ts"] = e["since"] = now  # a live report, even while moa's thread replays ("earlier")
 
+    def take_ask(self):
+        """Another agent's message to moa (moactl ask moa "…"): moa answers it here, in the
+        open, and the console hands the answer back. One at a time, between Eliraz's turns."""
+        if self.busy or self.perms or self.replaying or not self.sid or self.answering:
+            return False
+        a = self.conn.execute("SELECT * FROM asks WHERE to_sid='moa' AND status='pending' ORDER BY id LIMIT 1").fetchone()
+        if not a:
+            return False
+        self.conn.execute("UPDATE asks SET status='sent' WHERE id=?", (a["id"],))
+        self.conn.commit()
+        self.add("ask", a["text"], name=a["from_name"])
+        self.prompt(f"{ASK}, {a['from_name']}, sent with moactl ask; not typed by Eliraz. Your reply this turn goes "
+                    f"back to them as the answer: give them what they need, briefly. If it's something Eliraz should "
+                    f"decide or know, say so to Eliraz too.)\n\n{a['text']}", show=False)
+        self.answering = (a["id"], self.turn)
+        return True
+
     def tick(self):
         """Wake moa with the session reports once they settle, so it keeps the big picture."""
+        if self.take_ask():
+            return
         now = time.monotonic()
         if not (self.auto and self.reports and self.sid and not self.busy and not self.perms and not self.replaying):
             return
@@ -828,6 +856,8 @@ class Console:
                 rows = head + [[(" y  once ", S.chipwarn, f"!perm {rid} y"), ("  ", 0), (" a  always ", S.chipwarn, f"!perm {rid} a"),
                                 ("  ", 0), (" n  no ", S.chip, f"!perm {rid} n")]]
             return self.card("⚠ permission", rows, width, S.warn)
+        if k == "ask":  # another agent's message to moa
+            return self.card(f"✉ {e['name']} asks moa", markdown(e["text"], width - 2, S), width, S.head)
         if k == "err":
             return wrap([(e["text"], S.err)], width, [("✗ ", S.err)], [("  ", 0)])
         return wrap([(e["text"], S.dim | S.italic)], width, [("· ", S.dim)], [("  ", 0)])
