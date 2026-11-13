@@ -19,5 +19,5 @@ display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
   "-Ctrl-a ←↑↓→  move between panes" "" "" \
   "Previous window"         [ "previous-window" \
   "Next window"             ] "next-window" \
-  "Keys and help"           ? "display-popup -E -w 84 -h 38 'less -R $HOME/private/master-of-agents/spike/moa-proto/help.txt'" \
+  "Keys and help"           ? "display-popup -E -w 84 -h 38 'less -R $D/help.txt'" \
   "Send Ctrl-a to the app"  a "send-keys C-a"

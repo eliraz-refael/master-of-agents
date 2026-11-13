@@ -319,7 +319,7 @@ def status_line(s, width):
     grp = (s["grp"] or s["project"] or "").split("/")[-1]
     gw = 14 if width >= 44 else 0  # narrow panels drop the group, then the why
     tw = max(8, min(26, width - 8 - gw) if width >= 72 else width - 8 - gw)
-    line = f"{show_icon(s['show'])} {title[:tw]:<{tw}} {grp[:gw - 1]:<{gw}}{ago(s['since']):>4}"
+    line = f"{show_icon(s['show'])} {title[:tw]:<{tw}} {grp[:max(0, gw - 1)]:<{gw}}{ago(s['since']):>4}"
     return line + (f"  {s['why']}" if width >= 72 and s["why"] else "")
 
 
@@ -706,7 +706,8 @@ def main(scr):
             seen = m
             rows = build(conn, VIEWS[view], expanded, collapsed, max(10, iw), C)
             strip = conn.execute("SELECT * FROM activity ORDER BY id DESC LIMIT ?", (STRIP,)).fetchall()
-            animate = conn.execute("SELECT 1 FROM sessions WHERE state IN ('working','waiting') LIMIT 1").fetchone() is not None \
+            # live()'s show, not the raw state: an agent idle at the prompt pings "waiting" too
+            animate = any(s["show"] in ("working", "waiting") for s in live(conn)[0]) \
                 or any(fresh(a["ts"]) for a in strip)
             push_status(conn)
         selectable = [i for i, r in enumerate(rows) if r.kind]

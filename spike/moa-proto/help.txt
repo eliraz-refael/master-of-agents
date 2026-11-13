@@ -29,7 +29,7 @@
 
   Agent states    ⚠ needs you (a permission prompt)   ? asked you something
   (status panel,  ✓ done since you last looked        ◐ working   ● idle
-  status line)    The status line names only the ⚠ and ? ones; the rest are counts.
+  status line)    The status line names the ⚠ and ? ones and counts the rest.
 
   Moving around   Ctrl-a / finds any session; in an agent's own window,
                   Ctrl-a m comes back to moa. Clicking a pane works too.

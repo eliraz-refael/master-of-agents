@@ -22,7 +22,7 @@ GONE = {"ended": ("○", "ended"), "elsewhere": ("◌", "in herdr")}
 
 def sessions(conn):
     """Live sessions (with their status) first, then the rest that aren't archived."""
-    rows, _ = live(conn)
+    rows = [dict(s) for s in live(conn)[0]]  # copies: live()'s list is its cache
     seen = {s["session_id"] for s in rows}
     rest = conn.execute(SESSIONS_SQL + """ WHERE coalesce(s.state,'') NOT IN ('archived','working','idle','waiting')
         ORDER BY s.last_seen DESC LIMIT 300""").fetchall()
@@ -79,13 +79,15 @@ def main(scr):
             "working": c("blue"), "idle": c("text")}
     dim, sel_attr, hit, prompt = c("dim"), c("bright", "sel"), c("yellow") | curses.A_BOLD | curses.A_UNDERLINE, c("blue") | curses.A_BOLD
     conn = connect()
-    query, sel, top, stamp, rows = "", 0, 0, None, []
+    query, sel, top, stamp, rows, key = "", 0, 0, None, [], None
     while True:
         if db_mtime() != stamp:
             stamp, rows = db_mtime(), sessions(conn)
         terms = query.lower().split()
-        shown = [s for _, _, s in sorted((match(s["hay"], terms), i, s) for i, s in enumerate(rows)
-                                         if match(s["hay"], terms) is not None)] if terms else rows
+        if key != (stamp, query):  # filter only when the query or the sessions change, not per frame
+            key = (stamp, query)
+            ranked = ((match(s["hay"], terms), i, s) for i, s in enumerate(rows))
+            shown = [s for _, _, s in sorted(r for r in ranked if r[0] is not None)] if terms else rows
         h, w = scr.getmaxyx()
         body = max(1, h - 3)
         sel = max(0, min(sel, len(shown) - 1))
@@ -99,7 +101,7 @@ def main(scr):
         for y, s in enumerate(shown[top:top + body], start=2):
             title, grp, word = s["cols"]
             glyph = show_icon(s["show"]) if s["show"] in SHOW_WORD else GONE.get(s["show"], ("·",))[0]
-            line = f" {glyph} {title[:tw - 1]:<{tw}}{grp[:gw - 1]:<{gw}}{word:<10}{ago(s['since']):>4}  {s['why'] or ''}"
+            line = f" {glyph} {title[:tw - 1]:<{tw}}{grp[:max(0, gw - 1)]:<{gw}}{word:<10}{ago(s['since']):>4}  {s['why'] or ''}"
             line = line.replace("\n", " ")[:w - 1]
             on = top + y - 2 == sel
             base = sel_attr if on else attr.get(s["show"], dim)
