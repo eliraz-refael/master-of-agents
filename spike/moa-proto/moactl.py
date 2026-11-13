@@ -549,6 +549,9 @@ def caller(conn):
                            "ORDER BY s.last_seen DESC LIMIT 1", (pane, tsock)).fetchone()
         if row:
             return row["session_id"], row["title"] or label(row)
+    master = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "master-chat", "master")
+    if os.path.realpath(os.getcwd()) == os.path.realpath(master):  # moa started by hand (cd master && claude)
+        return "moa", "moa"
     return None, os.path.basename(os.getcwd()) or "an agent outside moa"
 
 
@@ -588,6 +591,10 @@ def deliver(conn, a, s):
     that its final message goes back. Bracketed paste keeps a multi-line message one prompt.
     False if another ask to that peer is already in (one at a time, so the peer's hook ties
     each answer to the right ask) or typing it failed."""
+    # a 'sent' ask nobody resolved (its asker was killed or gave up before it landed) would
+    # block this peer for good: past any asker's wait, it never arrived
+    conn.execute("UPDATE asks SET status='failed', reply='it never arrived as their prompt' WHERE to_sid=? "
+                 "AND status='sent' AND ts < datetime('now','localtime',?)", (a["to_sid"], f"-{2 * ASK_WAIT} seconds"))
     # claimed atomically, before typing: two askers polling the same idle peer can't both type in
     if not conn.execute("UPDATE asks SET status='sent' WHERE id=? AND status='pending' AND NOT EXISTS "
                         "(SELECT 1 FROM asks WHERE to_sid=? AND status IN ('sent','received'))",
@@ -596,7 +603,7 @@ def deliver(conn, a, s):
         return False
     conn.commit()
     back = "They're waiting on your answer, so answer rather than asking them back."
-    msg = (f"[moa · message from {a['from_name']}]\n{a['text']}\n\n(Your final message this turn goes back to "
+    msg = (f"[moa · message from {a['from_name']} · ask #{a['id']}]\n{a['text']}\n\n(Your final message this turn goes back to "
            f"{a['from_name']} as the answer. {back})")
     ok = (tmux("load-buffer", "-b", "moa-ask", "-", input=msg).returncode == 0
           and tmux("paste-buffer", "-p", "-d", "-b", "moa-ask", "-t", s["pane"]).returncode == 0)
@@ -609,8 +616,9 @@ def deliver(conn, a, s):
 
 
 def fail(conn, ask_id, why, status="failed", was="sent"):
-    conn.execute("UPDATE asks SET status=?, reply=? WHERE id=? AND status=?", (status, why, ask_id, was))
+    n = conn.execute("UPDATE asks SET status=?, reply=? WHERE id=? AND status=?", (status, why, ask_id, was)).rowcount
     conn.commit()
+    return n
 
 
 def ask(conn, q, text, timeout):
@@ -652,6 +660,9 @@ def wait_reply(conn, ask_id, timeout):
         if a["to_sid"] != "moa":
             s = conn.execute(SESS + "WHERE s.session_id=?", (a["to_sid"],)).fetchone()
             if not s or not reachable(s):
+                if a["status"] in ("pending", "sent"):  # an unresolved one would block a resumed peer for good
+                    fail(conn, ask_id, "they stopped running", status="dropped" if a["status"] == "pending" else "failed",
+                         was=a["status"])
                 sys.exit(f"{label(s) if s else a['to_sid'][:8]} stopped running; ask #{ask_id} "
                          + ("wasn't delivered" if a["status"] == "pending" else "got no reply"))
             if a["status"] == "pending" and s["state"] == "idle" and deliver(conn, a, s):
@@ -663,9 +674,9 @@ def wait_reply(conn, ask_id, timeout):
                 continue
         if time.monotonic() > end:
             if a["status"] == "pending" and a["to_sid"] != "moa":  # nobody would type it in once we stop waiting
-                fail(conn, ask_id, "they stayed busy until the wait ran out", status="dropped", was="pending")
-                print(f"ask #{ask_id} wasn't delivered: they stayed busy for {timeout} s. Ask again later.")
-                return
+                if not fail(conn, ask_id, "they stayed busy until the wait ran out", status="dropped", was="pending"):
+                    continue  # another `moactl reply` typed it in meanwhile
+                sys.exit(f"ask #{ask_id} wasn't delivered: they stayed busy for {timeout} s. Ask again later.")
             how = "they're working on it" if a["status"] in ("sent", "received") else "moa's busy; it goes in when it's free"
             print(f"no reply yet to ask #{ask_id} ({how}). `moactl reply {ask_id}` waits for it again.")
             return
