@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS meta (
 
 -- Agents asking each other through moa (`moactl ask`). to_sid is a session ID, or 'moa'
 -- for moa itself. status: pending (waiting for the peer to be free) | sent (typed in) | received (its prompt
--- was submitted; the turn it starts answers it) | answered. moa's own asks skip received.
+-- was submitted; the turn it starts answers it) | answered | failed (never arrived as a prompt) | dropped
+-- (the asker stopped waiting before the peer was free). moa's own asks skip received. A failed or
+-- dropped ask's reply says why.
 CREATE TABLE IF NOT EXISTS asks (
   id          INTEGER PRIMARY KEY,
   ts          TEXT NOT NULL DEFAULT (datetime('now','localtime')),
