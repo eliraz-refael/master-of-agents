@@ -15,7 +15,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get("MOA_DB", os.path.normpath(os.path.join(HERE, "..", "master-chat", "brain.db")))
 SOCK = os.environ.get("MOA_TMUX", "moa")
-VIEWS = ["Plan", "Today", "Projects", "Sessions", "Activity"]
+VIEWS = ["Plan", "Today", "Projects", "Sessions", "Activity", "Status"]
 ICON = {"working": "◐", "idle": "●", "waiting": "⚠", "ended": "○", "elsewhere": "◌", "archived": "·"}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -30,13 +30,15 @@ def icon(state):
 LIVE = ("working", "idle", "waiting")
 STRIP = 7
 PANEL = None  # set by --panel: show one view only (a cockpit panel), no tabs or activity strip
-PANEL_VIEW = {"tree": "Sessions", "today": "Today", "activity": "Activity", "projects": "Projects", "plan": "Plan"}
+PANEL_VIEW = {"tree": "Sessions", "today": "Today", "activity": "Activity", "projects": "Projects", "plan": "Plan",
+              "status": "Status"}
 
 SETUP = """
 CREATE TABLE IF NOT EXISTS asks (  -- agents asking each other through moa (moactl ask); to_sid 'moa' = moa itself
   id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT (datetime('now','localtime')), from_sid TEXT, from_name TEXT,
   to_sid TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | received | answered
   reply TEXT, answered_at TEXT);
+CREATE INDEX IF NOT EXISTS events_session ON events(session_id, id);
 CREATE TABLE IF NOT EXISTS groups (path TEXT PRIMARY KEY, created_at TEXT DEFAULT (datetime('now','localtime')));
 CREATE TABLE IF NOT EXISTS activity (
   id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT (datetime('now','localtime')), who TEXT, text TEXT);
@@ -133,7 +135,7 @@ def short_path(path):
     return "/".join(parts[-2:]) if len(parts) > 3 else path
 
 
-def tree_line(s, width):
+def tree_line(s, width, state=None):
     title = s["title"] or (s["last_prompt"] or "").replace("\n", " ")[:60] or s["session_id"][:8]
     acct = (s["account"] or "").replace("claude-", "")
     # Narrow panels drop the path first, then the account, so titles stay readable.
@@ -142,10 +144,12 @@ def tree_line(s, width):
         cols.append((short_path(s["cwd"]), 23))
     tw = max(8, width - 7 - sum(n for _, n in cols))
     extra = "".join(f"{text[:n - 1]:<{n}}" for text, n in cols)
-    return f"{icon(s['state'])} {title[:tw]:<{tw}} {extra}{ago(s['last_seen']):>4}"
+    glyph = show_icon(state) if state in SHOW_ICON else icon(s["state"])
+    return f"{glyph} {title[:tw]:<{tw}} {extra}{ago(s['last_seen']):>4}"
 
 
-def session_tree(sessions, groups, collapsed, width, C):
+def session_tree(sessions, groups, collapsed, width, C, shows=None):
+    """`shows`: session ID → its status-panel state (live()), so the tree agrees with it."""
     root = {"children": {}, "sessions": []}
     for x in sessions:
         node = root
@@ -179,9 +183,10 @@ def session_tree(sessions, groups, collapsed, width, C):
                 if gkey not in collapsed:
                     walk(item, prefix + cont, gkey, depth + 1)
             else:
-                st = item["state"]
-                attr = C["warn"] | curses.A_BOLD if st == "waiting" else (C["ok"] if st in LIVE else C["dim"])
-                rows.append(Row(prefix + branch + tree_line(item, width - len(prefix) - len(branch)), attr, "session", item))
+                st = (shows or {}).get(item["session_id"], item["state"])
+                attr = {"waiting": C["warn"] | curses.A_BOLD, "question": C["ask"] | curses.A_BOLD,
+                        "done": C["ok"] | curses.A_BOLD}.get(st, C["ok"] if st in SHOW else C["dim"])
+                rows.append(Row(prefix + branch + tree_line(item, width - len(prefix) - len(branch), st), attr, "session", item))
 
     walk(root, "", "", 0)
     return rows
@@ -228,7 +233,7 @@ def plan(conn, width, C):
     tasks = conn.execute("""SELECT t.*, p.name AS project, s.state AS sstate, s.title AS stitle FROM tasks t
         LEFT JOIN projects p ON p.id=t.project_id LEFT JOIN sessions s ON s.session_id=t.session_id
         WHERE t.status NOT IN ('done','dropped','idea')""").fetchall()
-    waiting = conn.execute(SESSIONS_SQL + " WHERE s.state='waiting'").fetchall()
+    waiting = [s for s in live(conn)[0] if s["show"] == "waiting"]  # not the "still at the prompt" pings
     by = {}
     for t in tasks:
         by.setdefault(t["project"] or "-", {"tasks": [], "waiting": []})["tasks"].append(t)
@@ -308,11 +313,42 @@ def plan(conn, width, C):
     return rows
 
 
+def status_line(s, width):
+    """One session on the status panel: state, title, group, age, and why (when there's room)."""
+    title = s["title"] or s["project"] or os.path.basename(s["cwd"] or "") or s["session_id"][:8]
+    grp = (s["grp"] or s["project"] or "").split("/")[-1]
+    gw = 14 if width >= 44 else 0  # narrow panels drop the group, then the why
+    tw = max(8, min(26, width - 8 - gw) if width >= 72 else width - 8 - gw)
+    line = f"{show_icon(s['show'])} {title[:tw]:<{tw}} {grp[:max(0, gw - 1)]:<{gw}}{ago(s['since']):>4}"
+    return line + (f"  {s['why']}" if width >= 72 and s["why"] else "")
+
+
+def status(conn, width, C):
+    """The status panel: every live session on one line, grouped by what it needs from
+    you, the most urgent group first. Compact enough to hold ~30 sessions."""
+    rows, _ = live(conn)
+    attr = {"waiting": C["warn"] | curses.A_BOLD, "question": C["ask"] | curses.A_BOLD, "done": C["ok"] | curses.A_BOLD,
+            "working": C["work"], "idle": C["dim"]}
+    out = []
+    for k in SHOW:
+        members = [s for s in rows if s["show"] == k]
+        if not members:
+            continue
+        name, n = SHOW_WORD[k], str(len(members))
+        out.append(Row(f"{name} {'─' * max(2, width - len(name) - len(n) - 3)} {n}", attr[k] if k != "idle" else C["head"]))
+        out.extend(Row(status_line(s, width), attr[k], "session", s) for s in members)
+    if not out:
+        out.append(Row("no live sessions: Ctrl-a / finds one to resume", C["dim"]))
+    return out
+
+
 def build(conn, view, expanded, collapsed, width, C):
     rows = []
     today = datetime.date.today().isoformat()
     if view == "Plan":
         return plan(conn, width, C)
+    if view == "Status":
+        return status(conn, width, C)
     if view == "Today":
         rows.append(Row(f"TODAY · {datetime.date.today():%a %d %b}", C["head"]))
         tasks = conn.execute("""SELECT t.*, p.name AS project FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
@@ -372,7 +408,8 @@ def build(conn, view, expanded, collapsed, width, C):
         sessions = conn.execute(SESSIONS_SQL + " WHERE coalesce(s.state,'') != 'archived' ORDER BY s.last_seen DESC").fetchall()
         nlive = sum(x["state"] in LIVE for x in sessions)
         nwork = sum(x["state"] == "working" for x in sessions)
-        nwait = sum(x["state"] == "waiting" for x in sessions)
+        shows = {r["session_id"]: r["show"] for r in live(conn)[0]}
+        nwait = sum(v == "waiting" for v in shows.values())
         head = f"{len(sessions)} sessions · {nlive} live"
         if nwork:
             head += f" · {icon('working')} {nwork} working"
@@ -380,7 +417,7 @@ def build(conn, view, expanded, collapsed, width, C):
             head += f" · {nwait} waiting on you"
         rows.append(Row(head, C["dim"]))
         groups = [r[0] for r in conn.execute("SELECT path FROM groups ORDER BY path")]
-        rows.extend(session_tree(sessions, groups, collapsed, width, C))
+        rows.extend(session_tree(sessions, groups, collapsed, width, C, shows))
     else:
         for a in conn.execute("SELECT * FROM activity ORDER BY id DESC LIMIT 300"):
             rows.append(Row(f"{a['ts'][11:16]} {a['text']}", C[a["who"]] if a["who"] in C else 0))
@@ -400,25 +437,125 @@ def log_ui(conn, text):
     conn.commit()
 
 
+# --- What each live session is doing, as you'd want to triage it (status panel, picker,
+# status line). The hook's state (working / idle / waiting) is refined into five, most
+# urgent first, like workmux's waiting > done > working:
+#   waiting   it's blocked on you: a permission prompt (the hook's Notification)
+#   question  its turn ended asking you something (the reply ends with "?")
+#   done      its turn ended since you last looked at its window
+#   working   mid-turn
+#   idle      ended a turn you've seen
+# Claude also sends a Notification after a minute at the prompt ("Claude is waiting for
+# your input"); the hook records that as waiting too, but it isn't news: it's read as idle.
+SHOW = ("waiting", "question", "done", "working", "idle")
+SHOW_ICON = {"waiting": "⚠", "question": "?", "done": "✓", "working": "◐", "idle": "●"}
+SHOW_WORD = {"waiting": "needs you", "question": "asks you", "done": "done", "working": "working", "idle": "idle"}
+WAKE = DB + "-focus"  # touched by a tmux hook when you switch window or pane (tmux.conf), so panels re-check "done"
+
+LIVE_SQL = """SELECT s.*, p.name AS project, e.kind AS last_kind, e.text AS last_text, e.ts AS last_ts
+    FROM sessions s LEFT JOIN projects p ON p.id=s.project_id
+    LEFT JOIN events e ON e.id=(SELECT max(id) FROM events x WHERE x.session_id=s.session_id
+        AND x.kind IN ('prompt','stop','waiting') AND NOT (x.kind='waiting' AND coalesce(x.text,'') LIKE '%waiting for your input%'))
+    WHERE s.state IN ('working','idle','waiting')"""
+
+
+def show_icon(state):
+    """The status glyph, animated for the two states that move (as `icon`)."""
+    return icon(state) if state in ("working", "waiting") else SHOW_ICON.get(state, "·")
+
+
+def asks(text):
+    """Did a reply end by asking something? Its last line, without Markdown, ends in "?"."""
+    last = (text or "").strip().splitlines()[-1:] or [""]
+    return last[0].rstrip(" *_`)\"'").endswith("?")
+
+
+def epoch(ts):
+    try:
+        return datetime.datetime.fromisoformat(ts).timestamp()
+    except (TypeError, ValueError):
+        return 0
+
+
+_live = (None, [], {})
+
+
+def live(conn):
+    """Live sessions, each with `show` (one of SHOW), `since` (when that began) and `why`
+    (one line of context), most urgent first, then most recent. "Seen" is a pane option
+    (@moa_seen, epoch seconds) that moa sets while the pane's window is on screen. Cached
+    until the brain or WAKE changes, so it costs one tmux call per change, not per frame.
+    Returns (sessions, {pane: seen-time to write}); push_status writes the latter."""
+    global _live
+    stamp = (db_mtime(), _mtime(WAKE))
+    if _live[0] == stamp:
+        return _live[1], _live[2]
+    rows = [dict(r) for r in conn.execute(LIVE_SQL)]
+    panes = {}
+    for line in tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@moa_seen}\t#{&&:#{window_active},#{session_attached}}").stdout.splitlines():
+        pane, seen, shown = (line.split("\t") + ["", ""])[:3]
+        panes[pane] = (float(seen) if seen.replace(".", "", 1).isdigit() else None, shown == "1")
+    now, marks = time.time(), {}
+    for s in rows:
+        s["since"] = s["last_ts"] or s["last_seen"]
+        seen, shown = panes.get(s["pane"] or "", (None, False))
+        if s["pane"] in panes and (seen is None or (shown and seen < epoch(s["since"]))):
+            seen = marks[s["pane"]] = now  # first sight is the baseline; on screen = seen
+        text = (s["last_text"] or "").strip()
+        if s["state"] == "working":
+            s["show"], s["why"] = "working", (s["last_prompt"] or "").replace("\n", " ")
+        elif s["state"] == "waiting" and s["last_kind"] == "waiting":
+            s["show"], s["why"] = "waiting", text.replace("\n", " ") or "needs you"
+        elif s["last_kind"] == "stop" and asks(text):
+            s["show"], s["why"] = "question", text.splitlines()[-1].strip(" *_")
+        else:
+            done = seen is not None and seen < epoch(s["since"])
+            s["show"], s["why"] = ("done" if done else "idle"), text.splitlines()[-1].strip(" *_#") if text else ""
+        if s["why"].startswith("<"):  # a command or system message, not words for you
+            s["why"] = ""
+    rows.sort(key=lambda s: (SHOW.index(s["show"]), -epoch(s["since"])))
+    _live = (stamp, rows, marks)
+    return rows, marks
+
+
+def _mtime(path):
+    try:
+        return os.stat(path).st_mtime_ns
+    except FileNotFoundError:
+        return 0
+
+
+def counts_text(rows):
+    """The status line's summary: a coloured count per state, most urgent first. Glyphs
+    and numbers only (the status panel and help spell them out): with words it took a
+    third of the bar, and the urgent ones are named on the left anyway."""
+    colour = {"waiting": "#ebcb8b", "question": "#d08770", "done": "#a3be8c", "working": "#88c0d0", "idle": "#8c9ab3"}
+    n = {k: sum(s["show"] == k for s in rows) for k in SHOW}
+    return "  ".join(f"#[fg={colour[k]}]{SHOW_ICON[k]} {n[k]}" for k in SHOW if n[k])
+
+
 _pushed = None
 
 
 def push_status(conn):
-    """Show live counts in the tmux status line (@moa_status) and a per-window state
-    icon (@moa_state). Launches one tmux process, only when something changed."""
+    """Show live counts in the tmux status line (@moa_status), a per-window state
+    (@moa_state, which the status line uses to pick out the windows waiting on you), and
+    when you last saw each pane (@moa_seen). One tmux process, only when something changed."""
     global _pushed
-    live = conn.execute("SELECT state, pane FROM sessions WHERE state IN ('waiting','working','idle')").fetchall()
-    n = {s: sum(r["state"] == s for r in live) for s in ("waiting", "working", "idle")}
-    text = " · ".join(f"{n[s]} {w}" for s, w in (("waiting", "waiting on you"), ("working", "working"), ("idle", "idle")) if n[s])
-    panes = {r["pane"]: r["state"] for r in live if r["pane"]}
-    if _pushed == (text, panes):
+    rows, marks = live(conn)
+    text = counts_text(rows)
+    panes = {r["pane"]: r["show"] for r in rows if r["pane"]}
+    if _pushed == (text, panes) and not marks:
         return
-    args = ["set", "-g", "@moa_status", text]
+    args = ["set", "-g", "@moa_status", text, ";", "set", "-g", "@moa_wake", WAKE]
     for pane, state in panes.items():
         args += [";", "set", "-q", "-w", "-t", pane, "@moa_state", state]
     for pane in (_pushed[1] if _pushed else {}).keys() - panes.keys():
         args += [";", "set", "-q", "-wu", "-t", pane, "@moa_state"]
+    for pane, seen in marks.items():
+        args += [";", "set", "-q", "-p", "-t", pane, "@moa_seen", f"{seen:.0f}"]
     tmux(*args)
+    marks.clear()  # written; the next live() reads them back from tmux
     _pushed = (text, panes)
 
 
@@ -543,7 +680,8 @@ def main(scr):
     c = chrome.color
     C = {"head": c("blue") | curses.A_BOLD, "dim": c("dim"), "warn": c("yellow"), "ok": c("green"),
          "brain": c("magenta"), "session": c("dim"), "you": c("yellow"), "group": c("blue") | curses.A_BOLD,
-         "late": c("dark", "red") | curses.A_BOLD, "today": c("dark", "yellow") | curses.A_BOLD, "soon": c("blue")}
+         "late": c("dark", "red") | curses.A_BOLD, "today": c("dark", "yellow") | curses.A_BOLD, "soon": c("blue"),
+         "ask": c("orange"), "work": c("blue")}
     selected = c("bright", "sel")
     if PANEL:
         chrome.use_palette(scr)
@@ -560,7 +698,7 @@ def main(scr):
             curses.endwin()
             os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
         scr.timeout(100 if animate else 300)
-        m = db_mtime()
+        m = (db_mtime(), _mtime(WAKE))  # a window switch (WAKE) can turn "done" into seen
         h, w = scr.getmaxyx()
         # a cockpit panel draws a rounded frame and keeps a column of padding inside it
         oy, ox, ih, iw = (1, 2, max(1, h - 2), max(2, w - 3)) if PANEL else (0, 0, h, w)
@@ -568,7 +706,8 @@ def main(scr):
             seen = m
             rows = build(conn, VIEWS[view], expanded, collapsed, max(10, iw), C)
             strip = conn.execute("SELECT * FROM activity ORDER BY id DESC LIMIT ?", (STRIP,)).fetchall()
-            animate = conn.execute("SELECT 1 FROM sessions WHERE state IN ('working','waiting') LIMIT 1").fetchone() is not None \
+            # live()'s show, not the raw state: an agent idle at the prompt pings "waiting" too
+            animate = any(s["show"] in ("working", "waiting") for s in live(conn)[0]) \
                 or any(fresh(a["ts"]) for a in strip)
             push_status(conn)
         selectable = [i for i, r in enumerate(rows) if r.kind]
@@ -608,8 +747,9 @@ def main(scr):
             scr.addnstr(y0 + 1 + i, 0, line, w - 1, C.get(a["who"], 0) | (curses.A_BOLD | curses.A_STANDOUT if new and int(time.monotonic() * 4) % 2 else curses.A_BOLD if new else 0))
         keys = ("⏎ open · n new · + group · m move · r rename · D del group · a archive · x close"
                 if VIEWS[view] == "Sessions" else
+                "⏎ jump · j/k · Ctrl-a / find" if VIEWS[view] == "Status" else
                 "j/k · ⏎ open · y/n suggestion" if PANEL else
-                "1-5/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
+                "1-6/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
         foot = confirm[0] if confirm else (msg or keys)
         scr.addnstr(oy + ih - 1, ox, foot, iw - 1, C["warn"] if confirm or msg else C["dim"])
         scr.refresh()
@@ -626,13 +766,13 @@ def main(scr):
             continue
         if k == ord("q") and not PANEL:
             return
-        if PANEL and k in (ord("\t"), curses.KEY_RIGHT, ord("l"), curses.KEY_BTAB, curses.KEY_LEFT, ord("h")) + tuple(range(ord("1"), ord("6"))):
+        if PANEL and k in (ord("\t"), curses.KEY_RIGHT, ord("l"), curses.KEY_BTAB, curses.KEY_LEFT, ord("h")) + tuple(range(ord("1"), ord("1") + len(VIEWS))):
             continue
         if k in (ord("\t"), curses.KEY_RIGHT, ord("l")):
             view, sel, top = (view + 1) % len(VIEWS), 0, 0
         elif k in (curses.KEY_BTAB, curses.KEY_LEFT, ord("h")):
             view, sel, top = (view - 1) % len(VIEWS), 0, 0
-        elif ord("1") <= k <= ord("5"):
+        elif ord("1") <= k < ord("1") + len(VIEWS):
             view, sel, top = k - ord("1"), 0, 0
         elif k in (ord("j"), curses.KEY_DOWN) and selectable:
             sel = next((i for i in selectable if i > sel), sel)

@@ -5,6 +5,7 @@
                   it's held. It's the only key you need to remember.
   Ctrl-a ←↑↓→     move to the pane that way (or h j k l); tap more arrows
                   right after to keep moving
+  Ctrl-a /        find a session: type part of its name, Enter jumps (or s)
   Ctrl-a c t p g  console · sessions tree · big picture · agent spot
   Ctrl-a z        zoom this pane to the whole window (again to unzoom)
   Ctrl-a Space    the full menu (or Ctrl-a twice): new session, layouts, repair
@@ -23,7 +24,12 @@
   Layouts         cockpit (tree · console · big picture)     Ctrl-a 1
                   focus   (tree and big picture · live agent · console)   Ctrl-a 2
                   classic (console · big picture and tree)   Ctrl-a 3
+                  triage  (status · console · big picture)   Ctrl-a 4
                   Ask moa to change one: "make the tree narrower".
 
-  Moving around   Ctrl-a s picks any session; in an agent's own window,
+  Agent states    ⚠ needs you (a permission prompt)   ? asked you something
+  (status panel,  ✓ done since you last looked        ◐ working   ● idle
+  status line)    The status line names the ⚠ and ? ones and counts the rest.
+
+  Moving around   Ctrl-a / finds any session; in an agent's own window,
                   Ctrl-a m comes back to moa. Clicking a pane works too.
