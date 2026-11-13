@@ -25,7 +25,7 @@ event=$(jq -r '.hook_event_name // empty' <<<"$in")
 text=""
 case "$event" in
   SessionStart)     kind=start;   text=$(jq -r '.source // ""' <<<"$in") ;;
-  UserPromptSubmit) kind=prompt;  text=$(jq -r '.prompt // ""' <<<"$in" | head -c 500) ;;
+  UserPromptSubmit) kind=prompt;  full=$(jq -r '.prompt // ""' <<<"$in"); text=$(printf %s "$full" | head -c 500) ;;
   Stop)
     kind=stop
     text=$(jq -r '.last_assistant_message // ""' <<<"$in")
@@ -65,7 +65,7 @@ SQL
 # prompt Eliraz typed just before the paste landed can't pass its reply off as the answer.
 # Last and on their own: a brain without the asks table yet only skips these.
 # (anywhere in the prompt: Claude wraps a paste in <pasted_content> tags)
-if [ "$kind" = prompt ] && [[ "$text" == *"[moa · message from"* ]]; then
+if [ "$kind" = prompt ] && [[ "$full" == *"[moa · message from"* ]]; then  # the whole prompt: text is cut at 500 bytes
   sqlite3 "$db" "PRAGMA busy_timeout=2000; UPDATE asks SET status='received'
     WHERE id=(SELECT min(id) FROM asks WHERE to_sid=$(q "$sid") AND status='sent');" >/dev/null 2>&1
 fi

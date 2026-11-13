@@ -29,7 +29,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from picture import connect, tmux, pane_alive, log_ui, SOCK  # noqa: E402
+from picture import connect, tmux, pane_alive, log_ui  # noqa: E402
 import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
@@ -532,30 +532,41 @@ def setup(conn, a):
 
 
 # --- partners: agents asking each other (and moa) through moa ------------------------------
-MOACTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moactl")  # the command, as the startup note names it
-MASTER_DIR = os.path.normpath(os.path.join(os.path.dirname(MOACTL), "..", "master-chat", "master"))
 ASK_WAIT = 540  # an agent's shell command times out at 10 minutes: answer before that
+LANDED = 20     # seconds for a typed-in ask to show up as the peer's prompt before it counts as failed
+_moa_sock = None
 
 
 def caller(conn):
-    """(session ID, name) of whoever runs this: the tracked session in this tmux pane, moa
-    itself (its folder), or (None, the folder's name) for an agent moa doesn't track."""
+    """(session ID, name) of whoever runs this: moa itself (the console marks its agent with
+    MOA_SELF), the tracked session in this tmux pane, or (None, the folder's name) for an agent
+    moa doesn't track."""
+    if os.environ.get("MOA_SELF") == "moa":
+        return "moa", "moa"
     pane, tsock = os.environ.get("TMUX_PANE"), os.environ.get("TMUX", "").split(",")[0]
     if pane:
         row = conn.execute(SESS + "WHERE s.pane=? AND coalesce(s.tmux,'') IN (?, '') AND s.state != 'ended' "
                            "ORDER BY s.last_seen DESC LIMIT 1", (pane, tsock)).fetchone()
         if row:
             return row["session_id"], row["title"] or label(row)
-    if os.path.realpath(os.getcwd()) == os.path.realpath(MASTER_DIR):
-        return "moa", "moa"
     return None, os.path.basename(os.getcwd()) or "an agent outside moa"
+
+
+def reachable(s):
+    """A live session in a pane on moa's tmux server. pane_alive asks moa's server, so a pane
+    ID recorded on another tmux server could name some other agent's pane here."""
+    global _moa_sock
+    if _moa_sock is None:
+        _moa_sock = tmux("display-message", "-p", "#{socket_path}").stdout.strip()
+    return (s["state"] in LIVE and (not _moa_sock or (s["tmux"] or "") in ("", _moa_sock))
+            and pane_alive(s["pane"]))
 
 
 def peers(conn, as_json):
     """The agents you can ask: moa, and every live session in moa but you."""
     me = caller(conn)[0]
     rows = [r for r in conn.execute(SESS + "WHERE s.state IN ('working','idle','waiting') ORDER BY s.last_seen DESC")
-            if r["session_id"] != me and pane_alive(r["pane"])]
+            if r["session_id"] != me and reachable(r)]
     if as_json:
         print(json.dumps([{"name": "moa", "id": "moa", "state": "here", "about": "moa itself: the big picture"}] + [
             {"name": r["title"] or r["session_id"][:8], "id": r["session_id"][:8], "state": r["state"], "project": r["project"],
@@ -565,7 +576,7 @@ def peers(conn, as_json):
     print("moa       moa itself: knows the big picture (projects, tasks, who's working on what)")
     for r in rows:
         doing = " ".join((r["last_prompt"] or "").split())[:70]
-        print(f"{r['session_id'][:8]}  {label(r)}  {r['state']}  {r['cwd'].replace(os.path.expanduser('~'), '~')}"
+        print(f"{r['session_id'][:8]}  {label(r)}  {r['state']}  {(r['cwd'] or '').replace(os.path.expanduser('~'), '~')}"
               + (f"\n          last asked: {doing}" if doing else ""))
     if not rows:
         print("(no other agent sessions are running in moa)")
@@ -574,16 +585,32 @@ def peers(conn, as_json):
 
 def deliver(conn, a, s):
     """Type the message into the peer's pane (it's idle), framed so it knows who's asking and
-    that its final message goes back. Bracketed paste keeps a multi-line message one prompt."""
+    that its final message goes back. Bracketed paste keeps a multi-line message one prompt.
+    False if another ask to that peer is already in (one at a time, so the peer's hook ties
+    each answer to the right ask) or typing it failed."""
+    # claimed atomically, before typing: two askers polling the same idle peer can't both type in
+    if not conn.execute("UPDATE asks SET status='sent' WHERE id=? AND status='pending' AND NOT EXISTS "
+                        "(SELECT 1 FROM asks WHERE to_sid=? AND status IN ('sent','received'))",
+                        (a["id"], a["to_sid"])).rowcount:
+        conn.commit()
+        return False
+    conn.commit()
     back = "They're waiting on your answer, so answer rather than asking them back."
     msg = (f"[moa · message from {a['from_name']}]\n{a['text']}\n\n(Your final message this turn goes back to "
            f"{a['from_name']} as the answer. {back})")
-    conn.execute("UPDATE asks SET status='sent' WHERE id=?", (a["id"],))  # before typing: its Stop hook answers 'sent' asks
+    ok = (tmux("load-buffer", "-b", "moa-ask", "-", input=msg).returncode == 0
+          and tmux("paste-buffer", "-p", "-d", "-b", "moa-ask", "-t", s["pane"]).returncode == 0)
+    if ok:
+        time.sleep(0.5)  # let the paste land before Enter submits it
+        ok = tmux("send-keys", "-t", s["pane"], "Enter").returncode == 0
+    if not ok:
+        fail(conn, a["id"], "couldn't type it into their pane")
+    return ok
+
+
+def fail(conn, ask_id, why, status="failed", was="sent"):
+    conn.execute("UPDATE asks SET status=?, reply=? WHERE id=? AND status=?", (status, why, ask_id, was))
     conn.commit()
-    subprocess.run(["tmux", "-L", SOCK, "load-buffer", "-b", "moa-ask", "-"], input=msg, text=True)
-    tmux("paste-buffer", "-p", "-d", "-b", "moa-ask", "-t", s["pane"])
-    time.sleep(0.5)  # let the paste land before Enter submits it
-    tmux("send-keys", "-t", s["pane"], "Enter")
 
 
 def ask(conn, q, text, timeout):
@@ -593,10 +620,11 @@ def ask(conn, q, text, timeout):
             sys.exit("that's you")
         to = "moa"
     else:
-        s = find(conn, q)
+        live = [r for r in candidates(conn, q) if r["state"] in LIVE]  # an ended session with the same title isn't a match
+        s = live[0] if len(live) == 1 else find(conn, q)
         if s["session_id"] == me_sid:
             sys.exit("that's you")
-        if s["state"] not in LIVE or not pane_alive(s["pane"]):
+        if not reachable(s):
             sys.exit(f"{label(s)} isn't running in moa ({s['state']}); `moactl resume {s['session_id'][:8]}` starts it")
         to = s["session_id"]
     if me_sid and conn.execute("SELECT 1 FROM asks WHERE from_sid=? AND to_sid=? AND status IN ('pending','sent','received')",
@@ -611,7 +639,7 @@ def ask(conn, q, text, timeout):
 def wait_reply(conn, ask_id, timeout):
     """Deliver the ask once its peer is free (moa's own are delivered by the console), then
     print the reply. Gives up after `timeout` seconds; `moactl reply ID` waits again."""
-    end = time.monotonic() + timeout
+    end, typed = time.monotonic() + timeout, None  # typed: when this process typed it in
     while True:
         a = conn.execute("SELECT * FROM asks WHERE id=?", (ask_id,)).fetchone()
         if not a:
@@ -619,16 +647,26 @@ def wait_reply(conn, ask_id, timeout):
         if a["status"] == "answered":
             print(a["reply"] or "(they finished without a reply)")
             return
+        if a["status"] in ("failed", "dropped"):
+            sys.exit(f"ask #{ask_id} {a['status']}: {a['reply'] or 'no reason recorded'}. Ask again.")
         if a["to_sid"] != "moa":
             s = conn.execute(SESS + "WHERE s.session_id=?", (a["to_sid"],)).fetchone()
-            if not s or s["state"] not in LIVE or not pane_alive(s["pane"]):
+            if not s or not reachable(s):
                 sys.exit(f"{label(s) if s else a['to_sid'][:8]} stopped running; ask #{ask_id} "
                          + ("wasn't delivered" if a["status"] == "pending" else "got no reply"))
-            if a["status"] == "pending" and s["state"] == "idle":
-                deliver(conn, a, s)
+            if a["status"] == "pending" and s["state"] == "idle" and deliver(conn, a, s):
+                typed = time.monotonic()
+                continue
+            if a["status"] == "sent" and typed and time.monotonic() - typed > LANDED:
+                # the paste never became a prompt (a dialog or copy-mode had the pane): free the peer for others
+                fail(conn, ask_id, "it never arrived as their prompt (something else had their pane)")
                 continue
         if time.monotonic() > end:
-            how = "they're working on it" if a["status"] in ("sent", "received") else "they're busy; it goes in when they're free"
+            if a["status"] == "pending" and a["to_sid"] != "moa":  # nobody would type it in once we stop waiting
+                fail(conn, ask_id, "they stayed busy until the wait ran out", status="dropped", was="pending")
+                print(f"ask #{ask_id} wasn't delivered: they stayed busy for {timeout} s. Ask again later.")
+                return
+            how = "they're working on it" if a["status"] in ("sent", "received") else "moa's busy; it goes in when it's free"
             print(f"no reply yet to ask #{ask_id} ({how}). `moactl reply {ask_id}` waits for it again.")
             return
         time.sleep(1)
