@@ -60,11 +60,22 @@ ON CONFLICT(session_id) DO UPDATE SET state=excluded.state, last_seen=excluded.l
 UPDATE projects SET last_activity=date('now','localtime')
  WHERE id=(SELECT project_id FROM sessions WHERE session_id=$(q "$sid"));
 SQL
-# A turn that ends while another agent's message to this session is out (moactl ask) is
-# the answer to it. Last and on its own: a brain without the asks table yet only skips this.
-if [ "$kind" = stop ]; then
-  sqlite3 "$db" "PRAGMA busy_timeout=2000; UPDATE asks SET status='answered', reply=$(q "${full:-}"), answered_at=datetime('now','localtime')
+# Another agent's message (moactl ask) is received when it's submitted as a prompt, and
+# the turn it starts ends with the answer. Tying the answer to the received message means a
+# prompt Eliraz typed just before the paste landed can't pass its reply off as the answer.
+# Last and on their own: a brain without the asks table yet only skips these.
+# (anywhere in the prompt: Claude wraps a paste in <pasted_content> tags)
+if [ "$kind" = prompt ] && [[ "$text" == *"[moa · message from"* ]]; then
+  sqlite3 "$db" "PRAGMA busy_timeout=2000; UPDATE asks SET status='received'
     WHERE id=(SELECT min(id) FROM asks WHERE to_sid=$(q "$sid") AND status='sent');" >/dev/null 2>&1
+fi
+if [ "$kind" = stop ]; then
+  # on stdin, not argv: a long reply can pass the per-argument limit (128 KB on Linux)
+  sqlite3 "$db" <<SQL >/dev/null 2>&1
+PRAGMA busy_timeout=2000;
+UPDATE asks SET status='answered', reply=$(q "${full:-}"), answered_at=datetime('now','localtime')
+ WHERE id=(SELECT min(id) FROM asks WHERE to_sid=$(q "$sid") AND status='received');
+SQL
 fi
 # A new session learns it has peers (SessionStart output becomes context), so asking
 # another agent needs no setup.
@@ -73,7 +84,7 @@ if [ "$kind" = start ]; then
   cat <<EOF
 You're running inside moa (master-of-agents), alongside other agent sessions and moa itself, which keeps the big picture.
 - \`$ctl peers\` lists the agents you can talk to.
-- \`$ctl ask NAME "message"\` sends one a message and waits for its reply (up to 9 minutes; \`$ctl reply ID\` waits again).
+- \`$ctl ask NAME "message"\` sends one a message and waits for its reply (up to 9 minutes, so give that shell command a 600000 ms timeout; \`$ctl reply ID\` waits again).
 Use it when the user asks you to talk to another session, agent or moa, or when a peer clearly knows something you need.
 Messages from peers arrive as "[moa · message from …]"; your final message that turn is your answer to them.
 EOF

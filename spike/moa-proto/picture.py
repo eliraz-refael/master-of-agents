@@ -35,7 +35,7 @@ PANEL_VIEW = {"tree": "Sessions", "today": "Today", "activity": "Activity", "pro
 SETUP = """
 CREATE TABLE IF NOT EXISTS asks (  -- agents asking each other through moa (moactl ask); to_sid 'moa' = moa itself
   id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT (datetime('now','localtime')), from_sid TEXT, from_name TEXT,
-  to_sid TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | answered
+  to_sid TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | received | answered
   reply TEXT, answered_at TEXT);
 CREATE TABLE IF NOT EXISTS groups (path TEXT PRIMARY KEY, created_at TEXT DEFAULT (datetime('now','localtime')));
 CREATE TABLE IF NOT EXISTS activity (

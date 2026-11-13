@@ -415,6 +415,7 @@ class Console:
     def handle(self, m):
         if m.get("_exit"):
             self.add("err", "moa's agent process exited; reopen the console from the menu (Ctrl-a)")
+            self.finish_ask("moa's agent process exited")
             self.busy = False
             return
         if "method" in m and "id" in m:                       # a request from the agent
@@ -433,6 +434,8 @@ class Console:
                 self.add("err", f"{what}: {m['error'].get('message')}")
                 if what == "load":
                     self.new_thread()
+                if what == "prompt":
+                    self.finish_ask(f"error: {m['error'].get('message')}")
                 self.busy = False
                 return
             r = m.get("result") or {}
@@ -454,13 +457,7 @@ class Console:
                 self.add("sys", f"resumed today's thread {self.sid[:8]}: everything above is from earlier")
             elif what == "prompt":
                 self.busy = False
-                if self.answering:  # what moa said that turn is the answer to the agent that asked
-                    ask_id, turn = self.answering
-                    reply = "".join(e["text"] for e in self.feed if e["kind"] == "agent" and e["turn"] == turn).strip()
-                    self.conn.execute("UPDATE asks SET status='answered', reply=?, answered_at=datetime('now','localtime') "
-                                      "WHERE id=?", (reply, ask_id))
-                    self.conn.commit()
-                    self.answering = None
+                self.finish_ask(r.get("stopReason"))
                 if r.get("stopReason") not in (None, "end_turn"):
                     self.add("sys", f"(turn ended: {r['stopReason']})")
             return
@@ -586,6 +583,19 @@ class Console:
                     f"decide or know, say so to Eliraz too.)\n\n{a['text']}", show=False)
         self.answering = (a["id"], self.turn)
         return True
+
+    def finish_ask(self, stop=None):
+        """moa's turn on another agent's message ended (or failed): what it said goes back as the answer."""
+        if not self.answering:
+            return
+        ask_id, turn = self.answering
+        self.answering = None
+        reply = "\n\n".join(e["text"].strip() for e in self.feed if e["kind"] == "agent" and e["turn"] == turn).strip()
+        if stop not in (None, "end_turn"):
+            reply = (reply + "\n\n" if reply else "") + f"(moa's turn ended early: {stop})"
+        self.conn.execute("UPDATE asks SET status='answered', reply=?, answered_at=datetime('now','localtime') "
+                          "WHERE id=?", (reply, ask_id))
+        self.conn.commit()
 
     def tick(self):
         """Wake moa with the session reports once they settle, so it keeps the big picture."""

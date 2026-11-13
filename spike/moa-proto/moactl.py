@@ -558,7 +558,7 @@ def peers(conn, as_json):
             if r["session_id"] != me and pane_alive(r["pane"])]
     if as_json:
         print(json.dumps([{"name": "moa", "id": "moa", "state": "here", "about": "moa itself: the big picture"}] + [
-            {"name": r["title"] or label(r), "id": r["session_id"][:8], "state": r["state"], "project": r["project"],
+            {"name": r["title"] or r["session_id"][:8], "id": r["session_id"][:8], "state": r["state"], "project": r["project"],
              "agent": "codex" if r["account"] == "codex" else "claude", "cwd": r["cwd"], "doing": (r["last_prompt"] or "")[:120]}
             for r in rows], indent=1))
         return
@@ -575,8 +575,7 @@ def peers(conn, as_json):
 def deliver(conn, a, s):
     """Type the message into the peer's pane (it's idle), framed so it knows who's asking and
     that its final message goes back. Bracketed paste keeps a multi-line message one prompt."""
-    back = (f'To ask them something back: `{MOACTL} ask {a["from_sid"][:8] if a["from_sid"] != "moa" else "moa"} "…"`.'
-            if a["from_sid"] else "They aren't in moa, so you can only answer.")
+    back = "They're waiting on your answer, so answer rather than asking them back."
     msg = (f"[moa · message from {a['from_name']}]\n{a['text']}\n\n(Your final message this turn goes back to "
            f"{a['from_name']} as the answer. {back})")
     conn.execute("UPDATE asks SET status='sent' WHERE id=?", (a["id"],))  # before typing: its Stop hook answers 'sent' asks
@@ -590,6 +589,8 @@ def deliver(conn, a, s):
 def ask(conn, q, text, timeout):
     me_sid, me_name = caller(conn)
     if q.lower() == "moa":
+        if me_sid == "moa":
+            sys.exit("that's you")
         to = "moa"
     else:
         s = find(conn, q)
@@ -598,6 +599,10 @@ def ask(conn, q, text, timeout):
         if s["state"] not in LIVE or not pane_alive(s["pane"]):
             sys.exit(f"{label(s)} isn't running in moa ({s['state']}); `moactl resume {s['session_id'][:8]}` starts it")
         to = s["session_id"]
+    if me_sid and conn.execute("SELECT 1 FROM asks WHERE from_sid=? AND to_sid=? AND status IN ('pending','sent','received')",
+                               (to, me_sid)).fetchone():
+        sys.exit("they're waiting on your answer to their own message, so they can't take one now: "
+                 "put what you need from them in your final message instead")
     cur = conn.execute("INSERT INTO asks(from_sid,from_name,to_sid,text) VALUES(?,?,?,?)", (me_sid, me_name, to, text))
     conn.commit()
     wait_reply(conn, cur.lastrowid, timeout)
@@ -614,15 +619,16 @@ def wait_reply(conn, ask_id, timeout):
         if a["status"] == "answered":
             print(a["reply"] or "(they finished without a reply)")
             return
-        if a["status"] == "pending" and a["to_sid"] != "moa":
+        if a["to_sid"] != "moa":
             s = conn.execute(SESS + "WHERE s.session_id=?", (a["to_sid"],)).fetchone()
-            if s["state"] not in LIVE or not pane_alive(s["pane"]):
-                sys.exit(f"{label(s)} stopped running; ask #{ask_id} wasn't delivered")
-            if s["state"] == "idle":
+            if not s or s["state"] not in LIVE or not pane_alive(s["pane"]):
+                sys.exit(f"{label(s) if s else a['to_sid'][:8]} stopped running; ask #{ask_id} "
+                         + ("wasn't delivered" if a["status"] == "pending" else "got no reply"))
+            if a["status"] == "pending" and s["state"] == "idle":
                 deliver(conn, a, s)
                 continue
         if time.monotonic() > end:
-            how = "they're working on it" if a["status"] == "sent" else "they're busy; it goes in when they're free"
+            how = "they're working on it" if a["status"] in ("sent", "received") else "they're busy; it goes in when they're free"
             print(f"no reply yet to ask #{ask_id} ({how}). `moactl reply {ask_id}` waits for it again.")
             return
         time.sleep(1)
@@ -669,7 +675,7 @@ def main():
     p = sub.add_parser("ask", help="send another agent (a session, or moa) a message and wait for its reply",
                        description="Send another agent a message and wait for its reply (its final message that turn). "
                                    "Are you an agent? `moactl peers` lists who you can ask. The message is typed into "
-                                   "their session once they're free, marked as from you. Waits up to 9 minutes; if it "
+                                   "their session once they're free, marked as from you. Waits up to 9 minutes (give the shell command a 10-minute timeout); if it "
                                    "gives up, `moactl reply ID` waits again.")
     p.add_argument("to", help="moa, or a session's ID prefix, title or project"); p.add_argument("text")
     p.add_argument("--timeout", type=int, default=ASK_WAIT, help="seconds to wait (default 540)")
