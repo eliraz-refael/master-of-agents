@@ -507,7 +507,9 @@ def setup(conn, a):
             return
         for x in accounts:
             only = f" (only {', '.join(setup_hooks.short(f) for f in x['only'])})" if x["only"] else ""
-            print(f"{x['name']:<16} {setup_hooks.short(x['dir']):<22} {x['state']}{only}{'  [skipped]' if x['skipped'] else ''}")
+            plug = ("  + plugin" if x["plugin"] else f"  · no plugin yet (moactl setup {'only' if x['only'] else 'install'} {x['name']})"
+                    ) if x["state"] == "installed" else ""
+            print(f"{x['name']:<16} {setup_hooks.short(x['dir']):<22} {x['state']}{only}{plug}{'  [skipped]' if x['skipped'] else ''}")
         return
     if not a.name:
         sys.exit(f"moactl setup {a.op} NAME (one of: {', '.join(x['name'] for x in accounts)})")
@@ -515,12 +517,14 @@ def setup(conn, a):
     if not acct:
         sys.exit(f"no Claude account {a.name!r} (moactl setup list)")
     if a.op == "install":
-        setup_hooks.install(acct["dir"])
-        print(f"tracking installed for {acct['name']}; its running sessions pick it up when they restart")
+        err = setup_hooks.install(acct["dir"])
+        print(f"tracking and the moa plugin installed for {acct['name']}; its running sessions pick them up when they restart"
+              + (f"\nbut: {err}" if err else ""))
     elif a.op == "only":
         folders = a.folders or PRIVATE_ROOTS
-        setup_hooks.install(acct["dir"], folders)
-        print(f"tracking installed for {acct['name']}, only under {', '.join(setup_hooks.short(f) for f in folders)}")
+        err = setup_hooks.install(acct["dir"], folders)
+        print(f"tracking and the moa plugin installed for {acct['name']}, only under {', '.join(setup_hooks.short(f) for f in folders)}"
+              + (f"\nbut: {err}" if err else ""))
     elif a.op == "remove":
         n = setup_hooks.remove(acct["dir"])
         print(f"removed moa's hook from {acct['name']}" if n else f"{acct['name']} had no moa hook")

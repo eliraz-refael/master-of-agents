@@ -11,9 +11,14 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRACK = os.path.normpath(os.path.join(HERE, "..", "master-chat", "hooks", "track.sh"))
+# the moa plugin (a skill telling agents about moa, and moactl on their PATH), loaded in place
+# from this folder as a local marketplace: edits apply at the next session start
+MARKET, PLUGIN = "moa-local", "moa@moa-local"
+MARKET_DIR = os.path.normpath(os.path.join(HERE, "..", "moa-plugin"))
 MARK = "# moa-spike"  # every hook command moa installs ends with this, so it can find and remove them
 EVENTS = {"SessionStart": None, "UserPromptSubmit": None, "Stop": None, "SessionEnd": None,
           "Notification": "permission_prompt|elicitation_dialog"}
@@ -32,8 +37,15 @@ def find_accounts(names):
         projects = os.path.join(d, "projects")
         used = os.path.getmtime(projects) if os.path.isdir(projects) else None
         found.append({"name": by_dir.get(os.path.realpath(d), os.path.basename(d).lstrip(".")), "dir": d,
-                      "state": state, "only": only, "last_used": used})
+                      "state": state, "only": only, "last_used": used, "plugin": has_plugin(d)})
     return found
+
+
+def has_plugin(d):
+    try:
+        return bool((_settings(d)[1].get("enabledPlugins") or {}).get(PLUGIN))
+    except (OSError, ValueError):
+        return False
 
 
 def _settings(d):
@@ -85,15 +97,47 @@ def _strip(s):
             s["hooks"][ev] = kept
         else:
             del s["hooks"][ev]
+    if "hooks" in s and not s["hooks"]:
+        del s["hooks"]
     return n
 
 
+def _unplug(s):
+    """Take the plugin's folder limit out of settings `s` in place."""
+    (s.get("env") or {}).pop("MOA_ONLY_UNDER", None)
+    if "env" in s and not s["env"]:
+        del s["env"]
+
+
+def plugin(d, on):
+    """Add or take out the moa plugin with Claude's own CLI (settings entries alone don't
+    register a marketplace). Returns an error message, or None."""
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=d)
+    run = lambda *a: subprocess.run(["claude", "plugin", *a], env=env, capture_output=True, text=True)  # noqa: E731
+    try:
+        if not on:
+            run("uninstall", PLUGIN)
+            run("marketplace", "remove", MARKET)
+            return None
+        run("marketplace", "add", MARKET_DIR)  # fails harmlessly when it's already there
+        r = run("install", PLUGIN)
+    except FileNotFoundError:
+        return "the claude command isn't on PATH, so the moa plugin wasn't installed"
+    return None if r.returncode == 0 else ((r.stdout + r.stderr).strip().splitlines() or ["the plugin install failed"])[-1]
+
+
 def remove(d):
-    """Take moa's hooks out of this account's settings (other hooks stay). Returns how many."""
+    """Take moa's hooks and plugin out of this account's settings (others stay). Returns how many hooks."""
     p, s = _settings(d)
+    before = json.dumps(s, sort_keys=True)
     n = _strip(s)
-    if n:
+    _unplug(s)
+    if json.dumps(s, sort_keys=True) != before:
         _write(p, s)
+    plugin(d, False)
+    p, s = _settings(d)  # Claude's uninstall leaves the plugin's settings keys behind, empty
+    if any(k in s and not s[k] for k in ("enabledPlugins", "extraKnownMarketplaces")):
+        _write(p, {k: v for k, v in s.items() if v or k not in ("enabledPlugins", "extraKnownMarketplaces")})
     return n
 
 
@@ -103,15 +147,19 @@ def _dq(text):
 
 
 def install(d, only=None):
-    """(Re)install moa's hook for every event it uses; `only` limits it to those folders."""
+    """(Re)install moa's hook for every event it uses, and the moa plugin; `only` limits both
+    to those folders."""
     p, s = _settings(d)
     _strip(s)
+    _unplug(s)
     env = ""
     if only:
         home = os.path.expanduser("~")
         roots = [os.path.abspath(os.path.expanduser(x)) for x in only]
         env = 'MOA_ONLY_UNDER="' + ":".join("$HOME" + _dq(r[len(home):]) if r.startswith(home + "/") else _dq(r)
                                             for r in roots) + '" '
+        # the same limit for the plugin's moactl: settings env reaches the agent's shell (no $HOME expansion there)
+        s.setdefault("env", {})["MOA_ONLY_UNDER"] = ":".join(roots)
     hook = {"type": "command", "command": f"{env}bash {shlex.quote(TRACK)} {MARK}", "timeout": 5}
     for ev, matcher in EVENTS.items():
         group = {"hooks": [hook]}
@@ -119,6 +167,7 @@ def install(d, only=None):
             group["matcher"] = matcher
         s.setdefault("hooks", {}).setdefault(ev, []).append(group)
     _write(p, s)
+    return plugin(d, True)  # an error message if the plugin couldn't be installed
 
 
 def _write(p, s):
@@ -166,9 +215,11 @@ def interactive(accounts, default_only, skipped):
         except EOFError:
             break
         if ans in ("y", "yes", "f", "folders"):
-            install(a["dir"], default_only if ans[0] == "f" else None)
+            err = install(a["dir"], default_only if ans[0] == "f" else None)
             skipped = [n for n in skipped if n != a["name"]]
             print(f"    installed, only under {folders}" if ans[0] == "f" else "    installed")
+            if err:
+                print(f"    but: {err}")
         else:
             skipped = sorted(set(skipped) | {a["name"]})
             print("    skipped")

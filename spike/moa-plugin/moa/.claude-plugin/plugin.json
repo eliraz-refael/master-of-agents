@@ -1,0 +1,5 @@
+{
+  "name": "moa",
+  "version": "0.1.0",
+  "description": "THROWAWAY PROTOTYPE: talk to your other agent sessions and to moa (master-of-agents). Puts moactl on the agent's PATH and teaches it when to use it."
+}
