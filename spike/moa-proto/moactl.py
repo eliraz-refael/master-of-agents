@@ -155,7 +155,10 @@ def term(path, title, pane):
     """A plain shell in a window of its own (a dev server, a quick look around). It isn't
     an agent: the brain doesn't track it, and the status line and panels leave it out. Its
     pane is marked @moa_term so the session picker can list the open terminals."""
-    path = os.path.abspath(os.path.expanduser(path or here_dir(pane)))
+    path = os.path.expanduser(path or "")
+    if not os.path.isabs(path):  # relative to "here" (`/term web`), not to wherever moactl runs
+        path = os.path.join(os.path.expanduser(here_dir(pane)), path)
+    path = os.path.abspath(path)
     if not os.path.isdir(path):
         sys.exit(f"no folder {path}")
     name = f"⌨ {title or ('~' if path == os.path.expanduser('~') else os.path.basename(path) or path)}"[:24]

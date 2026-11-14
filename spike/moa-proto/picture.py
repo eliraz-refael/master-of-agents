@@ -679,6 +679,8 @@ def follow(rows, selectable, sel, top, body):
     the headings, `top` stopped at the first selectable row and the top of the list could
     never be scrolled back into view. The last item brings the rows after it (key hints)."""
     start = max((i for i in selectable if i < sel), default=-1) + 1
+    while start < sel and rows[start].more:  # not the wrapped lines of the item above
+        start += 1
     end = len(rows) - 1 if sel == selectable[-1] else sel
     while end + 1 < len(rows) and rows[end + 1].more:
         end += 1

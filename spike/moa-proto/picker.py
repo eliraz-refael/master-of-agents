@@ -27,7 +27,7 @@ def terminals():
     for line in tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@moa_term}\t#{window_name}\t#{pane_current_path}").stdout.splitlines():
         pane, mark, name, cwd = (line.split("\t") + ["", "", ""])[:4]
         if mark:
-            out.append({"term": pane, "title": name.lstrip("⌨ "), "grp": None, "project": None, "cwd": cwd,
+            out.append({"title": name.lstrip("⌨ "), "grp": None, "project": None, "cwd": cwd,
                         "session_id": pane, "show": "term", "since": None, "why": cwd.replace(os.path.expanduser("~"), "~")})
     return out
 
@@ -163,8 +163,10 @@ if __name__ == "__main__":
     os.environ.setdefault("ESCDELAY", "25")
     locale.setlocale(locale.LC_ALL, "")
     picked = chrome.wrapper(main)
-    if picked and picked.get("term"):  # a terminal: just go to its window
-        tmux("select-window", "-t", picked["term"])
+    if picked and picked["show"] == "term":  # a terminal (its session_id is its pane): go to its window
+        r = tmux("select-window", "-t", picked["session_id"])
+        if r.returncode:  # closed since the picker listed it
+            tmux("display-message", "-d", "4000", f"moa: that terminal is gone ({r.stderr.strip()})")
     elif picked:
         # moactl focus: into the cockpit's agent spot if the layout has one, else its own
         # window; resumes it first if it isn't running. moamenu shows the result as a message.
