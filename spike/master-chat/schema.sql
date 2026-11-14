@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS meta (
 -- for moa itself. status: pending (waiting for the peer to be free) | sent (typed in) | received (its prompt
 -- was submitted; the turn it starts answers it) | answered | failed (never arrived as a prompt) | dropped
 -- (the asker stopped waiting before the peer was free). moa's own asks skip received. A failed or
--- dropped ask's reply says why.
+-- dropped ask's reply says why. ts is when it was asked, restamped when moactl types it in.
 CREATE TABLE IF NOT EXISTS asks (
   id          INTEGER PRIMARY KEY,
   ts          TEXT NOT NULL DEFAULT (datetime('now','localtime')),

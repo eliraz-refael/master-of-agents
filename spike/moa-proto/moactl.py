@@ -591,12 +591,14 @@ def deliver(conn, a, s):
     that its final message goes back. Bracketed paste keeps a multi-line message one prompt.
     False if another ask to that peer is already in (one at a time, so the peer's hook ties
     each answer to the right ask) or typing it failed."""
-    # a 'sent' ask nobody resolved (its asker was killed or gave up before it landed) would
-    # block this peer for good: past any asker's wait, it never arrived
-    conn.execute("UPDATE asks SET status='failed', reply='it never arrived as their prompt' WHERE to_sid=? "
-                 "AND status='sent' AND ts < datetime('now','localtime',?)", (a["to_sid"], f"-{2 * ASK_WAIT} seconds"))
+    # a 'sent' or 'received' ask nobody resolved (its asker was killed or gave up, or the peer
+    # died mid-turn) would block this peer for good: it's idle now, so past any asker's wait
+    # that ask isn't coming back. ts is restamped when an ask is typed in, so this counts from then.
+    conn.execute("UPDATE asks SET status='failed', reply='it never got an answer from them' WHERE to_sid=? "
+                 "AND status IN ('sent','received') AND ts < datetime('now','localtime',?)",
+                 (a["to_sid"], f"-{2 * ASK_WAIT} seconds"))
     # claimed atomically, before typing: two askers polling the same idle peer can't both type in
-    if not conn.execute("UPDATE asks SET status='sent' WHERE id=? AND status='pending' AND NOT EXISTS "
+    if not conn.execute("UPDATE asks SET status='sent', ts=datetime('now','localtime') WHERE id=? AND status='pending' AND NOT EXISTS "
                         "(SELECT 1 FROM asks WHERE to_sid=? AND status IN ('sent','received'))",
                         (a["id"], a["to_sid"])).rowcount:
         conn.commit()
@@ -660,7 +662,7 @@ def wait_reply(conn, ask_id, timeout):
         if a["to_sid"] != "moa":
             s = conn.execute(SESS + "WHERE s.session_id=?", (a["to_sid"],)).fetchone()
             if not s or not reachable(s):
-                if a["status"] in ("pending", "sent"):  # an unresolved one would block a resumed peer for good
+                if a["status"] in ("pending", "sent", "received"):  # an unresolved one would block a resumed peer for good
                     fail(conn, ask_id, "they stopped running", status="dropped" if a["status"] == "pending" else "failed",
                          was=a["status"])
                 sys.exit(f"{label(s) if s else a['to_sid'][:8]} stopped running; ask #{ask_id} "
