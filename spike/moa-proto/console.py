@@ -272,7 +272,7 @@ def markdown(text, width, S, base=0):
 
 class Acp:
     def __init__(self, inbox):
-        env = dict(os.environ, CLAUDE_CONFIG_DIR=ACCOUNT)
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=ACCOUNT, MOA_SELF="moa")  # MOA_SELF: moactl knows moa is the one asking
         # MOA_ACP: the agent command (tests point it at a stub; a pane's login shell resets PATH, not this)
         self.p = subprocess.Popen([os.environ.get("MOA_ACP", "claude-agent-acp")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd=MASTER_DIR, env=env)
@@ -330,6 +330,10 @@ class Console:
         self.hide_user = False     # replay: skipping a hidden prompt's chunks
         self.reports, self.report_at, self.last_wake, self.auto = [], 0.0, -GAP, True
         self.answering = None      # (ask id, turn): moa is answering another agent's message (moactl ask moa)
+        # an ask moa was answering when the last console went away can't be answered now: say so to its asker
+        self.conn.execute("UPDATE asks SET status='failed', reply=? WHERE to_sid='moa' AND status='sent'",
+                          ("moa's console restarted before moa answered",))
+        self.conn.commit()
         self.nagged = set()        # (task id, due, day) moa was already told about, so it nags once a day per task
         self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
         self.focus = None          # the focused hit (y, x0, x1, command), while Tab-hopping
