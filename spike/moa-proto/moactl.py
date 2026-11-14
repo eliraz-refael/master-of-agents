@@ -6,6 +6,7 @@ Not product code. A session ID can be any unique prefix, a title or a project na
 Read:     brief | attention | ls [--all] | find Q | project NAME
 Sessions: open PATH [--account A] [--title T] [--group G] [--prompt P] [--bg]
           resume Q [--bg] | close Q | archive Q... | set Q [--title T] [--group G]
+          term [PATH] [--title T]   (a plain shell in a window of its own, e.g. for a dev server)
 Groups:   group add PATH | group rename OLD NEW | group rm PATH
 Brain:    note TEXT [--project P] [--kind K] | suggest TEXT
           task add PROJECT TITLE [--today] | task set ID [--status S] [--today|--not-today] [--blocked-on X]
@@ -29,7 +30,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from picture import connect, tmux, pane_alive, log_ui  # noqa: E402
+from picture import connect, tmux, pane_alive, log_ui, SOCK  # noqa: E402
 import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
@@ -128,6 +129,45 @@ def resume(conn, s, bg):
     log_ui(conn, f"resumed {s['title'] or s['session_id'][:8]}")
     how = "in the background" if bg else layout.focus(pane, title_of(conn))
     print(f"resumed {s['session_id']} in {s['cwd']}; {how}")
+
+
+def here_dir(pane):
+    """Where "here" is for a new terminal: the folder of the agent (or terminal) you're
+    looking at; on a cockpit panel, the folder of the session selected in it (@moa_here,
+    set by picture.py), else of the agent in the cockpit's agent spot; else ~.
+    `pane` is the focused pane (the tmux key passes it); else this process's own pane, if
+    it's on moa's server (TMUX_PANE from another tmux server names someone else's pane)."""
+    if not pane and os.path.basename(os.environ.get("TMUX", "").split(",")[0]) == SOCK:
+        pane = os.environ.get("TMUX_PANE")
+    r = tmux("display-message", "-p", *(["-t", pane] if pane else []), "#{@moa_panel}\t#{pane_current_path}\t#{@moa_here}")
+    panel, cwd, picked = (r.stdout.rstrip("\n").split("\t") + ["", ""])[:3]
+    if r.returncode == 0 and panel in ("", "agent") and cwd:
+        return cwd
+    if r.returncode == 0 and picked:
+        return picked
+    s = layout.slot()
+    if s and s["panel"] == "agent":
+        return layout.out("display-message", "-p", "-t", s["pane"], "#{pane_current_path}") or "~"
+    return "~"
+
+
+def term(path, title, pane):
+    """A plain shell in a window of its own (a dev server, a quick look around). It isn't
+    an agent: the brain doesn't track it, and the status line and panels leave it out. Its
+    pane is marked @moa_term so the session picker can list the open terminals."""
+    path = os.path.expanduser(path or "")
+    if not os.path.isabs(path):  # relative to "here" (`/term web`), not to wherever moactl runs
+        path = os.path.join(os.path.expanduser(here_dir(pane)), path)
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        sys.exit(f"no folder {path}")
+    name = f"⌨ {title or ('~' if path == os.path.expanduser('~') else os.path.basename(path) or path)}"[:24]
+    r = tmux("new-window", "-P", "-F", "#{pane_id}", "-n", name, "-c", path)  # no command: the user's shell
+    if r.returncode:
+        sys.exit(f"tmux failed: {r.stderr.strip()} (is the moa tmux server running?)")
+    new = r.stdout.strip()
+    tmux("set", "-p", "-t", new, "@moa_term", "1", ";", "set", "-p", "-t", new, "@moa_label", name)
+    print(f"opened a terminal in {path.replace(os.path.expanduser('~'), '~')} (window {name})")
 
 
 def close(conn, s):
@@ -708,6 +748,8 @@ def main():
     p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--prompt"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("resume"); p.add_argument("id"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("close"); p.add_argument("id")
+    p = sub.add_parser("term", help="a plain shell in a new window (default folder: the agent you're looking at, else ~)")
+    p.add_argument("path", nargs="?"); p.add_argument("--title"); p.add_argument("--pane", help="the focused pane (tmux passes it)")
     p = sub.add_parser("archive"); p.add_argument("ids", nargs="+")
     sub.add_parser("import-herdr")
     p = sub.add_parser("adopt"); p.add_argument("pane"); p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--id")
@@ -856,6 +898,8 @@ def main():
         resume(conn, find(conn, a.id), a.bg)
     elif a.cmd == "close":
         close(conn, find(conn, a.id))
+    elif a.cmd == "term":
+        term(a.path, a.title, a.pane)
     elif a.cmd == "archive":
         for i in a.ids:
             s = find(conn, i)

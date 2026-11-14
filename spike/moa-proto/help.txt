@@ -7,6 +7,9 @@
                   right after to keep moving
   Ctrl-a /        find a session: type part of its name, Enter jumps (or s)
   Ctrl-a c t p g  console · sessions tree · big picture · agent spot
+  Ctrl-a $        a plain terminal in a new window (for a dev server…), in
+                  the folder of the agent or session you're on; Ctrl-a / or
+                  Ctrl-a [ ] get back to it, `exit` closes it
   Ctrl-a z        zoom this pane to the whole window (again to unzoom)
   Ctrl-a Space    the full menu (or Ctrl-a twice): new session, layouts, repair
   Ctrl-a a        a real Ctrl-a for the app (start of line)
@@ -17,9 +20,14 @@
     m             move to group   r       rename (session or group)
     a             archive         x       close          D   delete empty group
 
+  In every panel (tree, big picture, status)
+    click a row   same as Enter: jump to that session (a group: fold it)
+    wheel         scroll          Home End PgUp PgDn   to the ends / a page
+
   In the console
     type anything to talk to moa; /help lists the instant commands
     /layout NAME  switch layout   /focus Q   show a session   /open PATH title
+    /term [PATH]  a plain terminal (default: the agent spot's folder)
 
   Layouts         cockpit (tree · console · big picture)     Ctrl-a 1
                   focus   (tree and big picture · live agent · console)   Ctrl-a 2

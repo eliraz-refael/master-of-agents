@@ -46,6 +46,7 @@ COMMANDS = [  # name, arguments, what it does
     ("open", "PATH [title…]", "start an agent there and switch to it"),
     ("resume", "Q", "resume or jump to a session (title, project or ID)"),
     ("focus", "Q", "bring a session into the cockpit's agent spot"),
+    ("term", "[PATH]", "a plain terminal in a new window, for a dev server (default: the agent spot's folder)"),
     ("layout", "[NAME]", "list layouts, or switch to one"),
     ("close", "Q", "close a session's agent"),
     ("archive", "Q", "archive a session"),
@@ -679,6 +680,8 @@ class Console:
             self.run_ctl(cmd)
         elif cmd == "open" and args:
             self.run_ctl("open", args[0], *(["--title", " ".join(args[1:])] if args[1:] else []))
+        elif cmd == "term":
+            self.run_ctl("term", *([" ".join(args)] if args else []))
         elif cmd == "layout":
             self.run_ctl("layout", *(["apply", args[0]] if args else ["list"]))
         elif cmd in ("resume", "close", "archive", "focus") and args:

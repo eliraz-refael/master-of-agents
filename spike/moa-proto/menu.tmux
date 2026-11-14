@@ -7,6 +7,7 @@ display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
   "Agent spot"              g "run-shell -b '$M goto agent'" \
   "Find a session…"         / "display-popup -E -w 80% -h 70% -T '#[fg=#88c0d0 bold] ⌕ find a session ' 'python3 $D/picker.py'" \
   "New session…"            n "command-prompt -p 'folder:,title:' -I '~/private/,' \"run-shell -b \\\"$M open '%1' --title '%2'\\\"\"" \
+  "Terminal here"           $ "run-shell -b '$M term --pane #{pane_id}'" \
   "Back to moa"             m "select-window -t moa:moa" \
   "Zoom this pane"          z "resize-pane -Z" \
   "" \
@@ -19,5 +20,5 @@ display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
   "-Ctrl-a ←↑↓→  move between panes" "" "" \
   "Previous window"         [ "previous-window" \
   "Next window"             ] "next-window" \
-  "Keys and help"           ? "display-popup -E -w 84 -h 38 'less -R $D/help.txt'" \
+  "Keys and help"           ? "display-popup -E -w 84 -h 46 'less -R $D/help.txt'" \
   "Send Ctrl-a to the app"  a "send-keys C-a"

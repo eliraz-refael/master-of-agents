@@ -15,15 +15,28 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chrome  # noqa: E402
 from picture import (SESSIONS_SQL, SHOW_WORD, ago, connect, db_mtime, live, show_icon,  # noqa: E402
-                     HERE)
+                     HERE, tmux)
 
-GONE = {"ended": ("○", "ended"), "elsewhere": ("◌", "in herdr")}
+GONE = {"ended": ("○", "ended"), "elsewhere": ("◌", "in herdr"), "term": ("⌨", "terminal")}
+
+
+def terminals():
+    """Open plain terminals (moactl term marks their panes @moa_term): not sessions, but
+    the picker is where you look for anything you left running."""
+    out = []
+    for line in tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@moa_term}\t#{window_name}\t#{pane_current_path}").stdout.splitlines():
+        pane, mark, name, cwd = (line.split("\t") + ["", "", ""])[:4]
+        if mark:
+            out.append({"title": name.lstrip("⌨ "), "grp": None, "project": None, "cwd": cwd,
+                        "session_id": pane, "show": "term", "since": None, "why": cwd.replace(os.path.expanduser("~"), "~")})
+    return out
 
 
 def sessions(conn):
     """Live sessions (with their status) first, then the rest that aren't archived."""
     rows = [dict(s) for s in live(conn)[0]]  # copies: live()'s list is its cache
     seen = {s["session_id"] for s in rows}
+    rows += terminals()  # after the live sessions, before the finished ones
     rest = conn.execute(SESSIONS_SQL + """ WHERE coalesce(s.state,'') NOT IN ('archived','working','idle','waiting')
         ORDER BY s.last_seen DESC LIMIT 300""").fetchall()
     for r in rest:
@@ -76,7 +89,7 @@ def main(scr):
     chrome.use_palette(scr)
     c = chrome.color
     attr = {"waiting": c("yellow") | curses.A_BOLD, "question": c("orange") | curses.A_BOLD, "done": c("green") | curses.A_BOLD,
-            "working": c("blue"), "idle": c("text")}
+            "working": c("blue"), "idle": c("text"), "term": c("text")}
     dim, sel_attr, hit, prompt = c("dim"), c("bright", "sel"), c("yellow") | curses.A_BOLD | curses.A_UNDERLINE, c("blue") | curses.A_BOLD
     conn = connect()
     query, sel, top, stamp, rows, key = "", 0, 0, None, [], None
@@ -126,7 +139,7 @@ def main(scr):
         if k in ("\x1b", "\x03", "\x07"):  # Esc, Ctrl-c, Ctrl-g
             return None
         if k in ("\n", "\r", curses.KEY_ENTER):
-            return shown[sel]["session_id"] if shown else None
+            return shown[sel] if shown else None
         if k in (curses.KEY_UP, "\x10", curses.KEY_BTAB):
             sel -= 1
         elif k in (curses.KEY_DOWN, "\x0e", "\t"):
@@ -150,7 +163,11 @@ if __name__ == "__main__":
     os.environ.setdefault("ESCDELAY", "25")
     locale.setlocale(locale.LC_ALL, "")
     picked = chrome.wrapper(main)
-    if picked:
+    if picked and picked["show"] == "term":  # a terminal (its session_id is its pane): go to its window
+        r = tmux("select-window", "-t", picked["session_id"])
+        if r.returncode:  # closed since the picker listed it
+            tmux("display-message", "-d", "4000", f"moa: that terminal is gone ({r.stderr.strip()})")
+    elif picked:
         # moactl focus: into the cockpit's agent spot if the layout has one, else its own
         # window; resumes it first if it isn't running. moamenu shows the result as a message.
-        os.execv(os.path.join(HERE, "moamenu"), [os.path.join(HERE, "moamenu"), "focus", picked])
+        os.execv(os.path.join(HERE, "moamenu"), [os.path.join(HERE, "moamenu"), "focus", picked["session_id"]])
