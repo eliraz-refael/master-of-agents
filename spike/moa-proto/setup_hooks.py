@@ -113,32 +113,41 @@ def plugin(d, on):
     """Add or take out the moa plugin with Claude's own CLI (settings entries alone don't
     register a marketplace). Returns an error message, or None."""
     env = dict(os.environ, CLAUDE_CONFIG_DIR=d)
-    run = lambda *a: subprocess.run(["claude", "plugin", *a], env=env, capture_output=True, text=True)  # noqa: E731
+    run = lambda *a: subprocess.run(["claude", "plugin", *a], env=env, capture_output=True, text=True,  # noqa: E731
+                                    stdin=subprocess.DEVNULL, timeout=60)
     try:
         if not on:
-            run("uninstall", PLUGIN)
+            r = run("uninstall", PLUGIN)
             run("marketplace", "remove", MARKET)
-            return None
+            # not installed is fine; anything else (e.g. enabled at another scope) is worth saying
+            return None if r.returncode == 0 or not has_plugin(d) else _last_line(r, "the plugin uninstall failed")
         run("marketplace", "add", MARKET_DIR)  # fails harmlessly when it's already there
         r = run("install", PLUGIN)
     except FileNotFoundError:
-        return "the claude command isn't on PATH, so the moa plugin wasn't installed"
-    return None if r.returncode == 0 else ((r.stdout + r.stderr).strip().splitlines() or ["the plugin install failed"])[-1]
+        return f"the claude command isn't on PATH, so the moa plugin wasn't {'installed' if on else 'removed'}"
+    except subprocess.TimeoutExpired:
+        return f"the claude command hung, so the moa plugin wasn't {'installed' if on else 'removed'}"
+    return None if r.returncode == 0 else _last_line(r, "the plugin install failed")
+
+
+def _last_line(r, default):
+    return ((r.stdout + r.stderr).strip().splitlines() or [default])[-1]
 
 
 def remove(d):
-    """Take moa's hooks and plugin out of this account's settings (others stay). Returns how many hooks."""
+    """Take moa's hooks and plugin out of this account's settings (others stay). Returns (how
+    many hooks, an error message about the plugin or None)."""
     p, s = _settings(d)
     before = json.dumps(s, sort_keys=True)
     n = _strip(s)
     _unplug(s)
     if json.dumps(s, sort_keys=True) != before:
         _write(p, s)
-    plugin(d, False)
+    err = plugin(d, False)
     p, s = _settings(d)  # Claude's uninstall leaves the plugin's settings keys behind, empty
     if any(k in s and not s[k] for k in ("enabledPlugins", "extraKnownMarketplaces")):
         _write(p, {k: v for k, v in s.items() if v or k not in ("enabledPlugins", "extraKnownMarketplaces")})
-    return n
+    return n, err
 
 
 def _dq(text):
@@ -204,6 +213,10 @@ def interactive(accounts, default_only, skipped):
         extra = f" (only {', '.join(short(x) for x in a['only'])})" if a["only"] else ""
         print(f"  {'✓' if a['state'] == 'installed' else '·'} {a['name']:<16} {short(a['dir']):<22} {a['state']}{extra}  · {ago(a['last_used'])}")
     todo = [a for a in accounts if a["state"] == "not installed"]
+    for a in accounts:  # set up before there was a plugin: install again to add it, keeping its folders
+        if a["state"] == "installed" and not a["plugin"]:
+            print(f"    {a['name']} has no moa plugin yet: moactl setup "
+                  + (f"only {a['name']} {' '.join(shlex.quote(x) for x in a['only'])}" if a["only"] else f"install {a['name']}"))
     if not todo:
         print("\nEvery account is set up. (moactl setup remove NAME takes it out.)")
         return skipped

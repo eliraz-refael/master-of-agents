@@ -507,8 +507,8 @@ def setup(conn, a):
             return
         for x in accounts:
             only = f" (only {', '.join(setup_hooks.short(f) for f in x['only'])})" if x["only"] else ""
-            plug = ("  + plugin" if x["plugin"] else f"  · no plugin yet (moactl setup {'only' if x['only'] else 'install'} {x['name']})"
-                    ) if x["state"] == "installed" else ""
+            again = (f"only {x['name']} {' '.join(shlex.quote(f) for f in x['only'])}" if x["only"] else f"install {x['name']}")
+            plug = ("  + plugin" if x["plugin"] else f"  · no plugin yet (moactl setup {again})") if x["state"] == "installed" else ""
             print(f"{x['name']:<16} {setup_hooks.short(x['dir']):<22} {x['state']}{only}{plug}{'  [skipped]' if x['skipped'] else ''}")
         return
     if not a.name:
@@ -526,8 +526,9 @@ def setup(conn, a):
         print(f"tracking and the moa plugin installed for {acct['name']}, only under {', '.join(setup_hooks.short(f) for f in folders)}"
               + (f"\nbut: {err}" if err else ""))
     elif a.op == "remove":
-        n = setup_hooks.remove(acct["dir"])
-        print(f"removed moa's hook from {acct['name']}" if n else f"{acct['name']} had no moa hook")
+        n, err = setup_hooks.remove(acct["dir"])
+        print((f"removed moa's hook and plugin from {acct['name']}" if n else f"{acct['name']} had no moa hook; its moa plugin is removed")
+              + (f"\nbut: {err}" if err else ""))
     elif a.op == "skip":
         save_skipped(skipped + [acct["name"]])
         print(f"won't ask about {acct['name']} again (moactl setup install {acct['name']} if you change your mind)")
