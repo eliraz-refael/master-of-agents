@@ -27,7 +27,12 @@ import setup_hooks  # noqa: E402
 
 MASTER_DIR = os.path.normpath(os.path.join(HERE, "..", "master-chat", "master"))
 MOACTL = os.path.join(HERE, "moactl")
-ACCOUNT = os.path.expanduser("~/.claude-lead")
+# moa's own Claude account: a config folder, or an account name (claude-neeo → ~/.claude-neeo)
+def account_dir(acct):
+    return os.path.abspath(os.path.expanduser(acct if "/" in acct else f"~/.{acct}"))
+
+
+ACCOUNT = account_dir(os.environ.get("MOA_ACCOUNT") or "claude-lead")
 OPENING = ("(The console just opened a new thread for today.) Give me your opening brief: "
            "at most 6 short lines, what's hot, what's waiting on me, what's going stale, "
            "then propose 1-3 goals for today and ask which.")
@@ -445,7 +450,9 @@ class Console:
             r = m.get("result") or {}
             if what == "init":
                 t = self.thread_meta()
-                if t.get("date") == datetime.date.today().isoformat() and r.get("agentCapabilities", {}).get("loadSession"):
+                # today's thread, if it's on this account (a thread lives in one account's config folder)
+                same = account_dir(t.get("account") or "claude-lead") == ACCOUNT  # threads from before this setting: claude-lead
+                if t.get("date") == datetime.date.today().isoformat() and same and r.get("agentCapabilities", {}).get("loadSession"):
                     self.sid = t["sid"]
                     self.pending[self.acp.request("session/load", {"sessionId": t["sid"], "cwd": MASTER_DIR, "mcpServers": []})] = "load"
                     self.replaying = True
@@ -453,7 +460,7 @@ class Console:
                     self.new_thread()
             elif what == "new":
                 self.sid = r["sessionId"]
-                self.thread_meta({"sid": self.sid, "date": datetime.date.today().isoformat()})
+                self.thread_meta({"sid": self.sid, "date": datetime.date.today().isoformat(), "account": ACCOUNT})
                 self.add("sys", f"new thread {self.sid[:8]} for today")
                 self.prompt(OPENING, show=False)
             elif what == "load":
