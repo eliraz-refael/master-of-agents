@@ -124,9 +124,10 @@ def ago(ts):
 
 
 class Row:
-    def __init__(self, text, attr=0, kind=None, data=None, right=None):
+    def __init__(self, text, attr=0, kind=None, data=None, right=None, more=False):
         self.text, self.attr, self.kind, self.data = text, attr, kind, data
         self.right = right  # (text, attr) drawn against the right edge, like a task's due date
+        self.more = more  # a wrapped line of the row above (a long task): scrolls and clicks with it
 
 
 def short_path(path):
@@ -230,7 +231,7 @@ def plan(conn, width, C):
     done = conn.execute("SELECT count(*) FROM tasks WHERE status='done' AND date(updated_at)=?", (today,)).fetchone()[0]
     head = f"{datetime.date.today():%a %d %b}" + (f" · ✓ {done} done today" if done else "")
     rows = [Row(head, C["head"])]
-    tasks = conn.execute("""SELECT t.*, p.name AS project, s.state AS sstate, s.title AS stitle FROM tasks t
+    tasks = conn.execute("""SELECT t.*, p.name AS project, s.state AS sstate, s.title AS stitle, s.cwd AS scwd FROM tasks t
         LEFT JOIN projects p ON p.id=t.project_id LEFT JOIN sessions s ON s.session_id=t.session_id
         WHERE t.status NOT IN ('done','dropped','idea')""").fetchall()
     waiting = [s for s in live(conn)[0] if s["show"] == "waiting"]  # not the "still at the prompt" pings
@@ -273,7 +274,7 @@ def plan(conn, width, C):
         text = f"{title}  ({tail})" if tail else title
         lines = textwrap.wrap(text, max(10, width - 5 - (len(chip[0]) + 1 if chip else 0))) or [""]
         rows.append(Row(f"  {mark} {lines[0]}", attr, kind, data, chip))
-        rows.extend(Row(f"    {ln}", attr) for ln in lines[1:])
+        rows.extend(Row(f"    {ln}", attr, more=True) for ln in lines[1:])
 
     if not by:
         rows.append(Row("  nothing tracked yet: moa fills this in as sessions report", C["dim"]))
@@ -309,7 +310,7 @@ def plan(conn, width, C):
         rows.append(Row(""))
         rows.extend(Row(ln, C["dim"]) for ln in textwrap.wrap("no open tasks: " + ", ".join(quiet), max(10, width - 1)))
     rows.append(Row(""))
-    rows.append(Row("↵ jump to its session · d done · x drop", C["dim"]))
+    rows.append(Row("↵ or click: jump to its session · d done · x drop", C["dim"]))
     return rows
 
 
@@ -672,6 +673,53 @@ def tree_key(scr, conn, k, cur):
     return None
 
 
+def follow(rows, selectable, sel, top, body):
+    """The top row that shows the selected item whole: its wrapped lines, and the headings
+    above it (a project's name; the date and first project above the first item). Without
+    the headings, `top` stopped at the first selectable row and the top of the list could
+    never be scrolled back into view. The last item brings the rows after it (key hints)."""
+    start = max((i for i in selectable if i < sel), default=-1) + 1
+    end = len(rows) - 1 if sel == selectable[-1] else sel
+    while end + 1 < len(rows) and rows[end + 1].more:
+        end += 1
+    if top > start:
+        top = max(start, end - body + 1)
+    if end >= top + body:
+        top = end - body + 1
+    return min(top, sel)  # an item taller than the panel shows from its first line
+
+
+def folder(row):
+    """The folder a selected row stands for (a session's, a project's, a big-picture task's
+    session's), or ""."""
+    key = {"session": "cwd", "project": "path", "task": "scwd"}.get(row.kind)
+    try:
+        return (row.data[key] or "") if key else ""
+    except (IndexError, KeyError):  # a task row from a view that doesn't join its session
+        return ""
+
+
+def row_at(rows, y, top, body):
+    """The selectable row drawn at body line `y` (a wrapped line counts as its task's), or None."""
+    i = top + y
+    if not 0 <= y < body or i >= len(rows):
+        return None
+    while i > 0 and rows[i].more:
+        i -= 1
+    return i if rows[i].kind else None
+
+
+def page(selectable, sel, step):
+    """The selectable row about `step` rows from `sel` (PgUp/PgDn), stopping at the ends."""
+    if step < 0:
+        return next((i for i in reversed(selectable) if i <= sel + step), selectable[0])
+    return next((i for i in selectable if i >= sel + step), selectable[-1])
+
+
+WHEEL_UP, WHEEL_DOWN = getattr(curses, "BUTTON4_PRESSED", 0x80000), getattr(curses, "BUTTON5_PRESSED", 0x200000)
+CLICK = curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED
+
+
 def main(scr):
     import chrome  # the shared palette and frame (imported here: moactl imports this module without curses)
     from layout import LABELS
@@ -685,11 +733,14 @@ def main(scr):
     selected = c("bright", "sel")
     if PANEL:
         chrome.use_palette(scr)
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)  # the wheel scrolls, a click is Enter on that row
+    curses.mouseinterval(0)  # report presses at once; no waiting to tell clicks from double clicks
     conn = connect()
     view, sel, top, expanded, collapsed, msg, confirm = 0, 0, 0, set(), set(), "", None
+    tracking = True  # the view follows the selection; after the wheel, it stays where you scrolled until a key
     if PANEL:
         view = VIEWS.index(PANEL_VIEW[PANEL])
-    seen, rows, strip = -1, [], []
+    seen, rows, strip, told = -1, [], [], None
     me = os.path.abspath(__file__)
     code = os.stat(me).st_mtime_ns
     animate = False
@@ -713,12 +764,15 @@ def main(scr):
         selectable = [i for i, r in enumerate(rows) if r.kind]
         if selectable and sel not in selectable:
             sel = min(selectable, key=lambda i: abs(i - sel))
+        here = folder(rows[sel]) if selectable else ""
+        if PANEL and here != told:  # one tmux call per change of selected folder, for `moactl term`
+            told = here
+            tmux("set", "-p" if here else "-pu", "-t", os.environ.get("TMUX_PANE", ""), "@moa_here", *([here] if here else []))
         y_top = 0 if PANEL else 1
         body = max(1, ih - 2) if PANEL else max(1, h - STRIP - 3)
-        if sel < top:
-            top = sel
-        elif sel >= top + body:
-            top = sel - body + 1
+        if tracking and selectable:
+            top = follow(rows, selectable, sel, top, body)
+        top = max(0, min(top, len(rows) - body))
         scr.erase()
         if PANEL:
             chrome.frame(scr, LABELS.get(PANEL, PANEL))
@@ -745,9 +799,9 @@ def main(scr):
             new = fresh(a["ts"])
             line = f"{a['ts'][11:16]} {'✦' if new else ' '}{a['text']}"
             scr.addnstr(y0 + 1 + i, 0, line, w - 1, C.get(a["who"], 0) | (curses.A_BOLD | curses.A_STANDOUT if new and int(time.monotonic() * 4) % 2 else curses.A_BOLD if new else 0))
-        keys = ("⏎ open · n new · + group · m move · r rename · D del group · a archive · x close"
+        keys = ("⏎/click open · n new · + group · m move · r rename · D del group · a archive · x close"
                 if VIEWS[view] == "Sessions" else
-                "⏎ jump · j/k · Ctrl-a / find" if VIEWS[view] == "Status" else
+                "⏎/click jump · j/k · Ctrl-a / find" if VIEWS[view] == "Status" else
                 "j/k · ⏎ open · y/n suggestion" if PANEL else
                 "1-6/tab · j/k · ⏎ open · n/N new lead/neeo · a archive · x close · y/n sugg · q")
         foot = confirm[0] if confirm else (msg or keys)
@@ -758,12 +812,29 @@ def main(scr):
         if k == -1:
             continue
         msg = ""
-        cur = rows[sel] if rows and sel < len(rows) and rows[sel].kind else None
         if confirm:
             if k == ord("y"):
                 msg = confirm[1]()
             confirm, seen = None, -1
             continue
+        if k == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, b = curses.getmouse()
+            except curses.error:
+                continue
+            if b & (WHEEL_UP | WHEEL_DOWN):
+                top = max(0, min(top + (3 if b & WHEEL_DOWN else -3), len(rows) - body))
+                shown = [i for i in selectable if top <= i < top + body]
+                if shown and sel not in shown:  # keys act on what you can see, so the selection comes along
+                    sel = min(shown, key=lambda i: abs(i - sel))
+                tracking = False
+                continue
+            hit = row_at(rows, my - oy - y_top, top, body) if b & CLICK and ox <= mx < ox + iw else None
+            if hit is None:
+                continue
+            sel, k = hit, 10  # a click selects the row and opens it, like Enter (herdr's single click)
+        tracking = True
+        cur = rows[sel] if rows and sel < len(rows) and rows[sel].kind else None
         if k == ord("q") and not PANEL:
             return
         if PANEL and k in (ord("\t"), curses.KEY_RIGHT, ord("l"), curses.KEY_BTAB, curses.KEY_LEFT, ord("h")) + tuple(range(ord("1"), ord("1") + len(VIEWS))):
@@ -778,10 +849,12 @@ def main(scr):
             sel = next((i for i in selectable if i > sel), sel)
         elif k in (ord("k"), curses.KEY_UP) and selectable:
             sel = next((i for i in reversed(selectable) if i < sel), sel)
-        elif k == ord("g") and selectable:
+        elif k in (ord("g"), curses.KEY_HOME) and selectable:
             sel = selectable[0]
-        elif k == ord("G") and selectable:
+        elif k in (ord("G"), curses.KEY_END) and selectable:
             sel = selectable[-1]
+        elif k in (curses.KEY_PPAGE, curses.KEY_NPAGE) and selectable:
+            sel = page(selectable, sel, body if k == curses.KEY_NPAGE else -body)
         elif k in (10, 13, curses.KEY_ENTER, ord(" ")) and cur:
             if cur.kind == "project":
                 expanded ^= {cur.data["id"]}

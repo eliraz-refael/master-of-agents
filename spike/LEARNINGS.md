@@ -211,3 +211,22 @@
   not a wall. Tested: the agent reported it and didn't work around it.
 - Two brains, when they come, are two separate moas (the user's lean): the folder picks
   the brain, each brain lists the accounts it accepts, and peers never cross brains.
+
+## Mouse in the panels, and plain terminals (2026-11-15)
+- "You cannot click on anything, unlike herdr." The tree, big picture and status panels
+  now take the mouse: the wheel scrolls, a click is Enter on that row (jump to the
+  session, fold a group), herdr's single click. Clicking also selects the row, so the
+  keys (r, m, d…) act on it afterwards. Nothing extra was needed in tmux: with `mouse on`,
+  tmux's default bindings forward clicks and the wheel to a pane that asked for mouse
+  events (curses `mousemask`), and only fall back to copy mode when it didn't.
+- The wheel moves the view, not the selection, but drags the selection along when it
+  would scroll off screen, so a key never acts on a row you can't see.
+- "Couldn't scroll all the way up" was the selection logic: the view followed only the
+  selected row, and the first selectable row sits under headings (the date, a project's
+  name), so the view could never get above it again. The view now keeps the selected
+  item whole (a wrapped task's lines, the headings above it; the top of the list for the
+  first item, the key hints for the last).
+- A plain shell has its place next to the agents (the dev server): `moactl term`, Ctrl-a $,
+  `/term`. It opens where you are: the agent's folder, or on a panel the selected
+  session's (the panel publishes it as a pane option, one tmux call per change). It isn't
+  a session in the brain; the picker lists open terminals so they don't get lost.
