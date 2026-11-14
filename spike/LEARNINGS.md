@@ -194,3 +194,20 @@
 - The status panel is its own panel (the triage layout, Ctrl-a 4), not a mode of the
   tree: the tree answers "where is it" (by group, every session, editing), the status
   panel answers "what needs me" (by urgency, live only).
+
+## A plugin makes every session moa-aware (2026-11-14)
+- The startup note only reaches sessions moa starts; a session started elsewhere never
+  learns moa exists. A Claude Code plugin reaches every session on an account: a skill
+  (its description is always in context; the body loads when used) and `bin/moactl`
+  (a plugin's bin/ is on the agent's PATH). Tested: a fresh session with only the plugin,
+  asked "ask moa what's waiting on me", found moactl and asked.
+- Settings entries alone (`extraKnownMarketplaces` + `enabledPlugins`) don't register a
+  local marketplace; Claude's CLI does (`claude plugin marketplace add DIR`, then
+  `install`, per CLAUDE_CONFIG_DIR). A directory marketplace is read in place, so edits
+  apply at the next session start with no reinstall.
+- On a shared account (private projects on the work account) moa is switched off outside
+  the private folders: `moactl setup only` writes MOA_ONLY_UNDER into the account's
+  settings `env`, and the plugin's moactl refuses elsewhere. A guard against accidents,
+  not a wall. Tested: the agent reported it and didn't work around it.
+- Two brains, when they come, are two separate moas (the user's lean): the folder picks
+  the brain, each brain lists the accounts it accepts, and peers never cross brains.

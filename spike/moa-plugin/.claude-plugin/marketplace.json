@@ -1,0 +1,7 @@
+{
+  "name": "moa-local",
+  "owner": { "name": "master-of-agents" },
+  "plugins": [
+    { "name": "moa", "source": "./moa", "description": "Talk to your other agent sessions and to moa, the agent that keeps the big picture." }
+  ]
+}
