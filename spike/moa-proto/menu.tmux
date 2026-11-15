@@ -8,8 +8,8 @@ display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
   "Find a session…"         / "display-popup -E -w 80% -h 70% -T '#[fg=#88c0d0 bold] ⌕ find a session ' 'python3 $D/picker.py'" \
   "New session…"            n "command-prompt -p 'folder:,title:' -I '~/private/,' \"run-shell -b \\\"$M open '%1' --title '%2'\\\"\"" \
   "Terminal here"           $ "run-shell -b '$M term --pane #{pane_id}'" \
-  "Split: shell beside"     | "if -F '#{==:#{window_name},moa}' 'display \"split an agent or terminal window; the cockpit is a layout\"' 'split-window -h -c \"#{pane_current_path}\"'" \
-  "Split: shell below"      - "if -F '#{==:#{window_name},moa}' 'display \"split an agent or terminal window; the cockpit is a layout\"' 'split-window -v -c \"#{pane_current_path}\"'" \
+  "Split: shell beside"     | "if -F '#{==:#{window_name},moa}' 'display \"split an agent or terminal window; the cockpit is a layout\"' 'split-window -h -c \"##{pane_current_path}\" ; set -p @moa_label \"⌨ shell\"'" \
+  "Split: shell below"      - "if -F '#{==:#{window_name},moa}' 'display \"split an agent or terminal window; the cockpit is a layout\"' 'split-window -v -c \"##{pane_current_path}\" ; set -p @moa_label \"⌨ shell\"'" \
   "Back to moa"             m "select-window -t moa:moa" \
   "Zoom this pane"          z "resize-pane -Z" \
   "" \
