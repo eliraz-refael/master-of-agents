@@ -66,8 +66,9 @@ pub(crate) fn brain_row(
     })
 }
 
-/// The project named `name`, ignoring case.
+/// The project named `name`, ignoring case and surrounding spaces (names are stored
+/// trimmed).
 pub(crate) fn project_named<'a>(state: &'a State, name: &str) -> Option<&'a crate::model::Project> {
-    let want = name.to_lowercase();
+    let want = name.trim().to_lowercase();
     state.projects().find(|p| p.name.to_lowercase() == want)
 }

@@ -211,9 +211,15 @@ pub(crate) fn set(state: &mut State, tx: &mut Tx, now: &Now, a: &TaskSet) -> Res
     if a.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
         return Err(OpError("--title can't be empty".into()));
     }
+    // Every task has someone on it, so an empty `--who` is refused rather than ignored.
+    if a.who.as_deref().is_some_and(|w| w.trim().is_empty()) {
+        return Err(OpError(
+            "--who can't be empty; a task always has someone on it".into(),
+        ));
+    }
     // Every value is checked before any is applied.
     let given_status = a.status.as_deref().map(parse_status).transpose()?;
-    let who = non_empty(&a.who).map(parse_who).transpose()?;
+    let who = a.who.as_deref().map(parse_who).transpose()?;
     let priority = match a.priority.as_deref() {
         Some("") => Some(None),
         Some(p) => Some(Some(parse_priority(p)?)),

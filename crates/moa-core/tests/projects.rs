@@ -125,6 +125,13 @@ fn project_show_by_substring() {
     );
     // The lowest id wins among several substring matches.
     assert!(ok(&mut st, show("t"), &now).text.starts_with("Lantern "));
+    // Spaces around the name don't matter, and spaces alone match nothing.
+    assert!(
+        ok(&mut st, show("  driftwood "), &now)
+            .text
+            .starts_with("Driftwood [paused]")
+    );
+    assert_eq!(err(&mut st, show("   "), &now), "no project matches '   '");
 }
 
 #[test]

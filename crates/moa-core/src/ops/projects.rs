@@ -30,9 +30,10 @@ fn cut(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }
 
-/// The project named `name` exactly (ignoring case), else the lowest-id one whose name
-/// contains it.
+/// The project named `name` exactly (ignoring case and surrounding spaces), else the
+/// lowest-id one whose name contains it.
 fn find<'a>(state: &'a State, name: &str) -> Option<&'a Project> {
+    let name = name.trim();
     if name.is_empty() {
         return None;
     }

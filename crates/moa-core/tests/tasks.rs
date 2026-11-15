@@ -596,6 +596,51 @@ fn no_task_and_empty_title() {
 }
 
 #[test]
+fn an_empty_who_is_refused_not_ignored() {
+    let (b, mut st) = typical();
+    let now = b.now();
+    let before = task(&st, 1);
+    for w in ["", "  "] {
+        let set = TaskSet {
+            who: s(w),
+            status: s("done"),
+            ..task_set(1)
+        };
+        let fx = effects(&mut st, Op::TaskSet(set), &now);
+        assert_eq!(
+            reply_of(&fx).unwrap().as_ref().unwrap_err().0,
+            "--who can't be empty; a task always has someone on it"
+        );
+        assert!(!persisted(&fx));
+    }
+    assert_eq!(task(&st, 1), before);
+}
+
+#[test]
+fn a_project_name_with_spaces_around_it_still_finds_the_project() {
+    let (b, mut st) = typical();
+    let now = b.now();
+    let text = ok(
+        &mut st,
+        Op::TaskAdd(task_add("  lantern ", "Trim me")),
+        &now,
+    )
+    .text;
+    let id: i64 = text
+        .strip_prefix("task #")
+        .and_then(|t| t.strip_suffix(" added"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let lantern = st.projects().find(|p| p.name == "Lantern").unwrap().id;
+    assert_eq!(task(&st, id).project_id, Some(lantern));
+    assert_eq!(
+        ok(&mut st, note_op("n", Some(" Lantern "), None), &now).text,
+        "noted"
+    );
+}
+
+#[test]
 fn a_task_with_an_unknown_value_is_not_edited() {
     let b = TypicalBrain::new();
     let mut snapshot = b.snapshot();
