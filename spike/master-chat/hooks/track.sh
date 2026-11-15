@@ -81,6 +81,9 @@ UPDATE asks SET status='answered', reply=$(q "${full:-}"), answered_at=datetime(
  WHERE id=(SELECT min(id) FROM asks WHERE to_sid=$(q "$sid") AND status='received');
 SQL
 fi
+# Running again, so no longer asleep (moactl sleep). On its own, like the asks: a brain
+# without the column only skips it.
+[ "$kind" = start ] && sqlite3 "$db" "PRAGMA busy_timeout=2000; UPDATE sessions SET asleep_at=NULL WHERE session_id=$(q "$sid");" >/dev/null 2>&1
 # A new session learns it has peers (SessionStart output becomes context), so asking
 # another agent needs no setup.
 if [ "$kind" = start ]; then

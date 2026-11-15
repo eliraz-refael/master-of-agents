@@ -125,7 +125,8 @@ def panes(target="-a"):
 
 
 def alive(pane):
-    return bool(pane) and tmux("display-message", "-p", "-t", pane, "#{pane_id}").returncode == 0
+    # by what it prints: tmux 3.8's display-message exits 0 for a pane that's gone, printing nothing
+    return bool(pane) and tmux("display-message", "-p", "-t", pane, "#{pane_id}").stdout.strip() == pane
 
 
 def panel_of(pane):

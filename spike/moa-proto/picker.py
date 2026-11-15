@@ -15,9 +15,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chrome  # noqa: E402
 from picture import (SESSIONS_SQL, SHOW_WORD, ago, connect, db_mtime, live, show_icon,  # noqa: E402
-                     HERE, tmux)
+                     ASLEEP, HERE, asleep, tmux)
 
-GONE = {"ended": ("○", "ended"), "elsewhere": ("◌", "in herdr"), "term": ("⌨", "terminal")}
+GONE = {"ended": ("○", "ended"), "asleep": (ASLEEP, "asleep"),"elsewhere": ("◌", "in herdr"), "term": ("⌨", "terminal")}
 
 
 def terminals():
@@ -42,7 +42,7 @@ def sessions(conn):
     for r in rest:
         if r["session_id"] not in seen:
             s = dict(r)
-            s["show"], s["since"], s["why"] = r["state"] or "ended", r["last_seen"], ""
+            s["show"], s["since"], s["why"] = "asleep" if asleep(r) else r["state"] or "ended", r["last_seen"], ""
             rows.append(s)
     for s in rows:
         title = s["title"] or s["project"] or os.path.basename(s["cwd"] or "") or s["session_id"][:8]
@@ -114,13 +114,15 @@ def main(scr):
         for y, s in enumerate(shown[top:top + body], start=2):
             title, grp, word = s["cols"]
             glyph = show_icon(s["show"]) if s["show"] in SHOW_WORD else GONE.get(s["show"], ("·",))[0]
-            line = f" {glyph} {title[:tw - 1]:<{tw}}{grp[:max(0, gw - 1)]:<{gw}}{word:<10}{ago(s['since']):>4}  {s['why'] or ''}"
-            line = line.replace("\n", " ")[:w - 1]
+            wide = glyph == ASLEEP  # two cells: it takes the space after it too, so the title starts at cell 3 either way
+            line = f" {glyph}{'' if wide else ' '}{title[:tw - 1]:<{tw}}{grp[:max(0, gw - 1)]:<{gw}}{word:<10}{ago(s['since']):>4}  {s['why'] or ''}"
+            line = line.replace("\n", " ")[:w - 1 - wide]
             on = top + y - 2 == sel
             base = sel_attr if on else attr.get(s["show"], dim)
-            scr.addnstr(y, 0, line.ljust(w - 1) if on else line, w - 1, base)
-            for x in marks(line[3:3 + tw + gw], terms):  # highlight in the title and group only
-                scr.addnstr(y, 3 + x, line[3 + x], 1, (sel_attr | curses.A_BOLD | curses.A_UNDERLINE) if on else hit)
+            scr.addnstr(y, 0, line.ljust(w - 1 - wide) if on else line, w - 1, base)
+            at = 3 - wide  # where the title starts in the string
+            for x in marks(line[at:at + tw + gw], terms):  # highlight in the title and group only
+                scr.addnstr(y, 3 + x, line[at + x], 1, (sel_attr | curses.A_BOLD | curses.A_UNDERLINE) if on else hit)
         if not shown:
             scr.addnstr(2, 2, "no session matches", w - 3, dim)
         hint = "↵ jump · ↑↓ move · esc close"

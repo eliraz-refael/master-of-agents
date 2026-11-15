@@ -230,3 +230,20 @@
   `/term`. It opens where you are: the agent's folder, or on a panel the selected
   session's (the panel publishes it as a pane option, one tmux call per change). It isn't
   a session in the brain; the picker lists open terminals so they don't get lost.
+
+## Idle sessions go to sleep (2026-11-15)
+- "Put some sessions to sleep if they haven't been active lately to save some RAM, keeping
+  the conversation ID." An idle agent is a whole Node process; a conversation ID is free.
+  The console now closes sessions idle for 6 hours (`MOA_SLEEP_AFTER`, `/sleep`), says so
+  in one line, and the tree shows them as 💤; Enter resumes, as for any ended session.
+- What counts as idle is the status panel's: nothing you'd miss (no unseen reply, no
+  question, not blocked on you), not on screen, not in an open ask. And the pane has to
+  run *that* conversation: pane IDs restart with the tmux server, and a session that died
+  without its SessionEnd still says idle, holding an ID that's now someone else's pane.
+- Asleep is a column (`asleep_at`), not a state: killing the pane fires the SessionEnd hook,
+  which writes state='ended' and would race any state moa wrote.
+- tmux 3.8's `display-message -t PANE` exits 0 for a pane that's gone, so "is it alive"
+  has to compare what it prints. Otherwise a closed session's dead pane looks alive, and
+  `moactl resume` says "already running" instead of resuming it.
+- 💤 is one character in two cells (tmux and wcwidth agree); the panels place things by
+  `len()`, so it stands in for a glyph *and* its space.

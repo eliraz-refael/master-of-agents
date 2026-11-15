@@ -81,6 +81,10 @@ def connect():
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
             pass
+    try:  # when moa put the session to sleep (moactl sleep); a column of its own, see moactl.put_to_sleep
+        conn.execute("ALTER TABLE sessions ADD COLUMN asleep_at TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.executescript(SETUP)
     conn.commit()
     return conn
@@ -136,6 +140,22 @@ def short_path(path):
     return "/".join(parts[-2:]) if len(parts) > 3 else path
 
 
+ASLEEP = "💤"  # two cells wide (tmux and wcwidth agree), so it takes the place of a glyph and the space after it
+
+
+def asleep(s):
+    """Put to sleep by moa (its window closed to free memory) and not running since."""
+    try:
+        return bool(s["asleep_at"]) and s["state"] not in LIVE
+    except (IndexError, KeyError):  # a row without the column
+        return False
+
+
+def lead(s, glyph):
+    """A row's glyph and the space after it: two cells, which 💤 fills on its own."""
+    return ASLEEP if asleep(s) else glyph + " "
+
+
 def tree_line(s, width, state=None):
     title = s["title"] or (s["last_prompt"] or "").replace("\n", " ")[:60] or s["session_id"][:8]
     acct = (s["account"] or "").replace("claude-", "")
@@ -146,7 +166,7 @@ def tree_line(s, width, state=None):
     tw = max(8, width - 7 - sum(n for _, n in cols))
     extra = "".join(f"{text[:n - 1]:<{n}}" for text, n in cols)
     glyph = show_icon(state) if state in SHOW_ICON else icon(s["state"])
-    return f"{glyph} {title[:tw]:<{tw}} {extra}{ago(s['last_seen']):>4}"
+    return f"{lead(s, glyph)}{title[:tw]:<{tw}} {extra}{ago(s['last_seen']):>4}"
 
 
 def session_tree(sessions, groups, collapsed, width, C, shows=None):
@@ -411,7 +431,8 @@ def build(conn, view, expanded, collapsed, width, C):
         nwork = sum(x["state"] == "working" for x in sessions)
         shows = {r["session_id"]: r["show"] for r in live(conn)[0]}
         nwait = sum(v == "waiting" for v in shows.values())
-        head = f"{len(sessions)} sessions · {nlive} live"
+        nsleep = sum(asleep(x) for x in sessions)
+        head = f"{len(sessions)} sessions · {nlive} live" + (f" · {nsleep} asleep" if nsleep else "")
         if nwork:
             head += f" · {icon('working')} {nwork} working"
         if nwait:
@@ -561,7 +582,8 @@ def push_status(conn):
 
 
 def pane_alive(pane):
-    return bool(pane) and tmux("display-message", "-p", "-t", pane, "#{pane_id}").returncode == 0
+    # by what it prints: tmux 3.8's display-message exits 0 for a pane that's gone, printing nothing
+    return bool(pane) and tmux("display-message", "-p", "-t", pane, "#{pane_id}").stdout.strip() == pane
 
 
 def act_session(conn, s):

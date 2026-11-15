@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen   TEXT,
   pane        TEXT,                          -- tmux pane id, when it runs in tmux
   tmux        TEXT,                          -- tmux socket path
-  grp         TEXT                           -- tree group, e.g. 'Private/Neeo'
+  grp         TEXT,                          -- tree group, e.g. 'Private/Neeo'
+  asleep_at   TEXT                           -- moa closed it to free memory (moactl sleep); cleared when it runs again
 );
 
 CREATE TABLE IF NOT EXISTS events (
