@@ -44,6 +44,27 @@ Slice 2 items 6–10 and its "done when" and "try it"; P4, P10, P11, P13. Parity
 `caller_store`, `TypicalBrain`. Read 2a's calls S1–S19 first; S4 (group commit) and S17
 (the `MOA_ROOT` gate) shape this plan most.
 
+**Notes from 2a's final review** (apply in the task named, or the first that touches it):
+- `brief`/`attention` are `Op::Brief(NoParams)` / `Op::Attention(NoParams)`; `Done` derives
+  `Deserialize`.
+- Every `--brain B` (`moa daemon|status|shutdown|sql|service`) parses `BrainName` before any
+  `Paths` accessor, so `--brain ../x` can't escape the data dir.
+- `route`, `brain_for_folder` and `project add` work on canonical paths: canonicalise the
+  cwd and any path first (`moa_platform::canonical`). `account_for_store` compares exact
+  paths: canonicalise `caller_store` first.
+- `route` can return `NotAvailable` for brain+except accounts too (a relative or `..` cwd, or
+  an except folder no other brain owns). Every caller drops-and-logs or refuses; none falls
+  back to the opener or default.
+- Log the config's `skipped_tables` once at start (Task 6 step 5 already does).
+- `Input::ActorFailed.message` is dropped from both the log and the `Error` event today.
+  Decide in Task 4: show the raw text on the console event only (never logged), or carry a
+  contents-free cause.
+- `StoreHandle` has no join; decide in Task 6 whether `stop` waits for a running backup.
+- **Pending the owner's decision:** an account that isn't in `[accounts]` routes to the
+  default brain (spec §6.9). From 2b, `moactl` writes make that reachable: a forgotten work
+  account would write into the private brain. The owner chooses before Task 7 whether 2b
+  refuses moactl writes from an unconfigured store when moa.toml configures any account.
+
 ## PRs (roadmap P4)
 
 Three PRs, each its own branch from `main` after the previous one merged, each with
@@ -223,7 +244,7 @@ The roadmap's and 2a's Global Constraints apply. Also:
       `{"jsonrpc":"2.0","id":7,"method":"task.add","params":{"project":"Lantern","title":"x",…}}`
       → `Request { id: Num(7), call: Op(TaskAdd(..)) }`.
     - `unit_ops_take_any_empty_params`: `brief` with no params, `"params": null` and
-      `"params": {}` → `Op(Brief)` each.
+      `"params": {}` → `Op::Brief(NoParams)` each (2a made `brief`/`attention` one-field variants so serde accepts all three).
     - `the_error_table`: each bad input above gives its code, its exact message and its id.
     - `string_ids_round_trip`: an id of `"a"` comes back as `"a"`.
     - `hook_is_a_notification`: `{"jsonrpc":"2.0","method":"hook","params":{…}}` → `Hook`.
@@ -283,7 +304,7 @@ The roadmap's and 2a's Global Constraints apply. Also:
   | `task OP ARGS…` | OP ∈ add, set, ls; `--today --not-today --status --blocked-on --title --who {you,agent,other} --due --session --note --all --priority {p0,p1,p2,""}` | `TaskLs { project: args.first(), all }`; `TaskAdd { project: args[0], title: args[1..].join(" ") }`, with fewer than 2 args → Usage `moactl task add PROJECT TITLE… [--who you\|agent\|other] [--due DATE] [--session ID] [--status S]`; `TaskSet { id: args[0] }`, with a missing or non-numeric id → Usage `moactl task set ID [--status S] [--title T] [--who W] [--due D] [--priority P] [--session ID] [--note N]` |
   | `suggest TEXT` | `--do ARGS` (repeatable) | `Suggest { text, actions }` (Task 3) |
   | `suggestion OP [ID]` | OP ∈ yes, no, later, ls | `SuggestionAnswer`/`SuggestionLs` (Task 3) |
-  | `brief`, `attention` | | `Brief`, `Attention` |
+  | `brief`, `attention` | | `Brief(NoParams)`, `Attention(NoParams)` |
   | `open PATH` | `--account --title --group --prompt --bg` | NotYet |
   | `resume ID`, `focus Q`, `close ID` | `--bg` on resume | NotYet |
   | `sleep [ID…]` | `--dry-run`, `--idle HOURS` (f64) | NotYet |
@@ -401,7 +422,8 @@ The roadmap's and 2a's Global Constraints apply. Also:
     - **At `Startup`** (not `Reload`, which only replaces the state; 2a Task 9): every open or later suggestion that isn't
       flagged and has actions is re-checked with `parse_action`. A failing one gets
       `actions_invalid = "an action doesn't parse as moactl"` (committed, so it persists),
-      plus a `Log` naming its id.
+      plus a `Log` naming its id. Startup's effects keep the ordering rule: this `Persist`
+      goes before Startup's `Publish` (`check_order` rejects a `Persist` after a `Publish`).
 
 - [ ] **Step 1: Write the failing tests** (`tests/suggestions.rs`, on
   `TypicalBrain::state_with(Deps { parse_action: Some(moa_proto::cli::parse_action), canonical: |p| p.to_path_buf(), home })`)
@@ -530,7 +552,11 @@ The roadmap's and 2a's Global Constraints apply. Also:
   That's where batching comes from.
 - **The scheduler** keeps `BTreeMap<TimerKey, UtcMs>`, arms the `WallTimer` at the
   earliest, and on each `fired()` sends `Timer(key)` for every key whose deadline ≤
-  `clock.wall()` (`stats.timer_fires += 1` each). It runs under `supervise`.
+  `clock.wall()` (`stats.timer_fires += 1` each). After **every** `fired()`, due or not, it
+  re-arms the earliest remaining deadline: the macOS kqueue timer is one-shot, so a fire with
+  nothing due would otherwise lose the backup alarm. On `ZoneChanged` (and any detected
+  wall-clock step) it re-derives and re-arms every deadline, because macOS absolute timers
+  don't follow wall-clock steps. It runs under `supervise`.
 - **`supervise`** restarts `make()` after a panic (`JoinError::is_panic`), calling `failed`
   with the panic message's first line, which sends `ActorFailed`. The restart delay is 1 s,
   doubling to 30 s. A normal return isn't restarted.
@@ -580,7 +606,9 @@ The roadmap's and 2a's Global Constraints apply. Also:
   - `crates/moa-daemon/src/core_task.rs`.
   - `crates/moa-core/src/op.rs`:
     `#[doc(hidden)] #[cfg_attr(feature = "schema", schemars(skip))] Op::DebugPanic`, kept
-    out of `Op::METHODS` so the wire can't reach it.
+    out of `Op::METHODS` so the wire can't reach it. 2a's `op_methods_match_the_variants`
+    ties `METHODS` to the variants, so extend that test to name `DebugPanic` as the one
+    exception, and add an `ops::run` arm that panics.
 - Test: `crates/moa-daemon/tests/failures.rs`
 
 **Interfaces:**
@@ -761,7 +789,7 @@ The roadmap's and 2a's Global Constraints apply. Also:
     from `MOA_LOG` (default `info`). Lines name ids and methods, never record text (S15).
   - **`moa daemon [--brain B] [--notify-ready]`** (`--brain` defaults to `default`):
     - `Paths::from_env()`, then `check_v1_allowed()` (D20).
-    - `Config::from_file_text(paths.read_config()?, home, moa_platform::canonical)`.
+    - `Config::from_file_text(paths.read_config()?.as_deref(), home, moa_platform::canonical)`.
     - `TimeZone::try_system()` (D12); `WallAlarm::new()`; `ZoneWatch::system()` (on
       failure, log and run without it); a zone change → `core.zone_changed(TimeZone::try_system())`.
     - `Deps { parse_action: Some(moa_proto::cli::parse_action), canonical: moa_platform::canonical, home }`;
@@ -771,7 +799,8 @@ The roadmap's and 2a's Global Constraints apply. Also:
 
 - [ ] **Step 1: Write the failing tests** (`tests/server.rs`)
   - Each test runs an in-process `run` on a `/tmp` short root. The DB is put in place with
-    `moa_store::backup::vacuum_into(TypicalBrain::store().conn(), &paths.db("default"))`,
+    `moa_store::backup::vacuum_into(brain.store().conn(), &paths.db("default"))` (with
+    `let brain = TypicalBrain::new()`; `store()` takes `&self`),
     with `FakeTime` and `Ready::Channel`.
   - A tiny raw client writes and reads JSON lines over a std `UnixStream`.
   - `hello_then_ops_over_the_socket`: hello → `matched: true`; `task.ls` → its text has

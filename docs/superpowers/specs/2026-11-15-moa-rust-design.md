@@ -619,6 +619,10 @@ the injected plugin and so full tracking.
   anything else goes to B; with `only`, a cwd outside those folders gets `None` ("moa isn't
   available here"); otherwise the opener or the default brain. Paths are compared on whole
   components after `~` expansion and canonicalization; empty entries are ignored (lesson 37).
+  Isolation guards (v1 slice 2a): an `except` cwd never goes to B, even when B is the opener;
+  it goes to the brain that owns the folder (the most specific configured folder wins), else
+  `default`, else `None`. For an account with limits, a cwd that is relative or contains `..`
+  gets `None`. The same folder in two brains is a config error.
   A session's brain is fixed when it's first seen and never changes when its cwd moves.
 - **Opening in another brain's folder is refused [C14]**: if `route(account, cwd, self)` isn't
   this brain, `open` says "~/work/x belongs to the work brain; open it from `moa work`". In the
