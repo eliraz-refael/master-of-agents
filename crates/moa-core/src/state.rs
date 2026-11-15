@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::UtcMs;
 use crate::change::Change;
 use crate::config::{BrainName, Config};
+use crate::effect::RefuseWrites;
 use crate::model::*;
 use crate::publish::{ACTIVITY_SHOWN, Model};
 
@@ -136,6 +137,7 @@ pub struct State {
     brain: BrainName,
     config: Config,
     pub(crate) now: UtcMs,
+    pub(crate) refuse_writes: Option<RefuseWrites>,
     pub(crate) model: Arc<Model>,
     pub(crate) projects: BTreeMap<ProjectId, Project>,
     pub(crate) tasks: BTreeMap<TaskId, Task>,
@@ -162,6 +164,7 @@ impl State {
             brain,
             config,
             now: UtcMs(0),
+            refuse_writes: None,
             model: Arc::new(Model::default()),
             projects: BTreeMap::new(),
             tasks: BTreeMap::new(),
@@ -188,6 +191,11 @@ impl State {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Set while the store can't be written to; see [`RefuseWrites`].
+    pub fn refuse_writes(&self) -> Option<&RefuseWrites> {
+        self.refuse_writes.as_ref()
     }
 
     pub fn model(&self) -> Arc<Model> {
@@ -238,7 +246,6 @@ impl State {
     }
 
     /// The id the next row of `table` takes.
-    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     pub(crate) fn next_id(&self, table: Table) -> i64 {
         let n = &self.next_ids;
         match table {
@@ -254,7 +261,6 @@ impl State {
     }
 
     /// The time views are computed at. The caller sets it from `Now` before publishing.
-    #[allow(dead_code)] // first caller: Tasks 9-11
     pub(crate) fn set_now(&mut self, now: UtcMs) {
         self.now = now;
     }
@@ -304,7 +310,6 @@ impl State {
     }
 
     /// Replaces every row. The published rev is kept.
-    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     pub(crate) fn load(&mut self, snap: Snapshot) {
         fn by<K: Ord, V>(rows: Vec<V>, key: impl Fn(&V) -> K) -> BTreeMap<K, V> {
             rows.into_iter().map(|r| (key(&r), r)).collect()
@@ -328,21 +333,18 @@ impl State {
         self.unknown = snap.unknown;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     fn trim_activity(&mut self) {
         while self.activity.len() > ACTIVITY_SHOWN {
             self.activity.pop_first();
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     fn bump(next: &mut i64, id: i64) {
         *next = (*next).max(id.saturating_add(1));
     }
 
     /// The in-memory twin of the store's SQL for this change. Events and feed entries are
     /// not kept, only their ids are counted.
-    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     pub(crate) fn apply(&mut self, c: &Change) {
         match c {
             Change::Project(r) => {
