@@ -134,7 +134,7 @@ The roadmap's Global Constraints apply. The ones that matter most here:
    - Expected: nothing foreign is written; pruning keeps going and reports what it couldn't
      remove; a dangling link is not "already backed up"; a failed commit leaves nothing on
      disk; a dead store thread answers `Stopped`.
-   - Pinned by Task 1 and `a_failed_commit_writes_nothing` (Task 11).
+   - Pinned by Task 1 and `a_commit_is_one_transaction` (Task 11).
 
 ---
 
@@ -1118,8 +1118,10 @@ proptest! {
   - `actor.rs` (`#[tokio::test]`):
     - `a_commit_is_one_transaction`: `commit([a project, a task whose project_id is 999])`
       → `Failed(_)` (foreign key), and neither row is on disk.
-    - `a_failed_commit_writes_nothing`: `FailNextCommit`, then `commit([a project, a task in
-      it])` → `Failed(_)`, nothing on disk. The next `commit` of the same changes → `Ok`.
+    - `an_injected_failure_answers_failed_and_the_next_commit_works`: `FailNextCommit`, then
+      `commit([a project, a task in it])` → `Failed(_)`, nothing on disk. The next `commit` of
+      the same changes → `Ok`. (The fault answers before applying anything, so atomicity is
+      `a_commit_is_one_transaction`'s to prove.)
     - `commands_answer_in_queue_order`: `PauseNextCommit(rx)`, a `commit`, then a
       `snapshot()`. Release `rx`: the snapshot has the committed row.
     - `a_dead_thread_answers_stopped`: `Crash` → the next `commit` and `snapshot` return
@@ -1476,7 +1478,7 @@ proptest! {
   Typical brain, with the spike's text (snapshots committed). The ordering rule holds in
   every core test (`handle_checked`).
 - `verbs_through_the_store_match_a_reload` passes: memory and disk agree after any verb.
-- A failed commit writes nothing (`a_failed_commit_writes_nothing`), and a dead store
+- A failed commit writes nothing (`a_commit_is_one_transaction`), and a dead store
   thread answers `Stopped`, never silence.
 - The alarm fires at absolute deadlines on macOS and Linux CI. Route proptests and the
   store-hardening tests pass.
