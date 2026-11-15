@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use jiff::civil::date;
 use moa_core::Now;
 use moa_core::change::Change;
-use moa_core::config::{BrainName, Config};
+use moa_core::config::{BrainConfig, BrainName, Config};
 use moa_core::effect::{Effect, Input, Publish, handle_checked, reply_of};
 use moa_core::model::{ProjectId, ProjectStatus, SessionId};
 use moa_core::op::{ConnId, Done, Op, ReqId};
@@ -320,5 +320,69 @@ fn a_project_needs_a_name() {
             &b.now()
         ),
         "a project needs a name"
+    );
+}
+
+/// `default = ["~"]` beside `work = ["~/work"]`: the most specific folder owns a path.
+fn nested(b: &TypicalBrain) -> Config {
+    let mut c = Config::default();
+    c.brains.insert(
+        BrainName::default_brain(),
+        BrainConfig {
+            folders: vec![b.home.clone()],
+            ..BrainConfig::default()
+        },
+    );
+    c.brains.insert(
+        BrainName::parse("work").unwrap(),
+        BrainConfig {
+            folders: vec![b.home.join("work")],
+            ..BrainConfig::default()
+        },
+    );
+    c
+}
+
+fn brain_state(b: &TypicalBrain, brain: &str, config: Config) -> State {
+    let mut st = State::new(BrainName::parse(brain).unwrap(), config);
+    handle_checked(&mut st, Input::Startup(Box::new(b.snapshot())), b.now());
+    st
+}
+
+#[test]
+fn project_add_refuses_a_folder_a_more_specific_brain_owns() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let foo = b.home.join("work").join("foo");
+
+    let mut default = brain_state(&b, "default", nested(&b));
+    let fx = effects(&mut default, add("Foo", &foo, None), &now);
+    assert_eq!(
+        reply_of(&fx).unwrap().as_ref().unwrap_err().0,
+        format!(
+            "{} belongs to the work brain; add it from there",
+            foo.display()
+        )
+    );
+    assert!(!persisted(&fx));
+    assert!(default.projects().all(|p| p.name != "Foo"));
+    // The work folder itself is the work brain's too.
+    assert!(
+        err(&mut default, add("Work", &b.home.join("work"), None), &now)
+            .ends_with("belongs to the work brain; add it from there")
+    );
+    // A lookalike sibling isn't inside `~/work`: it stays the default brain's.
+    let work2 = b.home.join("work2").join("foo");
+    assert!(run(&mut default, add("Work2", &work2, None), &now).is_ok());
+
+    let mut work = brain_state(&b, "work", nested(&b));
+    assert!(run(&mut work, add("Foo", &foo, None), &now).is_ok());
+    // And the work brain can't take the default brain's folders through the nesting.
+    assert_eq!(
+        err(&mut work, add("Home", &b.home.join("notes"), None), &now),
+        format!(
+            "{} isn't in this brain's folders; this brain doesn't track it",
+            b.home.join("notes").display()
+        )
     );
 }

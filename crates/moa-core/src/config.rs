@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::model::AgentKind;
+use crate::route::is_under;
 
 /// A problem with `moa.toml`, as one plain line that always starts with `moa.toml`.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -353,6 +354,7 @@ impl Config {
             }
         }
         config.check_distinct_stores()?;
+        config.check_distinct_folders()?;
         for (name, b) in &config.brains {
             for (key, acct) in [
                 ("moa_account", &b.moa_account),
@@ -400,7 +402,40 @@ impl Config {
         config.canonicalize_with(canonical);
         // Two spellings of one folder (a symlink, say) only show up once canonical.
         config.check_distinct_stores()?;
+        config.check_distinct_folders()?;
         Ok(config)
+    }
+
+    /// One folder in two brains would leave its owner undecided. Nesting is fine: the most
+    /// specific folder wins (`brain_for_folder`).
+    fn check_distinct_folders(&self) -> Result<(), ConfigError> {
+        let mut owners: BTreeMap<&Path, &BrainName> = BTreeMap::new();
+        for (name, b) in &self.brains {
+            for f in b.folders.iter().filter(|f| !f.as_os_str().is_empty()) {
+                if let Some(other) = owners.insert(f, name)
+                    && other != name
+                {
+                    return Err(problem(format_args!(
+                        "{} is a folder of both brains.{other} and brains.{name}; a folder belongs to one brain",
+                        f.components().collect::<PathBuf>().display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The brain that owns `path`: the one whose configured folder is the longest
+    /// whole-component prefix of it, so `~/work` beats `~`. `None` when no folder holds it,
+    /// or when `path` is relative or contains `..` (`is_under` refuses those). Pass a
+    /// canonical path; `from_file_text` canonicalises the folders.
+    pub fn brain_for_folder(&self, path: &Path) -> Option<BrainName> {
+        self.brains
+            .iter()
+            .flat_map(|(name, b)| b.folders.iter().map(move |f| (name, f)))
+            .filter(|(_, f)| is_under(path, f))
+            .max_by_key(|(_, f)| f.components().count())
+            .map(|(name, _)| name.clone())
     }
 
     fn check_distinct_stores(&self) -> Result<(), ConfigError> {

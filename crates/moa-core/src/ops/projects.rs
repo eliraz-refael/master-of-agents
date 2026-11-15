@@ -134,6 +134,15 @@ pub(crate) fn add(
             "{shown} isn't in this brain's folders; this brain doesn't track it"
         )));
     }
+    // Brains' folders may nest (`default = ["~"]` beside `work = ["~/work"]`); the most
+    // specific one owns the path, so a work folder never lands in the private brain.
+    if let Some(owner) = state.config().brain_for_folder(path)
+        && owner != *state.brain()
+    {
+        return Err(OpError(format!(
+            "{shown} belongs to the {owner} brain; add it from there"
+        )));
+    }
     // The store keeps names unique ignoring case; refuse here so memory never gets ahead of
     // the disk.
     if project_named(state, name).is_some()

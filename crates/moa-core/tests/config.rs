@@ -367,3 +367,77 @@ fn two_accounts_cannot_share_a_store() {
         "moa.toml: acct-a and acct-b have the same store /h/.c"
     );
 }
+
+#[test]
+fn one_folder_in_two_brains_is_an_error() {
+    let text =
+        "[brains.default]\nfolders = [\"~/shared\"]\n[brains.work]\nfolders = [\"~/shared/\"]\n";
+    assert_eq!(
+        err(text),
+        "moa.toml: /h/shared is a folder of both brains.default and brains.work; a folder belongs to one brain"
+    );
+    // Listed twice in one brain is harmless; empty entries never clash.
+    let fine =
+        "[brains.default]\nfolders = [\"~/a\", \"~/a\", \"\"]\n[brains.work]\nfolders = [\"\"]\n";
+    assert!(Config::parse(fine, home()).is_ok());
+}
+
+#[test]
+fn one_folder_in_two_brains_is_caught_after_canonicalising() {
+    let t = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let r = t.path();
+    std::fs::create_dir(r.join("real")).unwrap();
+    std::os::unix::fs::symlink(r.join("real"), r.join("alias")).unwrap();
+    let text = format!(
+        "[brains.default]\nfolders = [\"{r}/real\"]\n[brains.work]\nfolders = [\"{r}/alias\"]\n",
+        r = r.display()
+    );
+    // Different spellings: parse alone can't tell.
+    assert!(Config::parse(&text, home()).is_ok());
+    let err = Config::from_file_text(Some(&text), home(), moa_platform::canonical)
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("moa.toml: "), "{err}");
+    assert!(
+        err.ends_with(
+            " is a folder of both brains.default and brains.work; a folder belongs to one brain"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_most_specific_folder_owns_a_path() {
+    let c = Config::parse(
+        "[brains.default]\nfolders = [\"~\"]\n[brains.work]\nfolders = [\"~/work\"]\n\
+         [brains.deep]\nfolders = [\"~/work/deep\"]\n",
+        home(),
+    )
+    .unwrap();
+    let owner = |p: &str| c.brain_for_folder(Path::new(p));
+    assert_eq!(owner("/h/work/foo"), Some(brain("work")));
+    assert_eq!(owner("/h/work"), Some(brain("work")));
+    assert_eq!(owner("/h/work/deep/x"), Some(brain("deep")));
+    assert_eq!(owner("/h/private/x"), Some(brain("default")));
+    assert_eq!(owner("/h"), Some(brain("default")));
+    // `~/work2` is not inside `~/work`.
+    assert_eq!(owner("/h/work2/foo"), Some(brain("default")));
+    // Outside every folder, relative, or climbing with `..`: nobody owns it.
+    assert_eq!(owner("/elsewhere"), None);
+    assert_eq!(owner("work/foo"), None);
+    assert_eq!(owner("/h/work/../private"), None);
+    // The order brains are listed in doesn't matter.
+    let c = Config::parse(
+        "[brains.work]\nfolders = [\"~/work\"]\n[brains.default]\nfolders = [\"~\"]\n",
+        home(),
+    )
+    .unwrap();
+    assert_eq!(
+        c.brain_for_folder(Path::new("/h/work/x")),
+        Some(brain("work"))
+    );
+    assert_eq!(Config::default().brain_for_folder(Path::new("/h")), None);
+}
