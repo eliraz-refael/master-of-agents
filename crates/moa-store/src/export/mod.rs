@@ -173,6 +173,19 @@ pub fn export_spike(src: &Store, dst: &Path, env: &ExportEnv) -> Result<ExportRe
         )));
     }
 
+    // Create the file ourselves, exclusively: `Connection::open` would happily write into a
+    // file that appeared since the checks above, and the cleanup below would delete it.
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+    {
+        Ok(file) => drop(file),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(ExportError::Exists(dst.to_path_buf()));
+        }
+        Err(e) => return Err(ExportError::Io(e)),
+    }
     let result = write_all(src, dst, env);
     if result.is_err() {
         let _ = fs::remove_file(dst);
@@ -225,6 +238,8 @@ struct Exporter<'a> {
     current: HashMap<String, Current>,
     /// Every conversation id of every session, for the suggestion rewrite.
     all_conversations: Vec<String>,
+    /// Every v1 session id, with or without a conversation, for the same rewrite.
+    all_sessions: Vec<String>,
     notes: Vec<RecordNote>,
     tables: Vec<TableCounts>,
     dirty: bool,
@@ -265,11 +280,16 @@ impl<'a> Exporter<'a> {
             all_conversations.push(cur.conversation_id.clone());
             current.insert(sid, cur);
         }
+        let all_sessions = src
+            .prepare("SELECT id FROM sessions")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             src,
             env,
             current,
             all_conversations,
+            all_sessions,
             notes: Vec::new(),
             tables: Vec::new(),
             dirty: false,

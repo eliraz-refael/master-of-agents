@@ -58,6 +58,7 @@ impl Exporter<'_> {
 
     pub(super) fn sessions(&mut self, tx: &Transaction) -> Result<(), ExportError> {
         struct S {
+            rowid: i64,
             id: String,
             agent_kind: String,
             account: Option<String>,
@@ -79,7 +80,7 @@ impl Exporter<'_> {
         let mut stmt = self.src.prepare(
             "SELECT s.id, s.agent_kind, s.account, s.cwd, s.project_id, s.title, s.group_path, \
              s.lifecycle, s.activity, s.asleep_at, s.archived_at, s.location, s.last_prompt, \
-             s.created_at, s.last_seen_at, b.pane_id, b.socket, p.pane_id, p.tmux \
+             s.created_at, s.last_seen_at, b.pane_id, b.socket, p.pane_id, p.tmux, s.rowid \
              FROM sessions s LEFT JOIN pane_bindings b ON b.session_id = s.id \
              LEFT JOIN spike_panes p ON p.session_id = s.id ORDER BY s.rowid",
         )?;
@@ -97,6 +98,7 @@ impl Exporter<'_> {
                     .map(|pane| Ok::<_, rusqlite::Error>((pane, r.get::<_, Option<String>>(18)?)))
                     .transpose()?;
                 Ok(S {
+                    rowid: r.get(19)?,
                     id: r.get(0)?,
                     agent_kind: r.get(1)?,
                     account: r.get(2)?,
@@ -122,7 +124,7 @@ impl Exporter<'_> {
         let mut used: HashSet<String> = HashSet::new();
         for s in &rows {
             let Some(cur) = self.current.get(&s.id) else {
-                self.note(Level::Warn, "sessions", &prefix8(&s.id), R_NO_CONVERSATION);
+                self.note(Level::Warn, "sessions", &key_of(s.rowid), R_NO_CONVERSATION);
                 warned += self.end_record();
                 continue;
             };
@@ -277,11 +279,11 @@ impl Exporter<'_> {
     /// Rewrites an argument to a session's current conversation id when the spike would
     /// otherwise not find it: it must be at least 8 characters, a prefix of exactly one v1
     /// session id, and not a prefix of any conversation id (a spike prefix passes through).
-    fn rewrite_arg(&self, arg: &str, session_ids: &[&String]) -> String {
+    fn rewrite_arg(&self, arg: &str) -> String {
         if arg.len() < 8 || self.all_conversations.iter().any(|c| c.starts_with(arg)) {
             return arg.to_string();
         }
-        let mut hits = session_ids.iter().filter(|s| s.starts_with(arg));
+        let mut hits = self.all_sessions.iter().filter(|s| s.starts_with(arg));
         match (hits.next(), hits.next()) {
             (Some(one), None) => self
                 .conversation_of(one)
@@ -309,8 +311,6 @@ impl Exporter<'_> {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let session_ids: Vec<String> = self.current.keys().cloned().collect();
-        let session_refs: Vec<&String> = session_ids.iter().collect();
         for (id, text, status, actions, raw, invalid, created, resolved) in &rows {
             let action: Option<String> = if invalid.is_some() {
                 raw.clone()
@@ -323,7 +323,7 @@ impl Exporter<'_> {
                     let lines: Vec<String> = parsed
                         .iter()
                         .map(|a| {
-                            let args = a.args.iter().map(|x| self.rewrite_arg(x, &session_refs));
+                            let args = a.args.iter().map(|x| self.rewrite_arg(x));
                             shell_words::join(std::iter::once(a.verb.clone()).chain(args))
                         })
                         .collect();

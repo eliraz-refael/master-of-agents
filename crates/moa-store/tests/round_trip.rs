@@ -1,6 +1,7 @@
 //! import -> export: what a brain looks like after a trip to v1 and back to the spike's schema.
 
-use std::collections::BTreeSet;
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,13 +12,14 @@ use moa_store::Store;
 use moa_store::accounts::AccountMap;
 use moa_store::export::{ExportEnv, ExportError, ExportReport, export_spike};
 use moa_store::import::report::ASK_SWITCHED_REPLY;
-use moa_store::import::{IdSource, ImportEnv, Level, import_spike};
+use moa_store::import::{IdSource, ImportEnv, Level, RecordNote, import_spike};
 use moa_testkit::spike_fixture::SpikeBrain;
 use moa_testkit::spike_gen::brain_valid;
 use moa_testkit::{Scenario, SpikeFixture, ids};
 use proptest::prelude::*;
-use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
+
+use common::{TimeMode, open_ro};
 
 const NOW: UtcMs = UtcMs(1_800_000_000_000);
 
@@ -33,6 +35,7 @@ struct Rig {
     spike: PathBuf,
     out: PathBuf,
     store: Store,
+    notes: Vec<RecordNote>,
 }
 
 fn rig_with(write: impl FnOnce(&Path, &Path)) -> Rig {
@@ -50,7 +53,7 @@ fn rig_with(write: impl FnOnce(&Path, &Path)) -> Rig {
         ids: IdSource::Derived,
         transcript: find_transcript,
     };
-    import_spike(&spike, &mut store, &env).unwrap();
+    let notes = import_spike(&spike, &mut store, &env).unwrap().notes;
     let out = dir.path().join("out.db");
     Rig {
         _dir: dir,
@@ -58,6 +61,7 @@ fn rig_with(write: impl FnOnce(&Path, &Path)) -> Rig {
         spike,
         out,
         store,
+        notes,
     }
 }
 
@@ -79,204 +83,51 @@ impl Rig {
     }
 }
 
-fn open_ro(path: &Path) -> Connection {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
-}
-
-type Table = (Vec<String>, Vec<Vec<Value>>);
-
-fn dump(c: &Connection, table: &str, order: &str) -> Table {
-    let mut stmt = c
-        .prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))
-        .unwrap();
-    let cols: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
-    let n = cols.len();
-    let rows = stmt
-        .query_map([], |r| {
-            (0..n)
-                .map(|i| r.get::<_, Value>(i))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    (cols, rows)
-}
-
-/// The expected differences, each named: `(table, primary key, column, expected value)`.
-type Exceptions = Vec<(&'static str, Value, &'static str, Value)>;
-
-fn text(s: &str) -> Value {
-    Value::Text(s.to_string())
-}
-
-fn apply(t: &mut Table, table: &str, pk_col: &str, exceptions: &Exceptions) {
-    let pk = t.0.iter().position(|c| c == pk_col).unwrap();
-    for (tbl, key, col, new) in exceptions {
-        if *tbl != table {
-            continue;
-        }
-        let ci = t.0.iter().position(|c| c == col).unwrap();
-        let row = t.1.iter_mut().find(|r| r[pk] == *key).unwrap_or_else(|| {
-            panic!("exception names a row that is not in {table}");
-        });
-        row[ci] = new.clone();
-    }
-}
-
-/// Suggestion actions compare as lists of word lists, not as text.
-fn normalise_actions(t: &mut Table) {
-    let ci = t.0.iter().position(|c| c == "action").unwrap();
-    for row in &mut t.1 {
-        if let Value::Text(raw) = &row[ci] {
-            row[ci] = match serde_json::from_str::<Vec<String>>(raw) {
-                Ok(lines) => {
-                    let split: Vec<Vec<String>> = lines
-                        .iter()
-                        .map(|l| shell_words::split(l).unwrap())
-                        .collect();
-                    Value::Text(serde_json::to_string(&split).unwrap())
-                }
-                Err(_) => Value::Text(raw.clone()),
-            };
-        }
-    }
-}
-
-fn json(c: &Connection, key: &str) -> Option<serde_json::Value> {
-    c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
-        r.get::<_, String>(0)
-    })
-    .ok()
-    .map(|v| serde_json::from_str(&v).unwrap())
-}
-
-/// Compares the export with the spike brain it came from, every column of every table,
-/// except for the differences in `exceptions`, `groups` and `meta`, which have their own
-/// rules below.
-fn assert_round_trip(rig: &Rig, exceptions: &Exceptions) {
+fn assert_round_trip(rig: &Rig) {
     rig.export().unwrap();
-    let (a, b) = (open_ro(&rig.spike), open_ro(&rig.out));
-    for (table, pk, order) in [
-        ("projects", "id", "id"),
-        ("tasks", "id", "id"),
-        ("notes", "id", "id"),
-        ("suggestions", "id", "id"),
-        ("sessions", "session_id", "session_id"),
-        ("events", "id", "id"),
-        ("asks", "id", "id"),
-        ("activity", "id", "id"),
-    ] {
-        let mut want = dump(&a, table, order);
-        apply(&mut want, table, pk, exceptions);
-        if table == "sessions" {
-            // The spike reads `tmux` only together with a matching pane, and moactl.py clears
-            // `pane` on other sessions when a pane is reused but leaves their `tmux`. So tmux
-            // is compared only where the source pane is set; elsewhere the export's is NULL.
-            let (pane, tmux) = (
-                want.0.iter().position(|c| c == "pane").unwrap(),
-                want.0.iter().position(|c| c == "tmux").unwrap(),
-            );
-            for row in &mut want.1 {
-                if row[pane] == Value::Null {
-                    row[tmux] = Value::Null;
-                }
-            }
-        }
-        let mut got = dump(&b, table, order);
-        if table == "suggestions" {
-            normalise_actions(&mut want);
-            normalise_actions(&mut got);
-        }
-        assert_eq!(want.0, got.0, "{table}: columns");
-        for (w, g) in want.1.iter().zip(&got.1) {
-            for (i, col) in want.0.iter().enumerate() {
-                assert_eq!(w[i], g[i], "{table} {:?} column {col}", w[0]);
-            }
-        }
-        assert_eq!(want.1.len(), got.1.len(), "{table}: row count");
-    }
-
-    // groups: every source group is there as it was; the export adds the groups that only a
-    // session's grp named.
-    let src_groups = dump(&a, "groups", "path").1;
-    let out_groups = dump(&b, "groups", "path").1;
-    for g in &src_groups {
-        assert!(out_groups.contains(g), "a source group is missing");
-    }
-    let mut expected: BTreeSet<String> = src_groups
-        .iter()
-        .map(|g| match &g[0] {
-            Value::Text(t) => t.clone(),
-            _ => unreachable!(),
-        })
-        .collect();
-    let mut stmt = a
-        .prepare("SELECT DISTINCT grp FROM sessions WHERE grp IS NOT NULL AND grp != ''")
-        .unwrap();
-    expected.extend(
-        stmt.query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap),
-    );
-    let got: BTreeSet<String> = out_groups
-        .iter()
-        .map(|g| match &g[0] {
-            Value::Text(t) => t.clone(),
-            _ => unreachable!(),
-        })
-        .collect();
-    assert_eq!(got, expected, "groups");
-
-    // meta: the cursor is the newest exported event; the others are the same JSON.
-    let max_event: Option<i64> = b
-        .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
-        .unwrap();
-    let cursor: Option<String> = b
-        .query_row("SELECT value FROM meta WHERE key = 'cursor'", [], |r| {
-            r.get(0)
-        })
-        .ok();
-    assert_eq!(cursor, max_event.map(|m| m.to_string()), "meta cursor");
-    for key in ["console_thread", "setup_skipped"] {
-        assert_eq!(json(&a, key), json(&b, key), "meta {key}");
-    }
-    let keys = |c: &Connection| -> BTreeSet<String> {
-        c.prepare("SELECT key FROM meta")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect()
-    };
-    assert_eq!(keys(&a), keys(&b), "meta keys");
+    let excluded = common::assert_round_trip(&rig.spike, &rig.out, &rig.notes, &TimeMode::Text);
+    assert_eq!(excluded, 0, "no spike-table record may be left out");
 }
 
 #[test]
 fn typical_round_trips() {
     let rig = typical();
-    // The known differences for the typical brain:
-    let exceptions: Exceptions = vec![
-        // The spike says `waiting`, but its newest event is the idle ping, so import reads it
-        // as idle and export writes `idle`.
-        (
-            "sessions",
-            text(ids::S9_WAITING_IDLE),
-            "state",
-            text("idle"),
-        ),
-        // Import drops the stale asleep mark of an archived session.
-        ("sessions", text(ids::S6_ARCHIVED), "asleep_at", Value::Null),
-        // Import closes asks nobody waits for: a pending one is dropped, one in flight fails
-        // with a reply that says why.
-        ("asks", Value::Integer(2), "status", text("dropped")),
-        ("asks", Value::Integer(3), "status", text("failed")),
-        ("asks", Value::Integer(3), "reply", text(ASK_SWITCHED_REPLY)),
-    ];
-    assert_round_trip(&rig, &exceptions);
+    assert_round_trip(&rig);
+
+    // The known differences for the typical brain, each asserted on its own.
+    let out = open_ro(&rig.out);
+    let one = |sql: &str| -> Option<String> { out.query_row(sql, [], |r| r.get(0)).unwrap() };
+    // The spike says `waiting`, but its newest event is the idle ping: idle.
+    assert_eq!(
+        one(&format!(
+            "SELECT state FROM sessions WHERE session_id = '{}'",
+            ids::S9_WAITING_IDLE
+        )),
+        Some("idle".into())
+    );
+    // Import drops the stale asleep mark of an archived session.
+    assert_eq!(
+        one(&format!(
+            "SELECT asleep_at FROM sessions WHERE session_id = '{}'",
+            ids::S6_ARCHIVED
+        )),
+        None
+    );
+    // A pending ask is dropped; one in flight fails with a reply that says why.
+    assert_eq!(
+        one("SELECT status FROM asks WHERE id = 2"),
+        Some("dropped".into())
+    );
+    assert_eq!(
+        one("SELECT status FROM asks WHERE id = 3"),
+        Some("failed".into())
+    );
+    assert_eq!(
+        one("SELECT reply FROM asks WHERE id = 3"),
+        Some(ASK_SWITCHED_REPLY.into())
+    );
 
     // The pane links survive, so the spike never starts a second copy of a running agent.
-    let out = open_ro(&rig.out);
     let pane = |sid: &str| -> (Option<String>, Option<String>) {
         out.query_row(
             "SELECT pane, tmux FROM sessions WHERE session_id = ?1",
@@ -348,7 +199,7 @@ proptest! {
     fn valid_brains_round_trip(b in brain_valid()) {
         let b: SpikeBrain = b;
         let rig = rig_with(|spike, home| b.write(spike, home));
-        assert_round_trip(&rig, &Vec::new());
+        assert_round_trip(&rig);
     }
 }
 
@@ -584,4 +435,105 @@ fn export_leaves_no_wal() {
         .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 9);
+}
+
+fn session_of(rig: &Rig, conv: &str) -> String {
+    rig.store
+        .conn()
+        .query_row(
+            "SELECT session_id FROM conversations WHERE conversation_id = ?1",
+            [conv],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// Adds a suggestion whose one action is `set <arg>`, exports, and returns the exported
+/// argument.
+fn exported_arg(rig: &Rig, id: i64, arg: &str) -> String {
+    let actions = serde_json::json!([{ "verb": "set", "args": [arg, "--title", "x"] }]);
+    rig.store
+        .conn()
+        .execute(
+            "INSERT INTO suggestions (id, text, actions, created_at) VALUES (?1, 't', ?2, 1)",
+            rusqlite::params![id, actions.to_string()],
+        )
+        .unwrap();
+    let out = rig.out.with_file_name(format!("out{id}.db"));
+    export_spike(&rig.store, &out, &export_env(&rig.home)).unwrap();
+    let action: String = open_ro(&out)
+        .query_row("SELECT action FROM suggestions WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let lines: Vec<String> = serde_json::from_str(&action).unwrap();
+    shell_words::split(&lines[0]).unwrap().remove(1)
+}
+
+#[test]
+fn suggestion_args_are_rewritten_only_when_unambiguous() {
+    let rig = typical();
+    let s1 = session_of(&rig, ids::S1_WORKING);
+
+    // A unique prefix of a v1 session id, 8 characters or more: the session's conversation.
+    assert_eq!(exported_arg(&rig, 10, &s1[..12]), ids::S1_WORKING);
+    // Under 8 characters: left alone.
+    assert_eq!(exported_arg(&rig, 11, &s1[..7]), &s1[..7]);
+
+    // Also a prefix of a conversation id: left alone (a spike prefix passes through).
+    let other = session_of(&rig, ids::S2_IDLE);
+    rig.store
+        .conn()
+        .execute(
+            "INSERT INTO conversations (agent_kind, conversation_id, session_id, reason, \
+             first_seen_at, last_seen_at) VALUES ('claude', ?1, ?2, 'resume', 1, 1)",
+            rusqlite::params![format!("{}-x", &s1[..12]), other],
+        )
+        .unwrap();
+    assert_eq!(exported_arg(&rig, 12, &s1[..12]), &s1[..12]);
+}
+
+#[test]
+fn an_ambiguous_prefix_is_left_alone_even_for_a_session_with_no_conversation() {
+    let rig = typical();
+    let s1 = session_of(&rig, ids::S1_WORKING);
+    // A twin of S1 that has no conversation, so it is never exported but is still a v1 session.
+    let twin = format!("{}{}", &s1[..35], if s1.ends_with('0') { '1' } else { '0' });
+    rig.store
+        .conn()
+        .execute(
+            "INSERT INTO sessions (id, agent_kind, lifecycle, created_at) \
+             VALUES (?1, 'claude', 'ended', 1)",
+            [&twin],
+        )
+        .unwrap();
+    assert_eq!(exported_arg(&rig, 10, &s1[..20]), &s1[..20]);
+    // The full id still names exactly one.
+    assert_eq!(exported_arg(&rig, 11, &s1), ids::S1_WORKING);
+}
+
+#[test]
+fn a_session_with_no_conversation_is_named_by_rowid() {
+    let rig = typical();
+    rig.store
+        .conn()
+        .execute(
+            "INSERT INTO sessions (id, agent_kind, lifecycle, created_at) \
+             VALUES ('00000000-0000-7000-8000-00000000ffff', 'claude', 'ended', 1)",
+            [],
+        )
+        .unwrap();
+    let rowid: i64 = rig
+        .store
+        .conn()
+        .query_row("SELECT max(rowid) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    let report = rig.export().unwrap();
+    let warn: Vec<_> = report
+        .notes
+        .iter()
+        .filter(|n| n.level == Level::Warn && n.table == "sessions" && n.key.starts_with('#'))
+        .collect();
+    assert_eq!(warn.len(), 1);
+    assert_eq!(warn[0].key, format!("#{rowid}"));
 }
