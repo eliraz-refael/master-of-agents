@@ -1,0 +1,13 @@
+---
+source: crates/moa-core/tests/projects.rs
+expression: text
+---
+Lantern [active] <home>/private/lantern  last activity 2026-11-15
+A small lamp controller
+  task #1 Order the dimmer board [todo]
+  session 3f9a1c52 Wire up the dimmer [Private/Lantern] working 2h  last prompt: Please continue
+  session d1c6a9f3 Fix the flicker [Lantern] waiting 3h  last prompt: Please continue
+  session 7b5d2e83 Calibrate the sensor [Lantern] idle 5h  last prompt: Please continue
+  session e57b3d96 Old lamp notes [Lantern] ended 3d  last prompt: Please continue
+  note (milestone) First light on the bench
+  note (fact) The lamp runs on 12 volts

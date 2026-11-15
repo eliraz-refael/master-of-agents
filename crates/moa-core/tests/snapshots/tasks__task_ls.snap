@@ -1,0 +1,10 @@
+---
+source: crates/moa-core/tests/tasks.rs
+expression: text
+---
+## -
+- #5 [waiting] Reply about the lease
+## Lantern
+- #1 [todo] Order the dimmer board  (P1, today, who=you, due=2026-11-16, session=3f9a1c52)
+## Tidepool
+- #3 [blocked] Survey the tide flats  (who=other, on=a permit)

@@ -400,6 +400,32 @@ fn op_methods_match_the_variants() {
         Op::SessionArchive {
             qs: vec!["a".into(), "b".into()],
         },
+        Op::TaskLs {
+            project: Some("P".into()),
+            all: true,
+        },
+        Op::TaskAdd(moa_core::op::TaskAdd {
+            project: "P".into(),
+            title: "t".into(),
+            due: Some("fri".into()),
+            ..Default::default()
+        }),
+        Op::TaskSet(moa_core::op::TaskSet {
+            id: 1,
+            not_today: true,
+            ..Default::default()
+        }),
+        Op::NoteAdd {
+            text: "n".into(),
+            project: None,
+            kind: Some("fact".into()),
+        },
+        Op::ProjectShow { name: "P".into() },
+        Op::ProjectAdd {
+            name: "P".into(),
+            path: "/x".into(),
+            summary: None,
+        },
     ];
     assert_eq!(Op::METHODS.len(), samples.len());
     for op in &samples {

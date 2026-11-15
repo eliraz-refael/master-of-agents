@@ -1,5 +1,7 @@
 //! What a client can ask the core to do, and what it gets back.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// A client connection, as the daemon numbers them.
@@ -35,6 +37,85 @@ pub enum Op {
     },
     #[serde(rename = "session.archive")]
     SessionArchive { qs: Vec<String> },
+    #[serde(rename = "task.ls")]
+    TaskLs {
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        all: bool,
+    },
+    #[serde(rename = "task.add")]
+    TaskAdd(TaskAdd),
+    #[serde(rename = "task.set")]
+    TaskSet(TaskSet),
+    #[serde(rename = "note.add")]
+    NoteAdd {
+        text: String,
+        #[serde(default)]
+        project: Option<String>,
+        /// `None` is `fact`.
+        #[serde(default)]
+        kind: Option<String>,
+    },
+    #[serde(rename = "project.show")]
+    ProjectShow { name: String },
+    #[serde(rename = "project.add")]
+    ProjectAdd {
+        name: String,
+        path: PathBuf,
+        #[serde(default)]
+        summary: Option<String>,
+    },
+}
+
+/// `task add`'s arguments, all the user's raw text.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct TaskAdd {
+    pub project: String,
+    pub title: String,
+    #[serde(default)]
+    pub today: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub blocked_on: Option<String>,
+    #[serde(default)]
+    pub who: Option<String>,
+    #[serde(default)]
+    pub due: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+/// `task set`'s arguments. `Some("")` clears `due`, `priority`, `session`, `note` and
+/// `blocked_on`.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct TaskSet {
+    pub id: i64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub who: Option<String>,
+    #[serde(default)]
+    pub due: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub blocked_on: Option<String>,
+    #[serde(default)]
+    pub today: bool,
+    #[serde(default)]
+    pub not_today: bool,
 }
 
 impl Op {
@@ -46,6 +127,12 @@ impl Op {
         "session.ls",
         "session.set",
         "session.archive",
+        "task.ls",
+        "task.add",
+        "task.set",
+        "note.add",
+        "project.show",
+        "project.add",
     ];
 
     /// This op's method name.
@@ -57,6 +144,12 @@ impl Op {
             Op::SessionLs { .. } => "session.ls",
             Op::SessionSet { .. } => "session.set",
             Op::SessionArchive { .. } => "session.archive",
+            Op::TaskLs { .. } => "task.ls",
+            Op::TaskAdd(_) => "task.add",
+            Op::TaskSet(_) => "task.set",
+            Op::NoteAdd { .. } => "note.add",
+            Op::ProjectShow { .. } => "project.show",
+            Op::ProjectAdd { .. } => "project.add",
         }
     }
 }
