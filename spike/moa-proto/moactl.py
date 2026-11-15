@@ -31,7 +31,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from picture import connect, tmux, pane_alive, log_ui, SOCK, asleep, epoch, live  # noqa: E402
+from picture import connect, tmux, pane_alive, session_alive, on_this_server, log_ui, SOCK, asleep, epoch, live  # noqa: E402
 import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
@@ -113,7 +113,9 @@ def title_of(conn):
 def resume(conn, s, bg):
     # A stale pane ID (tmux restarts numbering after a server restart) can point at a
     # cockpit panel; only an untagged pane or an agent pane is this session's.
-    if pane_alive(s["pane"]) and layout.panel_of(s["pane"]) in ("", "agent"):
+    if not on_this_server(s) and s["state"] in LIVE and not asleep(s):
+        sys.exit("it's running in another moa's tmux server; switch to it there (or close it there first)")
+    if session_alive(s) and layout.panel_of(s["pane"]) in ("", "agent"):
         print(f"already running in pane {s['pane']}" + ("" if bg else "; " + layout.focus(s["pane"], title_of(conn))))
         return
     if s["state"] == "elsewhere":
@@ -173,7 +175,7 @@ def term(path, title, pane):
 
 
 def close(conn, s):
-    if pane_alive(s["pane"]):
+    if session_alive(s):
         tmux("kill-pane", "-t", s["pane"])
     conn.execute("UPDATE sessions SET state='ended', asleep_at=NULL WHERE session_id=?", (s["session_id"],))
     log_ui(conn, f"closed {s['title'] or s['session_id'][:8]}")
@@ -334,7 +336,7 @@ def ls(conn, show_all, as_json=False):
     for s in conn.execute("SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
                           f"{where} ORDER BY s.last_seen DESC"):
         # asleep first: a session slept in the cockpit's agent spot leaves its pane ID alive (the empty spot)
-        alive = "asleep" if asleep(s) else "live" if pane_alive(s["pane"]) else s["state"]
+        alive = "asleep" if asleep(s) else "live" if session_alive(s) else s["state"]
         if as_json:
             rows.append({"id": s["session_id"], "alive": alive, "state": s["state"], "account": s["account"],
                          "group": s["grp"] or s["project"], "title": s["title"] or (s["last_prompt"] or "")[:40],
@@ -655,7 +657,6 @@ def setup(conn, a):
 # --- partners: agents asking each other (and moa) through moa ------------------------------
 ASK_WAIT = 540  # an agent's shell command times out at 10 minutes: answer before that
 LANDED = 20     # seconds for a typed-in ask to show up as the peer's prompt before it counts as failed
-_moa_sock = None
 
 
 def caller(conn):
@@ -679,11 +680,7 @@ def caller(conn):
 def reachable(s):
     """A live session in a pane on moa's tmux server. pane_alive asks moa's server, so a pane
     ID recorded on another tmux server could name some other agent's pane here."""
-    global _moa_sock
-    if _moa_sock is None:
-        _moa_sock = tmux("display-message", "-p", "#{socket_path}").stdout.strip()
-    return (s["state"] in LIVE and (not _moa_sock or (s["tmux"] or "") in ("", _moa_sock))
-            and pane_alive(s["pane"]))
+    return s["state"] in LIVE and session_alive(s)
 
 
 def peers(conn, as_json):

@@ -27,7 +27,7 @@ So **write things down the moment you learn them**, without asking:
 `note`, `task add/set`, `suggest`, `set` (session title or group), `group add/rename/rm`,
 `project NAME`, `attention`, `find Q`, `ls`. Use `sqlite3` on your `brain.db` (the path
 the briefing gives) only to read something moactl can't give you (the schema is in
-`/Users/elirazk/private/master-of-agents/spike/master-chat/schema.sql`). After writing, say in
+`../schema.sql`). After writing, say in
 one short line what you recorded ("noted: Lantern is this week's priority").
 
 **Structure you infer** (merging projects, "these sessions are one task", "X is blocked

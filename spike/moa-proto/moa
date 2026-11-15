@@ -11,13 +11,17 @@ chat="$here/../master-chat"
 brain="" account=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --account) account="${2:?--account needs an account, like claude-lead}"; shift 2 ;;
+    --account) account="${2:?--account needs an account, like claude-lead}"; account="${account/#\~/$HOME}"; shift 2 ;;
     -h|--help) sed -n '4,7s/^# //p' "$0"; exit 0 ;;
     -*) echo "moa: unknown option $1 (moa --help)" >&2; exit 2 ;;
     *) [ -z "$brain" ] || { echo "moa: one brain at a time" >&2; exit 2; }; brain="$1"; shift ;;
   esac
 done
 [[ -z "$brain" || "$brain" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "moa: a brain's name is lowercase letters, digits and dashes" >&2; exit 2; }
+[ "$brain" != default ] || { echo "moa: plain moa is the default brain" >&2; exit 2; }  # default.env is its settings file
+# Run from inside another moa (a terminal pane), this shell carries that moa's settings
+# and a session's markers; none of them belong to this brain. Its settings file has them.
+unset MOA_ACCOUNT MOA_OPEN_ACCOUNT MOA_TRACK MOA_TITLE MOA_GROUP MOA_SELF
 # Set every MOA_ variable here, before the tmux server starts: the server keeps this
 # environment, so its panels, key bindings and every session it opens use this brain,
 # even when this was run from inside another brain's moa.
@@ -27,7 +31,7 @@ conf="$HOME/.config/moa/${brain:-default}.env"
 if [ -n "$account" ]; then
   mkdir -p "$(dirname "$conf")"
   { grep -v '^MOA_ACCOUNT=\|^MOA_OPEN_ACCOUNT=' "$conf" 2>/dev/null || true
-    echo "MOA_ACCOUNT=$account"; echo "MOA_OPEN_ACCOUNT=$account"; } >"$conf.tmp"
+    printf 'MOA_ACCOUNT=%q\nMOA_OPEN_ACCOUNT=%q\n' "$account" "$account"; } >"$conf.tmp"
   mv "$conf.tmp" "$conf"
 fi
 if [ -f "$conf" ]; then set -a; . "$conf"; set +a; fi
@@ -60,5 +64,9 @@ elif [ -n "$account" ]; then
   # already running: new sessions pick the account up now; moa itself the next time it starts
   "${T[@]}" set-environment -g MOA_ACCOUNT "$account" \; set-environment -g MOA_OPEN_ACCOUNT "$account"
   echo "moa: new sessions open on $account now; moa itself moves to it the next time its console starts" >&2
+fi
+if [ -n "${TMUX:-}" ]; then  # tmux inside tmux, both on Ctrl-a, is a trap: hand it to a new terminal
+  echo "moa: the ${brain:-default} moa is running; open it from a new terminal tab: moa${brain:+ $brain}"
+  exit 0
 fi
 exec "${T[@]}" attach -t moa

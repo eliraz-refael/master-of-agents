@@ -18,6 +18,7 @@ if [ -n "${MOA_ONLY_UNDER:-}" ]; then
   if [ -z "$ok" ] && [ -n "${MOA_ELSE:-}" ]; then  # elsewhere, this account's sessions belong to that brain's moa
     . "$here/../../../moa-proto/brain.sh"
     moa_brain "$MOA_ELSE"
+    [ -f "$MOA_DB" ] || { echo "the $MOA_ELSE moa has no brain yet: start it once with moa $MOA_ELSE" >&2; exit 1; }
   elif [ -z "$ok" ]; then
     echo "moa isn't available here: on this account it only works in ${MOA_ONLY_UNDER//:/, }." >&2
     exit 1

@@ -12,19 +12,26 @@ q() { printf "'%s'" "${1//\'/\'\'}"; }
 # sessions under those folders, e.g. for an account that mostly works on things that
 # don't belong in this brain. MOA_ELSE (a brain's name) sends the sessions elsewhere to
 # that brain instead of dropping them. Checked before any other work; a session already
-# tracked stays where it is if it later moves out, so it doesn't freeze as "working".
+# tracked stays where it is if it later moves (out of the folders, or into them from
+# MOA_ELSE's brain), so it doesn't freeze as "working" or split across two brains.
+# (sqlite3 creates a missing file even to read it, hence the -f)
+tracked() { [ -f "$1" ] && [ -n "$(sqlite3 "$1" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ]; }
 if [ -n "${MOA_ONLY_UNDER:-}" ]; then
   ok=""; IFS=: read -ra roots <<<"$MOA_ONLY_UNDER"
   for r in "${roots[@]}"; do
     [ -n "$r" ] || continue   # an empty entry ("a::b", a trailing ":") must not match everything
     case "$cwd/" in "${r%/}"/*) ok=1; break ;; esac
   done
-  # (sqlite3 creates a missing file even to read it, hence the -f)
-  if [ -z "$ok" ] && ! { [ -f "$db" ] && [ -n "$(sqlite3 "$db" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ]; }; then
-    [ -n "${MOA_ELSE:-}" ] || exit 0
+  other=""
+  if [ -n "${MOA_ELSE:-}" ]; then
     . "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/brain.sh"
-    moa_brain "$MOA_ELSE"
-    db="$MOA_DB"
+    other=$(moa_brain "$MOA_ELSE"; echo "$MOA_DB")
+  fi
+  if [ -n "$ok" ]; then
+    if [ -n "$other" ] && ! tracked "$db" && tracked "$other"; then db="$other"; fi
+  elif ! tracked "$db"; then
+    [ -n "$other" ] || exit 0
+    db="$other"
   fi
 fi
 [ -f "$db" ] || exit 0
@@ -94,7 +101,8 @@ fi
 # A new session learns it has peers (SessionStart output becomes context), so asking
 # another agent needs no setup.
 if [ "$kind" = start ]; then
-  ctl="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto" && pwd)/moactl"
+  # the plugin's moactl: like this hook, it sends a session MOA_ELSE routes to that brain's moa
+  ctl="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../moa-plugin/moa/bin" && pwd)/moactl"
   cat <<EOF
 You're running inside moa (master-of-agents), alongside other agent sessions and moa itself, which keeps the big picture.
 - \`$ctl peers\` lists the agents you can talk to.

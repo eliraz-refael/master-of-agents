@@ -593,8 +593,25 @@ def pane_alive(pane):
     return bool(pane) and tmux("display-message", "-p", "-t", pane, "#{pane_id}").stdout.strip() == pane
 
 
+_sock_path = None
+
+
+def on_this_server(s):
+    """Whether a session's pane ID was recorded on this moa's tmux server. An account split
+    between brains (setup only --else) can send this brain a session another moa opened,
+    and its pane ID names some other pane here."""
+    global _sock_path
+    if _sock_path is None:
+        _sock_path = tmux("display-message", "-p", "#{socket_path}").stdout.strip()
+    return not _sock_path or (s["tmux"] or "") in ("", _sock_path)
+
+
+def session_alive(s):
+    return on_this_server(s) and pane_alive(s["pane"])
+
+
 def act_session(conn, s):
-    if pane_alive(s["pane"]):
+    if session_alive(s):
         tmux("select-window", "-t", s["pane"])
         tmux("select-pane", "-t", s["pane"])
         return f"jumped to {s['project'] or s['session_id'][:8]}"
