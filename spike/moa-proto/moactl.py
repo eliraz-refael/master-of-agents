@@ -361,9 +361,10 @@ def due_date(text):
         return (today + datetime.timedelta(days=text == "tomorrow")).isoformat()
     if text.startswith("+") and text[1:].isdigit():
         return (today + datetime.timedelta(days=int(text[1:]))).isoformat()
-    days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-    if text[:3].lower() in days and (len(text) == 3 or text.lower() == datetime.date(2024, 1, 1 + days.index(text[:3].lower())).strftime("%A").lower()):
-        ahead = (days.index(text[:3].lower()) - today.weekday()) % 7 or 7  # the next one, never today
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    day = next((i for i, d in enumerate(days) if text.lower() in (d, d[:3])), None)
+    if day is not None:
+        ahead = (day - today.weekday()) % 7 or 7  # the next one, never today
         return (today + datetime.timedelta(days=ahead)).isoformat()
     try:
         return datetime.date.fromisoformat(text).isoformat()
@@ -402,7 +403,10 @@ DOABLE = {"task", "set", "archive", "close", "group", "note", "project"}  # what
 
 def suggest(conn, text, actions):
     for act in actions:  # checked now, so a bad action fails for moa, not later for Eliraz
-        words = shlex.split(act)
+        try:
+            words = shlex.split(act)
+        except ValueError as e:
+            sys.exit(f"--do {act!r}: {e}")
         if not words or words[0] not in DOABLE:
             sys.exit(f"--do {act!r}: a suggestion can run moactl {', '.join(sorted(DOABLE))}")
     dup = conn.execute("SELECT id FROM suggestions WHERE status='open' AND text=?", (text,)).fetchone()
@@ -926,7 +930,7 @@ def main():
     p = sub.add_parser("task"); p.add_argument("op", choices=["add", "set", "ls"]); p.add_argument("args", nargs="*")
     p.add_argument("--today", action="store_true"); p.add_argument("--not-today", action="store_true")
     p.add_argument("--status"); p.add_argument("--blocked-on"); p.add_argument("--title")
-    p.add_argument("--who", choices=["you", "agent", "other"]); p.add_argument("--due", help="YYYY-MM-DD, today, tomorrow or +N (days)")
+    p.add_argument("--who", choices=["you", "agent", "other"]); p.add_argument("--due", help="YYYY-MM-DD, today, tomorrow, +N (days) or a weekday (fri, friday)")
     p.add_argument("--session"); p.add_argument("--note"); p.add_argument("--all", action="store_true")
     p.add_argument("--priority", choices=["p0", "p1", "p2", ""], help="p0 urgent, p1 important, p2 normal; \"\" clears it")
     p = sub.add_parser("peers", help="the agents you can ask: moa and the other sessions running in moa")
@@ -1034,7 +1038,7 @@ def main():
         conn.commit(); print(f"task #{cur.lastrowid} added")
     elif a.cmd == "task" and a.op == "set":
         if not a.args:
-            sys.exit("moactl task set ID [--status S] [--title T] [--who W] [--due D] [--session ID] [--note N]")
+            sys.exit("moactl task set ID [--status S] [--title T] [--who W] [--due D] [--priority P] [--session ID] [--note N]")
         tid = int(a.args[0])
         if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
             sys.exit(f"no task #{tid}")

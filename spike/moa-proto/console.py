@@ -354,7 +354,7 @@ class Console:
         self.cursor = self.conn.execute("SELECT coalesce(max(id),0) FROM events").fetchone()[0]
         # moa's suggestions as cards: the open ones from today now, new ones as moa makes them
         self.sugg_cursor = self.conn.execute("SELECT coalesce(max(id),0) FROM suggestions WHERE "
-                                             "created_at < date('now','localtime') OR status != 'open'").fetchone()[0]
+                                             "created_at < date('now','localtime')").fetchone()[0]
         self.seen = db_mtime()
         self._last_err = (None, 0.0)  # the last error line shown, and when
         self.pending[self.acp.request("initialize", {
@@ -580,7 +580,6 @@ class Console:
         m = db_mtime()
         if m == getattr(self, "sugg_seen", None):
             return
-        self.sugg_seen = m
         for r in self.conn.execute("SELECT * FROM suggestions WHERE id > ? AND status='open' ORDER BY id", (self.sugg_cursor,)):
             self.add_suggestion(r)
             self.sugg_cursor = r["id"]
@@ -589,6 +588,7 @@ class Console:
             q = ",".join("?" * len(cards))
             for r in self.conn.execute(f"SELECT id, status FROM suggestions WHERE id IN ({q}) AND status NOT IN ('open')", list(cards)):
                 cards[r["id"]]["answered"] = {"accepted": "✓ done", "rejected": "✗ no", "later": "◷ later"}.get(r["status"], r["status"])
+        self.sugg_seen = m  # only after every card was shown, so a failure retries (like watch_events)
 
     def add_event(self, text, what, name, sid):
         """A session report. moa briefs on what sessions say, so the console doesn't repeat

@@ -316,18 +316,19 @@ def plan(conn, width, C):
             item(icon("waiting"), f"{w['title'] or w['project']}: the session needs you", "", C["warn"] | curses.A_BOLD, "session", w)
         for t in sorted(g["tasks"], key=lambda t: ({"you": 0, "agent": 1, "wait": 2}[kind(t)], prio(t), t["due"] or "9999", t["id"])):
             k = kind(t)
-            if t["priority"] in ("p0", "p1"):  # the priority leads the title; p0 is red whoever's move it is
-                t = {**dict(t), "title": f"{t['priority'].upper()} {t['title']}"}
+            # the priority leads the title (shown only: the task's own title stays as it is); p0 is red whoever's move it is
+            title = f"{t['priority'].upper()} {t['title']}" if t["priority"] in ("p0", "p1") else t["title"]
+            red = C["p0"] if t["priority"] == "p0" else None
             if k == "wait":
                 on = t["blocked_on"] or ("someone else" if t["who"] == "other" else "")
-                item("◷", t["title"], on, C["dim"], "task", t, t["due"])
+                item("◷", title, on, red or C["dim"], "task", t, t["due"])
             elif k == "agent":
                 mark = icon("working") if t["sstate"] == "working" else "◐"
                 tail = "agent working" if t["sstate"] == "working" else "agent"
-                item(mark, t["title"], tail, C["ok"], "task", t, t["due"])
+                item(mark, title, tail, red or C["ok"], "task", t, t["due"])
             else:
                 mark = "★" if t["today"] == today else "▸"  # on today's list
-                item(mark, t["title"], "", C["p0"] if t["priority"] == "p0" else 0, "task", t, t["due"])
+                item(mark, title, "", red or 0, "task", t, t["due"])
     quiet = conn.execute("""SELECT name FROM projects p WHERE last_activity >= date('now','localtime','-7 days')
         AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.project_id=p.id AND t.status NOT IN ('done','dropped','idea'))
         ORDER BY last_activity DESC""").fetchall()
@@ -909,10 +910,7 @@ def main(scr):
             if p:
                 msg = new_session(conn, p, "claude-neeo" if k == ord("N") else "claude-lead")
         elif k in (ord("y"), ord("n")) and cur and cur.kind == "suggestion":
-            status = "accepted" if k == ord("y") else "rejected"
-            conn.execute("UPDATE suggestions SET status=?, resolved_at=datetime('now','localtime') WHERE id=?",
-                         (status, cur.data["id"]))
-            log_ui(conn, f"{status} suggestion #{cur.data['id']}: {cur.data['text']}")
+            msg = ctl("suggestion", "yes" if k == ord("y") else "no", str(cur.data["id"]))  # yes runs its --do actions
         elif k == ord("a") and cur and cur.kind == "session":
             conn.execute("UPDATE sessions SET state='archived' WHERE session_id=?", (cur.data["session_id"],))
             log_ui(conn, f"archived {cur.data['title'] or cur.data['session_id'][:8]}")
