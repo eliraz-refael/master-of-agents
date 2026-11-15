@@ -2,8 +2,9 @@
 remove moa's tracking hook in each one's settings.json. A Claude account is a config
 folder (~/.claude, or ~/.claude-* used with CLAUDE_CONFIG_DIR) that has a projects/
 folder or a settings.json. The hook (master-chat/hooks/track.sh) reports only sessions
-moa started (MOA_TRACK=1); "only" also limits it to some folders (MOA_ONLY_UNDER), and
-"--else BRAIN" sends the account's sessions outside them to that brain's moa (MOA_ELSE).
+moa started (MOA_TRACK=1). "only" limits it to some folders (MOA_ONLY_UNDER); "--brain B"
+sends the account's sessions to brain B's moa (MOA_ACCOUNT_BRAIN), "--except FOLDERS"
+keeping those folders with the default moa (MOA_EXCEPT_UNDER).
 Not product code."""
 import datetime
 import glob
@@ -34,11 +35,11 @@ def find_accounts(names):
     for d in sorted(glob.glob(os.path.join(home, ".claude")) + glob.glob(os.path.join(home, ".claude-*"))):
         if not os.path.isdir(d) or not (os.path.isdir(os.path.join(d, "projects")) or os.path.isfile(os.path.join(d, "settings.json"))):
             continue
-        state, only, other = hook_state(d)
+        state, limit = hook_state(d)
         projects = os.path.join(d, "projects")
         used = os.path.getmtime(projects) if os.path.isdir(projects) else None
         found.append({"name": by_dir.get(os.path.realpath(d), os.path.basename(d).lstrip(".")), "dir": d,
-                      "state": state, "only": only, "else": other, "last_used": used, "plugin": has_plugin(d)})
+                      "state": state, **limit, "last_used": used, "plugin": has_plugin(d)})
     return found
 
 
@@ -68,23 +69,26 @@ def _moa_commands(s):
 
 
 def hook_state(d):
-    """("installed" | "not installed" | "unreadable", [folders it's limited to], the brain
-    sessions outside them go to or None)."""
+    """("installed" | "not installed" | "unreadable", {"only": [folders it's limited to],
+    "brain": the brain the account's sessions go to or None, "except": [folders that stay]})."""
+    limit = {"only": [], "brain": None, "except": []}
     try:
         _, s = _settings(d)
     except (OSError, ValueError):
-        return "unreadable", [], None
+        return "unreadable", limit
     cmds = _moa_commands(s)
     if not cmds:
-        return "not installed", [], None
-    only, other = [], None
+        return "not installed", limit
+    folders = lambda w: [os.path.expandvars(x).replace("\\$", "$").replace("\\`", "`") for x in w.split("=", 1)[1].split(":") if x]  # noqa: E731
     for c in cmds:
         for word in shlex.split(c.split(MARK)[0]):
             if word.startswith("MOA_ONLY_UNDER="):
-                only = [os.path.expandvars(x).replace("\\$", "$").replace("\\`", "`") for x in word.split("=", 1)[1].split(":") if x]
-            elif word.startswith("MOA_ELSE="):
-                other = word.split("=", 1)[1] or None
-    return "installed", only, other
+                limit["only"] = folders(word)
+            elif word.startswith("MOA_EXCEPT_UNDER="):
+                limit["except"] = folders(word)
+            elif word.startswith("MOA_ACCOUNT_BRAIN="):
+                limit["brain"] = word.split("=", 1)[1] or None
+    return "installed", limit
 
 
 def _strip(s):
@@ -108,7 +112,7 @@ def _strip(s):
 
 def _unplug(s):
     """Take the plugin's folder limit out of settings `s` in place."""
-    for k in ("MOA_ONLY_UNDER", "MOA_ELSE"):
+    for k in ("MOA_ONLY_UNDER", "MOA_ACCOUNT_BRAIN", "MOA_EXCEPT_UNDER"):
         (s.get("env") or {}).pop(k, None)
     if "env" in s and not s["env"]:
         del s["env"]
@@ -160,23 +164,27 @@ def _dq(text):
     return re.sub(r'([\\"$`])', r"\\\1", text)
 
 
-def install(d, only=None, other=None):
-    """(Re)install moa's hook for every event it uses, and the moa plugin; `only` limits both
-    to those folders, and `other` (a brain's name) gets the sessions outside them."""
+def install(d, only=None, brain=None, exceptions=None):
+    """(Re)install moa's hook for every event it uses, and the moa plugin. `only` limits both
+    to those folders; `brain` sends the account's sessions to that brain's moa instead,
+    except in the folders `exceptions`, which stay with the default moa."""
     p, s = _settings(d)
     _strip(s)
     _unplug(s)
     env = ""
-    if only:
-        home = os.path.expanduser("~")
-        roots = [os.path.abspath(os.path.expanduser(x)) for x in only]
-        env = 'MOA_ONLY_UNDER="' + ":".join("$HOME" + _dq(r[len(home):]) if r.startswith(home + "/") else _dq(r)
-                                            for r in roots) + '" '
-        # the same limit for the plugin's moactl: settings env reaches the agent's shell (no $HOME expansion there)
-        s.setdefault("env", {})["MOA_ONLY_UNDER"] = ":".join(roots)
-        if other:
-            env += f"MOA_ELSE={shlex.quote(other)} "
-            s["env"]["MOA_ELSE"] = other
+    home = os.path.expanduser("~")
+
+    def put(var, value, shell):  # the hook command's prefix, and the same in settings env for
+        nonlocal env             # the plugin's moactl (the agent's shell, no $HOME expansion there)
+        env += f"{var}={shell} "
+        s.setdefault("env", {})[var] = value
+    for var, folders in (("MOA_ONLY_UNDER", only), ("MOA_EXCEPT_UNDER", exceptions)):
+        if folders:
+            roots = [os.path.abspath(os.path.expanduser(x)) for x in folders]
+            put(var, ":".join(roots), '"' + ":".join("$HOME" + _dq(r[len(home):]) if r.startswith(home + "/") else _dq(r)
+                                                     for r in roots) + '"')
+    if brain:
+        put("MOA_ACCOUNT_BRAIN", brain, shlex.quote(brain))
     hook = {"type": "command", "command": f"{env}bash {shlex.quote(TRACK)} {MARK}", "timeout": 5}
     for ev, matcher in EVENTS.items():
         group = {"hooks": [hook]}
@@ -207,17 +215,19 @@ def short(path):
 
 
 def limits(a):
-    """How an account's hook is limited, for listings: " (only ~/x; elsewhere: the work moa)"."""
-    if not a["only"]:
-        return ""
-    return f" (only {', '.join(short(x) for x in a['only'])}" + (f"; elsewhere: the {a['else']} moa)" if a["else"] else ")")
+    """Where an account's sessions go, for listings: " → work moa, except ~/x → default moa"."""
+    if a["brain"]:
+        return f" → {a['brain']} moa" + (f", except {', '.join(short(x) for x in a['except'])} → default moa" if a["except"] else "")
+    return f" (only {', '.join(short(x) for x in a['only'])})" if a["only"] else ""
 
 
 def again(a):
     """The moactl setup arguments that reinstall an account as it is."""
-    if not a["only"]:
-        return f"install {a['name']}"
-    return f"only {a['name']} {' '.join(shlex.quote(x) for x in a['only'])}" + (f" --else {a['else']}" if a["else"] else "")
+    if a["brain"]:
+        return f"install {a['name']} --brain {a['brain']}" + (f" --except {' '.join(shlex.quote(x) for x in a['except'])}" if a["except"] else "")
+    if a["only"]:
+        return f"only {a['name']} {' '.join(shlex.quote(x) for x in a['only'])}"
+    return f"install {a['name']}"
 
 
 def ago(ts):

@@ -8,31 +8,34 @@ in=$(cat)
 sid=$(jq -r '.session_id // ""' <<<"$in")
 cwd=$(jq -r '.cwd // ""' <<<"$in")
 q() { printf "'%s'" "${1//\'/\'\'}"; }
-# MOA_ONLY_UNDER (colon-separated folders), set in one account's hook command: report only
-# sessions under those folders, e.g. for an account that mostly works on things that
-# don't belong in this brain. MOA_ELSE (a brain's name) sends the sessions elsewhere to
-# that brain instead of dropping them. Checked before any other work; a session already
-# tracked stays where it is if it later moves (out of the folders, or into them from
-# MOA_ELSE's brain), so it doesn't freeze as "working" or split across two brains.
+# Where an account's sessions go, set in its hook command by `moactl setup`:
+# - MOA_ONLY_UNDER (colon-separated folders): report only sessions under those folders and
+#   drop the rest, e.g. for an account that mostly works on things that don't belong here.
+# - MOA_ACCOUNT_BRAIN (a brain's name): the account's sessions go to that brain's moa,
+#   except under MOA_EXCEPT_UNDER (folders), where they stay with the moa that started
+#   them, or the default one.
+# Checked before any other work. A session already tracked stays where it is if it later
+# moves, so it doesn't freeze as "working" or split across two brains.
 # (sqlite3 creates a missing file even to read it, hence the -f)
 tracked() { [ -f "$1" ] && [ -n "$(sqlite3 "$1" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ]; }
-if [ -n "${MOA_ONLY_UNDER:-}" ]; then
-  ok=""; IFS=: read -ra roots <<<"$MOA_ONLY_UNDER"
+under() {  # is the session's folder under one of these colon-separated folders?
+  local r roots; IFS=: read -ra roots <<<"$1"
   for r in "${roots[@]}"; do
     [ -n "$r" ] || continue   # an empty entry ("a::b", a trailing ":") must not match everything
-    case "$cwd/" in "${r%/}"/*) ok=1; break ;; esac
+    case "$cwd/" in "${r%/}"/*) return 0 ;; esac
   done
-  other=""
-  if [ -n "${MOA_ELSE:-}" ]; then
-    . "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/brain.sh"
-    other=$(moa_brain "$MOA_ELSE"; echo "$MOA_DB")
-  fi
-  if [ -n "$ok" ]; then
-    if [ -n "$other" ] && ! tracked "$db" && tracked "$other"; then db="$other"; fi
+  return 1
+}
+if [ -n "${MOA_ACCOUNT_BRAIN:-}" ]; then
+  . "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/brain.sh"
+  other=$(moa_brain "$MOA_ACCOUNT_BRAIN"; echo "$MOA_DB")
+  if under "${MOA_EXCEPT_UNDER:-}"; then
+    if ! tracked "$db" && tracked "$other"; then db="$other"; fi
   elif ! tracked "$db"; then
-    [ -n "$other" ] || exit 0
     db="$other"
   fi
+elif [ -n "${MOA_ONLY_UNDER:-}" ]; then
+  under "$MOA_ONLY_UNDER" || tracked "$db" || exit 0
 fi
 [ -f "$db" ] || exit 0
 event=$(jq -r '.hook_event_name // empty' <<<"$in")
@@ -101,7 +104,7 @@ fi
 # A new session learns it has peers (SessionStart output becomes context), so asking
 # another agent needs no setup.
 if [ "$kind" = start ]; then
-  # the plugin's moactl: like this hook, it sends a session MOA_ELSE routes to that brain's moa
+  # the plugin's moactl: like this hook, it sends the session to its account's brain (MOA_ACCOUNT_BRAIN)
   ctl="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../moa-plugin/moa/bin" && pwd)/moactl"
   cat <<EOF
 You're running inside moa (master-of-agents), alongside other agent sessions and moa itself, which keeps the big picture.

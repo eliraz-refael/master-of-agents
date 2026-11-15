@@ -39,7 +39,16 @@ named brain lives outside the repo, so its data can't be committed:
 | its settings (`MOA_ACCOUNT`, `MOA_OPEN_ACCOUNT`) | `~/.config/moa/work.env` (`default.env` for the default brain) |
 
 `--account` takes an account's command name or its config folder (`~/.claude-something`).
-Sessions belong to the moa that opened them. To split one account between brains by
-folder, keep it in the default brain for some folders and send the rest to another:
 
-    moactl setup only claude-work ~/private --else work
+Sessions belong to the moa that opened them. To send an account's sessions to a brain
+wherever they start, and keep some folders with the default moa:
+
+    moactl setup install claude-work --brain work --except ~/private ~/.config
+
+| claude-work session started in | goes to |
+|---|---|
+| `~/private/…`, `~/.config/…` | the default moa |
+| anywhere else (`~/workspace/…`, `~`, a clone in `/tmp`) | the work moa |
+
+Anything not listed as an exception is the brain's, so its data can't reach the default
+brain from a folder you forgot to list. `moactl setup list` shows each account's route.

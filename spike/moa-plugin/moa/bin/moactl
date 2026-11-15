@@ -1,25 +1,33 @@
 #!/bin/bash
 # THROWAWAY PROTOTYPE: moactl for agents, on their PATH through the moa plugin (a plugin's
-# bin/ is). It runs the repo's moactl. On an account moa only follows in some folders
-# (MOA_ONLY_UNDER, which `moactl setup only` writes into that account's settings), moa is
-# off for sessions elsewhere, e.g. day-job work on a shared account: a guard against
-# accidents, checked against the folder the session started in. With MOA_ELSE (a brain's
-# name) sessions elsewhere get that brain's moa instead. CLAUDE_PROJECT_DIR isn't in
-# the agent's shell, and $PWD follows its `cd`s, so the start folder is Claude's own cwd.
+# bin/ is). It runs the repo's moactl, for the moa this session belongs to. Some accounts
+# say where that is (`moactl setup` writes it into the account's settings env), checked
+# against the folder the session started in:
+# - MOA_ACCOUNT_BRAIN: that brain's moa, except under MOA_EXCEPT_UNDER (the default moa).
+# - MOA_ONLY_UNDER: moa only works in those folders, e.g. to keep day-job work on a shared
+#   account away from it; a guard against accidents.
+# CLAUDE_PROJECT_DIR isn't in the agent's shell, and $PWD follows its `cd`s, so the start
+# folder is Claude's own cwd.
 here="$(dirname "$(realpath "$0")")"
-if [ -n "${MOA_ONLY_UNDER:-}" ]; then
-  dir="${CLAUDE_PROJECT_DIR:-}"
-  [ -n "$dir" ] || [ -z "${CLAUDE_PID:-}" ] || dir="$(lsof -a -p "$CLAUDE_PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
-  dir="${dir:-$PWD}"; ok=""; IFS=: read -ra roots <<<"$MOA_ONLY_UNDER"
+under() {
+  local r roots; IFS=: read -ra roots <<<"$1"
   for r in "${roots[@]}"; do
     [ -n "$r" ] || continue
-    case "$dir/" in "${r%/}"/*) ok=1; break ;; esac
+    case "$dir/" in "${r%/}"/*) return 0 ;; esac
   done
-  if [ -z "$ok" ] && [ -n "${MOA_ELSE:-}" ]; then  # elsewhere, this account's sessions belong to that brain's moa
-    . "$here/../../../moa-proto/brain.sh"
-    moa_brain "$MOA_ELSE"
-    [ -f "$MOA_DB" ] || { echo "the $MOA_ELSE moa has no brain yet: start it once with moa $MOA_ELSE" >&2; exit 1; }
-  elif [ -z "$ok" ]; then
+  return 1
+}
+if [ -n "${MOA_ACCOUNT_BRAIN:-}${MOA_ONLY_UNDER:-}" ]; then
+  dir="${CLAUDE_PROJECT_DIR:-}"
+  [ -n "$dir" ] || [ -z "${CLAUDE_PID:-}" ] || dir="$(lsof -a -p "$CLAUDE_PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+  dir="${dir:-$PWD}"
+  if [ -n "${MOA_ACCOUNT_BRAIN:-}" ]; then
+    if ! under "${MOA_EXCEPT_UNDER:-}"; then
+      . "$here/../../../moa-proto/brain.sh"
+      moa_brain "$MOA_ACCOUNT_BRAIN"
+      [ -f "$MOA_DB" ] || { echo "the $MOA_ACCOUNT_BRAIN moa has no brain yet: start it once with moa $MOA_ACCOUNT_BRAIN" >&2; exit 1; }
+    fi
+  elif ! under "$MOA_ONLY_UNDER"; then
     echo "moa isn't available here: on this account it only works in ${MOA_ONLY_UNDER//:/, }." >&2
     exit 1
   fi

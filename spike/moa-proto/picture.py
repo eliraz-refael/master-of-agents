@@ -598,7 +598,7 @@ _sock_path = None
 
 def on_this_server(s):
     """Whether a session's pane ID was recorded on this moa's tmux server. An account split
-    between brains (setup only --else) can send this brain a session another moa opened,
+    between brains (setup install --brain --except) can send this brain a session another moa opened,
     and its pane ID names some other pane here."""
     global _sock_path
     if _sock_path is None:

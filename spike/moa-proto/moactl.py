@@ -631,17 +631,25 @@ def setup(conn, a):
     acct = next((x for x in accounts if a.name in (x["name"], x["dir"], setup_hooks.short(x["dir"]))), None)
     if not acct:
         sys.exit(f"no Claude account {a.name!r} (moactl setup list)")
-    if a.other and (a.op != "only" or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.other)):
-        sys.exit("--else BRAIN goes with `setup only`, and a brain's name is lowercase letters, digits and dashes")
+    if (a.brain or a.exceptions) and a.op != "install":
+        sys.exit("--brain and --except go with `setup install`")
+    if a.exceptions and not a.brain:
+        sys.exit("--except FOLDERS goes with --brain BRAIN: the account's sessions go to that brain, except in FOLDERS")
+    if a.brain and (a.brain == "default" or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.brain)):
+        sys.exit("a brain's name is lowercase letters, digits and dashes (and plain moa is the default brain)")
     if a.op == "install":
-        err = setup_hooks.install(acct["dir"])
-        print(f"tracking and the moa plugin installed for {acct['name']}; its running sessions pick them up when they restart"
+        err = setup_hooks.install(acct["dir"], brain=a.brain, exceptions=a.exceptions)
+        where = ""
+        if a.brain:
+            where = (f"; its sessions go to the {a.brain} moa (start it with: moa {a.brain})"
+                     + (f", except under {', '.join(setup_hooks.short(f) for f in a.exceptions)}, which stay with the default moa"
+                        if a.exceptions else ""))
+        print(f"tracking and the moa plugin installed for {acct['name']}{where}; its running sessions pick them up when they restart"
               + (f"\nbut: {err}" if err else ""))
     elif a.op == "only":
         folders = a.folders or PRIVATE_ROOTS
-        err = setup_hooks.install(acct["dir"], folders, a.other)
+        err = setup_hooks.install(acct["dir"], folders)
         print(f"tracking and the moa plugin installed for {acct['name']}, only under {', '.join(setup_hooks.short(f) for f in folders)}"
-              + (f"; its sessions elsewhere go to the {a.other} moa (start it with: moa {a.other})" if a.other else "")
               + (f"\nbut: {err}" if err else ""))
     elif a.op == "remove":
         n, err = setup_hooks.remove(acct["dir"])
@@ -898,7 +906,9 @@ def main():
     p = sub.add_parser("setup", help="install moa's tracking hook in your Claude accounts (asks; no args = interactive)")
     p.add_argument("op", nargs="?", choices=["list", "install", "only", "remove", "skip"])
     p.add_argument("name", nargs="?"); p.add_argument("folders", nargs="*"); p.add_argument("--json", action="store_true")
-    p.add_argument("--else", dest="other", metavar="BRAIN", help="with only: the account's sessions outside FOLDERS go to this brain's moa")
+    p.add_argument("--brain", metavar="BRAIN", help="with install: the account's sessions go to this brain's moa (moa BRAIN)")
+    p.add_argument("--except", dest="exceptions", nargs="+", metavar="FOLDER",
+                   help="with --brain: sessions in these folders stay with the default moa")
     p = sub.add_parser("open"); p.add_argument("path"); p.add_argument("--account", default=os.environ.get("MOA_OPEN_ACCOUNT") or "claude-lead")
     p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--prompt"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("resume"); p.add_argument("id"); p.add_argument("--bg", action="store_true")

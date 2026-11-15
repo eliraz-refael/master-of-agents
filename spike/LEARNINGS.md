@@ -269,6 +269,8 @@ whole moa: `moa work` gets its own tmux server, `brain.db` and scope file, all o
 the repo. The launcher sets the MOA_ variables before the tmux server starts, so the
 panels, keys, sessions and their hooks all inherit that brain without being told. What
 the moa is for moved out of CLAUDE.md into a scope file the briefing prints, so both moas
-share one set of instructions. The account decides nothing by itself; the folder does:
-an account split between brains routes its sessions outside some folders to another
-brain (`setup only … --else work`), in both the tracking hook and the plugin's moactl.
+share one set of instructions. An account can be sent to a brain with folder
+exceptions (`setup install claude-work --brain work --except ~/private`), applied in both
+the tracking hook and the plugin's moactl. Say it the way people think about it: the
+first version read `setup only claude-work ~/private --else work`, which looks like the
+work account only works in ~/private, the opposite of what it did.
