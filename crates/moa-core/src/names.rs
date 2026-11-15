@@ -64,6 +64,10 @@ impl State {
     /// id or of any conversation id (archived ones too); failing that by substring of the
     /// title, project name or group of a non-archived session, where an exact title wins.
     pub fn candidates(&self, q: &str) -> Vec<SessionId> {
+        // An empty name is a prefix of everything: it never means anyone.
+        if q.trim().is_empty() {
+            return Vec::new();
+        }
         let q = q.to_lowercase();
         let ids = |mut list: Vec<&Session>| {
             newest_first(&mut list);
@@ -104,6 +108,9 @@ impl State {
 
     /// The one session `q` means, or why not.
     pub fn resolve(&self, q: &str) -> Result<SessionId, OpError> {
+        if q.trim().is_empty() {
+            return Err(OpError("a session name can't be empty".into()));
+        }
         let found = self.candidates(q);
         match found.as_slice() {
             [one] => Ok(*one),

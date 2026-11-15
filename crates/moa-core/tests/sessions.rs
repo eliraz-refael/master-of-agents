@@ -285,6 +285,41 @@ fn titles_that_differ_only_in_case_are_both_exact() {
 }
 
 #[test]
+fn an_empty_name_never_resolves() {
+    let st = started(Snapshot {
+        sessions: vec![session(M1, Some("Only"), Some(10))],
+        ..Snapshot::default()
+    });
+    for q in ["", "  ", "\t"] {
+        assert_eq!(
+            st.resolve(q).unwrap_err().0,
+            "a session name can't be empty"
+        );
+        assert!(st.candidates(q).is_empty());
+    }
+    let mut st = st;
+    for op in [
+        Op::SessionArchive {
+            qs: vec!["".into()],
+        },
+        set_op(" ", Some("x"), None),
+    ] {
+        let fx = effects(&mut st, op, &noon());
+        assert_eq!(
+            reply_of(&fx).unwrap().as_ref().unwrap_err().0,
+            "a session name can't be empty"
+        );
+        assert!(!persisted(&fx));
+    }
+    assert!(
+        st.session(M1.parse().unwrap())
+            .unwrap()
+            .archived_at
+            .is_none()
+    );
+}
+
+#[test]
 fn only_eight_candidates_are_listed() {
     let sessions = (1..=10)
         .map(|n| {
@@ -539,14 +574,15 @@ fn archive_marks_each_session_once() {
     assert_eq!(st.session(s4).unwrap().archived_at, Some(now.wall));
     // Again later: the first time stays.
     let later = Now::at(UtcMs(now.wall.0 + 60_000), Duration::ZERO, est());
-    let done = ok(
+    let fx = effects(
         &mut st,
         Op::SessionArchive {
             qs: vec![h(S4_ENDED).into()],
         },
         &later,
     );
-    assert_eq!(done.text, "archived 0");
+    assert_eq!(reply_of(&fx).unwrap().as_ref().unwrap().text, "archived 0");
+    assert!(!persisted(&fx), "nothing to save");
     assert_eq!(st.session(s4).unwrap().archived_at, Some(now.wall));
     assert_eq!(
         err(&mut st, Op::SessionArchive { qs: vec![] }, &now),
