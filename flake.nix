@@ -30,7 +30,18 @@
             # The root Cargo.toml is a virtual workspace, so crane cannot infer these.
             pname = "moa";
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-            src = craneLib.cleanCargoSource ./.;
+            # cleanCargoSource keeps only .rs/.toml/Cargo.lock; the store's .sql and the
+            # tests' .snap files must reach the build too.
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                (craneLib.fileset.commonCargoSources ./.)
+                (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap" || f.hasExt "proptest-regressions") ./crates)
+                # read by a DDL check test; removed with the spike
+                ./spike/master-chat/schema.sql
+                ./spike/moa-proto/picture.py
+              ];
+            };
             strictDeps = true;
             buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
           };
@@ -45,7 +56,7 @@
         let b = builds.${system}; in
         {
           default = b.craneLib.buildPackage (b.withArtifacts // {
-            cargoExtraArgs = "-p moa";
+            cargoExtraArgs = "--locked -p moa";
             doCheck = false;
             meta.mainProgram = "moa";
           });

@@ -1,0 +1,16 @@
+[package]
+name = "moa-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+moa-core = { path = "../moa-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
