@@ -14,9 +14,12 @@ pub mod accounts;
 pub mod backup;
 pub mod export;
 pub mod import;
+mod rows;
 mod schema;
+mod snapshot;
 pub mod spike;
 
+pub use moa_core::state::Snapshot;
 pub use schema::{SCHEMA_VERSION, migrations};
 
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
