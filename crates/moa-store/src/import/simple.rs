@@ -31,7 +31,11 @@ pub(super) fn projects(run: &mut Run, tx: &Transaction) -> Result<(), ImportErro
     for r in &rows {
         let Some(id) = r.int("id") else { continue };
         let key = id_key(id);
-        let name = run.rule("projects", &key, rules::text_not_null(r.text("name")));
+        let name = run.rule(
+            "projects",
+            &key,
+            rules::text_not_null(r.text("name"), R_PROJECT_NAME_NULL),
+        );
         let name = unique_name(run, &mut used, &key, name);
         let status = run.rule(
             "projects",
@@ -45,17 +49,27 @@ pub(super) fn projects(run: &mut Run, tx: &Transaction) -> Result<(), ImportErro
         let last_activity = run.rule(
             "projects",
             &key,
-            rules::date(r.text("last_activity").as_deref()),
+            rules::date(r.text("last_activity").as_deref(), R_PROJECT_LAST_ACTIVITY),
         );
         let created = run.rule(
             "projects",
             &key,
-            rules::instant_or(r.text("created_at").as_deref(), &tz, env_now),
+            rules::instant_or(
+                r.text("created_at").as_deref(),
+                &tz,
+                env_now,
+                R_PROJECT_CREATED,
+            ),
         );
         let updated = run.rule(
             "projects",
             &key,
-            rules::instant_or(r.text("updated_at").as_deref(), &tz, env_now),
+            rules::instant_or(
+                r.text("updated_at").as_deref(),
+                &tz,
+                env_now,
+                R_PROJECT_UPDATED,
+            ),
         );
         tx.execute(
             "INSERT INTO projects (id, name, path, status, summary, last_activity_on, created_at, updated_at) \
@@ -110,14 +124,31 @@ pub(super) fn notes(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> 
         let project = run.rule(
             "notes",
             &key,
-            rules::reference(r.int("project_id"), |p| run.project_ids.contains(&p)),
+            rules::reference(
+                r.int("project_id"),
+                |p| run.project_ids.contains(&p),
+                R_NOTE_PROJECT,
+            ),
         );
-        let kind = run.rule("notes", &key, rules::text_not_null(r.text("kind")));
-        let text = run.rule("notes", &key, rules::text_not_null(r.text("text")));
+        let kind = run.rule(
+            "notes",
+            &key,
+            rules::text_not_null(r.text("kind"), R_NOTE_KIND_NULL),
+        );
+        let text = run.rule(
+            "notes",
+            &key,
+            rules::text_not_null(r.text("text"), R_NOTE_TEXT_NULL),
+        );
         let created = run.rule(
             "notes",
             &key,
-            rules::instant_or(r.text("created_at").as_deref(), &tz, env_now),
+            rules::instant_or(
+                r.text("created_at").as_deref(),
+                &tz,
+                env_now,
+                R_NOTE_CREATED,
+            ),
         );
         tx.execute(
             "INSERT INTO notes (id, project_id, kind, text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -182,7 +213,7 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
                 let created = run.rule(
                     "groups",
                     &item.key,
-                    rules::instant_or(item.created.as_deref(), &tz, env_now),
+                    rules::instant_or(item.created.as_deref(), &tz, env_now, R_GROUP_CREATED),
                 );
                 tx.execute(
                     "INSERT INTO groups (path, collapsed, created_at) VALUES (?1, 0, ?2)",
@@ -209,14 +240,18 @@ pub(super) fn activity(run: &mut Run, tx: &Transaction) -> Result<(), ImportErro
         let at = run.rule(
             "activity",
             &key,
-            rules::instant_or(r.text("ts").as_deref(), &tz, env_now),
+            rules::instant_or(r.text("ts").as_deref(), &tz, env_now, R_ACTIVITY_TS),
         );
         let who = run.rule(
             "activity",
             &key,
             rules::closed(r.text("who").as_deref(), ActivityWho::Brain, R_ACTIVITY_WHO),
         );
-        let text = run.rule("activity", &key, rules::text_not_null(r.text("text")));
+        let text = run.rule(
+            "activity",
+            &key,
+            rules::text_not_null(r.text("text"), R_ACTIVITY_TEXT_NULL),
+        );
         tx.execute(
             "INSERT INTO activity (id, at, who, text) VALUES (?1, ?2, ?3, ?4)",
             params![id, at.0, who.as_str(), text],
@@ -238,7 +273,7 @@ struct ConsoleThread {
 pub(super) fn meta(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
     let rows = run.src.rows("meta", &["rowid", "key", "value"], "key")?;
     let (mut carried, mut warned) = (0, 0);
-    let (mut threads_source, mut threads_imported) = (0, 0);
+    let (mut threads_source, mut threads_imported, mut threads_warned) = (0, 0, 0);
     for r in &rows {
         let key = id_key(r.int("rowid").unwrap_or(0));
         let value = r.text("value").unwrap_or_default();
@@ -255,7 +290,10 @@ pub(super) fn meta(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
                         threads_imported += 1;
                         carried += 1;
                     }
-                    None => run.warn("meta", &key, R_META_THREAD_BAD),
+                    None => {
+                        run.warn("meta", &key, R_META_THREAD_BAD);
+                        threads_warned += 1;
+                    }
                 }
             }
             "setup_skipped" => match serde_json::from_str::<Vec<String>>(&value) {
@@ -271,7 +309,12 @@ pub(super) fn meta(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
         }
         warned += run.end_record();
     }
-    run.finish("moa_threads", threads_source, threads_imported, 0);
+    run.finish(
+        "moa_threads",
+        threads_source,
+        threads_imported,
+        threads_warned,
+    );
     run.finish("meta", rows.len(), carried, warned);
     Ok(())
 }

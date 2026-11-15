@@ -104,19 +104,27 @@ impl ImportReport {
 
 // The fixed reasons. A reason names a column at most and never a value.
 
-pub const R_INSTANT_BAD: &str = "a time isn't a time; imported as none";
-pub const R_INSTANT_BAD_NOW: &str = "a time isn't a time; imported as the import time";
-pub const R_DATE_BAD: &str = "a date isn't a date; imported as none";
-pub const R_ENUM_BAD: &str = "a value isn't one of the known ones; imported as the default";
-pub const R_REF_GONE: &str = "a link points at nothing; imported as none";
-pub const R_TEXT_NULL: &str = "text was missing; imported as empty";
 pub const R_GROUP_PATH_FIXED: &str = "group path had empty parts; imported cleaned up";
 pub const R_GROUP_PATH_EMPTY: &str = "group path is empty; not imported";
 
 pub const R_PROJECT_NAME_CLASH: &str =
     "name clashes with another project ignoring case; renamed with a suffix";
+pub const R_PROJECT_NAME_NULL: &str = "name was missing; imported as empty";
 pub const R_PROJECT_STATUS: &str = "status isn't a known one; imported as active";
+pub const R_PROJECT_LAST_ACTIVITY: &str = "last_activity isn't a date; imported as none";
+pub const R_PROJECT_CREATED: &str = "created_at isn't a time; imported as the import time";
+pub const R_PROJECT_UPDATED: &str = "updated_at isn't a time; imported as the import time";
+
+pub const R_NOTE_PROJECT: &str = "project_id points at no project; imported as none";
+pub const R_NOTE_KIND_NULL: &str = "kind was missing; imported as empty";
+pub const R_NOTE_TEXT_NULL: &str = "text was missing; imported as empty";
+pub const R_NOTE_CREATED: &str = "created_at isn't a time; imported as the import time";
+
+pub const R_GROUP_CREATED: &str = "created_at isn't a time; imported as the import time";
+
+pub const R_ACTIVITY_TS: &str = "ts isn't a time; imported as the import time";
 pub const R_ACTIVITY_WHO: &str = "who isn't a known one; imported as brain";
+pub const R_ACTIVITY_TEXT_NULL: &str = "text was missing; imported as empty";
 
 pub const R_META_CURSOR: &str = "meta cursor not carried (v1 has one channel)";
 pub const R_META_OTHER: &str = "meta key not carried";

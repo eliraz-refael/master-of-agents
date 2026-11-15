@@ -341,6 +341,12 @@ fn awkward_simple_tables_warn_without_contents() {
         .query_row("SELECT count(*) FROM moa_threads", [], |r| r.get(0))
         .unwrap();
     assert_eq!(threads, 0);
+    let t = report
+        .tables
+        .iter()
+        .find(|t| t.table == "moa_threads")
+        .unwrap();
+    assert_eq!((t.source, t.imported, t.warned), (1, 0, 1));
     // Activity text that the spike left NULL is imported as an empty string.
     let empty: i64 = c
         .query_row("SELECT count(*) FROM activity WHERE text = ''", [], |r| {
@@ -374,7 +380,6 @@ fn an_old_spike_imports_with_the_late_tables_missing() {
         .query_row("SELECT count(*) FROM groups", [], |r| r.get(0))
         .unwrap();
     assert_eq!(groups, 0);
-    let _ = find_transcript;
 }
 
 #[test]
@@ -389,10 +394,12 @@ fn odd_rows_are_kept_with_fixed_warnings() {
          INSERT INTO projects VALUES (1, 'Lantern', 'someday', 'soon', 'garbage', NULL);
          INSERT INTO projects VALUES (2, 'lantern', 'active', NULL, '', '');
          INSERT INTO projects VALUES (3, 'LANTERN (2)', 'active', NULL, NULL, NULL);
+         INSERT INTO projects VALUES (4, 'Two bad times', 'active', NULL, 'garbage', 'nonsense');
          CREATE TABLE notes (id INTEGER PRIMARY KEY, project_id INTEGER, kind TEXT, text TEXT, created_at TEXT);
          INSERT INTO notes VALUES (1, 99, 'milestone', 'secret words', NULL);
          CREATE TABLE activity (id INTEGER PRIMARY KEY, ts TEXT, who TEXT, text TEXT);
-         INSERT INTO activity VALUES (1, NULL, 'bot', 'x');",
+         INSERT INTO activity VALUES (1, NULL, 'bot', 'x');
+         INSERT INTO activity VALUES (2, NULL, NULL, 'y');",
     )
     .unwrap();
     drop(c);
@@ -408,7 +415,10 @@ fn odd_rows_are_kept_with_fixed_warnings() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(names, ["Lantern", "lantern (2)", "LANTERN (2) (2)"]);
+    assert_eq!(
+        names,
+        ["Lantern", "lantern (2)", "LANTERN (2) (2)", "Two bad times"]
+    );
     let (status, created): (String, i64) = store
         .conn()
         .query_row(
@@ -433,8 +443,18 @@ fn odd_rows_are_kept_with_fixed_warnings() {
     let warned = |t: &str| report.tables.iter().find(|c| c.table == t).unwrap().warned;
     assert_eq!(
         (warned("projects"), warned("notes"), warned("activity")),
-        (3, 1, 1)
+        (4, 1, 2)
     );
+    // Two bad times on one record give two notes that each name their column.
+    let reasons: Vec<&str> = report
+        .notes
+        .iter()
+        .filter(|n| n.table == "projects" && n.key == "#4")
+        .map(|n| n.reason)
+        .collect();
+    assert_eq!(reasons.len(), 2);
+    assert!(reasons[0].starts_with("created_at") && reasons[1].starts_with("updated_at"));
+    assert_ne!(reasons[0], reasons[1]);
     let text = report.render_text(false);
     assert!(!text.contains("secret") && !text.contains("Lantern") && !text.contains("garbage"));
 }

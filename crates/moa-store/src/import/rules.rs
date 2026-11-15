@@ -18,64 +18,71 @@ fn blank(text: Option<&str>) -> Option<&str> {
 }
 
 /// G1, nullable column: NULL or empty is none, with no note; unparsable is none with a warning.
-pub fn instant(text: Option<&str>, tz: &TimeZone) -> Ruled<Option<UtcMs>> {
+pub fn instant(text: Option<&str>, tz: &TimeZone, reason: &'static str) -> Ruled<Option<UtcMs>> {
     match blank(text) {
         None => (None, None),
         Some(t) => match spike_local_to_utc(t, tz) {
             Ok(ms) => (Some(ms), None),
-            Err(_) => (None, Some(R_INSTANT_BAD)),
+            Err(_) => (None, Some(reason)),
         },
     }
 }
 
 /// G1, `NOT NULL` column: missing is `fallback` with no note; unparsable is `fallback` with a warning.
-pub fn instant_or(text: Option<&str>, tz: &TimeZone, fallback: UtcMs) -> Ruled<UtcMs> {
+pub fn instant_or(
+    text: Option<&str>,
+    tz: &TimeZone,
+    fallback: UtcMs,
+    reason: &'static str,
+) -> Ruled<UtcMs> {
     match blank(text) {
         None => (fallback, None),
         Some(t) => match spike_local_to_utc(t, tz) {
             Ok(ms) => (ms, None),
-            Err(_) => (fallback, Some(R_INSTANT_BAD_NOW)),
+            Err(_) => (fallback, Some(reason)),
         },
     }
 }
 
 /// G2: NULL or empty is none with no note; unparsable is none with a warning.
-pub fn date(text: Option<&str>) -> Ruled<Option<Date>> {
+pub fn date(text: Option<&str>, reason: &'static str) -> Ruled<Option<Date>> {
     match blank(text) {
         None => (None, None),
         Some(t) => match parse_date(t) {
             Ok(d) => (Some(d), None),
-            Err(_) => (None, Some(R_DATE_BAD)),
+            Err(_) => (None, Some(reason)),
         },
     }
 }
 
-/// G3: a missing column or NULL is `default` with no note; an unknown value is `default` with
-/// a warning (`reason`, which names the column).
+/// G3: NULL (or a column an older DB lacks) and any unknown value are `default` with a warning
+/// (`reason`, which names the column). A caller whose column may be absent from an older DB
+/// must skip the call in that case (G6).
 pub fn closed<T: FromStr>(text: Option<&str>, default: T, reason: &'static str) -> Ruled<T> {
-    match text {
-        None => (default, None),
-        Some(t) => match t.parse() {
-            Ok(v) => (v, None),
-            Err(_) => (default, Some(reason)),
-        },
+    match text.map(str::parse) {
+        Some(Ok(v)) => (v, None),
+        _ => (default, Some(reason)),
     }
 }
 
 /// G4: a reference to something that exists is kept; one that doesn't is none with a warning.
-pub fn reference(id: Option<i64>, exists: impl Fn(i64) -> bool) -> Ruled<Option<i64>> {
+pub fn reference(
+    id: Option<i64>,
+    exists: impl Fn(i64) -> bool,
+    reason: &'static str,
+) -> Ruled<Option<i64>> {
     match id {
         None => (None, None),
         Some(i) if exists(i) => (Some(i), None),
-        Some(_) => (None, Some(R_REF_GONE)),
+        Some(_) => (None, Some(reason)),
     }
 }
 
 /// G5: NULL in a `NOT NULL` text column is empty with a warning.
-pub fn text_not_null(text: Option<String>) -> Ruled<String> {
+pub fn text_not_null(text: Option<String>, reason: &'static str) -> Ruled<String> {
     match text {
         Some(t) => (t, None),
-        None => (String::new(), Some(R_TEXT_NULL)),
+        None => (String::new(), Some(reason)),
     }
 }
 
@@ -95,6 +102,8 @@ mod tests {
     use super::*;
     use moa_core::model::{ActivityWho, ProjectStatus};
 
+    const R_X: &str = "x isn't right";
+
     fn tz() -> TimeZone {
         TimeZone::posix("UTC0").unwrap()
     }
@@ -102,39 +111,42 @@ mod tests {
     #[test]
     fn g1_instants() {
         let t = tz();
-        assert_eq!(instant(None, &t), (None, None));
-        assert_eq!(instant(Some(""), &t), (None, None));
+        assert_eq!(instant(None, &t, R_X), (None, None));
+        assert_eq!(instant(Some(""), &t, R_X), (None, None));
         assert_eq!(
-            instant(Some("1970-01-01 00:00:01"), &t),
+            instant(Some("1970-01-01 00:00:01"), &t, R_X),
             (Some(UtcMs(1000)), None)
         );
-        assert_eq!(instant(Some("soon"), &t), (None, Some(R_INSTANT_BAD)));
-        assert_eq!(instant_or(None, &t, UtcMs(7)), (UtcMs(7), None));
-        assert_eq!(instant_or(Some(" "), &t, UtcMs(7)), (UtcMs(7), None));
+        assert_eq!(instant(Some("soon"), &t, R_X), (None, Some(R_X)));
+        assert_eq!(instant_or(None, &t, UtcMs(7), R_X), (UtcMs(7), None));
+        assert_eq!(instant_or(Some(" "), &t, UtcMs(7), R_X), (UtcMs(7), None));
         assert_eq!(
-            instant_or(Some("1970-01-01 00:00:02"), &t, UtcMs(7)),
+            instant_or(Some("1970-01-01 00:00:02"), &t, UtcMs(7), R_X),
             (UtcMs(2000), None)
         );
         assert_eq!(
-            instant_or(Some("soon"), &t, UtcMs(7)),
-            (UtcMs(7), Some(R_INSTANT_BAD_NOW))
+            instant_or(Some("soon"), &t, UtcMs(7), R_X),
+            (UtcMs(7), Some(R_X))
         );
     }
 
     #[test]
     fn g2_dates() {
         let d = jiff::civil::date(2026, 11, 15);
-        assert_eq!(date(None), (None, None));
-        assert_eq!(date(Some("")), (None, None));
-        assert_eq!(date(Some("2026-11-15")), (Some(d), None));
-        assert_eq!(date(Some("2026-11-15 10:00:00")), (Some(d), None));
-        assert_eq!(date(Some("tomorrow")), (None, Some(R_DATE_BAD)));
+        assert_eq!(date(None, R_X), (None, None));
+        assert_eq!(date(Some(""), R_X), (None, None));
+        assert_eq!(date(Some("2026-11-15"), R_X), (Some(d), None));
+        assert_eq!(date(Some("2026-11-15 10:00:00"), R_X), (Some(d), None));
+        assert_eq!(date(Some("tomorrow"), R_X), (None, Some(R_X)));
     }
 
     #[test]
     fn g3_closed_enums() {
         let d = ProjectStatus::Active;
-        assert_eq!(closed(None, d, R_PROJECT_STATUS), (d, None));
+        assert_eq!(
+            closed(None, d, R_PROJECT_STATUS),
+            (d, Some(R_PROJECT_STATUS))
+        );
         assert_eq!(
             closed(Some("paused"), d, R_PROJECT_STATUS),
             (ProjectStatus::Paused, None)
@@ -152,16 +164,19 @@ mod tests {
     #[test]
     fn g4_references() {
         let has = |i: i64| i == 1;
-        assert_eq!(reference(None, has), (None, None));
-        assert_eq!(reference(Some(1), has), (Some(1), None));
-        assert_eq!(reference(Some(2), has), (None, Some(R_REF_GONE)));
+        assert_eq!(reference(None, has, R_X), (None, None));
+        assert_eq!(reference(Some(1), has, R_X), (Some(1), None));
+        assert_eq!(reference(Some(2), has, R_X), (None, Some(R_X)));
     }
 
     #[test]
     fn g5_text() {
-        assert_eq!(text_not_null(Some("x".into())), ("x".into(), None));
-        assert_eq!(text_not_null(Some(String::new())), (String::new(), None));
-        assert_eq!(text_not_null(None), (String::new(), Some(R_TEXT_NULL)));
+        assert_eq!(text_not_null(Some("x".into()), R_X), ("x".into(), None));
+        assert_eq!(
+            text_not_null(Some(String::new()), R_X),
+            (String::new(), None)
+        );
+        assert_eq!(text_not_null(None, R_X), (String::new(), Some(R_X)));
     }
 
     #[test]
@@ -171,19 +186,5 @@ mod tests {
             assert_eq!(group_path(raw), ("A/B".into(), Some(R_GROUP_PATH_FIXED)));
         }
         assert_eq!(group_path("/"), (String::new(), Some(R_GROUP_PATH_FIXED)));
-    }
-
-    #[test]
-    fn no_reason_is_built_from_data() {
-        // Reasons are consts; the type is &'static str, so this only documents the intent.
-        for r in [
-            R_INSTANT_BAD,
-            R_DATE_BAD,
-            R_ENUM_BAD,
-            R_REF_GONE,
-            R_TEXT_NULL,
-        ] {
-            assert!(!r.contains('{'));
-        }
     }
 }
