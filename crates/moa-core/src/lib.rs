@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod model;
+pub mod route;
 pub mod time;
 
 pub use time::{TimeError, UtcMs};
