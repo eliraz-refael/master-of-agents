@@ -128,6 +128,7 @@ fn into_an_existing_file_or_leftover_wal_is_refused() {
     let alias = r.dir.path().join(".").join("spike.db");
     let o = r.moa(&["adopt-spike", "--from", s(&r.spike), "--into", s(&alias)]);
     assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o).contains("the source and the target are the same file"));
 }
 
 #[test]

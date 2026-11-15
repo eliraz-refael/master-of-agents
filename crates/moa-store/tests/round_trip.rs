@@ -193,6 +193,19 @@ fn typical_report_names_records_not_contents() {
     }
 }
 
+#[test]
+fn a_title_with_invalid_utf8_still_compares() {
+    let mut b = SpikeFixture::brain(Scenario::Typical);
+    let (_, row) = b.rows.iter_mut().find(|(t, _)| *t == "sessions").unwrap();
+    let (_, v) = row.iter_mut().find(|(c, _)| *c == "title").unwrap();
+    // A title cut in the middle of a three-byte character.
+    *v = rusqlite::types::Value::Blob(vec![b'a', 0xE2, 0x82]);
+    let rig = rig_with(|spike, home| b.write(spike, home));
+    rig.export().unwrap();
+    let excluded = common::assert_round_trip(&rig.spike, &rig.out, &rig.notes, &TimeMode::Text);
+    assert_eq!(excluded, 1);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
     #[test]

@@ -12,7 +12,7 @@ use moa_store::accounts::AccountMap;
 use moa_store::import::report::ASK_SWITCHED_REPLY;
 use moa_store::import::rules::group_path;
 use moa_store::import::{Level, RecordNote};
-use rusqlite::types::Value;
+use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, OpenFlags};
 
 /// How times (and dates) are compared.
@@ -55,7 +55,16 @@ fn dump(c: &Connection, table: &str) -> Vec<Row> {
     stmt.query_map([], |r| {
         let mut row = Row::new();
         for (i, col) in cols.iter().enumerate() {
-            row.insert(col.clone(), r.get::<_, Value>(i)?);
+            // Real brains hold text that isn't valid UTF-8; read it lossily.
+            let v = match r.get_ref(i)? {
+                ValueRef::Null => Value::Null,
+                ValueRef::Integer(n) => Value::Integer(n),
+                ValueRef::Real(f) => Value::Real(f),
+                ValueRef::Text(b) | ValueRef::Blob(b) => {
+                    Value::Text(String::from_utf8_lossy(b).into_owned())
+                }
+            };
+            row.insert(col.clone(), v);
         }
         Ok(row)
     })

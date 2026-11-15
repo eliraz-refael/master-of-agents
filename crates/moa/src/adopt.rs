@@ -160,8 +160,8 @@ pub fn adopt(args: &AdoptArgs) -> Result<(), String> {
         return Err(format!("no spike brain at {}", file_name(&args.from)));
     }
     if let Some(into) = &args.into {
-        refuse_existing(into)?;
         refuse_same_file(&args.from, into)?;
+        refuse_existing(into)?;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -184,13 +184,16 @@ pub fn adopt(args: &AdoptArgs) -> Result<(), String> {
             scratch.path().join("moa.db")
         }
     };
-    let mut store = Store::open(&db, &backups_for(&db)).map_err(store_err)?;
-    let report = import_spike(&args.from, &mut store, &env).map_err(import_err);
-    drop(store);
-    let report = match report {
+    // Claim the target exclusively, then undo everything if anything after that fails.
+    if let Some(into) = &args.into {
+        claim(into)?;
+    }
+    let imported = Store::open(&db, &backups_for(&db))
+        .map_err(store_err)
+        .and_then(|mut store| import_spike(&args.from, &mut store, &env).map_err(import_err));
+    let report = match imported {
         Ok(r) => r,
         Err(e) => {
-            // Don't leave a half-made brain behind.
             if args.into.is_some() {
                 remove_brain(&db);
             }
@@ -209,6 +212,22 @@ pub fn adopt(args: &AdoptArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Creates the target file, failing if anything is already there.
+fn claim(into: &Path) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(into)
+        .map(drop)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!(
+                "{} already exists; moa never overwrites a brain",
+                file_name(into)
+            ),
+            _ => "a file could not be created".to_string(),
+        })
+}
+
 /// Removes a brain this run just created, with the files SQLite keeps beside it.
 fn remove_brain(db: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -224,8 +243,8 @@ pub fn export(args: &ExportArgs) -> Result<(), String> {
     if !args.from.is_file() {
         return Err(format!("no v1 brain at {}", file_name(&args.from)));
     }
-    refuse_existing(&args.into)?;
     refuse_same_file(&args.from, &args.into)?;
+    refuse_existing(&args.into)?;
     let store = Store::open_read_only(&args.from).map_err(store_err)?;
     let env = ExportEnv {
         tz,
