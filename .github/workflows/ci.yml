@@ -8,9 +8,11 @@ on:
 permissions:
   contents: read
 
+# Superseded PR runs are cancelled; runs on main always finish, so every main commit
+# gets a real ci result.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ubuntu-24.04's apt tmux is 3.4: the minimum version moa supports.

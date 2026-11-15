@@ -40,22 +40,25 @@ impl Sandbox {
         let dir = tempfile::Builder::new().prefix("moa").tempdir_in("/tmp")?;
         let home = dir.path().join("home");
         std::fs::create_dir(&home)?;
+        let conf = dir.path().join("tmux.conf");
         std::fs::write(
-            dir.path().join("tmux.conf"),
+            &conf,
             "set -g default-shell /bin/sh\nset -g @moa-sandbox 1\n",
         )?;
+        let (conf, home_arg) = (
+            conf.to_string_lossy().into_owned(),
+            home.to_string_lossy().into_owned(),
+        );
         let sb = Sandbox { name, dir, home };
-        let conf = sb.dir.path().join("tmux.conf");
-        let home = sb.home.clone();
         sb.tmux(&[
             "-f",
-            &conf.to_string_lossy(),
+            &conf,
             "new-session",
             "-d",
             "-s",
             "sandbox",
             "-c",
-            &home.to_string_lossy(),
+            &home_arg,
             "-x",
             "200",
             "-y",
@@ -118,7 +121,7 @@ impl Drop for Sandbox {
         let pid = self.tmux(&["display-message", "-p", "#{pid}"]).ok();
         let _ = self.tmux(&["kill-server"]);
         if let Some(pid) = pid {
-            wait_for(Duration::from_secs(2), || {
+            let gone = wait_for(Duration::from_secs(2), || {
                 let alive = Command::new("kill")
                     .args(["-0", &pid])
                     .output()
@@ -126,6 +129,10 @@ impl Drop for Sandbox {
                     .unwrap_or(true); // can't run kill: assume still alive and keep waiting
                 (!alive).then_some(())
             });
+            if gone.is_none() {
+                // Never leave a server running once its socket dir is deleted below.
+                let _ = Command::new("kill").args(["-9", &pid]).output();
+            }
         }
     }
 }

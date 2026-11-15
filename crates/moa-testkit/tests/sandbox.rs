@@ -10,8 +10,10 @@ fn runs_a_supported_tmux() {
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.')
         .collect();
-    let mut it = digits.split('.').map(|n| n.parse::<u32>().unwrap());
-    let (major, minor) = (it.next().unwrap(), it.next().unwrap());
+    let mut it = digits.split('.').map(|n| n.parse::<u32>().ok());
+    let (Some(Some(major)), Some(Some(minor))) = (it.next(), it.next()) else {
+        panic!("can't read a major.minor version from tmux {v:?}");
+    };
     assert!((major, minor) >= (3, 4), "tmux {v} is older than 3.4");
 }
 
