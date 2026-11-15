@@ -142,6 +142,11 @@ pub fn local_text(t: UtcMs, tz: &TimeZone) -> String {
     utc_to_spike_local(t, tz)
 }
 
+/// `t` in `tz` through a strftime pattern.
+pub fn local_format(t: UtcMs, tz: &TimeZone, pattern: &str) -> String {
+    tz.to_datetime(timestamp(t)).strftime(pattern).to_string()
+}
+
 /// `YYYY-MM-DD`, or the date part of a timestamp text.
 pub fn parse_date(text: &str) -> Result<Date, TimeError> {
     let text = text.trim();

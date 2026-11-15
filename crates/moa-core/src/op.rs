@@ -37,6 +37,8 @@ pub enum Op {
     },
     #[serde(rename = "session.archive")]
     SessionArchive { qs: Vec<String> },
+    #[serde(rename = "session.find")]
+    SessionFind { q: String },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -66,6 +68,10 @@ pub enum Op {
         #[serde(default)]
         summary: Option<String>,
     },
+    #[serde(rename = "brief")]
+    Brief,
+    #[serde(rename = "attention")]
+    Attention,
 }
 
 /// `task add`'s arguments, all the user's raw text.
@@ -127,12 +133,15 @@ impl Op {
         "session.ls",
         "session.set",
         "session.archive",
+        "session.find",
         "task.ls",
         "task.add",
         "task.set",
         "note.add",
         "project.show",
         "project.add",
+        "brief",
+        "attention",
     ];
 
     /// This op's method name.
@@ -144,12 +153,15 @@ impl Op {
             Op::SessionLs { .. } => "session.ls",
             Op::SessionSet { .. } => "session.set",
             Op::SessionArchive { .. } => "session.archive",
+            Op::SessionFind { .. } => "session.find",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",
             Op::NoteAdd { .. } => "note.add",
             Op::ProjectShow { .. } => "project.show",
             Op::ProjectAdd { .. } => "project.add",
+            Op::Brief => "brief",
+            Op::Attention => "attention",
         }
     }
 }

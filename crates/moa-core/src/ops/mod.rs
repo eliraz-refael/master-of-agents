@@ -3,6 +3,7 @@
 
 pub mod groups;
 pub mod projects;
+pub mod read;
 pub mod sessions;
 pub mod tasks;
 
@@ -27,6 +28,7 @@ pub(crate) fn run(
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())
         }
         Op::SessionArchive { qs } => sessions::archive(state, tx, now, &qs),
+        Op::SessionFind { q } => read::find(state, now, &q),
         Op::TaskLs { project, all } => tasks::ls(state, now, project.as_deref(), all),
         Op::TaskAdd(a) => tasks::add(state, tx, now, &a),
         Op::TaskSet(a) => tasks::set(state, tx, now, &a),
@@ -41,6 +43,8 @@ pub(crate) fn run(
             path,
             summary,
         } => projects::add(state, tx, now, &name, &path, summary.as_deref()),
+        Op::Brief => read::brief(state, now),
+        Op::Attention => read::attention(state, now),
     }
 }
 

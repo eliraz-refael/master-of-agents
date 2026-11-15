@@ -426,6 +426,9 @@ fn op_methods_match_the_variants() {
             path: "/x".into(),
             summary: None,
         },
+        Op::SessionFind { q: "q".into() },
+        Op::Brief,
+        Op::Attention,
     ];
     assert_eq!(Op::METHODS.len(), samples.len());
     for op in &samples {
