@@ -282,7 +282,7 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
 
     // Sessions come before tasks and events, which refer to them.
     let mut sids: Vec<String> = Vec::new();
-    // The account string of each session, as written.
+    // The account each session's hook events carry (track.sh's form).
     let mut session_accounts: Vec<Value> = Vec::new();
     // Sessions on a Claude account, with that account: where a console thread can point.
     let mut claude: Vec<(String, String)> = Vec::new();
@@ -375,7 +375,12 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
             ],
         ));
         sids.push(sid);
-        session_accounts.push(account);
+        // `track.sh` writes the bare basename of the store folder, however the session's
+        // own account is written.
+        session_accounts.push(match (&account, store) {
+            (_, Some(store)) => Value::Text(store.trim_start_matches('.').to_string()),
+            (other, None) => other.clone(),
+        });
     }
 
     for id in 1..=n_task as i64 {
@@ -453,7 +458,7 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
         let text = if g.messy(15) { Value::Null } else { g.text() };
         let at = (!ui).then(|| g.below(sids.len()));
         let sid = at.map_or(Value::Null, |i| Value::Text(sids[i].clone()));
-        // Hooks write the session's account string into its events.
+        // Hooks write the account in `track.sh`'s form into the session's events.
         let account = match at {
             Some(i) if g.chance(60) => session_accounts[i].clone(),
             _ => Value::Null,

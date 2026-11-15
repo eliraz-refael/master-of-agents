@@ -144,8 +144,9 @@ fn typical_round_trips() {
         pane(ids::S2_IDLE),
         (Some("%4".into()), Some("/tmp/x/moa".into()))
     );
-    // Accounts come back as the exact strings the spike had: S2 by bare name, S1 by path,
-    // and an event carries its session's string.
+    // Sessions come back with the exact strings the spike had: S2 by bare name, S1 by path.
+    // Events carry the account the way `track.sh` writes it, the store folder's bare basename,
+    // whatever string their session uses (S1's events say `acct-a`, its session a path).
     let account = |sql: &str| -> Option<String> { out.query_row(sql, [], |r| r.get(0)).unwrap() };
     assert_eq!(
         account(&format!(
@@ -167,6 +168,13 @@ fn typical_round_trips() {
             ids::S2_IDLE
         )),
         Some("acct-b".into())
+    );
+    assert_eq!(
+        account(&format!(
+            "SELECT account FROM events WHERE session_id = '{}' AND kind = 'start'",
+            ids::S1_WORKING
+        )),
+        Some("acct-a".into())
     );
     // The groups are exactly these two.
     let groups: Vec<String> = out

@@ -238,8 +238,6 @@ struct Exporter<'a> {
     current: HashMap<String, Current>,
     /// Every conversation id of every session, for the suggestion rewrite.
     all_conversations: Vec<String>,
-    /// The spike's own account string of every conversation, by conversation id.
-    conversation_accounts: HashMap<String, String>,
     /// Every v1 session id, with or without a conversation, for the same rewrite.
     all_sessions: Vec<String>,
     notes: Vec<RecordNote>,
@@ -263,7 +261,6 @@ impl<'a> Exporter<'a> {
     fn new(src: &'a Connection, env: &'a ExportEnv) -> Result<Self, ExportError> {
         let mut current = HashMap::new();
         let mut all_conversations = Vec::new();
-        let mut conversation_accounts = HashMap::new();
         let mut stmt = src.prepare(
             "SELECT session_id, conversation_id, spike_account, store_dir FROM conversations \
              ORDER BY first_seen_at, rowid",
@@ -281,9 +278,6 @@ impl<'a> Exporter<'a> {
         for row in rows {
             let (sid, cur) = row?;
             all_conversations.push(cur.conversation_id.clone());
-            if let Some(a) = &cur.spike_account {
-                conversation_accounts.insert(cur.conversation_id.clone(), a.clone());
-            }
             current.insert(sid, cur);
         }
         let all_sessions = src
@@ -295,7 +289,6 @@ impl<'a> Exporter<'a> {
             env,
             current,
             all_conversations,
-            conversation_accounts,
             all_sessions,
             notes: Vec::new(),
             tables: Vec::new(),
@@ -366,6 +359,25 @@ impl<'a> Exporter<'a> {
         }
         match self.env.accounts.store_for(name) {
             Some(store) => abs(store).to_string_lossy().into_owned(),
+            None => name.to_string(),
+        }
+    }
+
+    /// An event's account the way the spike's `track.sh` writes it: the basename of the
+    /// account's store folder without its leading dot. With no store (`codex`, or a name
+    /// nothing is known about) it is the name itself.
+    fn event_account(&self, name: &str) -> String {
+        match self
+            .env
+            .accounts
+            .store_for(name)
+            .as_deref()
+            .and_then(Path::file_name)
+        {
+            Some(base) => {
+                let base = base.to_string_lossy();
+                base.strip_prefix('.').unwrap_or(&base).to_string()
+            }
             None => name.to_string(),
         }
     }
