@@ -211,30 +211,43 @@ impl Tx {
     pub(crate) fn ui(
         &mut self,
         state: &mut State,
-        mut changes: Vec<Change>,
+        changes: Vec<Change>,
         text: String,
     ) -> Result<(), OpError> {
-        changes.push(Change::Event(Event {
-            id: EventId(self.next_id(state, Table::Event)),
-            at: self.wall,
-            session_id: None,
-            conversation_id: None,
-            account: None,
-            cwd: None,
-            kind: EventKind(EventKind::UI.to_string()),
-            text: Some(text.clone()),
-            detail: None,
-        }));
-        changes.push(Change::Activity(ActivityRow {
-            id: ActivityId(self.next_id(state, Table::Activity)),
-            at: self.wall,
-            who: ActivityWho::You,
-            text: text.clone(),
-            ref_kind: None,
-            ref_id: None,
-        }));
+        self.ui_each(state, changes, vec![text])
+    }
+
+    /// [`Tx::ui`] with one `ui` event and activity row per text, all in one commit.
+    pub(crate) fn ui_each(
+        &mut self,
+        state: &mut State,
+        mut changes: Vec<Change>,
+        texts: Vec<String>,
+    ) -> Result<(), OpError> {
+        for text in &texts {
+            changes.push(Change::Event(Event {
+                id: EventId(self.next_id(state, Table::Event)),
+                at: self.wall,
+                session_id: None,
+                conversation_id: None,
+                account: None,
+                cwd: None,
+                kind: EventKind(EventKind::UI.to_string()),
+                text: Some(text.clone()),
+                detail: None,
+            }));
+            changes.push(Change::Activity(ActivityRow {
+                id: ActivityId(self.next_id(state, Table::Activity)),
+                at: self.wall,
+                who: ActivityWho::You,
+                text: text.clone(),
+                ref_kind: None,
+                ref_id: None,
+            }));
+        }
         self.commit(state, changes)?;
-        self.events.push(CoreEvent::Ui { text });
+        self.events
+            .extend(texts.into_iter().map(|text| CoreEvent::Ui { text }));
         Ok(())
     }
 }

@@ -745,6 +745,17 @@ fn group_rm_refuses_while_sessions_remain() {
     assert!(!paths.contains(&"Private".to_string()));
     assert!(!paths.contains(&"Private/Lantern".to_string()));
     assert!(paths.contains(&"Private2".to_string()), "lookalike stays");
+    // Removing it again finds nothing, and says so instead of logging a removal.
+    assert_eq!(
+        err(
+            &mut st,
+            Op::GroupRm {
+                path: "Private".into()
+            },
+            &now
+        ),
+        "no group Private"
+    );
 }
 
 #[test]

@@ -3,11 +3,13 @@
 //! by its one `state` column.
 
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 
 use jiff::Span;
 use jiff::civil::Date;
 use serde_json::json;
 
+use super::cut;
 use crate::Now;
 use crate::live::spike_state;
 use crate::model::{NoteKind, ProjectId, Session, SuggestionStatus, TaskStatus};
@@ -29,10 +31,6 @@ const BRIEF_SESSIONS: usize = 12;
 const BRIEF_NOTES: usize = 10;
 const NOTE_CUT: usize = 200;
 const THREAD_CUT: usize = 600;
-
-fn cut(text: &str, n: usize) -> String {
-    text.chars().take(n).collect()
-}
 
 /// The local day a week before today, for comparing calendar dates.
 fn week_ago(now: &Now) -> Option<Date> {
@@ -112,10 +110,9 @@ fn attention_lines(state: &State, now: &Now, limit: usize) -> Vec<String> {
         ));
     }
 
-    let is_open = |s: TaskStatus| !matches!(s, TaskStatus::Done | TaskStatus::Dropped);
     for t in state
         .tasks()
-        .filter(|t| t.today == Some(now.local_day) && is_open(t.status))
+        .filter(|t| t.today == Some(now.local_day) && t.status.is_open())
     {
         out.push(format!(
             "- ▸ today: {}: {} [{}]",
@@ -138,21 +135,24 @@ fn attention_lines(state: &State, now: &Now, limit: usize) -> Vec<String> {
     }
 
     if let Some(week) = week_ago(now) {
+        // One pass over the tasks, not one per project.
+        let mut open: BTreeMap<ProjectId, usize> = BTreeMap::new();
+        for t in state.tasks().filter(|t| {
+            matches!(
+                t.status,
+                TaskStatus::Todo | TaskStatus::Active | TaskStatus::Waiting
+            )
+        }) {
+            if let Some(p) = t.project_id {
+                *open.entry(p).or_default() += 1;
+            }
+        }
         let mut stale: Vec<_> = state
             .projects()
             .filter_map(|p| {
                 // A project with no date is skipped, as SQL's `NULL < x` skipped it.
                 let on = p.last_activity_on.filter(|d| *d < week)?;
-                let n = state
-                    .tasks()
-                    .filter(|t| t.project_id == Some(p.id))
-                    .filter(|t| {
-                        matches!(
-                            t.status,
-                            TaskStatus::Todo | TaskStatus::Active | TaskStatus::Waiting
-                        )
-                    })
-                    .count();
+                let n = open.get(&p.id).copied().unwrap_or(0);
                 (n > 0).then_some((on, p.id, &p.name, n))
             })
             .collect();

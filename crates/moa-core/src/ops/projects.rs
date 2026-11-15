@@ -1,16 +1,16 @@
 //! `project show|add`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{brain_row, project_named};
+use super::{brain_row, cut, project_named};
 use crate::Now;
 use crate::activity;
 use crate::change::Change;
 use crate::core::Tx;
 use crate::live::spike_state;
-use crate::model::{Project, ProjectId, ProjectStatus, Session, SessionId, TaskStatus};
+use crate::model::{Project, ProjectId, ProjectStatus, Session, SessionId};
 use crate::names::{label, newest_first};
 use crate::op::{Done, OpError};
 use crate::route::{is_under, is_under_any};
@@ -25,10 +25,6 @@ const NOTE_CUT: usize = 200;
 const LISTED: usize = 10;
 /// The label's cut, as the spike's `label` did.
 const LABEL_CUT: usize = 50;
-
-fn cut(text: &str, n: usize) -> String {
-    text.chars().take(n).collect()
-}
 
 /// The project named `name` exactly (ignoring case and surrounding spaces), else the
 /// lowest-id one whose name contains it.
@@ -61,7 +57,7 @@ pub(crate) fn show(state: &State, now: &Now, name: &str) -> Result<Done, OpError
     let tasks: Vec<_> = state
         .tasks()
         .filter(|t| t.project_id == Some(p.id))
-        .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Dropped))
+        .filter(|t| t.status.is_open())
         .collect();
     for t in &tasks {
         let blocked = t
@@ -129,6 +125,9 @@ pub(crate) fn add(
             state.brain().as_str()
         )));
     }
+    // One spelling per folder: `/a/b/` and `/a/./b` are stored, and compared, as `/a/b`.
+    let path: PathBuf = path.components().collect();
+    let path = path.as_path();
     let shown = path.display().to_string();
     if !is_under_any(path, &folders) {
         return Err(OpError(format!(

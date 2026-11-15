@@ -71,7 +71,7 @@ pub(crate) fn set(
     if title.is_none() && group.is_none() {
         return Err(OpError("set needs --title or --group".into()));
     }
-    if title == Some("") {
+    if title.is_some_and(|t| t.trim().is_empty()) {
         return Err(OpError("--title can't be empty".into()));
     }
     let group = match group.map(normalize_group_path) {
@@ -154,10 +154,8 @@ pub(crate) fn archive(
         changes.push(Change::Session(s));
         archived.push(id);
     }
-    tx.commit(state, changes)?;
-    for text in said {
-        tx.ui(state, Vec::new(), text)?;
-    }
+    // One commit: a refusal leaves every session as it was.
+    tx.ui_each(state, changes, said)?;
     Ok(Done {
         text: format!("archived {}", archived.len()),
         data: json!({ "archived": archived }),

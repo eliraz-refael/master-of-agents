@@ -128,11 +128,15 @@ pub(crate) fn rm(state: &mut State, tx: &mut Tx, path: &str) -> Result<Done, OpE
             "{path} still has {n} session(s); move or archive them first"
         )));
     }
-    let changes = state
+    let changes: Vec<Change> = state
         .groups()
         .filter(|g| in_subtree(&g.path, &path))
         .map(|g| Change::DeleteGroup(g.path.clone()))
         .collect();
+    // A typo removes nothing, so it mustn't log "removed group" either (rename refuses too).
+    if changes.is_empty() {
+        return Err(OpError(format!("no group {path}")));
+    }
     tx.ui(state, changes, format!("removed group {path}"))?;
     Ok(Done {
         text: "ok".into(),

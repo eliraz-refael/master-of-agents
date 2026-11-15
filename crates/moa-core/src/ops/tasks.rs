@@ -75,10 +75,13 @@ pub(crate) fn ls(
     project: Option<&str>,
     all: bool,
 ) -> Result<Done, OpError> {
-    let want = project.map(str::to_lowercase);
+    // Trimmed as `project_named` trims; an empty name is no filter, as in the spike.
+    let want = project
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty());
     let mut rows: Vec<(Option<&str>, &Task)> = state
         .tasks()
-        .filter(|t| all || !matches!(t.status, TaskStatus::Done | TaskStatus::Dropped))
+        .filter(|t| all || t.status.is_open())
         .map(|t| {
             let name = t
                 .project_id
@@ -150,7 +153,8 @@ pub(crate) fn add(state: &mut State, tx: &mut Tx, now: &Now, a: &TaskAdd) -> Res
         return Err(OpError("a task needs a title".into()));
     }
     let blocked_on = non_empty(&a.blocked_on).map(str::to_string);
-    let status = match &a.status {
+    // An empty flag is unset, as for every other optional field here.
+    let status = match non_empty(&a.status) {
         Some(s) => parse_status(s)?,
         None if blocked_on.is_some() => TaskStatus::Blocked,
         None => TaskStatus::Todo,
