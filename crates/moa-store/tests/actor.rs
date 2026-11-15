@@ -23,7 +23,10 @@ struct Rig {
 }
 
 fn rig() -> Rig {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
     let backups = dir.path().join("backups");
     let store = Store::open(&dir.path().join("moa.db"), &backups).unwrap();
     let handle = StoreHandle::spawn(store, backups);
@@ -103,19 +106,34 @@ async fn commands_answer_in_queue_order() {
     let rig = rig();
     let (release, gate) = mpsc::channel();
     rig.handle.fault(Fault::PauseNextCommit(gate));
-    // `join!` polls in order, so the commit and the snapshot are queued in that order, and
-    // the third branch releases the gate only after both are.
-    let (committed, snapshot, ()) = tokio::time::timeout(PATIENCE, async {
-        tokio::join!(
-            rig.handle.commit(vec![project(1)]),
-            rig.handle.snapshot(),
-            async { release.send(()).unwrap() },
-        )
-    })
-    .await
-    .expect("the store thread answered");
-    committed.unwrap();
-    let snapshot = snapshot.unwrap();
+    let mut commit = Box::pin(rig.handle.commit(vec![project(1)]));
+    let mut snapshot = Box::pin(rig.handle.snapshot());
+
+    // Both are queued (a future sends on its first poll). The gate holds the commit, so
+    // neither can answer: the pause is real, and the snapshot waits behind the commit.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut commit)
+            .await
+            .is_err(),
+        "the commit answered while paused"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut snapshot)
+            .await
+            .is_err(),
+        "the snapshot overtook the paused commit"
+    );
+    assert_eq!(count(&db(&rig), "projects"), 0);
+
+    release.send(()).unwrap();
+    tokio::time::timeout(PATIENCE, &mut commit)
+        .await
+        .expect("the commit answered after release")
+        .unwrap();
+    let snapshot = tokio::time::timeout(PATIENCE, &mut snapshot)
+        .await
+        .expect("the snapshot answered")
+        .unwrap();
     assert_eq!(snapshot.projects.len(), 1);
     assert_eq!(snapshot.projects[0].id, ProjectId(1));
 }
