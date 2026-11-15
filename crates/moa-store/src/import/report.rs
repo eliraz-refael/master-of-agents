@@ -130,3 +130,76 @@ pub const R_META_CURSOR: &str = "meta cursor not carried (v1 has one channel)";
 pub const R_META_OTHER: &str = "meta key not carried";
 pub const R_META_THREAD_BAD: &str = "console_thread isn't usable; no console thread imported";
 pub const R_META_SKIPPED_BAD: &str = "setup_skipped isn't a list of names; ignored";
+
+// Sessions and what points at them.
+
+pub const R_SESSION_ACCOUNT_NULL: &str = "account unknown; imported as claude with no account";
+pub const R_SESSION_CREATED: &str =
+    "first_seen is missing or isn't a time; imported as another time of the session";
+pub const R_SESSION_LAST_SEEN: &str = "last_seen isn't a time; imported as none";
+pub const R_SESSION_PROJECT: &str = "project_id points at no project; imported as none";
+pub const R_SESSION_STATE: &str = "unknown state; imported as ended";
+pub const R_SESSION_ASLEEP: &str = "asleep_at isn't a time; imported as none";
+pub const R_SESSION_ASLEEP_DROPPED: &str = "stale asleep mark dropped";
+pub const R_PANE_UNVERIFIED: &str = "pane not verified yet (checked at switch-over)";
+
+pub const R_CONV_UNSAFE: &str =
+    "conversation id can't be used as a file name; transcript not checked";
+pub const R_CONV_UNCHECKED: &str = "transcript not checked";
+
+pub const R_EVENT_TS: &str = "ts isn't a time; imported as the import time";
+pub const R_EVENT_KIND_NULL: &str = "kind was missing; imported as empty";
+pub const R_EVENT_KIND_UNKNOWN: &str = "kind isn't a known one; kept as written";
+
+pub const R_TASK_TITLE_NULL: &str = "title was missing; imported as empty";
+pub const R_TASK_STATUS: &str = "status isn't a known one; imported as todo";
+pub const R_TASK_PROJECT: &str = "project_id points at no project; imported as none";
+pub const R_TASK_SESSION: &str = "session_id points at no session; imported as none";
+pub const R_TASK_TODAY: &str = "today isn't a date; imported as none";
+pub const R_TASK_DUE: &str = "due isn't a date; imported as none";
+pub const R_TASK_WHO: &str = "who isn't a known one; imported as none";
+pub const R_TASK_PRIORITY: &str = "priority isn't a known one; imported as none";
+pub const R_TASK_CREATED: &str = "created_at isn't a time; imported as the import time";
+pub const R_TASK_UPDATED: &str = "updated_at isn't a time; imported as the import time";
+
+pub const R_SUGG_TEXT_NULL: &str = "text was missing; imported as empty";
+pub const R_SUGG_STATUS: &str = "status isn't a known one; imported as open";
+pub const R_SUGG_ACTION: &str = "action isn't a list of known commands; imported as no actions";
+pub const R_SUGG_CREATED: &str = "created_at isn't a time; imported as the import time";
+pub const R_SUGG_RESOLVED: &str = "resolved_at isn't a time; imported as none";
+/// Stored in `suggestions.actions_invalid` when the spike's action could not be read.
+pub const ACTIONS_INVALID_TEXT: &str = "the action was not a list of known commands";
+
+pub const R_ASK_TS: &str = "ts isn't a time; imported as the import time";
+pub const R_ASK_ANSWERED: &str = "answered_at isn't a time; imported as none";
+pub const R_ASK_STATUS: &str = "status isn't a known one; imported as failed";
+pub const R_ASK_TEXT_NULL: &str = "text was missing; imported as empty";
+pub const R_ASK_TO: &str = "target session isn't in this brain";
+pub const R_ASK_FROM: &str = "from_sid points at no session; imported as none";
+pub const R_ASK_PENDING: &str = "pending ask dropped (nobody waits for it after the switch)";
+pub const R_ASK_IN_FLIGHT: &str =
+    "ask in flight closed as failed (nobody waits for it after the switch)";
+/// The reply stored on an ask that was in flight at the switch.
+pub const ASK_SWITCHED_REPLY: &str = "moa switched over before it was answered";
+
+/// The report line for a missing transcript. Accounts are numbered in the report, so the
+/// sentence names one by its number; the numbers are fixed text, never a name.
+pub fn r_transcript_missing(account: usize) -> &'static str {
+    const R: [&str; 12] = [
+        "transcript missing; resume will fail (account #1)",
+        "transcript missing; resume will fail (account #2)",
+        "transcript missing; resume will fail (account #3)",
+        "transcript missing; resume will fail (account #4)",
+        "transcript missing; resume will fail (account #5)",
+        "transcript missing; resume will fail (account #6)",
+        "transcript missing; resume will fail (account #7)",
+        "transcript missing; resume will fail (account #8)",
+        "transcript missing; resume will fail (account #9)",
+        "transcript missing; resume will fail (account #10)",
+        "transcript missing; resume will fail (account #11)",
+        "transcript missing; resume will fail (account #12)",
+    ];
+    R.get(account.wrapping_sub(1))
+        .copied()
+        .unwrap_or("transcript missing; resume will fail (another account)")
+}

@@ -65,6 +65,18 @@ pub fn closed<T: FromStr>(text: Option<&str>, default: T, reason: &'static str) 
     }
 }
 
+/// G3 for a nullable column: NULL or empty is none with no note (so a column an older DB
+/// lacks is fine); an unknown non-empty value is none with a warning.
+pub fn closed_opt<T: FromStr>(text: Option<&str>, reason: &'static str) -> Ruled<Option<T>> {
+    match blank(text) {
+        None => (None, None),
+        Some(t) => match t.parse() {
+            Ok(v) => (Some(v), None),
+            Err(_) => (None, Some(reason)),
+        },
+    }
+}
+
 /// G4: a reference to something that exists is kept; one that doesn't is none with a warning.
 pub fn reference(
     id: Option<i64>,
@@ -74,6 +86,20 @@ pub fn reference(
     match id {
         None => (None, None),
         Some(i) if exists(i) => (Some(i), None),
+        Some(_) => (None, Some(reason)),
+    }
+}
+
+/// G4 for a text key (a session id): none stays none, a key that exists is kept, any other
+/// is none with a warning.
+pub fn reference_text(
+    key: Option<String>,
+    exists: impl Fn(&str) -> bool,
+    reason: &'static str,
+) -> Ruled<Option<String>> {
+    match key {
+        None => (None, None),
+        Some(k) if exists(&k) => (Some(k), None),
         Some(_) => (None, Some(reason)),
     }
 }
@@ -158,6 +184,29 @@ mod tests {
         assert_eq!(
             closed(Some("bot"), ActivityWho::Brain, R_ACTIVITY_WHO),
             (ActivityWho::Brain, Some(R_ACTIVITY_WHO))
+        );
+    }
+
+    #[test]
+    fn g3_nullable_closed_enums() {
+        use moa_core::model::Who;
+        assert_eq!(closed_opt::<Who>(None, R_X), (None, None));
+        assert_eq!(closed_opt::<Who>(Some(""), R_X), (None, None));
+        assert_eq!(closed_opt::<Who>(Some("you"), R_X), (Some(Who::You), None));
+        assert_eq!(closed_opt::<Who>(Some("me"), R_X), (None, Some(R_X)));
+    }
+
+    #[test]
+    fn g4_text_references() {
+        let has = |k: &str| k == "a";
+        assert_eq!(reference_text(None, has, R_X), (None, None));
+        assert_eq!(
+            reference_text(Some("a".into()), has, R_X),
+            (Some("a".into()), None)
+        );
+        assert_eq!(
+            reference_text(Some("b".into()), has, R_X),
+            (None, Some(R_X))
         );
     }
 

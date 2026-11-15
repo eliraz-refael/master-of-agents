@@ -233,13 +233,20 @@ fn simple_tables_import() {
     );
 
     assert_eq!(report.setup_skipped, ["acct-c"]);
-    assert_eq!(report.accounts, ["acct-b"]);
+    assert_eq!(report.accounts, ["acct-a", "acct-b", "codex"]);
     assert!(report.notes.iter().any(|n| {
         n.table == "meta"
             && n.level == Level::Info
             && n.reason == "meta cursor not carried (v1 has one channel)"
     }));
-    assert!(!report.has_warnings());
+    // The only warning is a session whose transcript is missing; the simple tables add none.
+    assert!(
+        report
+            .notes
+            .iter()
+            .filter(|n| n.level == Level::Warn)
+            .all(|n| n.table == "conversations")
+    );
 
     let json: String = c
         .query_row(

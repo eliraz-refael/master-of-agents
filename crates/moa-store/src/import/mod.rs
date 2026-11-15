@@ -4,7 +4,7 @@
 //! the copy is what gets read. Everything is written in one transaction of the target store.
 //! Reports carry no record contents (see [`report`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,8 +20,11 @@ use sha2::{Digest, Sha256};
 use crate::accounts::AccountMap;
 use crate::{Store, StoreError};
 
+mod linked;
+mod live;
 pub mod report;
 pub mod rules;
+mod sessions;
 mod simple;
 
 pub use report::{ImportReport, Level, RecordNote, TableCounts};
@@ -264,6 +267,8 @@ pub(crate) struct Run<'a> {
     pub(crate) tables: Vec<TableCounts>,
     pub(crate) setup_skipped: Vec<String>,
     pub(crate) project_ids: HashSet<i64>,
+    /// Spike conversation id to the session id it was given.
+    pub(crate) session_ids: HashMap<String, SessionId>,
     dirty: bool,
 }
 
@@ -357,10 +362,12 @@ pub fn import_spike(
         tables: Vec::new(),
         setup_skipped: Vec::new(),
         project_ids: HashSet::new(),
+        session_ids: HashMap::new(),
         dirty: false,
     };
     simple::projects(&mut run, &tx)?;
-    // Sessions and everything that points at them are imported here (Task 7).
+    sessions::import(&mut run, &tx)?;
+    linked::import(&mut run, &tx)?;
     simple::notes(&mut run, &tx)?;
     simple::groups(&mut run, &tx)?;
     simple::activity(&mut run, &tx)?;
