@@ -78,12 +78,15 @@ fn attention_names_the_waiting_session_first() {
     // S9 only sent the idle ping: it never gets a ⚠ line.
     let warned = lines(&text).into_iter().filter(|l| l.starts_with("- ⚠"));
     assert_eq!(warned.count(), 1, "{text}");
+    // It shows once, as a finished turn.
+    let s9: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains(&S9_WAITING_IDLE[..8]))
+        .collect();
+    assert_eq!(s9.len(), 1, "{text}");
+    assert!(s9[0].starts_with("- ● "), "{text}");
     assert!(
-        !text.contains(&format!("moactl resume {}", &S9_WAITING_IDLE[..8]))
-            || text
-                .lines()
-                .filter(|l| l.contains(&S9_WAITING_IDLE[..8]))
-                .all(|l| l.starts_with("- ●")),
+        s9[0].ends_with(&format!("  → moactl resume {}", &S9_WAITING_IDLE[..8])),
         "{text}"
     );
 }

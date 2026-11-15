@@ -230,4 +230,14 @@ async fn verbs_through_the_store_match_a_reload() {
         live.notes().collect::<Vec<_>>(),
         disk.notes().collect::<Vec<_>>()
     );
+    // `project add Shore ~/private` linked the sessions that had no project, and the links
+    // reached the disk (the comparisons above would pass if it linked none).
+    let shore = disk.projects().find(|p| p.name == "Shore").unwrap().id;
+    assert!(
+        disk.sessions()
+            .filter(|s| s.project_id == Some(shore))
+            .count()
+            >= 1,
+        "project add linked no session"
+    );
 }
