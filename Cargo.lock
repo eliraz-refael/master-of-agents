@@ -610,6 +610,7 @@ dependencies = [
  "sha2",
  "shell-words",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 
@@ -617,6 +618,9 @@ dependencies = [
 name = "moa-testkit"
 version = "0.1.0"
 dependencies = [
+ "jiff",
+ "moa-agents",
+ "moa-core",
  "moa-store",
  "proptest",
  "rusqlite",

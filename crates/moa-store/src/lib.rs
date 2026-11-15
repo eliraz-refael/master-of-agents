@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::{Migrations, SchemaVersion};
 
 pub mod accounts;
+pub mod actor;
 pub mod backup;
 pub mod export;
 pub mod import;
