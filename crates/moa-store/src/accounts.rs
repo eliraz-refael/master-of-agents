@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use moa_core::config::Config;
 use moa_core::model::AgentKind;
 
 /// An account as moa knows it. `store` is the agent's data directory when there is one.
@@ -39,6 +40,16 @@ impl AccountMap {
             explicit: Vec::new(),
             seen: RefCell::new(Vec::new()),
         }
+    }
+
+    /// One explicit entry per account in `moa.toml`.
+    pub fn from_config(config: &Config, home: &Path) -> Self {
+        config
+            .accounts
+            .iter()
+            .fold(Self::new(home.to_path_buf()), |m, (name, a)| {
+                m.with(name.as_str(), a.store.clone())
+            })
     }
 
     /// Adds an explicit `name` for the agent store at `store`.

@@ -97,3 +97,18 @@ proptest! {
         prop_assert_eq!(m.resolve(&once).name, once);
     }
 }
+
+#[test]
+fn from_config_names_the_configured_stores() {
+    let config = moa_core::config::Config::parse(
+        "[accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n",
+        Path::new("/h"),
+    )
+    .unwrap();
+    let m = AccountMap::from_config(&config, Path::new("/h"));
+    assert_eq!(
+        m.resolve("acct-a").store,
+        Some(PathBuf::from("/h/.claude-acct-a"))
+    );
+    assert_eq!(m.resolve("/h/.claude-acct-a").name, "acct-a");
+}
