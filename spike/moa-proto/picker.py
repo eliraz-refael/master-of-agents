@@ -17,7 +17,7 @@ import chrome  # noqa: E402
 from picture import (SESSIONS_SQL, SHOW_WORD, ago, connect, db_mtime, live, show_icon,  # noqa: E402
                      ASLEEP, HERE, asleep, tmux)
 
-GONE = {"ended": ("○", "ended"), "asleep": (ASLEEP, "asleep"),"elsewhere": ("◌", "in herdr"), "term": ("⌨", "terminal")}
+GONE = {"ended": ("○", "ended"), "asleep": (ASLEEP, "asleep"), "elsewhere": ("◌", "in herdr"), "term": ("⌨", "terminal")}
 
 
 def terminals():

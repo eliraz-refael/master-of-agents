@@ -55,7 +55,7 @@ COMMANDS = [  # name, arguments, what it does
     ("archive", "Q", "archive a session"),
     ("new", "", "start a fresh moa thread"),
     ("auto", "[on|off]", "moa reads session reports on its own (default on)"),
-    ("sleep", "[on|off|HOURS]", "idle sessions go to sleep (window closed, resumable) after 6 h"),
+    ("sleep", "[on|off|HOURS]", "idle sessions go to sleep (window closed, resumable); no args: the threshold"),
     ("setup", "", "track sessions on your Claude accounts (installs moa's hook)"),
     ("help", "", "commands and keys"),
     ("quit", "", "close the console"),
@@ -346,7 +346,6 @@ class Console:
         self.conn.commit()
         self.nagged = set()        # (task id, due, day) moa was already told about, so it nags once a day per task
         self.sleep_after, self.sleep_check = SLEEP_AFTER, time.monotonic()  # the first look is SLEEP_EVERY after start
-        self.slept = set()         # sessions this console put to sleep: their "ended" report isn't news
         self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
         self.focus = None          # the focused hit (y, x0, x1, command), while Tab-hopping
         self.pal, self.pal_key, self.pal_items, self.pal_hits = 0, None, [], []
@@ -546,16 +545,15 @@ class Console:
         if m == self.seen:
             return
         self.load_names()
-        rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name, p.name AS project FROM events e
+        rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name, p.name AS project, s.asleep_at FROM events e
             LEFT JOIN sessions s ON s.session_id=e.session_id LEFT JOIN projects p ON p.id=s.project_id
             WHERE e.id > ? ORDER BY e.id""", (self.cursor,)).fetchall()
         for e in rows:
             name = e["name"] or os.path.basename(e["cwd"] or "") or "?"
             sid = (e["session_id"] or "")[:8]
             text = " ".join((e["text"] or "").split())
-            if e["kind"] == "start":
-                self.slept.discard(e["session_id"])  # awake again: its next end is news
-            if e["kind"] in ("stop", "waiting", "start", "end") and not (e["kind"] == "end" and e["session_id"] in self.slept):
+            # the end of a session put to sleep (by this console or `moactl sleep`) isn't news; resuming clears asleep_at
+            if e["kind"] in ("stop", "waiting", "start", "end") and not (e["kind"] == "end" and e["asleep_at"]):
                 self.add_event(text, what=e["kind"], name=name, sid=sid)
             if e["kind"] in ("stop", "waiting") and e["cwd"] != MASTER_DIR and (e["text"] or "").strip():
                 old = [r for r in self.reports if r["sid"] == sid and r["kind"] == e["kind"]]
@@ -599,7 +597,6 @@ class Console:
         slept = [s for s in moactl.drowsy(self.conn, self.sleep_after) if moactl.put_to_sleep(self.conn, s)]
         if not slept:
             return
-        self.slept.update(s["session_id"] for s in slept)
         names = ", ".join(SESSION_NAMES.get(s["session_id"]) or s["title"] or s["session_id"][:8] for s in slept)
         n = f"{len(slept)} idle session{'s' if len(slept) > 1 else ''}"
         self.add("sys", f"put {n} to sleep: {names} · resume from the tree", glyph=ASLEEP)
@@ -700,6 +697,8 @@ class Console:
             try:
                 self.sleep_after = (0.0 if args[0] == "off" else (SLEEP_AFTER or 6.0) if args[0] == "on"
                                     else max(0.0, float(args[0]))) if args else self.sleep_after
+                if args:  # a new threshold applies at the next loop, not in 10 minutes
+                    self.sleep_check = time.monotonic() - SLEEP_EVERY
             except ValueError:
                 self.add("sys", "/sleep on, off, or a number of hours")
                 return

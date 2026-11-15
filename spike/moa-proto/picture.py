@@ -146,7 +146,7 @@ ASLEEP = "💤"  # two cells wide (tmux and wcwidth agree), so it takes the plac
 def asleep(s):
     """Put to sleep by moa (its window closed to free memory) and not running since."""
     try:
-        return bool(s["asleep_at"]) and s["state"] not in LIVE
+        return bool(s["asleep_at"]) and s["state"] == "ended"  # as the SQL has it: archived or elsewhere isn't asleep
     except (IndexError, KeyError):  # a row without the column
         return False
 
@@ -809,7 +809,7 @@ def main(scr):
         for y, r in enumerate(rows[top:top + body], start=y_top):
             on = top + y - y_top == sel and r.kind
             attr = (selected | (r.attr & curses.A_BOLD)) if on else r.attr
-            text = r.text.ljust(iw - 1) if on else r.text  # the selection is a full-width bar
+            text = r.text.ljust(iw - 1 - r.text.count(ASLEEP)) if on else r.text  # the selection is a full-width bar (💤 is two cells)
             scr.addnstr(oy + y, ox, text, iw - 1, attr)
             if r.right and iw - 1 - len(r.right[0]) > len(r.text.rstrip()):
                 chip, cattr = r.right  # on the selection bar, a plain date takes the bar's colour; a padded (late/today) chip keeps its own
@@ -917,7 +917,7 @@ def main(scr):
             def close(s=s):
                 if pane_alive(s["pane"]):
                     tmux("kill-pane", "-t", s["pane"])
-                conn.execute("UPDATE sessions SET state='ended' WHERE session_id=?", (s["session_id"],))
+                conn.execute("UPDATE sessions SET state='ended', asleep_at=NULL WHERE session_id=?", (s["session_id"],))
                 log_ui(conn, f"closed session {s['session_id'][:8]} ({s['project'] or s['cwd']})")
                 return "closed"
             confirm = (f"close session {s['session_id'][:8]} in {s['project'] or s['cwd']}? y/N", close)

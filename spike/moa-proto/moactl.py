@@ -333,7 +333,8 @@ def ls(conn, show_all, as_json=False):
     rows = []
     for s in conn.execute("SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
                           f"{where} ORDER BY s.last_seen DESC"):
-        alive = "live" if pane_alive(s["pane"]) else "asleep" if asleep(s) else s["state"]
+        # asleep first: a session slept in the cockpit's agent spot leaves its pane ID alive (the empty spot)
+        alive = "asleep" if asleep(s) else "live" if pane_alive(s["pane"]) else s["state"]
         if as_json:
             rows.append({"id": s["session_id"], "alive": alive, "state": s["state"], "account": s["account"],
                          "group": s["grp"] or s["project"], "title": s["title"] or (s["last_prompt"] or "")[:40],
@@ -751,7 +752,7 @@ def put_to_sleep(conn, s):
     SessionEnd hook write state='ended', which would race a state written here. Resuming
     clears it (here, and the hook's SessionStart). False if it isn't running in moa."""
     panel = layout.panel_of(s["pane"]) if reachable(s) else None
-    if panel not in ("", "agent"):  # not running here, or a stale pane ID that names a panel
+    if panel not in ("", "agent") or not runs_in_pane(s):  # not running here, or a stale pane ID (a panel, another agent)
         return False
     if panel == "agent":  # in the cockpit's agent spot: the spot stays, empty
         tmux("respawn-pane", "-k", "-t", s["pane"], layout.EMPTY_SLOT)
@@ -792,10 +793,15 @@ def drowsy(conn, hours):
                 or newest.get(s["pane"]) is not s or max(epoch(s["last_seen"]), epoch(s["since"])) > cutoff
                 or not reachable(s)):
             continue
-        agent = pane_agent(s["pane"], info)
-        if agent and (agent["sid"] or s["session_id"]) == s["session_id"] and related(agent["cwd"], s["cwd"]):
+        if runs_in_pane(s, info):
             out.append(s)
     return out
+
+
+def runs_in_pane(s, info=None):
+    """The session's pane runs its agent, not someone else's that inherited a reused pane ID."""
+    agent = pane_agent(s["pane"], info)
+    return bool(agent) and (agent["sid"] or s["session_id"]) == s["session_id"] and related(agent["cwd"], s["cwd"])
 
 
 def sleep_cmd(conn, ids, hours, dry_run):
