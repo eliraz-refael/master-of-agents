@@ -12,11 +12,11 @@ use std::time::UNIX_EPOCH;
 /// folder under a symlinked parent still resolves like its neighbours. A relative `p` is
 /// returned unchanged.
 pub fn canonical(p: &Path) -> PathBuf {
-    if let Ok(c) = std::fs::canonicalize(p) {
-        return c;
-    }
     if !p.is_absolute() {
         return p.to_path_buf();
+    }
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
     }
     let mut tail = Vec::new();
     let mut head = p;

@@ -249,6 +249,67 @@ fn an_explicit_empty_only_is_an_error() {
 }
 
 #[test]
+fn two_spellings_of_one_store_are_caught_after_canonicalising() {
+    let t = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let r = t.path();
+    std::fs::create_dir(r.join("real")).unwrap();
+    std::os::unix::fs::symlink(r.join("real"), r.join("alias")).unwrap();
+    let text = format!(
+        "[accounts.acct-a]\nkind = \"claude\"\nstore = \"{r}/real\"\n\
+         [accounts.acct-b]\nkind = \"claude\"\nstore = \"{r}/alias\"\n",
+        r = r.display()
+    );
+    // Different spellings: parse alone can't tell.
+    assert!(Config::parse(&text, home()).is_ok());
+    let err = Config::from_file_text(Some(&text), home(), moa_platform::canonical).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("moa.toml: acct-a and acct-b have the same store "),
+        "{err}"
+    );
+}
+
+#[test]
+fn dotdot_in_a_path_is_an_error() {
+    let cases = [
+        (
+            "[brains.default]\nfolders = [\"~/a/../b\"]\n",
+            "moa.toml: the folder in brains.default can't contain ..",
+        ),
+        (
+            "[accounts.x]\nkind = \"claude\"\nstore = \"~/.c\"\nbrain = \"default\"\nexcept = [\"/a/..\"]\n",
+            "moa.toml: the folder in accounts.x.except can't contain ..",
+        ),
+        (
+            "[accounts.x]\nkind = \"claude\"\nstore = \"~/.c\"\nonly = [\"~/../b\"]\n",
+            "moa.toml: the folder in accounts.x.only can't contain ..",
+        ),
+        (
+            "[accounts.x]\nkind = \"claude\"\nstore = \"/a/../.c\"\n",
+            "moa.toml: the store in accounts.x can't contain ..",
+        ),
+        (
+            "[accounts.x]\nkind = \"claude\"\nstore = \"~/.c\"\nlauncher = \"/a/../l\"\n",
+            "moa.toml: the launcher in accounts.x can't contain ..",
+        ),
+        (
+            "[brains.default]\nspike_db = \"/a/../d\"\n",
+            "moa.toml: the spike_db in brains.default can't contain ..",
+        ),
+    ];
+    for (text, want) in cases {
+        assert_eq!(
+            Config::parse(text, home()).unwrap_err().to_string(),
+            want,
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn names_are_validated() {
     assert_eq!(BrainName::default_brain().as_str(), "default");
     assert_eq!(brain("work-2_x").to_string(), "work-2_x");

@@ -26,6 +26,15 @@ fn a_missing_path_is_canonicalized_through_its_existing_parent() {
 }
 
 #[test]
+fn a_relative_path_that_exists_is_returned_unchanged() {
+    // "." and ".." exist relative to whatever the cwd is; no cwd change needed.
+    for rel in [".", "..", "./src"] {
+        let p = std::path::Path::new(rel);
+        assert_eq!(canonical(p), p);
+    }
+}
+
+#[test]
 fn fnv_known_vectors() {
     assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
     assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);

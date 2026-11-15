@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -175,6 +175,16 @@ fn toml_problem(text: &str, e: &toml::de::Error) -> ConfigError {
 
 /// Expands `~` and `~/x` and insists on an absolute path. An empty entry stays empty.
 fn expand(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, ConfigError> {
+    let path = expand_unchecked(s, what, place, home)?;
+    if path.components().any(|c| c == Component::ParentDir) {
+        return Err(problem(format_args!(
+            "the {what} in {place} can't contain .."
+        )));
+    }
+    Ok(path)
+}
+
+fn expand_unchecked(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, ConfigError> {
     if s.is_empty() {
         return Ok(PathBuf::new());
     }
@@ -342,15 +352,7 @@ impl Config {
                 )));
             }
         }
-        let mut stores: BTreeMap<&Path, &AccountName> = BTreeMap::new();
-        for (name, a) in &config.accounts {
-            if let Some(other) = stores.insert(&a.store, name) {
-                return Err(problem(format_args!(
-                    "{other} and {name} have the same store {}",
-                    a.store.display()
-                )));
-            }
-        }
+        config.check_distinct_stores()?;
         for (name, b) in &config.brains {
             for (key, acct) in [
                 ("moa_account", &b.moa_account),
@@ -396,7 +398,22 @@ impl Config {
         };
         let mut config = Config::parse(text, home)?;
         config.canonicalize_with(canonical);
+        // Two spellings of one folder (a symlink, say) only show up once canonical.
+        config.check_distinct_stores()?;
         Ok(config)
+    }
+
+    fn check_distinct_stores(&self) -> Result<(), ConfigError> {
+        let mut stores: BTreeMap<&Path, &AccountName> = BTreeMap::new();
+        for (name, a) in &self.accounts {
+            if let Some(other) = stores.insert(&a.store, name) {
+                return Err(problem(format_args!(
+                    "{other} and {name} have the same store {}",
+                    a.store.display()
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// The configured brain, or an empty one for `default` when it isn't configured.
