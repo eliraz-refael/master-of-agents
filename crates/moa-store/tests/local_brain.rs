@@ -23,6 +23,14 @@ fn zone(s: &str) -> TimeZone {
         .expect("MOA_LOCAL_BRAIN_TZ is not a time zone")
 }
 
+/// The variant name of an error's Debug text, with no payload: the payload can hold paths.
+fn kind(e: &impl std::fmt::Debug) -> String {
+    format!("{e:?}")
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
 fn accounts(home: &std::path::Path) -> AccountMap {
     let mut map = AccountMap::new(home.to_path_buf());
     let pairs = std::env::var("MOA_LOCAL_BRAIN_ACCOUNTS").unwrap_or_default();
@@ -55,7 +63,8 @@ fn local_brain_imports_and_round_trips() {
         ids: IdSource::Derived,
         transcript: find_transcript,
     };
-    let report = import_spike(&copy, &mut store, &env).expect("the import failed");
+    let report = import_spike(&copy, &mut store, &env)
+        .unwrap_or_else(|e| panic!("the import failed ({})", kind(&e)));
     for t in &report.tables {
         println!(
             "{:<14} {} of {} imported, {} with warnings",
@@ -77,7 +86,8 @@ fn local_brain_imports_and_round_trips() {
         accounts: accounts(&home),
         setup_skipped: None,
     };
-    export_spike(&store, &out, &xenv).expect("the export failed");
+    export_spike(&store, &out, &xenv)
+        .unwrap_or_else(|e| panic!("the export failed ({})", kind(&e)));
     let excluded = common::assert_round_trip_with(
         &copy,
         &out,

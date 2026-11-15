@@ -132,6 +132,15 @@ fn actions(v: &Value) -> Value {
     }
 }
 
+/// Panics with `loud()` (which may show values) or, when `private`, with `quiet` only. A
+/// private run is a real brain: the message then holds a table, a report key and a column,
+/// never a value, a long id, a path or a name.
+fn ensure(private: bool, same: bool, quiet: String, loud: impl FnOnce() -> String) {
+    if !same {
+        panic!("{}", if private { quiet } else { loud() });
+    }
+}
+
 struct Table {
     name: &'static str,
     pk: &'static str,
@@ -278,6 +287,9 @@ pub fn assert_round_trip(
 /// Like [`assert_round_trip`]. With `accounts`, a console thread's account that isn't equal on
 /// both sides must be an absolute path equal to the store path of the source account; without
 /// it, an absolute path is accepted as it stands.
+///
+/// The failure messages hold no contents (see [`ensure`]) whenever `mode` is
+/// [`TimeMode::Instant`] or `accounts` is given: those are the real-brain runs.
 pub fn assert_round_trip_with(
     spike: &Path,
     out: &Path,
@@ -285,6 +297,7 @@ pub fn assert_round_trip_with(
     mode: &TimeMode,
     accounts: Option<&AccountMap>,
 ) -> usize {
+    let private = matches!(mode, TimeMode::Instant(_)) || accounts.is_some();
     let (a, b) = (open_ro(spike), open_ro(out));
     let warned: BTreeSet<(&str, &str)> = import_notes
         .iter()
@@ -305,22 +318,36 @@ pub fn assert_round_trip_with(
             let names = |r: &Row| -> Vec<String> {
                 r.keys().filter(|k| *k != "__rowid").cloned().collect()
             };
-            assert_eq!(names(s), names(o), "{}: column names", table.name);
+            ensure(
+                private,
+                names(s) == names(o),
+                format!("{}: column names differ", table.name),
+                || {
+                    format!(
+                        "{}: column names {:?} vs {:?}",
+                        table.name,
+                        names(s),
+                        names(o)
+                    )
+                },
+            );
         }
         let mut seen = BTreeSet::new();
         let mut skipped_pks = BTreeSet::new();
         for src in &src_rows {
             let pk = format!("{:?}", src[table.pk]);
-            if warned.contains(&(table.name, key(table.name, src).as_str())) {
+            let rkey = key(table.name, src);
+            if warned.contains(&(table.name, rkey.as_str())) {
                 excluded += 1;
                 skipped_pks.insert(pk);
                 continue;
             }
             seen.insert(pk.clone());
             let want = expected(table, src, &events);
-            let got = by_pk
-                .get(&pk)
-                .unwrap_or_else(|| panic!("{} {pk}: missing from the export", table.name));
+            let Some(got) = by_pk.get(&pk) else {
+                let who = if private { &rkey } else { &pk };
+                panic!("{} {who}: missing from the export", table.name);
+            };
             for (col, g) in got.iter().filter(|(c, _)| *c != "__rowid") {
                 let w = want.get(col).cloned().unwrap_or(Value::Null);
                 let (w, g) = if table.times.contains(&col.as_str()) {
@@ -332,16 +359,27 @@ pub fn assert_round_trip_with(
                 } else {
                     (w, g.clone())
                 };
-                assert_eq!(w, g, "{} {pk} column {col}", table.name);
+                ensure(
+                    private,
+                    w == g,
+                    format!("{} {rkey} column {col} differs", table.name),
+                    || format!("{} {pk} column {col}: {w:?} vs {g:?}", table.name),
+                );
             }
         }
         // Nothing is invented. An excluded record may or may not be exported.
-        for pk in by_pk.keys() {
-            assert!(
-                seen.contains(pk) || skipped_pks.contains(pk),
-                "{} {pk}: the export has a row the source lacks",
-                table.name
-            );
+        for (pk, row) in &by_pk {
+            if !(seen.contains(pk) || skipped_pks.contains(pk)) {
+                let who = if private {
+                    key(table.name, row)
+                } else {
+                    pk.clone()
+                };
+                panic!(
+                    "{} {who}: the export has a row the source lacks",
+                    table.name
+                );
+            }
         }
     }
 
@@ -369,7 +407,12 @@ pub fn assert_round_trip_with(
             r.get(0)
         })
         .ok();
-    assert_eq!(cursor, max_event.map(|m| m.to_string()), "meta cursor");
+    ensure(
+        private,
+        cursor == max_event.map(|m| m.to_string()),
+        "meta cursor differs".into(),
+        || format!("meta cursor {cursor:?} vs {max_event:?}"),
+    );
     let meta_warned = |k: &str| {
         dump(&a, "meta").iter().any(|r| {
             text_of(r.get("key")) == Some(k) && warned.contains(&("meta", key("meta", r).as_str()))
@@ -393,21 +436,26 @@ pub fn assert_round_trip_with(
             // A real brain may name the account by name; the export gives its store path.
             let exported = g["account"].as_str().unwrap_or_default().to_string();
             let source = w["account"].as_str().unwrap_or_default().to_string();
-            assert!(
+            ensure(
+                private,
                 Path::new(&exported).is_absolute(),
-                "console_thread account is not a path"
+                "meta console_thread account is not a path".into(),
+                || format!("console_thread account {exported:?} is not a path"),
             );
             if let Some(accounts) = accounts {
                 let store = accounts.resolve(&source).store;
-                assert_eq!(
-                    store.as_deref(),
-                    Some(Path::new(&exported)),
-                    "console_thread account"
+                ensure(
+                    private,
+                    store.as_deref() == Some(Path::new(&exported)),
+                    "meta console_thread account differs".into(),
+                    || format!("console_thread account {store:?} vs {exported:?}"),
                 );
             }
             w["account"] = g["account"].clone();
         }
-        assert_eq!(want, got, "meta {k}");
+        ensure(private, want == got, format!("meta {k} differs"), || {
+            format!("meta {k}: {want:?} vs {got:?}")
+        });
     }
     let keys: BTreeSet<String> = dump(&b, "meta")
         .iter()

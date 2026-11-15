@@ -621,3 +621,68 @@ fn spike_only_event_kinds_come_back_as_written() {
         .unwrap();
     assert_eq!(cursor, "50");
 }
+
+/// The panic text of a comparison that is expected to fail.
+fn mismatch_message(rig: &Rig, mode: &TimeMode) -> String {
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        common::assert_round_trip(&rig.spike, &rig.out, &rig.notes, mode);
+    }))
+    .expect_err("the comparison should have failed");
+    caught
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| caught.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_real_brain_mismatch_names_no_contents() {
+    let rig = typical();
+    rig.export().unwrap();
+    let src = open_ro(&rig.spike);
+    let (task_title, session_title): (String, String) = (
+        src.query_row("SELECT title FROM tasks WHERE id = 1", [], |r| r.get(0))
+            .unwrap(),
+        src.query_row(
+            "SELECT title FROM sessions WHERE session_id = ?1",
+            [ids::S1_WORKING],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    );
+    let planted = "PLANTED-VALUE-XYZ";
+    let out = Connection::open(&rig.out).unwrap();
+
+    out.execute(
+        "UPDATE sessions SET title = ?1 WHERE session_id = ?2",
+        [planted, ids::S1_WORKING],
+    )
+    .unwrap();
+    let instant = TimeMode::Instant(tz());
+    let msg = mismatch_message(&rig, &instant);
+    assert_eq!(
+        msg,
+        format!("sessions {} column title differs", &ids::S1_WORKING[..8])
+    );
+    assert!(
+        !msg.contains(planted) && !msg.contains(&session_title),
+        "{msg}"
+    );
+    // Fixtures and generated brains keep the values in the message.
+    let msg = mismatch_message(&rig, &TimeMode::Text);
+    assert!(msg.contains(planted), "{msg}");
+
+    out.execute("UPDATE tasks SET title = ?1 WHERE id = 1", [planted])
+        .unwrap();
+    out.execute(
+        "UPDATE sessions SET title = ?1 WHERE session_id = ?2",
+        [&session_title, ids::S1_WORKING],
+    )
+    .unwrap();
+    let msg = mismatch_message(&rig, &instant);
+    assert_eq!(msg, "tasks #1 column title differs");
+    assert!(
+        !msg.contains(planted) && !msg.contains(&task_title),
+        "{msg}"
+    );
+}
