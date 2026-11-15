@@ -83,14 +83,20 @@ fn accounts(flags: &[String]) -> Result<AccountMap, String> {
     Ok(map)
 }
 
-/// Refuses a target that exists, has a leftover SQLite file beside it, or is named like one.
-fn refuse_existing(into: &Path) -> Result<(), String> {
+/// Refuses a target named like one of SQLite's own files.
+fn refuse_sidecar_name(into: &Path) -> Result<(), String> {
     if is_sidecar_name(into) {
         return Err(format!(
             "{} is a name SQLite keeps for its own files; pick another",
             file_name_of(into)
         ));
     }
+    Ok(())
+}
+
+/// Refuses a target that exists, has a leftover SQLite file beside it, or is named like one.
+fn refuse_existing(into: &Path) -> Result<(), String> {
+    refuse_sidecar_name(into)?;
     for p in std::iter::once(into.to_path_buf()).chain(sidecars(into)) {
         if p.symlink_metadata().is_ok() {
             return Err(format!(
@@ -243,7 +249,8 @@ pub fn export(args: &ExportArgs) -> Result<(), String> {
         return Err(format!("no v1 brain at {}", file_name_of(&args.from)));
     }
     refuse_same_file(&args.from, &args.into)?;
-    refuse_existing(&args.into)?;
+    // An existing target is `export_spike`'s to refuse (`ExportError::Exists`).
+    refuse_sidecar_name(&args.into)?;
     let store = Store::open_read_only(&args.from).map_err(|e| match e {
         StoreError::NotABrain => {
             format!("{} isn't a moa brain", file_name_of(&args.from))

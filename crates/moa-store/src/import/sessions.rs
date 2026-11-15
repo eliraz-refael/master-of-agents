@@ -25,7 +25,6 @@ struct Ev {
     session: Option<String>,
     cwd: Option<String>,
     kind: String,
-    text: Option<String>,
     row: SrcRow,
 }
 
@@ -56,7 +55,6 @@ fn load_events(run: &Run) -> Result<Vec<Ev>, ImportError> {
                 session: row.text("session_id"),
                 cwd: row.text("cwd").filter(|c| !c.trim().is_empty()),
                 kind: row.text("kind").unwrap_or_default(),
-                text: row.text("text"),
                 row,
             })
         })
@@ -83,7 +81,7 @@ fn facts(events: &[Ev]) -> HashMap<&str, Facts> {
             }
         }
         let counts = matches!(e.kind.as_str(), "prompt" | "stop" | "waiting")
-            && !(e.kind == "waiting" && live::is_idle_ping(e.text.as_deref()));
+            && !(e.kind == "waiting" && live::is_idle_ping(e.row.text_cow("text").as_deref()));
         if counts {
             f.latest = Some(i);
         }
@@ -237,13 +235,14 @@ fn sessions(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), Import
             .map(|g| rules::group_path(&g).0)
             .filter(|g| !g.is_empty());
         let last_prompt = r.text("last_prompt");
+        let latest_text = latest.and_then(|e| e.row.text_cow("text"));
         let why = live::activity_why(
             state.as_deref(),
             last_prompt.as_deref(),
             latest
                 .map(|e| Latest {
                     kind: &e.kind,
-                    text: e.text.as_deref(),
+                    text: latest_text.as_deref(),
                 })
                 .as_ref(),
         );
@@ -409,7 +408,8 @@ fn events(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), ImportEr
             .text("account")
             .filter(|a| !a.trim().is_empty())
             .map(|a| run.resolve_account(&a).name);
-        let kind = match event_kind(&e.kind, e.text.as_deref()) {
+        let text = e.row.text_cow("text");
+        let kind = match event_kind(&e.kind, text.as_deref()) {
             Some(k) => k.to_string(),
             None => {
                 if e.row.text("kind").is_none() {
@@ -431,7 +431,7 @@ fn events(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), ImportEr
                 account,
                 e.row.text("cwd"),
                 kind,
-                e.text
+                text
             ],
         )?;
         imported += 1;

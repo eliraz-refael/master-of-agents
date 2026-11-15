@@ -48,7 +48,8 @@ pub fn file_name_of(p: &Path) -> String {
 #[derive(Debug)]
 pub enum StoreError {
     Missing(PathBuf),
-    /// The file is a database, but not one moa made: no schema version was ever set.
+    /// The file isn't a brain: not a database, another app's tables with no schema version, or
+    /// a schema version with no `sessions` table.
     NotABrain,
     Sqlite(rusqlite::Error),
     Migration(rusqlite_migration::Error),
@@ -118,33 +119,16 @@ impl Store {
         Self::open_with(db, backups, &migrations(), SCHEMA_VERSION)
     }
 
-    /// Opens an existing database without creating or migrating anything. A file that moa
-    /// never set a schema version on is refused as [`StoreError::NotABrain`].
+    /// Opens an existing database without creating or migrating anything. A file that isn't
+    /// a brain (see [`StoreError::NotABrain`]) or is empty is refused as `NotABrain`.
     pub fn open_read_only(db: &Path) -> Result<Store, StoreError> {
         if !db.exists() {
             return Err(StoreError::Missing(db.to_path_buf()));
         }
-        let not_a_brain = |e: rusqlite::Error| match e {
-            rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::NotADatabase => {
-                StoreError::NotABrain
-            }
-            other => StoreError::Sqlite(other),
-        };
-        let conn = Connection::open_with_flags(
-            db,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(not_a_brain)?;
-        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-        conn.pragma_update(None, "foreign_keys", true)?;
-        let version = migrations().current_version(&conn).map_err(|e| match e {
-            rusqlite_migration::Error::RusqliteError { err, .. } => not_a_brain(err),
-            other => StoreError::Migration(other),
-        })?;
-        let ahead_of_build = match version {
-            SchemaVersion::Outside(v) => Some(v.get()),
-            SchemaVersion::NoneSet => return Err(StoreError::NotABrain),
-            SchemaVersion::Inside(_) => None,
+        let conn = open_checked_read_only(db)?;
+        let ahead_of_build = match brain_version(&conn)? {
+            None => return Err(StoreError::NotABrain),
+            Some(v) => (v > SCHEMA_VERSION).then_some(v),
         };
         Ok(Store {
             conn,
@@ -160,6 +144,11 @@ impl Store {
     ) -> Result<Store, StoreError> {
         if let Some(parent) = db.parent() {
             create_private_dirs(parent)?;
+        }
+        // Look before touching: the PRAGMAs below would turn a foreign database into WAL
+        // mode, and the first migration would write into it.
+        if fs::metadata(db).is_ok_and(|m| m.len() > 0) {
+            brain_version(&open_checked_read_only(db)?)?;
         }
         let mut conn = Connection::open(db)?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
@@ -193,6 +182,48 @@ impl Store {
     }
 }
 
+fn not_a_brain(e: rusqlite::Error) -> StoreError {
+    match e {
+        rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::NotADatabase => {
+            StoreError::NotABrain
+        }
+        other => StoreError::Sqlite(other),
+    }
+}
+
+fn open_checked_read_only(db: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(not_a_brain)?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    Ok(conn)
+}
+
+/// The schema version of a brain, or `None` for a new, empty file. Anything else that
+/// isn't a brain is [`StoreError::NotABrain`]: no schema version but tables, or a schema
+/// version but no `sessions` table.
+fn brain_version(conn: &Connection) -> Result<Option<usize>, StoreError> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(not_a_brain)?;
+    let tables = |only: &str| -> Result<i64, StoreError> {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name GLOB ?1",
+            [only],
+            |r| r.get(0),
+        )
+        .map_err(not_a_brain)
+    };
+    match usize::try_from(version) {
+        Ok(0) if tables("*")? == 0 => Ok(None),
+        Ok(v) if v > 0 && tables("sessions")? > 0 => Ok(Some(v)),
+        _ => Err(StoreError::NotABrain),
+    }
+}
+
 /// `backups/pre-v<target>.db`, or with `-<unix ms>` added when that name is taken.
 fn backup_path(backups: &Path, target: usize) -> PathBuf {
     let plain = backups.join(format!("pre-v{target}.db"));
@@ -216,11 +247,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("moa.db");
         let backups = dir.path().join("backups");
-        let one = Migrations::new(vec![M::up(
-            "CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT;",
-        )]);
+        // Both start with a `sessions` table, which is what makes a file a brain.
+        const FIRST: &str = "CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT; \
+                             CREATE TABLE sessions (id TEXT PRIMARY KEY) STRICT;";
+        let one = Migrations::new(vec![M::up(FIRST)]);
         let two = Migrations::new(vec![
-            M::up("CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT;"),
+            M::up(FIRST),
             M::up("CREATE TABLE extra (id INTEGER PRIMARY KEY) STRICT;"),
         ]);
 

@@ -4,6 +4,7 @@
 //! the copy is what gets read. Everything is written in one transaction of the target store.
 //! Reports carry no record contents (see [`report`]).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
@@ -196,6 +197,15 @@ impl SrcRow {
             Value::Real(r) => Some(r.to_string()),
             Value::Text(t) => Some(t.clone()),
             Value::Blob(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        }
+    }
+
+    /// [`SrcRow::text`] without copying a text value.
+    pub(crate) fn text_cow(&self, col: &str) -> Option<Cow<'_, str>> {
+        match self.get(col) {
+            Value::Text(t) => Some(Cow::Borrowed(t)),
+            Value::Blob(b) => Some(String::from_utf8_lossy(b)),
+            _ => self.text(col).map(Cow::Owned),
         }
     }
 

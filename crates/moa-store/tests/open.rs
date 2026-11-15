@@ -1,7 +1,9 @@
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use moa_store::{SCHEMA_VERSION, Store, StoreError, migrations};
-use rusqlite::ErrorCode;
+use rusqlite::{Connection, ErrorCode, OpenFlags};
+use sha2::{Digest, Sha256};
 
 fn user_version(store: &Store) -> i64 {
     store
@@ -130,4 +132,85 @@ fn read_only_open_never_creates() {
     assert_eq!(err.to_string(), "there is no database at moa.db");
     assert!(!db.exists());
     assert!(!db.parent().unwrap().exists());
+}
+
+fn sha(path: &Path) -> String {
+    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+fn journal_mode_read_only(db: &Path) -> String {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// A rollback-journal database with one table and the given `user_version`.
+fn another_apps_db(path: &Path, user_version: i64) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE x(a); PRAGMA user_version = {user_version};"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn a_foreign_database_is_refused_before_anything_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("other.db");
+    another_apps_db(&db, 0);
+    let before = sha(&db);
+
+    let err = Store::open(&db, &dir.path().join("backups"))
+        .err()
+        .expect("must fail");
+    assert!(matches!(err, StoreError::NotABrain), "{err}");
+    assert_eq!(sha(&db), before);
+    for sidecar in moa_store::sidecars(&db) {
+        assert!(!sidecar.exists(), "{}", sidecar.display());
+    }
+    assert_eq!(journal_mode_read_only(&db), "delete");
+}
+
+#[test]
+fn another_apps_versioned_database_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("other.db");
+    another_apps_db(&db, 7);
+    let before = sha(&db);
+
+    let err = Store::open(&db, &dir.path().join("backups"))
+        .err()
+        .expect("must fail");
+    assert!(matches!(err, StoreError::NotABrain), "{err}");
+    assert_eq!(sha(&db), before);
+
+    let err = Store::open_read_only(&db).err().expect("must fail");
+    assert!(matches!(err, StoreError::NotABrain), "{err}");
+    assert_eq!(sha(&db), before);
+}
+
+#[test]
+fn a_file_that_isnt_sqlite_is_refused_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("notes.txt");
+    std::fs::write(&db, b"hello\n").unwrap();
+
+    let err = Store::open(&db, &dir.path().join("backups"))
+        .err()
+        .expect("must fail");
+    assert!(matches!(err, StoreError::NotABrain), "{err}");
+    assert_eq!(std::fs::read(&db).unwrap(), b"hello\n");
+    for sidecar in moa_store::sidecars(&db) {
+        assert!(!sidecar.exists(), "{}", sidecar.display());
+    }
+}
+
+#[test]
+fn an_empty_file_becomes_a_brain() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("moa.db");
+    std::fs::write(&db, b"").unwrap();
+
+    let store = Store::open(&db, &dir.path().join("backups")).unwrap();
+    assert_eq!(user_version(&store), SCHEMA_VERSION as i64);
 }

@@ -1,11 +1,13 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use jiff::ToSpan;
 use jiff::civil::{Date, date};
 use moa_store::Store;
 use moa_store::backup::{backups_to_delete, daily_backup, prune_backups, vacuum_into};
 use proptest::prelude::*;
+use rusqlite::{Connection, OpenFlags};
 
 fn dates() -> impl Strategy<Value = Vec<Date>> {
     proptest::collection::btree_set(0i32..400, 0..60)
@@ -72,9 +74,10 @@ fn prune_ignores_pre_migration_and_switch_backups() {
     touch(dir.path(), "daily-2026-1-1.db");
     touch(dir.path(), "daily-2026-01-01.db-wal");
 
-    let removed = prune_backups(dir.path()).unwrap();
-    assert!(!removed.is_empty());
-    for p in &removed {
+    let pruned = prune_backups(dir.path()).unwrap();
+    assert!(pruned.failed.is_empty());
+    assert!(!pruned.removed.is_empty());
+    for p in &pruned.removed {
         let name = p.file_name().unwrap().to_str().unwrap();
         assert!(
             name.starts_with("daily-2026-01-") && name.ends_with(".db"),
@@ -186,6 +189,157 @@ fn a_refusal_names_the_file_not_its_folder() {
         err.to_string(),
         "a file could not be used: y-wal already exists"
     );
+}
+
+fn project_count(db: &Path) -> i64 {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.query_row("SELECT count(*) FROM projects", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn store_with_a_project(dir: &Path) -> Store {
+    let store = Store::open(&dir.join("moa.db"), &dir.join("pre")).unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('Lantern', 0, 0)",
+            [],
+        )
+        .unwrap();
+    store
+}
+
+fn names(paths: &[PathBuf]) -> Vec<String> {
+    let mut v: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+fn daily_names(days: &[i8]) -> Vec<String> {
+    days.iter()
+        .map(|d| format!("daily-2026-01-{d:02}.db"))
+        .collect()
+}
+
+#[test]
+fn prune_keeps_going_past_a_file_it_cannot_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..20 {
+        let d = date(2026, 1, 1) + i.days();
+        if i == 0 {
+            // remove_file can't remove a directory.
+            fs::create_dir(dir.path().join(format!("daily-{d}.db"))).unwrap();
+        } else {
+            touch(dir.path(), &format!("daily-{d}.db"));
+        }
+    }
+
+    let pruned = prune_backups(dir.path()).unwrap();
+    let failed: Vec<PathBuf> = pruned.failed.iter().map(|(p, _)| p.clone()).collect();
+    assert_eq!(names(&failed), daily_names(&[1]));
+    assert_eq!(
+        names(&pruned.removed),
+        daily_names(&[2, 3, 5, 6, 7, 8, 9, 10, 12])
+    );
+
+    let mut left: Vec<String> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n != "daily-2026-01-01.db")
+        .collect();
+    left.sort();
+    assert_eq!(left, daily_names(&[4, 11, 13, 14, 15, 16, 17, 18, 19, 20]));
+    assert!(dir.path().join("daily-2026-01-01.db").is_dir());
+}
+
+#[test]
+fn a_dangling_daily_link_is_not_a_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_a_project(dir.path());
+    let backups = dir.path().join("backups");
+    fs::create_dir(&backups).unwrap();
+    let missing = dir.path().join("missing.db");
+    let link = backups.join("daily-2026-11-15.db");
+    std::os::unix::fs::symlink(&missing, &link).unwrap();
+
+    let path = daily_backup(&store, &backups, date(2026, 11, 15))
+        .unwrap()
+        .expect("a dangling link is not a backup");
+    assert_eq!(path, link);
+    assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
+    assert_eq!(project_count(&path), 1);
+    assert!(!missing.exists());
+}
+
+#[test]
+fn a_daily_link_to_a_real_file_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_a_project(dir.path());
+    let backups = dir.path().join("backups");
+    fs::create_dir(&backups).unwrap();
+    let other = dir.path().join("other.db");
+    fs::write(&other, b"keep").unwrap();
+    let link = backups.join("daily-2026-11-15.db");
+    std::os::unix::fs::symlink(&other, &link).unwrap();
+
+    let path = daily_backup(&store, &backups, date(2026, 11, 15))
+        .unwrap()
+        .expect("a link is not a backup");
+    assert_eq!(fs::read(&other).unwrap(), b"keep");
+    assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
+    assert_eq!(project_count(&path), 1);
+}
+
+#[test]
+fn a_directory_in_the_way_of_a_daily_backup_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_a_project(dir.path());
+    let backups = dir.path().join("backups");
+    fs::create_dir_all(backups.join("daily-2026-11-15.db")).unwrap();
+
+    assert_already_exists(daily_backup(&store, &backups, date(2026, 11, 15)).map(|_| ()));
+    assert!(backups.join("daily-2026-11-15.db").is_dir());
+}
+
+#[test]
+fn a_leftover_tmp_is_not_a_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_a_project(dir.path());
+    let backups = dir.path().join("backups");
+    fs::create_dir(&backups).unwrap();
+    fs::write(backups.join("daily-2026-11-15.db.tmp"), b"garbage").unwrap();
+
+    let path = daily_backup(&store, &backups, date(2026, 11, 15))
+        .unwrap()
+        .expect("a .tmp is not a backup");
+    assert_eq!(path, backups.join("daily-2026-11-15.db"));
+    assert_eq!(project_count(&path), 1);
+    assert!(!backups.join("daily-2026-11-15.db.tmp").exists());
+}
+
+#[test]
+fn prune_never_counts_a_tmp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // Jan 1-19 are backups; Jan 20 is only a leftover .tmp.
+    let dated: Vec<Date> = (0..19).map(|i| date(2026, 1, 1) + i.days()).collect();
+    for d in &dated {
+        touch(dir.path(), &format!("daily-{d}.db"));
+    }
+    touch(dir.path(), "daily-2026-01-20.db.tmp");
+
+    let pruned = prune_backups(dir.path()).unwrap();
+    assert!(pruned.failed.is_empty());
+    let expected: Vec<String> = backups_to_delete(&dated)
+        .iter()
+        .map(|d| format!("daily-{d}.db"))
+        .collect();
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(names(&pruned.removed), expected);
+    assert!(dir.path().join("daily-2026-01-20.db.tmp").exists());
 }
 
 #[test]

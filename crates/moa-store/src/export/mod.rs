@@ -193,6 +193,9 @@ fn write_all(src: &Store, dst: &Path, env: &ExportEnv) -> Result<ExportReport, E
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
     conn.execute_batch(SCHEMA_SQL)?;
     let report = {
+        // One snapshot of the source for the whole export: a daemon may be writing to it.
+        // The transaction only reads, so it ends by rolling back.
+        let _snapshot = src.conn().unchecked_transaction()?;
         let tx = conn.transaction()?;
         let mut ex = Exporter::new(src.conn(), env)?;
         ex.run(&tx)?;

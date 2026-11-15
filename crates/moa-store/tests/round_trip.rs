@@ -4,6 +4,8 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use jiff::tz::TimeZone;
 use moa_agents::claude::find_transcript;
@@ -348,6 +350,75 @@ fn export_follows_rotation() {
         )
         .unwrap();
     assert_eq!(account, rig.home.join(".acct-a").to_string_lossy());
+}
+
+#[test]
+fn export_reads_one_snapshot() {
+    let rig = typical();
+    let db = rig._dir.path().join("moa.db");
+    let count = |table: &str| -> i64 {
+        rig.store
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    let (projects, tasks, events) = (count("projects"), count("tasks"), count("events"));
+    let max_event: i64 = rig
+        .store
+        .conn()
+        .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+        .unwrap();
+
+    let mut reader = Store::open_read_only(&db).unwrap();
+    let fired = Arc::new(AtomicBool::new(false));
+    let flag = fired.clone();
+    let writer_path = db.clone();
+    // Mid-export, another connection (the daemon) writes a project, a task and an event.
+    // The fixture is small and the count is per statement, so the handler runs every 20 ops.
+    reader
+        .conn_mut()
+        .progress_handler(
+            20,
+            Some(move || {
+                if !flag.swap(true, Ordering::SeqCst) {
+                    let w = Connection::open(&writer_path).unwrap();
+                    w.execute_batch(&format!(
+                        "INSERT INTO projects (name, created_at, updated_at) VALUES ('Beacon', 0, 0); \
+                         INSERT INTO tasks (title, created_at, updated_at) VALUES ('late', 0, 0); \
+                         INSERT INTO events (id, at, kind) VALUES ({}, 0, 'turn.failed');",
+                        max_event + 1
+                    ))
+                    .unwrap();
+                }
+                false
+            }),
+        )
+        .unwrap();
+    export_spike(&reader, &rig.out, &export_env(&rig.home)).unwrap();
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "the write must happen mid-export"
+    );
+
+    let out = open_ro(&rig.out);
+    let out_count = |table: &str| -> i64 {
+        out.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(out_count("projects"), projects);
+    assert_eq!(out_count("tasks"), tasks);
+    assert_eq!(out_count("events"), events);
+    let cursor: String = out
+        .query_row("SELECT value FROM meta WHERE key = 'cursor'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(cursor, max_event.to_string());
+
+    // The write did land in the source.
+    assert_eq!(count("projects"), projects + 1);
+    assert_eq!(count("tasks"), tasks + 1);
+    assert_eq!(count("events"), events + 1);
 }
 
 #[test]
