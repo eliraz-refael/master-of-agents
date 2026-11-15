@@ -48,6 +48,8 @@ pub(crate) fn file_name_of(p: &Path) -> String {
 #[derive(Debug)]
 pub enum StoreError {
     Missing(PathBuf),
+    /// The file is a database, but not one moa made: no schema version was ever set.
+    NotABrain,
     Sqlite(rusqlite::Error),
     Migration(rusqlite_migration::Error),
     Io(io::Error),
@@ -57,6 +59,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing(p) => write!(f, "there is no database at {}", file_name_of(p)),
+            Self::NotABrain => f.write_str("this file isn't a moa brain"),
             Self::Sqlite(e) => write!(f, "the database failed: {e}"),
             Self::Migration(e) => write!(f, "the database could not be upgraded: {e}"),
             Self::Io(e) => write!(f, "a file could not be used: {e}"),
@@ -67,7 +70,7 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Missing(_) => None,
+            Self::Missing(_) | Self::NotABrain => None,
             Self::Sqlite(e) => Some(e),
             Self::Migration(e) => Some(e),
             Self::Io(e) => Some(e),
@@ -115,20 +118,33 @@ impl Store {
         Self::open_with(db, backups, &migrations(), SCHEMA_VERSION)
     }
 
-    /// Opens an existing database without creating or migrating anything.
+    /// Opens an existing database without creating or migrating anything. A file that moa
+    /// never set a schema version on is refused as [`StoreError::NotABrain`].
     pub fn open_read_only(db: &Path) -> Result<Store, StoreError> {
         if !db.exists() {
             return Err(StoreError::Missing(db.to_path_buf()));
         }
+        let not_a_brain = |e: rusqlite::Error| match e {
+            rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::NotADatabase => {
+                StoreError::NotABrain
+            }
+            other => StoreError::Sqlite(other),
+        };
         let conn = Connection::open_with_flags(
             db,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        )
+        .map_err(not_a_brain)?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        let ahead_of_build = match migrations().current_version(&conn)? {
+        let version = migrations().current_version(&conn).map_err(|e| match e {
+            rusqlite_migration::Error::RusqliteError { err, .. } => not_a_brain(err),
+            other => StoreError::Migration(other),
+        })?;
+        let ahead_of_build = match version {
             SchemaVersion::Outside(v) => Some(v.get()),
-            _ => None,
+            SchemaVersion::NoneSet => return Err(StoreError::NotABrain),
+            SchemaVersion::Inside(_) => None,
         };
         Ok(Store {
             conn,

@@ -12,7 +12,7 @@ use moa_core::UtcMs;
 use moa_store::accounts::AccountMap;
 use moa_store::export::{ExportEnv, ExportError, export_spike};
 use moa_store::import::{IdSource, ImportEnv, ImportError, import_spike};
-use moa_store::{Store, StoreError};
+use moa_store::{Store, StoreError, is_sidecar_name, sidecars};
 
 #[derive(Args)]
 pub struct AdoptArgs {
@@ -89,12 +89,15 @@ fn accounts(flags: &[String]) -> Result<AccountMap, String> {
     Ok(map)
 }
 
-/// Refuses a target that exists, or has a leftover SQLite file beside it.
+/// Refuses a target that exists, has a leftover SQLite file beside it, or is named like one.
 fn refuse_existing(into: &Path) -> Result<(), String> {
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        let mut s = into.as_os_str().to_owned();
-        s.push(suffix);
-        let p = PathBuf::from(s);
+    if is_sidecar_name(into) {
+        return Err(format!(
+            "{} is a name SQLite keeps for its own files; pick another",
+            file_name(into)
+        ));
+    }
+    for p in std::iter::once(into.to_path_buf()).chain(sidecars(into)) {
         if p.symlink_metadata().is_ok() {
             return Err(format!(
                 "{} already exists; moa never overwrites a brain",
@@ -224,16 +227,17 @@ fn claim(into: &Path) -> Result<(), String> {
                 "{} already exists; moa never overwrites a brain",
                 file_name(into)
             ),
+            std::io::ErrorKind::NotFound => {
+                format!("the folder for {} doesn't exist", file_name(into))
+            }
             _ => "a file could not be created".to_string(),
         })
 }
 
 /// Removes a brain this run just created, with the files SQLite keeps beside it.
 fn remove_brain(db: &Path) {
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        let mut s = db.as_os_str().to_owned();
-        s.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(s));
+    for p in std::iter::once(db.to_path_buf()).chain(sidecars(db)) {
+        let _ = std::fs::remove_file(p);
     }
 }
 
@@ -245,7 +249,12 @@ pub fn export(args: &ExportArgs) -> Result<(), String> {
     }
     refuse_same_file(&args.from, &args.into)?;
     refuse_existing(&args.into)?;
-    let store = Store::open_read_only(&args.from).map_err(store_err)?;
+    let store = Store::open_read_only(&args.from).map_err(|e| match e {
+        StoreError::NotABrain => {
+            format!("{} isn't a moa brain", file_name(&args.from))
+        }
+        other => store_err(other),
+    })?;
     let env = ExportEnv {
         tz,
         accounts,

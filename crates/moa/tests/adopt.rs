@@ -238,3 +238,71 @@ fn export_spike_round_trip_via_cli() {
     assert_eq!(o.status.code(), Some(1));
     assert!(text(&o).contains("out.db already exists; moa never overwrites a brain"));
 }
+
+#[test]
+fn export_from_a_file_that_is_not_a_v1_brain_says_so() {
+    let r = rig();
+    let garbage = r.path("garbage.db");
+    fs::write(&garbage, b"this is not a database at all, just text").unwrap();
+    for from in [&r.spike, &garbage] {
+        let out = r.path("out.db");
+        let o = r.moa(&["export-spike", "--from", s(from), "--into", s(&out)]);
+        assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+        let name = from.file_name().unwrap().to_str().unwrap();
+        assert!(
+            text(&o).contains(&format!("{name} isn't a moa brain")),
+            "{}",
+            text(&o)
+        );
+        assert!(!text(&o).contains("upgraded"), "{}", text(&o));
+        assert!(!out.exists());
+    }
+}
+
+#[test]
+fn into_a_missing_folder_is_refused_plainly() {
+    let r = rig();
+    let into = r.path("nowhere").join("moa.db");
+    let o = r.moa(&["adopt-spike", "--from", s(&r.spike), "--into", s(&into)]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        text(&o).contains("the folder for moa.db doesn't exist"),
+        "{}",
+        text(&o)
+    );
+    assert!(!text(&o).contains(s(r.dir.path())));
+    assert!(!r.path("nowhere").exists());
+}
+
+#[test]
+fn into_a_sidecar_name_is_refused() {
+    let r = rig();
+    for name in ["brain.db-journal", "brain.db-wal", "brain.db-shm"] {
+        let into = r.path(name);
+        let o = r.moa(&["adopt-spike", "--from", s(&r.spike), "--into", s(&into)]);
+        assert_eq!(o.status.code(), Some(1), "{name}");
+        assert!(
+            text(&o).contains(&format!(
+                "{name} is a name SQLite keeps for its own files; pick another"
+            )),
+            "{}",
+            text(&o)
+        );
+        assert!(!into.exists(), "{name}");
+    }
+}
+
+#[test]
+fn a_failed_adopt_leaves_nothing_behind() {
+    let r = rig();
+    let garbage = r.path("garbage.db");
+    fs::write(&garbage, b"this is not a database at all, just text").unwrap();
+    let into = r.path("x.db");
+    let o = r.moa(&["adopt-spike", "--from", s(&garbage), "--into", s(&into)]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    let left: Vec<String> = listing(r.dir.path())
+        .into_iter()
+        .filter(|n| n.starts_with("x.db"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
