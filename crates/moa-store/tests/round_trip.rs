@@ -537,3 +537,42 @@ fn a_session_with_no_conversation_is_named_by_rowid() {
     assert_eq!(warn.len(), 1);
     assert_eq!(warn[0].key, format!("#{rowid}"));
 }
+
+#[test]
+fn spike_only_event_kinds_come_back_as_written() {
+    let rig = typical();
+    let conn = rig.store.conn();
+    // What import keeps for a kind it doesn't know (`compact`), and a dotted v1 kind.
+    for (id, kind) in [(50, "compact"), (51, "model.changed")] {
+        conn.execute(
+            "INSERT INTO events (id, at, session_id, conversation_id, cwd, kind, text) \
+             VALUES (?1, ?2, NULL, NULL, '/a', ?3, 'hello')",
+            rusqlite::params![id, NOW.0, kind],
+        )
+        .unwrap();
+    }
+    let report = rig.export().unwrap();
+    let out = open_ro(&rig.out);
+    let kind = |id: i64| -> Option<String> {
+        out.query_row("SELECT kind FROM events WHERE id = ?1", [id], |r| r.get(0))
+            .ok()
+    };
+    assert_eq!(kind(50), Some("compact".into()));
+    // A dotted kind with no spike equivalent is skipped, with one Info.
+    assert_eq!(kind(51), None);
+    assert_eq!(
+        report
+            .notes
+            .iter()
+            .filter(|n| n.table == "events" && n.level == Level::Info)
+            .count(),
+        1
+    );
+    // The cursor follows the newest event actually exported.
+    let cursor: String = out
+        .query_row("SELECT value FROM meta WHERE key = 'cursor'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(cursor, "50");
+}

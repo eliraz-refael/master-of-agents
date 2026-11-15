@@ -377,6 +377,9 @@ impl Exporter<'_> {
                 EventKind::IDLE_PING | EventKind::NEEDS_PERMISSION => "waiting",
                 EventKind::SESSION_ENDED => "end",
                 EventKind::UI => "ui",
+                // v1's own kinds are dotted. One without a dot came from the spike, which
+                // import kept as written, so it goes back as written.
+                other if !other.contains('.') => other,
                 _ => {
                     if skipped_kinds.insert(kind.clone()) {
                         self.note(Level::Info, "events", &key_of(*id), R_EVENT_KIND);

@@ -8,6 +8,7 @@ use std::path::Path;
 
 use jiff::tz::TimeZone;
 use moa_core::time::{parse_date, spike_local_to_utc};
+use moa_store::accounts::AccountMap;
 use moa_store::import::report::ASK_SWITCHED_REPLY;
 use moa_store::import::rules::group_path;
 use moa_store::import::{Level, RecordNote};
@@ -262,6 +263,19 @@ pub fn assert_round_trip(
     import_notes: &[RecordNote],
     mode: &TimeMode,
 ) -> usize {
+    assert_round_trip_with(spike, out, import_notes, mode, None)
+}
+
+/// Like [`assert_round_trip`]. With `accounts`, a console thread's account that isn't equal on
+/// both sides must be an absolute path equal to the store path of the source account; without
+/// it, an absolute path is accepted as it stands.
+pub fn assert_round_trip_with(
+    spike: &Path,
+    out: &Path,
+    import_notes: &[RecordNote],
+    mode: &TimeMode,
+    accounts: Option<&AccountMap>,
+) -> usize {
     let (a, b) = (open_ro(spike), open_ro(out));
     let warned: BTreeSet<(&str, &str)> = import_notes
         .iter()
@@ -278,6 +292,12 @@ pub fn assert_round_trip(
             .iter()
             .map(|r| (format!("{:?}", r[table.pk]), r))
             .collect();
+        if let (Some(s), Some(o)) = (src_rows.first(), out_rows.first()) {
+            let names = |r: &Row| -> Vec<String> {
+                r.keys().filter(|k| *k != "__rowid").cloned().collect()
+            };
+            assert_eq!(names(s), names(o), "{}: column names", table.name);
+        }
         let mut seen = BTreeSet::new();
         let mut skipped_pks = BTreeSet::new();
         for src in &src_rows {
@@ -356,13 +376,27 @@ pub fn assert_round_trip(
         if k == "setup_skipped" && want == Some(serde_json::json!([])) {
             want = None;
         }
-        if k == "console_thread" && matches!(mode, TimeMode::Instant(_)) {
+        if k == "console_thread"
+            && matches!(mode, TimeMode::Instant(_))
+            && want != got
+            && let (Some(w), Some(g)) = (want.as_mut(), got.as_mut())
+        {
             // A real brain may name the account by name; the export gives its store path.
-            for v in [&mut want, &mut got].into_iter().flatten() {
-                if let Some(o) = v.as_object_mut() {
-                    o.remove("account");
-                }
+            let exported = g["account"].as_str().unwrap_or_default().to_string();
+            let source = w["account"].as_str().unwrap_or_default().to_string();
+            assert!(
+                Path::new(&exported).is_absolute(),
+                "console_thread account is not a path"
+            );
+            if let Some(accounts) = accounts {
+                let store = accounts.resolve(&source).store;
+                assert_eq!(
+                    store.as_deref(),
+                    Some(Path::new(&exported)),
+                    "console_thread account"
+                );
             }
+            w["account"] = g["account"].clone();
         }
         assert_eq!(want, got, "meta {k}");
     }
