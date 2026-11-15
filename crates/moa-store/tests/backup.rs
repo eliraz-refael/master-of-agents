@@ -102,12 +102,12 @@ fn vacuum_into_refuses_an_existing_file_or_leftover_wal() {
     let x = dir.path().join("out").join("x");
     vacuum_into(store.conn(), &x).unwrap();
     let before = fs::read(&x).unwrap();
-    assert!(vacuum_into(store.conn(), &x).is_err());
+    assert_already_exists(vacuum_into(store.conn(), &x));
     assert_eq!(fs::read(&x).unwrap(), before);
 
     let y = dir.path().join("out").join("y");
     fs::write(dir.path().join("out").join("y-wal"), b"w").unwrap();
-    assert!(vacuum_into(store.conn(), &y).is_err());
+    assert_already_exists(vacuum_into(store.conn(), &y));
     assert!(!y.exists());
 
     let mode = fs::metadata(dir.path().join("out"))
@@ -147,4 +147,29 @@ fn daily_backup_is_once_per_day() {
             .unwrap()
             .is_some()
     );
+}
+
+fn assert_already_exists(r: Result<(), moa_store::StoreError>) {
+    match r {
+        Err(moa_store::StoreError::Io(e)) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists)
+        }
+        other => panic!("expected Io(AlreadyExists), got {other:?}"),
+    }
+}
+
+#[test]
+fn daily_backup_reports_a_leftover_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("moa.db"), &dir.path().join("pre")).unwrap();
+    let backups = dir.path().join("backups");
+    fs::create_dir(&backups).unwrap();
+    fs::write(backups.join("daily-2026-11-15.db-wal"), b"w").unwrap();
+
+    let r = daily_backup(&store, &backups, date(2026, 11, 15));
+    assert!(
+        r.is_err(),
+        "a leftover -wal must not read as already backed up"
+    );
+    assert!(!backups.join("daily-2026-11-15.db").exists());
 }

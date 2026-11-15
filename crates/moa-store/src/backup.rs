@@ -51,11 +51,12 @@ fn occupied_names(dest: &Path) -> Vec<PathBuf> {
 /// Returns the new file's path, or `None` when that day already has one.
 pub fn daily_backup(store: &Store, dir: &Path, today: Date) -> Result<Option<PathBuf>, StoreError> {
     let dest = dir.join(daily_name(today));
-    match vacuum_into(store.conn(), &dest) {
-        Ok(()) => Ok(Some(dest)),
-        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
-        Err(e) => Err(e),
+    if fs::symlink_metadata(&dest).is_ok() {
+        return Ok(None);
     }
+    // A leftover -wal/-shm/-journal is not "already backed up": vacuum_into reports it.
+    vacuum_into(store.conn(), &dest)?;
+    Ok(Some(dest))
 }
 
 /// The dates to delete: everything but the 7 newest and, of the rest, the newest date
