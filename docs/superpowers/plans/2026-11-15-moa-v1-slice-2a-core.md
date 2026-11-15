@@ -568,7 +568,9 @@ fn vars(root: Option<&str>, home: Option<&str>, real: bool) -> Result<Paths, Pat
   - `pub fn route(config: &Config, account: Option<&AccountName>, cwd: &Path, opener: Option<&BrainName>) -> Route`
     (spec §6.9; lesson 34). Let `home = opener` or `default`.
     1. The account is configured with `brain = B`: `cwd` under one of its `except` folders →
-       `home`; otherwise → `B`.
+       `home`, except that it never goes to `B` (final-review ruling: the opener when it isn't
+       `B`, else the folder's owning brain, else `default`, `NotAvailable` when that is `B`);
+       otherwise → `B`. A limited account's relative or `..` cwd → `NotAvailable`.
     2. Else the account has a non-empty `only`: `cwd` under one of them → `home`; otherwise
        → `NotAvailable` (an `only` of just `""` matches nothing, as `MOA_ONLY_UNDER=":"` did).
     3. Else (no account, unknown account, no limits) → `home`.
