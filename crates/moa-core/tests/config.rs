@@ -26,10 +26,11 @@ fn err(text: &str) -> String {
     Config::parse(text, home()).unwrap_err().0
 }
 
+/// Spec §6.9's example, copied verbatim (comments included).
 const SPEC_EXAMPLE: &str = r#"
 [brains.default]
-folders = ["~/private", "~/.config"]
-moa_account = "acct-b"
+folders = ["~/private", "~/.config"]   # folders this brain owns: adopt, project add,
+moa_account = "acct-b"                 #   untracked panes, seeding, new-session prefill
 open_account = "acct-b"
 [brains.work]
 folders = ["~/work"]
@@ -38,11 +39,12 @@ moa_account = "acct-a"
 [accounts.acct-a]
 kind = "claude"
 store = "~/.claude-acct-a"
-brain = "work"
+brain = "work"                         # setup install acct-a --brain work --except …
 except = ["~/private", "~/.config"]
 [accounts.acct-b]
 kind = "claude"
 store = "~/.claude-acct-b"
+only = ["~/private"]                   # setup only: the account works with moa only here
 "#;
 
 #[test]
@@ -70,9 +72,11 @@ fn the_spec_example_parses() {
     assert!(a.only.is_empty());
 
     let b = &c.accounts[&account("acct-b")];
+    assert_eq!(b.kind, AgentKind::Claude);
     assert_eq!(b.store, PathBuf::from("/h/.claude-acct-b"));
+    assert_eq!(b.launcher, None);
     assert_eq!(b.brain, None);
-    assert!(b.only.is_empty());
+    assert_eq!(b.only, paths(&["/h/private"]));
     assert!(b.except.is_empty());
 }
 
