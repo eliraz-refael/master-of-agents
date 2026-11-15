@@ -18,22 +18,58 @@
         inherit system;
         overlays = [ rust-overlay.overlays.default ];
       };
-      toolchainFor = pkgs: pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-    in
-    {
-      devShells = forAllSystems (system:
+      craneLibFor = pkgs: (crane.mkLib pkgs).overrideToolchain
+        (p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
+
+      # Everything a derivation needs, per system.
+      buildFor = system:
         let
           pkgs = pkgsFor system;
-          toolchain = toolchainFor pkgs;
+          craneLib = craneLibFor pkgs;
+          commonArgs = {
+            src = craneLib.cleanCargoSource ./.;
+            strictDeps = true;
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+            nativeCheckInputs = [ pkgs.tmux ];
+          };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          withArtifacts = commonArgs // { inherit cargoArtifacts; };
         in
+        { inherit pkgs craneLib withArtifacts cargoArtifacts; };
+    in
+    {
+      packages = forAllSystems (system:
+        let b = buildFor system; in
         {
-          default = pkgs.mkShell {
+          default = b.craneLib.buildPackage (b.withArtifacts // {
+            pname = "moa";
+            doCheck = false;
+            meta.mainProgram = "moa";
+          });
+        });
+
+      checks = forAllSystems (system:
+        let b = buildFor system; in
+        {
+          moa = self.packages.${system}.default;
+          clippy = b.craneLib.cargoClippy (b.withArtifacts // {
+            cargoClippyExtraArgs = "--all-targets -- -D warnings";
+          });
+          fmt = b.craneLib.cargoFmt { src = b.withArtifacts.src; };
+          nextest = b.craneLib.cargoNextest (b.withArtifacts // {
+            nativeBuildInputs = [ b.pkgs.tmux ];
+          });
+        });
+
+      devShells = forAllSystems (system:
+        let b = buildFor system; in
+        {
+          default = b.craneLib.devShell {
             packages = [
-              toolchain
-              pkgs.tmux
-              pkgs.cargo-nextest
-              pkgs.cargo-insta
-            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
+              b.pkgs.tmux
+              b.pkgs.cargo-nextest
+              b.pkgs.cargo-insta
+            ] ++ b.pkgs.lib.optionals b.pkgs.stdenv.hostPlatform.isDarwin [ b.pkgs.libiconv ];
           };
         });
     };
