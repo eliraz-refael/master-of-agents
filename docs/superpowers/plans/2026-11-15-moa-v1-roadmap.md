@@ -211,20 +211,20 @@ use these names unchanged.
 | `AccountMap` (+ `AccountMap::from_config` in slice 2) | `moa_store::accounts` | 1 |
 | `import_spike`, `ImportEnv`, `IdSource`, `ImportReport`, `TableCounts`, `RecordNote`, `export_spike`, `ExportEnv`, `ExportReport` | `moa_store::{import, export}` | 1 |
 | `find_transcript`, `TranscriptCheck` | `moa_agents::claude` | 1 |
-| `Snapshot`, `Store::load_snapshot`, `StoreHandle` (actor) | `moa_store` | 2 |
+| `Snapshot` (defined in `moa_core::state`, re-exported here), `Store::load_snapshot`, `Store::apply`, `StoreHandle` (actor; one transaction per commit), `CommitError` | `moa_store` | 2 |
 | `Change` (typed writes the core emits) | `moa_core::change` | 2 |
-| `State`, `Input`, `Effect`, `handle` | `moa_core` | 2 |
-| `Config` (`moa.toml`), `BrainName`, `AccountName` | `moa_core::config` | 2 |
+| `State`, `Input`, `Effect`, `handle`; `Op`, `Done`, `OpError`, `Deps`, `CallerInfo` (`moa_core::op`, `state`); `Model`, `Topic`, `CoreEvent` (`moa_core::publish`) | `moa_core` | 2 |
+| `Config` (`moa.toml`, `Config::from_file_text`), `BrainName`, `AccountName`, `caller_store` | `moa_core::config` | 2 |
 | `route(&Config, account, cwd, opener) -> Route` | `moa_core::route` | 2 |
-| `Request`, `Response`, `RpcError`, `Topic`, `Patch`, `EventMsg`, `cli::Verb` | `moa_proto` | 2 |
-| `Paths`, `spawn::Spawner` (counting), `WallAlarm`, `build_id()` | `moa_platform` | 2 |
+| `Call`, `Incoming`, `ServerLine`, `RpcError`, `Patch`, `SnapshotMsg`, `Topic` (re-exported from `moa_core::publish`), `cli::{Moactl, Verb, parse_action}` | `moa_proto` | 2 |
+| `Paths` (incl. `check_v1_allowed`), `ensure_private_dir`, `spawn::Spawner` (counting), `WallTimer`, `WallAlarm`, `ZoneWatch`, `build_id()` | `moa_platform` | 2 |
 | `Notification`, `Cmd`, `ControlClient`, `Mailbox` | `moa_tmux` | 3 |
 | `HookEnvelope`, `HookKind` | `moa_proto::hook` | 4 |
 | `DisplayState`, `display_state(&Session, now) -> (DisplayState, Why)` | `moa_core::live` | 2 (from rows), 4 (quiet, events) |
 | `AgentKindImpl` trait, `claude`, `acp` | `moa_agents` | 1 (`claude::find_transcript`), 4, 6 |
 | `Layout`, `LayoutFile` | `moa_core::layout` | 5 |
 | `Action`, view-models | `moa_view` | 5 |
-| `Sandbox` (tmux), `SpikeFixture`, `TempBrain`, `fake-claude` bin, `stub-acp` bin | `moa_testkit` | 0, 1, 2, 4, 6 |
+| `Sandbox` (tmux), `SpikeFixture`, `TypicalBrain`, `TempBrain`, `fake-claude` bin, `stub-acp` bin | `moa_testkit` | 0, 1, 2, 4, 6 |
 
 ## Conventions for every slice
 
@@ -267,6 +267,11 @@ use these names unchanged.
 - The user runs the same against a copy of the work brain, in their own terminal.
 
 ## Slice 2: core, daemon, protocol, data verbs
+
+**Detailed plans:** `2026-11-15-moa-v1-slice-2a-core.md` (platform, config, routing, core,
+store actor, the data verbs but suggestions) and `2026-11-15-moa-v1-slice-2b-daemon.md`
+(protocol, grammar, suggestions, daemon, client, `moa sql`, service; it owns this "done
+when" and "try it").
 
 Spec §6.2–6.5, §6.9, §6.10 (verbs), §6.8 (wall-clock alarm).
 
@@ -322,8 +327,8 @@ Spec §6.2–6.5, §6.9, §6.10 (verbs), §6.8 (wall-clock alarm).
      Deadlines are derived from data at start.
 5. **`moa-store` actor**:
    - `Store::load_snapshot()`.
-   - `StoreHandle` on its own OS thread, batching queued `Change`s into one transaction and
-     replying after commit.
+   - `StoreHandle` on its own OS thread: one transaction per commit; the core batches each
+     drain (2a S4) and replies after commit.
    - A read-only connection for `find`/history.
    - Daily `VACUUM INTO` on a `WallAlarm` deadline, with slice 1's rotation.
 6. **`moa-proto`**:
@@ -353,8 +358,8 @@ Spec §6.2–6.5, §6.9, §6.10 (verbs), §6.8 (wall-clock alarm).
    - `note`, `project` (show/add, with back-linking of sessions), `find`, `brief`,
      `attention`.
    - `suggest` (actions parsed by `cli::Verb` and whitelisted; duplicate open text refused),
-     and `suggestion yes|no|later|ls`. Yes runs the actions in-process. Actions that need
-     tmux return "needs moa's tmux link (slice 4)" until then.
+     and `suggestion yes|no|later|ls`. Yes runs the actions in-process. An action that needs
+     tmux (`close`) answers "close isn't in this build yet" until slice 4.
    - Session data ops: `set` title/group, `group add|rename|rm`, `archive`, and `ls`. Its
      data columns come now; the tmux columns and the untracked list come in slice 4.
    - Name resolution: a unique prefix of the moa id **or of any of the session's
@@ -380,9 +385,9 @@ Spec §6.2–6.5, §6.9, §6.10 (verbs), §6.8 (wall-clock alarm).
   the private brain imported with slice 1, through the daemon, with no tmux.
 - A scripted flow of 20 verbs makes zero `Spawner` launches after the daemon is up.
 
-**Try it:** with `MOA_ROOT=/tmp/moa-try`, run `moa adopt-spike --from <copy> --into
-/tmp/moa-try/.local/share/moa/default/moa.db`, then `moactl brief`. Restart needed:
-nothing; the spike is untouched.
+**Try it:** with `MOA_ROOT=/tmp/moa-try`, run `nix run . -- adopt-spike --from <copy> --into
+/tmp/moa-try/.local/share/moa/default/moa.db`, then `nix run .#moactl -- brief` (v1 isn't on
+`PATH`; 2b ships `moactl` in the package). Restart needed: nothing; the spike is untouched.
 
 ## Slice 3: tmux layer
 
@@ -474,6 +479,8 @@ Spec §6.7, §6.13 (sleep, reboot), §6.12 (peers-note plumbing only).
      without changing state.
    - The route is re-checked on every event (events for another brain are dropped and
      logged).
+   - Events bump `projects.last_activity_on`, as the spike's `track.sh` did, so "active this
+     week" and "untouched since" stay true.
 3. **Injected plugin**: `plugin/session/` is generated with exec-form async hooks for the
    C10 events. It is regenerated at start only when its content changes.
 4. **Live-state model, event side** (`moa_core::live`, started in slice 2):
@@ -729,7 +736,9 @@ Spec §9.
    - Back up the frozen DBs with `VACUUM INTO`, move them aside, then export to the spike's
      paths. The export refuses leftover `-wal`/`-shm` files.
    - Remove the flag, re-source the spike config, run the spike launcher.
-7. **Rehearsal test**:
+7. **The real home opens up**: remove slice 2's `MOA_ROOT` gate (`Paths::check_v1_allowed`
+   and `MOA_REAL_HOME`), so `moa daemon`, autostart and `moa service` use the real home.
+8. **Rehearsal test**:
    - A sandbox server runs the real spike code from the repo with fake agents and copied
      brains.
    - Run `moa switch`, and assert no pane died and every session is mapped.
@@ -743,6 +752,10 @@ present.
 
 - Once v1 works like the spike: remove the spike, the forwarders, the frozen DBs and the
   `# moa-spike` hooks (offered as a suggestion card), and lift the additive-only rule.
+  Also remove the move-only code: `moa adopt-spike` and `moa export-spike` (export-spike is
+  the way back, so it stays until the spike is gone), the store's `spike`, `import` and
+  `export` modules, `moa switch`, `--from-spike`, and the testkit's spike fixture and
+  generator, after re-basing `TypicalBrain` on a v1-native fixture.
 - Then: packaging for others (U16), Codex, the worktree lifecycle, the retention mechanism
-  (Q1), `type: http` hooks if measured worth it, Claude messaging-socket delivery, a web
+  (Q1), log rotation, `type: http` hooks if measured worth it, Claude messaging-socket delivery, a web
   UI/GUI, and collectors.
