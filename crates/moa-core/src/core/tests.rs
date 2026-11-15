@@ -103,3 +103,50 @@ fn a_refused_commit_applies_nothing() {
     assert!(tx.commit(&mut s, vec![group("A")]).is_err());
     assert_eq!(s.groups().count(), 0);
 }
+
+/// Rows the store skips are noted under `Change::row()` keys, so a later write to the same
+/// key is refused rather than overwriting what is on disk.
+#[test]
+fn a_write_to_a_skipped_rows_key_is_refused() {
+    use crate::model::*;
+    let conv = Change::Conversation(Conversation {
+        agent_kind: AgentKind::Codex,
+        conversation_id: "c-1".into(),
+        session_id: SessionId(uuid::Uuid::from_u128(1)),
+        store_dir: None,
+        spike_account: None,
+        reason: ConversationReason::Fork,
+        first_seen_at: UtcMs(1),
+        last_seen_at: UtcMs(1),
+        transcript_path: None,
+        transcript_present: None,
+        transcript_checked_at: None,
+    });
+    let thread = Change::Thread(MoaThread {
+        thread_id: "th-1".into(),
+        account: "acct-a".into(),
+        day: jiff::civil::date(2026, 11, 16),
+        kind: ThreadKind::Daily,
+        started_at: UtcMs(1),
+    });
+    let notes = [&conv, &thread].map(|c| {
+        let (table, key) = c.row().unwrap();
+        LoadNote {
+            table,
+            key,
+            reason: "x",
+        }
+    });
+    let mut s = state_with_unknown(notes.to_vec());
+    for change in [conv, thread] {
+        let mut tx = Tx::new(&now());
+        let err = tx.commit(&mut s, vec![group("Other"), change]).unwrap_err();
+        assert!(
+            err.0.contains("has a value this build doesn't know"),
+            "{}",
+            err.0
+        );
+        assert!(tx.changes.is_empty());
+    }
+    assert_eq!(s.groups().count(), 0);
+}

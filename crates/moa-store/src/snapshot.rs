@@ -96,16 +96,10 @@ impl Store {
         .collect();
         activity_tail.reverse();
 
-        let meta = self
-            .conn()
-            .prepare("SELECT key, value FROM meta ORDER BY key")?
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let meta = rows_of("meta", rows::META, "key")?
+            .iter()
+            .filter_map(|r| rows::meta(r, n))
+            .collect();
 
         Ok(Snapshot {
             projects,

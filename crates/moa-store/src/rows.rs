@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use jiff::civil::Date;
 use moa_core::UtcMs;
-use moa_core::change::Change;
+use moa_core::change::{Change, conversation_key, nag_key};
 use moa_core::model::*;
 use moa_core::state::LoadNote;
 use moa_core::time::parse_date;
@@ -37,6 +37,17 @@ const R_ASK_TARGET: &str = "a session isn't moa or a session id; loaded as none"
 const R_ASK_STATUS: &str = "status isn't a known one; loaded as failed";
 const R_THREAD_KIND: &str = "kind isn't a known one; loaded as manual";
 const R_BAD_KEY: &str = "key isn't usable; row not loaded";
+
+/// Parses `text` only when printing the result gives `text` back. `Uuid::parse_str` also takes
+/// upper case, braces and urns, and `parse_date` a trailing time; a value like that would load
+/// under a key the disk doesn't hold, so for key columns it counts as unusable.
+fn canonical<T: FromStr + std::fmt::Display>(text: &str) -> Option<T> {
+    text.parse::<T>().ok().filter(|v| v.to_string() == text)
+}
+
+fn canonical_date(text: &str) -> Option<Date> {
+    parse_date(text).ok().filter(|d| d.to_string() == text)
+}
 
 /// What reading one row found wrong, as fixed reasons.
 struct Flags(Vec<&'static str>);
@@ -80,8 +91,8 @@ impl Flags {
 
     fn session(&mut self, text: Option<&str>) -> Option<SessionId> {
         let t = text.filter(|t| !t.is_empty())?;
-        t.parse().map_or_else(
-            |_| {
+        canonical::<SessionId>(t).map_or_else(
+            || {
                 self.0.push(R_SESSION_REF);
                 None
             },
@@ -91,8 +102,8 @@ impl Flags {
 
     fn target(&mut self, text: Option<&str>) -> Option<AskTarget> {
         let t = text.filter(|t| !t.is_empty())?;
-        t.parse().map_or_else(
-            |_| {
+        canonical::<AskTarget>(t).map_or_else(
+            || {
                 self.0.push(R_ASK_TARGET);
                 None
             },
@@ -153,7 +164,7 @@ fn project_ref(r: &SrcRow, col: &str) -> Option<ProjectId> {
 
 fn session_key(r: &SrcRow) -> Result<SessionId, Option<String>> {
     let raw = txt(r, "session_id");
-    raw.as_deref().and_then(|t| t.parse().ok()).ok_or(raw)
+    raw.as_deref().and_then(canonical).ok_or(raw)
 }
 
 pub(crate) const PROJECTS: &[&str] = &[
@@ -313,7 +324,7 @@ pub(crate) const SESSIONS: &[&str] = &[
 /// `None` when the id isn't a session id: nothing can point at such a row.
 pub(crate) fn session(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Session> {
     let raw = txt(r, "id");
-    let Some(id) = raw.as_deref().and_then(|t| t.parse::<SessionId>().ok()) else {
+    let Some(id) = raw.as_deref().and_then(canonical::<SessionId>) else {
         unusable(notes, "sessions", raw);
         return None;
     };
@@ -383,10 +394,9 @@ pub(crate) fn conversation(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Conv
         .text_cow("agent_kind")
         .and_then(|k| k.parse::<AgentKind>().ok());
     let (Some(agent_kind), Ok(session_id)) = (kind, session_key(r)) else {
-        let key = format!(
-            "{}/{}",
+        let key = conversation_key(
             txt_or_empty(r, "agent_kind"),
-            txt_or_empty(r, "conversation_id")
+            &txt_or_empty(r, "conversation_id"),
         );
         unusable(notes, "conversations", Some(key));
         return None;
@@ -535,7 +545,7 @@ pub(crate) const MOA_THREADS: &[&str] = &["thread_id", "account", "day", "kind",
 
 /// `None` when `day` isn't a date: a thread without its day can't be told apart.
 pub(crate) fn thread(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<MoaThread> {
-    let Some(day) = r.text_cow("day").and_then(|d| parse_date(&d).ok()) else {
+    let Some(day) = r.text_cow("day").and_then(|d| canonical_date(&d)) else {
         unusable(notes, "moa_threads", txt(r, "thread_id"));
         return None;
     };
@@ -555,16 +565,38 @@ pub(crate) fn thread(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<MoaThread>
     Some(t)
 }
 
+pub(crate) const META: &[&str] = &["key", "value"];
+
+const R_META_NULL: &str = "value was missing; loaded as empty";
+
+/// A meta pair. Meta rows have no [`Change::row`] key, so a note names the meta key itself.
+pub(crate) fn meta(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<(String, String)> {
+    let Some(key) = txt(r, "key") else {
+        unusable(notes, "meta", None);
+        return None;
+    };
+    let mut reasons = Flags::new(r).0;
+    let value = txt(r, "value").unwrap_or_else(|| {
+        reasons.push(R_META_NULL);
+        String::new()
+    });
+    notes.extend(reasons.into_iter().map(|reason| LoadNote {
+        table: "meta",
+        key: key.clone(),
+        reason,
+    }));
+    Some((key, value))
+}
+
 pub(crate) const NAGS: &[&str] = &["task_id", "due", "day"];
 
 pub(crate) fn nag(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Nag> {
-    let date = |col: &str| r.text_cow(col).and_then(|d| parse_date(&d).ok());
+    let date = |col: &str| r.text_cow(col).and_then(|d| canonical_date(&d));
     let (Some(task_id), Some(due), Some(day)) = (r.int("task_id"), date("due"), date("day")) else {
-        let key = format!(
-            "#{}/{}/{}",
+        let key = nag_key(
             r.int("task_id").unwrap_or(0),
             txt_or_empty(r, "due"),
-            txt_or_empty(r, "day")
+            txt_or_empty(r, "day"),
         );
         unusable(notes, "nags", Some(key));
         return None;

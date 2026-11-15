@@ -572,3 +572,110 @@ fn text_that_is_not_utf8_loads_lossily_with_a_note() {
     assert_eq!(s.unknown[0].table, "groups");
     assert_eq!(s.unknown[0].key, "Lantern\u{fffd}");
 }
+
+fn fk_off(store: &Store) {
+    store
+        .conn()
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+}
+
+#[test]
+fn skipped_rows_are_noted_under_the_key_a_change_for_them_has() {
+    let mut rig = empty();
+    rig.store.apply(&one_of_each()).unwrap();
+    fk_off(&rig.store);
+    let c = rig.store.conn();
+    c.execute("UPDATE conversations SET session_id = 'nope'", [])
+        .unwrap();
+    c.execute("UPDATE moa_threads SET day = 'nope'", [])
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert!(s.conversations.is_empty());
+    assert!(s.threads.is_empty());
+
+    let got: Vec<(&str, String)> = s.unknown.iter().map(|n| (n.table, n.key.clone())).collect();
+    let conv = Change::Conversation(conversation(AgentKind::Codex, "c-1"))
+        .row()
+        .unwrap();
+    let thr = Change::Thread(thread()).row().unwrap();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.contains(&conv), "{got:?}");
+    assert!(got.contains(&thr), "{got:?}");
+}
+
+#[test]
+fn keys_that_are_not_written_canonically_are_skipped_not_fixed() {
+    let mut rig = empty();
+    rig.store.apply(&one_of_each()).unwrap();
+    fk_off(&rig.store);
+    let c = rig.store.conn();
+    c.execute(
+        "UPDATE sessions SET id = '0000000A-0000-0000-0000-00000000000B'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE pane_bindings SET session_id = '0000000A-0000-0000-0000-00000000000B'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE spike_panes SET session_id = '0000000A-0000-0000-0000-00000000000B'",
+        [],
+    )
+    .unwrap();
+    c.execute("UPDATE nags SET due = '2026-11-20 09:00'", [])
+        .unwrap();
+    c.execute("UPDATE moa_threads SET day = '2026-11-16 09:00'", [])
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert!(s.sessions.is_empty());
+    assert!(s.pane_bindings.is_empty());
+    assert!(s.spike_panes.is_empty());
+    assert!(s.nags.is_empty());
+    assert!(s.threads.is_empty());
+
+    let upper = "0000000A-0000-0000-0000-00000000000B".to_string();
+    let mut got: Vec<(&str, String)> = s.unknown.iter().map(|n| (n.table, n.key.clone())).collect();
+    got.sort();
+    let mut want = vec![
+        ("sessions", upper.clone()),
+        ("pane_bindings", upper.clone()),
+        ("spike_panes", upper),
+        ("nags", "#1/2026-11-20 09:00/2026-11-18".to_string()),
+        ("moa_threads", "th-1".to_string()),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn meta_is_read_lossily_and_a_missing_value_is_noted() {
+    let rig = empty();
+    let c = rig.store.conn();
+    c.execute("INSERT INTO meta (key, value) VALUES ('a', NULL)", [])
+        .unwrap();
+    c.execute(
+        "INSERT INTO meta (key, value) VALUES ('b', CAST(x'66ff' AS TEXT))",
+        [],
+    )
+    .unwrap();
+    c.execute("INSERT INTO meta (key, value) VALUES ('c', 'ok')", [])
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(
+        s.meta,
+        vec![
+            ("a".to_string(), String::new()),
+            ("b".to_string(), "f\u{fffd}".to_string()),
+            ("c".to_string(), "ok".to_string()),
+        ]
+    );
+    let got: Vec<(&str, &str)> = s
+        .unknown
+        .iter()
+        .map(|n| (n.table, n.key.as_str()))
+        .collect();
+    assert_eq!(got, vec![("meta", "a"), ("meta", "b")]);
+}

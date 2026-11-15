@@ -34,6 +34,21 @@ pub enum Change {
     DeleteGroup(String),
 }
 
+/// The key of a `conversations` row: `<agent_kind>/<conversation_id>`. The store names rows it
+/// can't load with this too, so a skipped row and a later write share one spelling.
+pub fn conversation_key(agent_kind: impl std::fmt::Display, conversation_id: &str) -> String {
+    format!("{agent_kind}/{conversation_id}")
+}
+
+/// The key of a `nags` row: `#<task_id>/<due>/<day>`.
+pub fn nag_key(
+    task_id: impl std::fmt::Display,
+    due: impl std::fmt::Display,
+    day: impl std::fmt::Display,
+) -> String {
+    format!("#{task_id}/{due}/{day}")
+}
+
 impl Change {
     /// The topics this change can alter.
     pub fn topics(&self) -> &'static [Topic] {
@@ -72,7 +87,7 @@ impl Change {
             Change::Session(r) => ("sessions", r.id.to_string()),
             Change::Conversation(r) => (
                 "conversations",
-                format!("{}/{}", r.agent_kind, r.conversation_id),
+                conversation_key(r.agent_kind, &r.conversation_id),
             ),
             Change::PaneBinding(r) => ("pane_bindings", r.session_id.to_string()),
             Change::SpikePane(r) => ("spike_panes", r.session_id.to_string()),
@@ -82,7 +97,7 @@ impl Change {
             Change::Ask(r) => ("asks", format!("#{}", r.id)),
             Change::Thread(r) => ("moa_threads", r.thread_id.clone()),
             Change::Feed(r) => ("feed", format!("#{}", r.id)),
-            Change::Nag(r) => ("nags", format!("#{}/{}/{}", r.task_id, r.due, r.day)),
+            Change::Nag(r) => ("nags", nag_key(r.task_id, r.due, r.day)),
             Change::Meta { .. } => return None,
             Change::DeletePaneBinding(id) => ("pane_bindings", id.to_string()),
             Change::DeleteSpikePane(id) => ("spike_panes", id.to_string()),
