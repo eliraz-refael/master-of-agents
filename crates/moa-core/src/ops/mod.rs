@@ -43,8 +43,8 @@ pub(crate) fn run(
             path,
             summary,
         } => projects::add(state, tx, now, &name, &path, summary.as_deref()),
-        Op::Brief => read::brief(state, now),
-        Op::Attention => read::attention(state, now),
+        Op::Brief(_) => read::brief(state, now),
+        Op::Attention(_) => read::attention(state, now),
     }
 }
 

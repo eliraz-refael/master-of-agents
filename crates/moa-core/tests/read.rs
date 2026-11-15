@@ -5,7 +5,7 @@ use moa_core::Now;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Input, handle_checked};
 use moa_core::model::{ProjectId, TaskId, TaskStatus};
-use moa_core::op::{Done, Op, TaskAdd};
+use moa_core::op::{Done, NoParams, Op, TaskAdd};
 use moa_core::state::State;
 use moa_testkit::brain::{TypicalBrain, run};
 use moa_testkit::ids::*;
@@ -36,7 +36,7 @@ fn find(st: &mut State, q: &str, now: &Now) -> Done {
 #[test]
 fn brief_matches_the_spike_layout() {
     let (b, mut st) = typical();
-    let text = ok(&mut st, Op::Brief, &b.now()).text;
+    let text = ok(&mut st, Op::Brief(NoParams), &b.now()).text;
     assert_eq!(
         lines(&text)[0],
         "# Brief (Sun 15 Nov 12:00). More: moactl attention | project NAME | ls | find Q"
@@ -57,7 +57,7 @@ fn brief_matches_the_spike_layout() {
 #[test]
 fn attention_matches_the_spike_layout() {
     let (b, mut st) = typical();
-    let d = ok(&mut st, Op::Attention, &b.now());
+    let d = ok(&mut st, Op::Attention(NoParams), &b.now());
     assert_eq!(d.data["text"], d.text);
     insta::assert_snapshot!("attention_matches_the_spike_layout", mask(&b, &d.text));
 }
@@ -65,7 +65,7 @@ fn attention_matches_the_spike_layout() {
 #[test]
 fn attention_names_the_waiting_session_first() {
     let (b, mut st) = typical();
-    let text = ok(&mut st, Op::Attention, &b.now()).text;
+    let text = ok(&mut st, Op::Attention(NoParams), &b.now()).text;
     let first = lines(&text)[0];
     assert!(
         first.starts_with("- ⚠ Fix the flicker [Lantern] is blocked on you"),
@@ -99,7 +99,7 @@ fn archived_and_elsewhere_sessions_need_no_attention() {
         },
         &now,
     );
-    let text = ok(&mut st, Op::Attention, &now).text;
+    let text = ok(&mut st, Op::Attention(NoParams), &now).text;
     assert!(!text.contains('⚠'), "{text}");
     for gone in [S3_WAITING, S7_ELSEWHERE, S6_ARCHIVED] {
         assert!(!text.contains(&gone[..8]), "{text}");
@@ -112,10 +112,10 @@ fn an_empty_brain_has_nothing_to_say() {
     let b = TypicalBrain::new();
     let now = b.now();
     assert_eq!(
-        ok(&mut st, Op::Attention, &now).text,
+        ok(&mut st, Op::Attention(NoParams), &now).text,
         "nothing needs you right now"
     );
-    let brief = ok(&mut st, Op::Brief, &now).text;
+    let brief = ok(&mut st, Op::Brief(NoParams), &now).text;
     let l = lines(&brief);
     assert_eq!(l[1], "## Today: nothing set yet");
     assert_eq!(&l[2..4], ["## Needs attention", "- nothing"]);
@@ -175,13 +175,13 @@ fn today_tasks_show_up_in_the_brief_and_attention() {
         }),
         &now,
     );
-    let brief = ok(&mut st, Op::Brief, &now).text;
+    let brief = ok(&mut st, Op::Brief(NoParams), &now).text;
     let today = lines(&brief)[1];
     assert!(
         today.contains("; ") && today.contains("#6 Tidepool: Walk the shore [todo]"),
         "{today}"
     );
-    let att = ok(&mut st, Op::Attention, &now).text;
+    let att = ok(&mut st, Op::Attention(NoParams), &now).text;
     assert!(
         att.contains("- ▸ today: Tidepool: Walk the shore [todo]"),
         "{att}"
@@ -213,7 +213,7 @@ fn with_driftwood_task(b: &TypicalBrain, st: &mut State, status: TaskStatus) {
 fn attention_orders_its_groups() {
     let (b, mut st) = typical();
     with_driftwood_task(&b, &mut st, TaskStatus::Active);
-    let att = ok(&mut st, Op::Attention, &b.now()).text;
+    let att = ok(&mut st, Op::Attention(NoParams), &b.now()).text;
     let marks = ["- ⚠", "- ●", "- ▸", "- ⧗", "- ◷", "- ?"];
     let at: Vec<usize> = marks.iter().map(|m| att.find(m).expect(m)).collect();
     assert!(at.windows(2).all(|w| w[0] < w[1]), "{att}");
@@ -244,11 +244,11 @@ fn a_week_is_counted_in_civil_days() {
         )
     };
     // Last activity 2026-10-20: exactly seven days earlier is not "more than 7 days ago".
-    let seven = ok(&mut st, Op::Attention, &at("2026-10-27")).text;
+    let seven = ok(&mut st, Op::Attention(NoParams), &at("2026-10-27")).text;
     assert!(!seven.contains("- ◷"), "{seven}");
-    let eight = ok(&mut st, Op::Attention, &at("2026-10-28")).text;
+    let eight = ok(&mut st, Op::Attention(NoParams), &at("2026-10-28")).text;
     assert!(eight.contains("- ◷ Driftwood"), "{eight}");
-    let brief = ok(&mut st, Op::Brief, &at("2026-10-27")).text;
+    let brief = ok(&mut st, Op::Brief(NoParams), &at("2026-10-27")).text;
     assert!(
         brief.contains("## Active this week: Lantern, Driftwood\n"),
         "{brief}"

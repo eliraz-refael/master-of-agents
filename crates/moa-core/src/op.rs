@@ -69,9 +69,31 @@ pub enum Op {
         summary: Option<String>,
     },
     #[serde(rename = "brief")]
-    Brief,
+    Brief(NoParams),
     #[serde(rename = "attention")]
-    Attention,
+    Attention(NoParams),
+}
+
+/// The params of an op that takes none. Missing, `null` and `{}` all decode (a unit variant
+/// would reject `{}`); it encodes as `{}`. Anything else is refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct NoParams;
+
+impl Serialize for NoParams {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        s.serialize_map(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for NoParams {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Empty {}
+        // A missing `params` arrives as `None` (serde's missing-field deserializer).
+        Option::<Empty>::deserialize(d).map(|_| NoParams)
+    }
 }
 
 /// `task add`'s arguments, all the user's raw text.
@@ -160,14 +182,15 @@ impl Op {
             Op::NoteAdd { .. } => "note.add",
             Op::ProjectShow { .. } => "project.show",
             Op::ProjectAdd { .. } => "project.add",
-            Op::Brief => "brief",
-            Op::Attention => "attention",
+            Op::Brief(_) => "brief",
+            Op::Attention(_) => "attention",
         }
     }
 }
 
-/// A successful reply: the line the CLI prints and the data a script reads.
-#[derive(Clone, PartialEq, Debug, Serialize)]
+/// A successful reply: the line the CLI prints and the data a script reads. A client decodes
+/// it, so it round-trips.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Done {
     pub text: String,
     pub data: serde_json::Value,

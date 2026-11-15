@@ -12,7 +12,7 @@ use moa_core::effect::{
     reply_of,
 };
 use moa_core::model::{ActivityWho, EventKind, Group};
-use moa_core::op::{ConnId, Op, OpError, ReqId};
+use moa_core::op::{ConnId, NoParams, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model, Topic};
 use moa_core::state::{CallerInfo, LoadNote, NextIds, Snapshot, State};
 use moa_core::{Now, UtcMs};
@@ -427,8 +427,8 @@ fn op_methods_match_the_variants() {
             summary: None,
         },
         Op::SessionFind { q: "q".into() },
-        Op::Brief,
-        Op::Attention,
+        Op::Brief(NoParams),
+        Op::Attention(NoParams),
     ];
     assert_eq!(Op::METHODS.len(), samples.len());
     for op in &samples {
@@ -452,5 +452,46 @@ fn session_ops_take_their_flags_as_optional() {
             title: None,
             group: None
         }
+    );
+}
+
+#[test]
+fn ops_without_params_take_missing_null_or_empty_params() {
+    for (method, want) in [
+        ("brief", Op::Brief(NoParams)),
+        ("attention", Op::Attention(NoParams)),
+    ] {
+        for text in [
+            format!(r#"{{"method":"{method}"}}"#),
+            format!(r#"{{"method":"{method}","params":null}}"#),
+            format!(r#"{{"method":"{method}","params":{{}}}}"#),
+        ] {
+            let got: Op = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(got, want, "{text}");
+        }
+        // It encodes with empty params, and a field it doesn't take is refused.
+        assert_eq!(
+            serde_json::to_value(&want).unwrap(),
+            serde_json::json!({ "method": method, "params": {} })
+        );
+        let extra = format!(r#"{{"method":"{method}","params":{{"x":1}}}}"#);
+        assert!(serde_json::from_str::<Op>(&extra).is_err(), "{extra}");
+    }
+}
+
+#[test]
+fn done_round_trips() {
+    let done = moa_core::op::Done {
+        text: "task #4 added".into(),
+        data: serde_json::json!({ "id": 4, "project": "Lantern", "tags": [] }),
+    };
+    let v = serde_json::to_value(&done).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({ "text": "task #4 added", "data": { "id": 4, "project": "Lantern", "tags": [] } })
+    );
+    assert_eq!(
+        serde_json::from_value::<moa_core::op::Done>(v).unwrap(),
+        done
     );
 }

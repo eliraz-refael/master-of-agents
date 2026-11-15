@@ -3,7 +3,7 @@
 
 use moa_core::config::BrainName;
 use moa_core::effect::{Effect, Input, handle_checked, reply_of};
-use moa_core::op::{ConnId, Op, ReqId, TaskAdd, TaskSet};
+use moa_core::op::{ConnId, NoParams, Op, ReqId, TaskAdd, TaskSet};
 use moa_core::state::{CallerInfo, State};
 use moa_store::actor::StoreHandle;
 use moa_testkit::brain::TypicalBrain;
@@ -162,8 +162,8 @@ async fn verbs_through_the_store_match_a_reload() {
         ),
         (Op::TaskAdd(task_add("Harbour", "Paint the hull")), true),
         // Read-only verbs change nothing, on either side.
-        (Op::Brief, true),
-        (Op::Attention, true),
+        (Op::Brief(NoParams), true),
+        (Op::Attention(NoParams), true),
         (
             Op::SessionFind {
                 q: "lantern".into(),
