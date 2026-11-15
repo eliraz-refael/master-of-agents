@@ -149,6 +149,16 @@ str_enum!(ConversationReason, conversation_reason_round_trips, "conversation rea
     Start => "start", Clear => "clear", Fork => "fork", Resume => "resume", Import => "import" });
 str_enum!(ThreadKind, thread_kind_round_trips, "thread kind", { Daily => "daily", Manual => "manual" });
 
+// ---------- group paths ----------
+
+/// Trims `/` and drops empty segments (`A//B/` becomes `A/B`).
+pub fn normalize_group_path(raw: &str) -> String {
+    raw.split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 // ---------- open kinds ----------
 
 macro_rules! open_kind {
@@ -255,7 +265,7 @@ impl<'de> Deserialize<'de> for AskTarget {
 
 // ---------- rows (field names equal column names) ----------
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
@@ -267,7 +277,7 @@ pub struct Project {
     pub updated_at: UtcMs,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
     pub project_id: Option<ProjectId>,
@@ -285,7 +295,7 @@ pub struct Task {
     pub done_at: Option<UtcMs>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Note {
     pub id: NoteId,
     pub project_id: Option<ProjectId>,
@@ -294,7 +304,7 @@ pub struct Note {
     pub created_at: UtcMs,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Suggestion {
     pub id: SuggestionId,
     pub text: String,
@@ -307,7 +317,7 @@ pub struct Suggestion {
     pub resolved_at: Option<UtcMs>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub id: SessionId,
     pub agent_kind: AgentKind,
@@ -333,7 +343,7 @@ pub struct Session {
     pub last_seen_at: Option<UtcMs>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Conversation {
     pub agent_kind: AgentKind,
     pub conversation_id: String,
@@ -348,7 +358,7 @@ pub struct Conversation {
     pub transcript_checked_at: Option<UtcMs>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PaneBinding {
     pub session_id: SessionId,
     pub server_pid: i64,
@@ -359,7 +369,7 @@ pub struct PaneBinding {
     pub bound_at: UtcMs,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SpikePane {
     pub session_id: SessionId,
     pub pane_id: String,
@@ -367,7 +377,7 @@ pub struct SpikePane {
     pub imported_at: UtcMs,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
     pub at: UtcMs,
@@ -381,7 +391,7 @@ pub struct Event {
 }
 
 /// A row of the `activity` table (named so it does not clash with the [`Activity`] enum).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ActivityRow {
     pub id: ActivityId,
     pub at: UtcMs,
@@ -391,14 +401,14 @@ pub struct ActivityRow {
     pub ref_id: Option<String>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Group {
     pub path: String,
     pub collapsed: bool,
     pub created_at: UtcMs,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Ask {
     pub id: AskId,
     pub at: UtcMs,
@@ -414,7 +424,7 @@ pub struct Ask {
     pub answered_at: Option<UtcMs>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MoaThread {
     pub thread_id: String,
     pub account: String,
@@ -423,7 +433,7 @@ pub struct MoaThread {
     pub started_at: UtcMs,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FeedEntry {
     pub id: i64,
     pub thread_id: String,
@@ -435,7 +445,7 @@ pub struct FeedEntry {
     pub state: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Nag {
     pub task_id: TaskId,
     pub due: Date,
@@ -470,6 +480,32 @@ mod tests {
         assert!(EventKind(EventKind::IDLE_PING.into()).is_known());
         assert_eq!(EventKind::IDLE_PING, "idle.ping");
         assert!(!EventKind("x.y".into()).is_known());
+    }
+
+    #[test]
+    fn group_paths_normalize() {
+        assert_eq!(normalize_group_path("A/B"), "A/B");
+        assert_eq!(normalize_group_path("//A///B//"), "A/B");
+        assert_eq!(normalize_group_path("/"), "");
+    }
+
+    #[test]
+    fn rows_round_trip_through_json() {
+        let g = Group {
+            path: "Lantern/Tidepool".into(),
+            collapsed: true,
+            created_at: UtcMs(5),
+        };
+        let back: Group = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
+        let n = Nag {
+            task_id: TaskId(3),
+            due: jiff::civil::date(2026, 11, 20),
+            day: jiff::civil::date(2026, 11, 16),
+        };
+        let j = serde_json::to_value(n).unwrap();
+        assert_eq!(j["due"], "2026-11-20");
+        assert_eq!(serde_json::from_value::<Nag>(j).unwrap(), n);
     }
 
     #[test]
