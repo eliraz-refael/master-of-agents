@@ -36,7 +36,7 @@ def account_dir(acct):
 ACCOUNT = account_dir(os.environ.get("MOA_ACCOUNT") or "claude-lead")
 OPENING = ("(The console just opened a new thread for today.) Give me your opening brief: "
            "at most 6 short lines, what's hot, what's waiting on me, what's going stale, "
-           "then propose 1-3 goals for today and ask which.")
+           "then propose today's 1-3 as one suggestion with buttons (see \"Being proactive\" in your instructions).")
 WAKE = "(Automatic wake-up from the console"
 ASK = "(A message for you from another agent"
 SETTLE, GAP = (int(os.environ.get(v, d)) for v, d in (("MOA_WAKE_SETTLE", 45), ("MOA_WAKE_GAP", 180)))  # wake moa 45 s after the last report, at most every 3 min
@@ -56,6 +56,7 @@ COMMANDS = [  # name, arguments, what it does
     ("new", "", "start a fresh moa thread"),
     ("auto", "[on|off]", "moa reads session reports on its own (default on)"),
     ("sleep", "[on|off|HOURS]", "idle sessions go to sleep (window closed, resumable); no args: the threshold"),
+    ("suggestions", "", "moa's open suggestions, with their buttons"),
     ("setup", "", "track sessions on your Claude accounts (installs moa's hook)"),
     ("help", "", "commands and keys"),
     ("quit", "", "close the console"),
@@ -351,6 +352,9 @@ class Console:
         self.pal, self.pal_key, self.pal_items, self.pal_hits = 0, None, [], []
         self.pal_moved = False     # ↑↓ picked a row, so ↵ runs it even with nothing typed after the command
         self.cursor = self.conn.execute("SELECT coalesce(max(id),0) FROM events").fetchone()[0]
+        # moa's suggestions as cards: the open ones from today now, new ones as moa makes them
+        self.sugg_cursor = self.conn.execute("SELECT coalesce(max(id),0) FROM suggestions WHERE "
+                                             "created_at < date('now','localtime') OR status != 'open'").fetchone()[0]
         self.seen = db_mtime()
         self._last_err = (None, 0.0)  # the last error line shown, and when
         self.pending[self.acp.request("initialize", {
@@ -567,6 +571,25 @@ class Console:
             self.cursor = e["id"]  # after it was shown, so a failing row is retried, not skipped
         self.seen = m  # only after every row was shown, so a failure retries instead of dropping events
 
+    def add_suggestion(self, r):
+        acts = json.loads(r["action"]) if r["action"] else []
+        self.add("suggest", r["text"], sid=r["id"], acts=acts)
+
+    def watch_suggestions(self):
+        """moa's new suggestions become cards with buttons; one answered elsewhere updates its card."""
+        m = db_mtime()
+        if m == getattr(self, "sugg_seen", None):
+            return
+        self.sugg_seen = m
+        for r in self.conn.execute("SELECT * FROM suggestions WHERE id > ? AND status='open' ORDER BY id", (self.sugg_cursor,)):
+            self.add_suggestion(r)
+            self.sugg_cursor = r["id"]
+        cards = {e["sid"]: e for e in self.feed if e["kind"] == "suggest" and not e.get("answered")}
+        if cards:
+            q = ",".join("?" * len(cards))
+            for r in self.conn.execute(f"SELECT id, status FROM suggestions WHERE id IN ({q}) AND status NOT IN ('open')", list(cards)):
+                cards[r["id"]]["answered"] = {"accepted": "✓ done", "rejected": "✗ no", "later": "◷ later"}.get(r["status"], r["status"])
+
     def add_event(self, text, what, name, sid):
         """A session report. moa briefs on what sessions say, so the console doesn't repeat
         it: finished turns from one session fold into one line ("6 turns since 21:10") until
@@ -661,7 +684,8 @@ class Console:
                 "\n\nUpdate the big picture (see \"Wake-ups\" in your instructions): `moactl task ls`, then add, update or "
                 "close tasks for these projects. Then brief Eliraz: the console no longer shows what sessions said, so "
                 "don't retell it. Per session, one line in your own words on what's going on there now, then only what's "
-                "on Eliraz (▸ lines, at most 3), with a button when one action is obvious.")
+                "on Eliraz (▸ lines, at most 3), with a button when one action is obvious. If something calls for it (see "
+                "\"Being proactive\"), make at most 2 suggestions with --do.")
         self.add("sys", f"moa is reading {len(batch)} session report{'s' if len(batch) > 1 else ''}…")
         self.prompt(text, show=False, auto=True)
 
@@ -714,6 +738,18 @@ class Console:
             self.offer_setup(everyone=True)
         elif cmd in ("attention", "brief", "ls"):
             self.run_ctl(cmd)
+        elif cmd == "suggestion" and len(args) == 2 and args[0] in ("yes", "no", "later") and args[1].isdigit():
+            r = subprocess.run([MOACTL, "suggestion", *args], capture_output=True, text=True)
+            out = (r.stdout + r.stderr).strip()
+            for e in self.feed:
+                if e["kind"] == "suggest" and e["sid"] == int(args[1]):
+                    e["answered"] = {"yes": "✓ " + out, "no": "✗ no", "later": "◷ later"}[args[0]] if not r.returncode else out
+        elif cmd == "suggestions":
+            open_ = self.conn.execute("SELECT * FROM suggestions WHERE status IN ('open','later') ORDER BY id").fetchall()
+            for r in open_:
+                self.add_suggestion(r)
+            if not open_:
+                self.add("sys", "no open suggestions")
         elif cmd == "open" and args:
             self.run_ctl("open", args[0], *(["--title", " ".join(args[1:])] if args[1:] else []))
         elif cmd == "term":
@@ -916,6 +952,17 @@ class Console:
                 rows = head + [[(" y  once ", S.chipwarn, f"!perm {rid} y"), ("  ", 0), (" a  always ", S.chipwarn, f"!perm {rid} a"),
                                 ("  ", 0), (" n  no ", S.chip, f"!perm {rid} n")]]
             return self.card("⚠ permission", rows, width, S.warn)
+        if k == "suggest":  # moa proposes; yes runs what it attached (moactl suggestion yes ID)
+            rows = markdown(e["text"], width - 2, S)
+            if e["acts"] and not e.get("answered"):
+                rows += [[("does: " + "; ".join(e["acts"]), S.dim)]]
+            if e.get("answered"):
+                rows += [[(f"→ {e['answered']}", S.dim)]]
+            else:
+                n = e["sid"]
+                rows += [[(" ✓ yes " if e["acts"] else " ✓ ok ", S.chip, f"/suggestion yes {n}"), ("  ", 0),
+                          (" ◷ later ", S.chip, f"/suggestion later {n}"), ("  ", 0), (" ✗ no ", S.chip, f"/suggestion no {n}")]]
+            return self.card("✦ moa suggests", rows, width, S.brand)
         if k == "ask":  # another agent's message to moa
             return self.card(f"✉ {e['name']} asks moa", markdown(e["text"], width - 2, S), width, S.head)
         if k == "err":
@@ -1109,6 +1156,7 @@ def main(scr):
                 while not con.inbox.empty():
                     con.handle(con.inbox.get())
                 con.watch_events()
+                con.watch_suggestions()
                 con.tick()
                 con.doze()
             except Exception as exc:  # keep the console alive; the traceback goes to stderr (console.err)

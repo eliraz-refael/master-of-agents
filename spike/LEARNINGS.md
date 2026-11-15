@@ -247,3 +247,16 @@
   `moactl resume` says "already running" instead of resuming it.
 - 💤 is one character in two cells (tmux and wcwidth agree); the panels place things by
   `len()`, so it stands in for a glyph *and* its space.
+
+## moa proposes, Eliraz clicks (2026-11-15)
+- With 22 open tasks over 8 projects (4 overdue), reporting isn't enough: "I would like
+  moa to be pro-active about it and suggest things". Ideas on the table: priorities and a
+  daily pick, suggested actions, a focus mode, a war room for P0s. Started with the first two.
+- Tasks have a priority (p0 red and first, p1); today's picks show ★. moa sets
+  priorities from what it knows and proposes the rest.
+- A suggestion carries actions (`moactl suggest "…" --do "task set 6 --due fri"`) and
+  shows in the console as a card with yes / later / no; yes runs the actions with no LLM
+  turn. The actions are limited to safe moactl verbs, checked when moa makes the
+  suggestion. Due dates take weekday names now ("fri"), since that's how moa talks.
+- Emoji in a card title are two columns wide; the card code counts one. Use single-width
+  glyphs (✦, ✉) in titles.

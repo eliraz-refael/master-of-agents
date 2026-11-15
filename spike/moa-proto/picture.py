@@ -76,7 +76,7 @@ def connect():
     conn = sqlite3.connect(DB, timeout=2)
     conn.row_factory = sqlite3.Row
     for table, col in (("sessions", "pane"), ("sessions", "tmux"), ("sessions", "grp"),
-                       ("tasks", "who"), ("tasks", "due")):  # tasks.who: you | agent | other; tasks.due: YYYY-MM-DD
+                       ("tasks", "who"), ("tasks", "due"), ("tasks", "priority"), ("suggestions", "action")):  # tasks.who: you | agent | other; tasks.due: YYYY-MM-DD
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -268,11 +268,14 @@ def plan(conn, width, C):
             return "agent"
         return "you"
 
+    def prio(t):  # p0 urgent, p1 important, then the rest
+        return {"p0": 0, "p1": 1}.get(t["priority"] or "", 2)
+
     def rank(name):
         g = by[name]
         mine = [t for t in g["tasks"] if kind(t) == "you"]
         due = min((t["due"] for t in g["tasks"] if t["due"]), default="9999")
-        return (not g["waiting"], not mine, due, name)
+        return (not g["waiting"], min((prio(t) for t in g["tasks"]), default=2), not mine, due, name)
 
     def due_chip(day):
         """A task's due date as its own column: overdue and today stand out, the rest fade with distance."""
@@ -311,8 +314,10 @@ def plan(conn, width, C):
                         C["group"] if n_you else C["head"]))
         for w in g["waiting"]:
             item(icon("waiting"), f"{w['title'] or w['project']}: the session needs you", "", C["warn"] | curses.A_BOLD, "session", w)
-        for t in sorted(g["tasks"], key=lambda t: ({"you": 0, "agent": 1, "wait": 2}[kind(t)], t["due"] or "9999", t["id"])):
+        for t in sorted(g["tasks"], key=lambda t: ({"you": 0, "agent": 1, "wait": 2}[kind(t)], prio(t), t["due"] or "9999", t["id"])):
             k = kind(t)
+            if t["priority"] in ("p0", "p1"):  # the priority leads the title; p0 is red whoever's move it is
+                t = {**dict(t), "title": f"{t['priority'].upper()} {t['title']}"}
             if k == "wait":
                 on = t["blocked_on"] or ("someone else" if t["who"] == "other" else "")
                 item("◷", t["title"], on, C["dim"], "task", t, t["due"])
@@ -321,7 +326,8 @@ def plan(conn, width, C):
                 tail = "agent working" if t["sstate"] == "working" else "agent"
                 item(mark, t["title"], tail, C["ok"], "task", t, t["due"])
             else:
-                item("▸", t["title"], "", 0, "task", t, t["due"])
+                mark = "★" if t["today"] == today else "▸"  # on today's list
+                item(mark, t["title"], "", C["p0"] if t["priority"] == "p0" else 0, "task", t, t["due"])
     quiet = conn.execute("""SELECT name FROM projects p WHERE last_activity >= date('now','localtime','-7 days')
         AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.project_id=p.id AND t.status NOT IN ('done','dropped','idea'))
         ORDER BY last_activity DESC""").fetchall()
@@ -752,7 +758,7 @@ def main(scr):
     c = chrome.color
     C = {"head": c("blue") | curses.A_BOLD, "dim": c("dim"), "warn": c("yellow"), "ok": c("green"),
          "brain": c("magenta"), "session": c("dim"), "you": c("yellow"), "group": c("blue") | curses.A_BOLD,
-         "late": c("dark", "red") | curses.A_BOLD, "today": c("dark", "yellow") | curses.A_BOLD, "soon": c("blue"),
+         "p0": c("red") | curses.A_BOLD, "late": c("dark", "red") | curses.A_BOLD, "today": c("dark", "yellow") | curses.A_BOLD, "soon": c("blue"),
          "ask": c("orange"), "work": c("blue")}
     selected = c("bright", "sel")
     if PANEL:
