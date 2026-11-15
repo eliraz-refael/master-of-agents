@@ -225,13 +225,35 @@ impl Paths {
 /// it is a real directory of ours that no one else can reach. Never follows a
 /// link: the socket fallback lives in a shared `$TMPDIR`.
 pub fn ensure_private_dir(dir: &Path) -> Result<(), PathsError> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
+    // A trailing slash makes lstat follow a link, so drop it first.
+    let dir: PathBuf = dir.components().collect();
+    let dir = dir.as_path();
+    let with_path =
+        |e: io::Error| PathsError::Io(io::Error::new(e.kind(), format!("{}: {e}", dir.display())));
+    // Look before creating: a link (even a dangling one) is refused, never followed.
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(PathsError::UnsafeDir(dir.to_path_buf(), "is a symlink"));
+        }
+        Ok(m) if !m.is_dir() => {
+            return Err(PathsError::UnsafeDir(dir.to_path_buf(), "isn't a folder"));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(with_path)?;
+        }
+        Err(e) => return Err(with_path(e)),
+    }
+    let meta = std::fs::symlink_metadata(dir).map_err(with_path)?;
     if meta.file_type().is_symlink() {
         return Err(PathsError::UnsafeDir(dir.to_path_buf(), "is a symlink"));
+    }
+    if !meta.is_dir() {
+        return Err(PathsError::UnsafeDir(dir.to_path_buf(), "isn't a folder"));
     }
     if meta.uid() != sys::current_uid() {
         return Err(PathsError::UnsafeDir(dir.to_path_buf(), "isn't yours"));

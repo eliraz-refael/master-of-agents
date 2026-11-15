@@ -230,3 +230,56 @@ fn tmpdir_defaults_to_slash_tmp() {
     .unwrap();
     assert!(x.socket("d").unwrap().starts_with("/tmp/moa-7/"));
 }
+
+#[test]
+fn a_trailing_slash_does_not_hide_a_symlink() {
+    let t = tmp();
+    let real = t.path().join("real");
+    ensure_private_dir(&real).unwrap();
+    let link = t.path().join("link");
+    symlink(&real, &link).unwrap();
+    let slashed = format!("{}/", link.display());
+    let err = ensure_private_dir(Path::new(&slashed)).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{} is a symlink; moa won't use it", link.display())
+    );
+}
+
+#[test]
+fn a_dangling_symlink_is_refused_as_a_symlink() {
+    let t = tmp();
+    let link = t.path().join("dangling");
+    symlink(t.path().join("nowhere"), &link).unwrap();
+    let err = ensure_private_dir(&link).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{} is a symlink; moa won't use it", link.display())
+    );
+}
+
+#[test]
+fn a_plain_file_is_refused_as_not_a_folder() {
+    let t = tmp();
+    let f = t.path().join("file");
+    std::fs::write(&f, b"x").unwrap();
+    let err = ensure_private_dir(&f).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{} isn't a folder; moa won't use it", f.display())
+    );
+}
+
+#[test]
+fn io_errors_name_the_path() {
+    let t = tmp();
+    let f = t.path().join("file");
+    std::fs::write(&f, b"x").unwrap();
+    let under = f.join("sub");
+    let err = ensure_private_dir(&under).unwrap_err();
+    assert!(matches!(err, PathsError::Io(_)));
+    assert!(
+        err.to_string().contains(&under.display().to_string()),
+        "{err}"
+    );
+}
