@@ -12,6 +12,7 @@ use rusqlite_migration::{Migrations, SchemaVersion};
 
 pub mod accounts;
 pub mod backup;
+pub mod export;
 pub mod import;
 mod schema;
 pub mod spike;
