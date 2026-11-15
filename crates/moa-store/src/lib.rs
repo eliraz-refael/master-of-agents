@@ -10,7 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::{Migrations, SchemaVersion};
 
+pub mod accounts;
 pub mod backup;
+pub mod import;
 mod schema;
 pub mod spike;
 

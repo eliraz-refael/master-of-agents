@@ -27,3 +27,4 @@ thiserror = "2"
 proptest = "1"
 rusqlite = { version = "0.41", features = ["bundled", "backup", "hooks", "functions"] }  # held at 0.41 by rusqlite_migration 2.7
 rusqlite_migration = "2.7"
+sha2 = "0.10"

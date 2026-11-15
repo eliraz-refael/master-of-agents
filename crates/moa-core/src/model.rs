@@ -187,6 +187,18 @@ open_kind!(
       IDLE_PING = "idle.ping" }
 );
 
+// ---------- transcripts ----------
+
+/// The result of looking for an agent conversation's transcript file. `UnsafeId` means the
+/// conversation id could not be used as a file name; `NotChecked` means no check was made.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TranscriptCheck {
+    Present(std::path::PathBuf),
+    Missing,
+    UnsafeId,
+    NotChecked,
+}
+
 // ---------- suggestions and asks ----------
 
 pub const ACTION_VERBS: &[&str] = &[
