@@ -406,6 +406,8 @@ Spec §6.6; R2.
 3. **Server bootstrap and adoption**:
    - Keeps the spike's socket names (`-L moa` and `-L moa-<brain>`) and the cockpit session
      name `moa` (C7), so v1 can adopt the live servers.
+   - `moa_testkit::Sandbox` gains a constructor with no server (for create-if-missing tests),
+     and restarts after `kill-server` pass `-f` again.
    - Creates the server only if it's missing, with a generated config that runs
      `source-file -q ~/.tmux.conf` first and sets `terminal-features …:RGB` for terminals
      known to support it (spec §6.14).
@@ -512,6 +514,8 @@ Spec §6.7, §6.13 (sleep, reboot), §6.12 (peers-note plumbing only).
    - `adopt PANE`, the untracked list in `ls`, and the "restart under moa" action.
 10. **`fake-claude`** in the testkit: a binary that replays a scripted list of hook payloads
     (synthetic, scrubbed) through `moa hook`, and can `/clear`, die, or hang.
+    The flake's `packages.default` builds only `-p moa` (`cargoExtraArgs`), so test binaries
+    never land in the user's `bin/`.
 
 **Done when:**
 - Fake agents drive every display state.
@@ -583,6 +587,8 @@ Spec §6.11; R3 §1.
    - `session/update` is always drained into `feed`.
    - **`stub-acp`** in the testkit (same SDK, Agent role, scripted turns, permission
      requests, hangs, crashes).
+     The flake's `packages.default` builds only `-p moa` (`cargoExtraArgs`), so test
+     binaries never land in the user's `bin/`.
 2. **Threads**:
    - One per local day per account. `session/resume`, else `session/load` with dedupe.
    - `systemPrompt` append = the embedded constitution + scope + brief (~2 KB).

@@ -26,6 +26,20 @@ fn socket_path_fits() {
 }
 
 #[test]
+fn daemon_socket_path_would_fit() {
+    let sb = Sandbox::start().unwrap();
+    let p = std::fs::canonicalize(sb.home())
+        .unwrap()
+        .join(".local/state/moa/run/default.sock");
+    let len = p.as_os_str().len();
+    assert!(
+        len < 104,
+        "daemon socket path would be {len} bytes: {}",
+        p.display()
+    );
+}
+
+#[test]
 fn home_shell_and_config_are_the_sandboxes() {
     let sb = Sandbox::start().unwrap();
     let home = sb.tmux(&["show-environment", "-g", "HOME"]).unwrap();
@@ -70,8 +84,9 @@ fn server_is_gone_after_drop() {
     drop(sb);
     let alive = std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
-        .status()
+        .output()
         .unwrap()
+        .status
         .success();
     assert!(!alive, "tmux server {pid} still running after drop");
 }

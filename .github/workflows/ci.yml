@@ -8,10 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ubuntu-24.04's apt tmux is 3.4: the minimum version moa supports.
   linux:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Spike parses (frozen prototype; removed with the spike)
@@ -30,6 +35,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: brew install tmux && tmux -V
@@ -42,9 +48,16 @@ jobs:
   # aarch64-darwin, the user's platform; nixpkgs tmux (3.8).
   nix:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      # Linux outputs are not built here, only evaluated, so a broken Linux derivation fails CI.
+      - name: Evaluate the Linux outputs
+        run: |
+          for a in checks.x86_64-linux.nextest checks.aarch64-linux.nextest packages.x86_64-linux.default; do
+            nix eval ".#$a.drvPath"
+          done
       - run: nix flake check -L
 
   # The required check: green only if every job above succeeded.

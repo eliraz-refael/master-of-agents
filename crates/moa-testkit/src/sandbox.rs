@@ -29,28 +29,22 @@ pub struct Sandbox {
     name: String,
     dir: TempDir,
     home: PathBuf,
-    sock_dir: TempDir,
 }
 
 impl Sandbox {
     pub fn start() -> io::Result<Sandbox> {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!("moa-test-{}-{n}", std::process::id());
-        let dir = TempDir::new()?;
+        // One short root for everything: unix socket paths are limited to 104 bytes on
+        // macOS, and later slices put the daemon socket under `home`.
+        let dir = tempfile::Builder::new().prefix("moa").tempdir_in("/tmp")?;
         let home = dir.path().join("home");
         std::fs::create_dir(&home)?;
         std::fs::write(
             dir.path().join("tmux.conf"),
             "set -g default-shell /bin/sh\nset -g @moa-sandbox 1\n",
         )?;
-        // Short on purpose: unix socket paths are limited to 104 bytes on macOS.
-        let sock_dir = tempfile::Builder::new().prefix("moa").tempdir_in("/tmp")?;
-        let sb = Sandbox {
-            name,
-            dir,
-            home,
-            sock_dir,
-        };
+        let sb = Sandbox { name, dir, home };
         let conf = sb.dir.path().join("tmux.conf");
         let home = sb.home.clone();
         sb.tmux(&[
@@ -78,7 +72,17 @@ impl Sandbox {
             .args(args)
             .env_clear()
             .envs(self.env())
-            .output()?;
+            .output()
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "tmux not found on PATH (moa needs tmux >= 3.4; or run inside `nix develop`)",
+                    )
+                } else {
+                    e
+                }
+            })?;
         if !out.status.success() {
             return Err(io::Error::other(
                 String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -103,10 +107,7 @@ impl Sandbox {
             ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
             ("HOME".into(), self.home.clone().into_os_string()),
             ("SHELL".into(), "/bin/sh".into()),
-            (
-                "TMUX_TMPDIR".into(),
-                self.sock_dir.path().as_os_str().to_owned(),
-            ),
+            ("TMUX_TMPDIR".into(), self.dir.path().as_os_str().to_owned()),
             ("TERM".into(), "xterm-256color".into()),
         ]
     }

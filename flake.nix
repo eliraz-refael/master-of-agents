@@ -33,25 +33,26 @@
             src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
             buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
-            nativeCheckInputs = [ pkgs.tmux ];
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           withArtifacts = commonArgs // { inherit cargoArtifacts; };
         in
         { inherit pkgs craneLib withArtifacts cargoArtifacts; };
+      builds = forAllSystems buildFor;
     in
     {
       packages = forAllSystems (system:
-        let b = buildFor system; in
+        let b = builds.${system}; in
         {
           default = b.craneLib.buildPackage (b.withArtifacts // {
+            cargoExtraArgs = "-p moa";
             doCheck = false;
             meta.mainProgram = "moa";
           });
         });
 
       checks = forAllSystems (system:
-        let b = buildFor system; in
+        let b = builds.${system}; in
         {
           moa = self.packages.${system}.default;
           clippy = b.craneLib.cargoClippy (b.withArtifacts // {
@@ -64,7 +65,7 @@
         });
 
       devShells = forAllSystems (system:
-        let b = buildFor system; in
+        let b = builds.${system}; in
         {
           default = b.craneLib.devShell {
             packages = [
