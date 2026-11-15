@@ -52,7 +52,7 @@ pub enum CoreEvent {
 }
 
 /// The newest activity rows published.
-pub(crate) const ACTIVITY_SHOWN: usize = 300;
+pub const ACTIVITY_SHOWN: usize = 300;
 
 /// A row as JSON with its `key` field added.
 fn keyed<T: Serialize>(key: &str, row: &T) -> Value {
@@ -139,13 +139,8 @@ impl State {
             Topic::Tasks => by_key(self.tasks().map(|t| (t.id.to_string(), t))),
             Topic::Suggestions => by_key(self.suggestions().map(|s| (s.id.to_string(), s))),
             Topic::Asks => by_key(self.asks.values().map(|a| (a.id.to_string(), a))),
-            Topic::Activity => by_key(
-                self.activity
-                    .values()
-                    .rev()
-                    .take(ACTIVITY_SHOWN)
-                    .map(|a| (a.id.to_string(), a)),
-            ),
+            // The state keeps only the newest ACTIVITY_SHOWN rows.
+            Topic::Activity => by_key(self.activity.values().map(|a| (a.id.to_string(), a))),
         }
     }
 

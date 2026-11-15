@@ -21,7 +21,11 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
             state.refuse_writes = None;
             state.load(*snapshot);
             let mut fx = vec![Effect::Backup { day: now.local_day }, backup_timer(&now)];
-            fx.extend(state.unknown().iter().map(|n| {
+            // A row's notes sit together, one per reason; the line names no reason, so one
+            // line per row.
+            let mut rows: Vec<&crate::state::LoadNote> = state.unknown().iter().collect();
+            rows.dedup_by(|a, b| a.table == b.table && a.key == b.key);
+            fx.extend(rows.into_iter().map(|n| {
                 // A group's key is its path: a name, so it stays out of the log.
                 let message = if n.table == "groups" {
                     "a row in groups has a value this build doesn't know".to_string()
@@ -79,6 +83,12 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
                 mut events,
                 ..
             } = tx;
+            // Handlers commit once, last: a refusal has applied nothing, so there is nothing
+            // to persist that the reply would deny.
+            debug_assert!(
+                result.is_ok() || changes.is_empty(),
+                "an op returned Err after committing"
+            );
             if result.is_err() {
                 events.clear();
             }
@@ -154,7 +164,13 @@ impl Tx {
                 r.reason
             )));
         }
-        for c in &changes {
+        // Most brains have no unknown rows; then no key needs building.
+        let checked = if state.unknown().is_empty() {
+            &[][..]
+        } else {
+            &changes[..]
+        };
+        for c in checked {
             let Some((table, key)) = c.row() else {
                 continue;
             };
@@ -236,7 +252,7 @@ fn unknown_message(state: &State, table: &str, key: &str) -> String {
         "asks" => "ask",
         "moa_threads" => "thread",
         "nags" => "nag",
-        "pane_bindings" => "pane",
+        "pane_bindings" | "spike_panes" => "pane",
         other => other,
     };
     let key = match table {

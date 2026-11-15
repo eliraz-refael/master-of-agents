@@ -8,8 +8,8 @@ use rusqlite::TransactionBehavior;
 use crate::import::{ImportError, Src};
 use crate::{Store, StoreError, rows};
 
-/// How many of the newest activity rows a snapshot carries (what the state keeps).
-const ACTIVITY_TAIL: usize = 300;
+/// How many of the newest activity rows a snapshot carries: what the state keeps.
+const ACTIVITY_TAIL: usize = moa_core::publish::ACTIVITY_SHOWN;
 
 fn store_error(e: ImportError) -> StoreError {
     match e {
@@ -27,7 +27,9 @@ impl Store {
     /// newest 300 activity rows, and the next id of each integer-id table. Text this build
     /// doesn't know loads as the import's default and is listed in `unknown`.
     pub fn load_snapshot(&self) -> Result<Snapshot, StoreError> {
-        let src = Src { conn: self.conn() };
+        // One read transaction, so the rows and the next ids are one moment of the file.
+        let read = self.conn().unchecked_transaction()?;
+        let src = Src { conn: &read };
         let rows_of = |table: &str, cols: &'static [&'static str], order: &str| {
             src.rows(table, cols, order).map_err(store_error)
         };
