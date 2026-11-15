@@ -260,6 +260,18 @@ fn expected(table: &Table, src: &Row, events: &[Row]) -> Row {
         },
         _ => {}
     }
+    // The spike writes `''` to unlink a task's session, and reads `''` and NULL alike; the
+    // import keeps no link for a blank reference.
+    let blank_ref = match table.name {
+        "tasks" => Some("session_id"),
+        "asks" => Some("from_sid"),
+        _ => None,
+    };
+    if let Some(c) = blank_ref
+        && text_of(src.get(c)).is_some_and(|t| t.trim().is_empty())
+    {
+        row.insert(c.into(), Value::Null);
+    }
     row
 }
 

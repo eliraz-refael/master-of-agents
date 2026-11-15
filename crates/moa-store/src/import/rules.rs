@@ -90,8 +90,8 @@ pub fn reference(
     }
 }
 
-/// G4 for a text key (a session id): none stays none, a key that exists is kept, any other
-/// is none with a warning.
+/// G4 for a text key (a session id): none and blank stay none (the spike writes `''` on
+/// purpose to unlink), a key that exists is kept, any other is none with a warning.
 pub fn reference_text(
     key: Option<String>,
     exists: impl Fn(&str) -> bool,
@@ -99,6 +99,7 @@ pub fn reference_text(
 ) -> Ruled<Option<String>> {
     match key {
         None => (None, None),
+        Some(k) if k.trim().is_empty() => (None, None),
         Some(k) if exists(&k) => (Some(k), None),
         Some(_) => (None, Some(reason)),
     }
@@ -200,6 +201,8 @@ mod tests {
     fn g4_text_references() {
         let has = |k: &str| k == "a";
         assert_eq!(reference_text(None, has, R_X), (None, None));
+        assert_eq!(reference_text(Some(String::new()), has, R_X), (None, None));
+        assert_eq!(reference_text(Some("  ".into()), has, R_X), (None, None));
         assert_eq!(
             reference_text(Some("a".into()), has, R_X),
             (Some("a".into()), None)

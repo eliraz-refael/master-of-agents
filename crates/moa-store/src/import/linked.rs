@@ -264,7 +264,8 @@ fn asks(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
         );
         let from_raw = r.text("from_sid");
         let from = ask_target(run, from_raw.as_deref());
-        if from.is_none() && from_raw.is_some() {
+        // A blank sender is none, as for `reference_text`.
+        if from.is_none() && from_raw.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             run.warn("asks", &key, R_ASK_FROM);
         }
         let to = ask_target(run, r.text("to_sid").as_deref());

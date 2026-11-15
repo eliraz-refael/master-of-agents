@@ -686,3 +686,41 @@ fn a_real_brain_mismatch_names_no_contents() {
         "{msg}"
     );
 }
+
+#[test]
+fn a_blank_reference_is_no_link_and_no_warning() {
+    // The spike writes '' on purpose to unlink a task's session.
+    let rig = rig_with(|spike, home| {
+        SpikeFixture::write(spike, Scenario::Typical, home).unwrap();
+        let c = Connection::open(spike).unwrap();
+        let tasks = c
+            .execute(
+                "UPDATE tasks SET session_id = '' WHERE session_id IS NOT NULL",
+                [],
+            )
+            .unwrap();
+        let asks = c
+            .execute(
+                "UPDATE asks SET from_sid = '' WHERE from_sid IS NOT NULL",
+                [],
+            )
+            .unwrap();
+        assert!(tasks > 0 && asks > 0, "the fixture has links to blank");
+    });
+    let warns: Vec<_> = rig
+        .notes
+        .iter()
+        .filter(|n| n.level == Level::Warn && matches!(n.table, "tasks" | "asks"))
+        .collect();
+    assert!(warns.is_empty(), "{warns:?}");
+    assert_round_trip(&rig);
+    let out = open_ro(&rig.out);
+    let linked: i64 = out
+        .query_row(
+            "SELECT count(*) FROM tasks WHERE session_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, 0);
+}
