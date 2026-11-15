@@ -238,6 +238,8 @@ struct Exporter<'a> {
     current: HashMap<String, Current>,
     /// Every conversation id of every session, for the suggestion rewrite.
     all_conversations: Vec<String>,
+    /// The spike's own account string of every conversation, by conversation id.
+    conversation_accounts: HashMap<String, String>,
     /// Every v1 session id, with or without a conversation, for the same rewrite.
     all_sessions: Vec<String>,
     notes: Vec<RecordNote>,
@@ -261,6 +263,7 @@ impl<'a> Exporter<'a> {
     fn new(src: &'a Connection, env: &'a ExportEnv) -> Result<Self, ExportError> {
         let mut current = HashMap::new();
         let mut all_conversations = Vec::new();
+        let mut conversation_accounts = HashMap::new();
         let mut stmt = src.prepare(
             "SELECT session_id, conversation_id, spike_account, store_dir FROM conversations \
              ORDER BY first_seen_at, rowid",
@@ -278,6 +281,9 @@ impl<'a> Exporter<'a> {
         for row in rows {
             let (sid, cur) = row?;
             all_conversations.push(cur.conversation_id.clone());
+            if let Some(a) = &cur.spike_account {
+                conversation_accounts.insert(cur.conversation_id.clone(), a.clone());
+            }
             current.insert(sid, cur);
         }
         let all_sessions = src
@@ -289,6 +295,7 @@ impl<'a> Exporter<'a> {
             env,
             current,
             all_conversations,
+            conversation_accounts,
             all_sessions,
             notes: Vec::new(),
             tables: Vec::new(),

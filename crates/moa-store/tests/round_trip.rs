@@ -144,6 +144,30 @@ fn typical_round_trips() {
         pane(ids::S2_IDLE),
         (Some("%4".into()), Some("/tmp/x/moa".into()))
     );
+    // Accounts come back as the exact strings the spike had: S2 by bare name, S1 by path,
+    // and an event carries its session's string.
+    let account = |sql: &str| -> Option<String> { out.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        account(&format!(
+            "SELECT account FROM sessions WHERE session_id = '{}'",
+            ids::S2_IDLE
+        )),
+        Some("acct-b".into())
+    );
+    assert_eq!(
+        account(&format!(
+            "SELECT account FROM sessions WHERE session_id = '{}'",
+            ids::S1_WORKING
+        )),
+        Some(rig.home.join(".acct-a").to_string_lossy().into_owned())
+    );
+    assert_eq!(
+        account(&format!(
+            "SELECT account FROM events WHERE session_id = '{}' AND kind = 'start'",
+            ids::S2_IDLE
+        )),
+        Some("acct-b".into())
+    );
     // The groups are exactly these two.
     let groups: Vec<String> = out
         .prepare("SELECT path FROM groups ORDER BY path")

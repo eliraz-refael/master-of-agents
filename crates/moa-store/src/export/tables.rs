@@ -393,6 +393,15 @@ impl Exporter<'_> {
                     .and_then(|s| self.conversation_of(s))
                     .map(str::to_string)
             });
+            // The spike's own string for the conversation when it has one (real brains name
+            // accounts by name), else the store path or `codex`.
+            let account = account.as_deref().map(|a| {
+                conversation
+                    .as_ref()
+                    .and_then(|c| self.conversation_accounts.get(c))
+                    .cloned()
+                    .unwrap_or_else(|| self.account_string(a))
+            });
             tx.execute(
                 "INSERT INTO events (id, ts, session_id, account, cwd, kind, text) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -400,7 +409,7 @@ impl Exporter<'_> {
                     id,
                     self.local(*at),
                     conversation,
-                    account.as_deref().map(|a| self.account_string(a)),
+                    account,
                     cwd,
                     spike_kind,
                     text

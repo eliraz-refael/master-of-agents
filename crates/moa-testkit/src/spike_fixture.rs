@@ -208,6 +208,17 @@ fn n(x: i64) -> Value {
 
 const NIL: Value = Value::Null;
 
+/// The account string a session's hook events carry: S2 by bare name, the rest by path.
+fn event_account(sid: &Value) -> Value {
+    use ids::*;
+    match sid {
+        Value::Text(t) if t == S2_IDLE => s("acct-b"),
+        Value::Text(t) if [S1_WORKING, S3_WAITING, S9_WAITING_IDLE].contains(&t.as_str()) => s(A),
+        Value::Text(t) if t == S4_ENDED => s(B),
+        _ => NIL,
+    }
+}
+
 fn brain(rows: Vec<(&'static str, Row)>) -> SpikeBrain {
     SpikeBrain {
         rows,
@@ -323,7 +334,8 @@ fn typical() -> SpikeBrain {
         ),
         (
             S2_IDLE,
-            s(B),
+            // Named the way real brains do: by the bare name.
+            s("acct-b"),
             NIL,
             "Read the tide tables",
             "idle",
@@ -521,7 +533,7 @@ fn typical() -> SpikeBrain {
                 ("id", n(i as i64 + 1)),
                 ("ts", s(ts)),
                 ("session_id", sid.clone()),
-                ("account", NIL),
+                ("account", event_account(&sid)),
                 ("cwd", if kind == "ui" { NIL } else { s(LANTERN) }),
                 ("kind", s(kind)),
                 ("text", s(text)),

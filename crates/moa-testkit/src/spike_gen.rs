@@ -282,6 +282,8 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
 
     // Sessions come before tasks and events, which refer to them.
     let mut sids: Vec<String> = Vec::new();
+    // The account string of each session, as written.
+    let mut session_accounts: Vec<Value> = Vec::new();
     // Sessions on a Claude account, with that account: where a console thread can point.
     let mut claude: Vec<(String, String)> = Vec::new();
     let mut transcripts = Vec::new();
@@ -309,7 +311,10 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
             sid = ids::AWK_PATH.to_string();
         }
         let (account, store) = match g.below(if any { 5 } else { 3 }) {
+            // Real brains name an account by its bare name as often as by its path.
+            0 if g.chance(40) => (Value::Text("acct-a".into()), Some(".acct-a")),
             0 => (Value::Text("{home}/.acct-a".into()), Some(".acct-a")),
+            1 if g.chance(40) => (Value::Text("acct-b".into()), Some(".acct-b")),
             1 => (Value::Text("{home}/.acct-b".into()), Some(".acct-b")),
             2 => (Value::Text("codex".into()), None),
             3 => (Value::Null, None),
@@ -341,7 +346,7 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
             "sessions",
             vec![
                 ("session_id", Value::Text(sid.clone())),
-                ("account", account),
+                ("account", account.clone()),
                 ("cwd", cwd),
                 ("project_id", g.reference(&project_ids)),
                 ("title", g.opt_text()),
@@ -370,6 +375,7 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
             ],
         ));
         sids.push(sid);
+        session_accounts.push(account);
     }
 
     for id in 1..=n_task as i64 {
@@ -445,10 +451,12 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
             Value::Text(format!("{{home}}/private/{}", g.tok()))
         };
         let text = if g.messy(15) { Value::Null } else { g.text() };
-        let sid = if ui {
-            Value::Null
-        } else {
-            Value::Text(sids[g.below(sids.len())].clone())
+        let at = (!ui).then(|| g.below(sids.len()));
+        let sid = at.map_or(Value::Null, |i| Value::Text(sids[i].clone()));
+        // Hooks write the session's account string into its events.
+        let account = match at {
+            Some(i) if g.chance(60) => session_accounts[i].clone(),
+            _ => Value::Null,
         };
         last_event = id;
         rows.push((
@@ -457,7 +465,7 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
                 ("id", Value::Integer(id)),
                 ("ts", g.time()),
                 ("session_id", sid),
-                ("account", Value::Null),
+                ("account", account),
                 ("cwd", cwd),
                 ("kind", kind),
                 ("text", text),

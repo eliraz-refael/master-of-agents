@@ -315,11 +315,18 @@ proptest! {
         let accounts: Vec<Option<String>> = accounts.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
         for account in accounts {
             let account = account.expect("a valid session has an account");
-            if account != "codex" {
+            if account == "codex" {
+                continue;
+            }
+            // A path under home, or the bare name real brains use.
+            let path = if account.starts_with("acct-") {
+                dir.path().join(format!(".{account}"))
+            } else {
                 let rel = Path::new(&account).strip_prefix(dir.path()).expect("under home");
                 prop_assert!(rel.to_string_lossy().starts_with(".acct-"));
-                prop_assert!(Path::new(&account).is_dir());
-            }
+                Path::new(&account).to_path_buf()
+            };
+            prop_assert!(path.is_dir());
         }
         let thread: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key='console_thread'", [], |r| r.get(0))
