@@ -5,3 +5,8 @@ docs/context.md
 __pycache__/
 console.err
 picture.err
+
+/target
+/result
+/result-*
+/.claude/worktrees/
