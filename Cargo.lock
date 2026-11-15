@@ -541,6 +541,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-platform"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "moa-store"
 version = "0.1.0"
 dependencies = [
