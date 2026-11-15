@@ -268,4 +268,68 @@ proptest! {
         let unique: BTreeSet<_> = tokens.iter().collect();
         prop_assert_eq!(unique.len(), tokens.len());
     }
+
+    #[test]
+    fn brain_valid_meets_the_round_trip_contract(brain in brain_valid()) {
+        const TIME: &str = "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]'";
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("c.db");
+        brain.write(&db, dir.path());
+        let conn = Connection::open(&db).unwrap();
+        let bad_times = [
+            ("sessions", "first_seen"), ("sessions", "last_seen"), ("projects", "created_at"),
+            ("projects", "updated_at"), ("tasks", "created_at"), ("tasks", "updated_at"),
+            ("asks", "ts"), ("groups", "created_at"), ("events", "ts"), ("notes", "created_at"),
+            ("suggestions", "created_at"), ("activity", "ts"),
+        ];
+        let mut violations: Vec<(String, i64)> = bad_times
+            .iter()
+            .map(|(t, c)| (
+                format!("{t}.{c} is not a time"),
+                count(&conn, &format!("SELECT count(*) FROM {t} WHERE {c} IS NULL OR NOT {c} GLOB {TIME}")),
+            ))
+            .collect();
+        let checks = [
+            ("event without a session", "SELECT count(*) FROM events WHERE kind != 'ui' AND (session_id IS NULL OR session_id NOT IN (SELECT session_id FROM sessions))"),
+            ("ui event with a session", "SELECT count(*) FROM events WHERE kind = 'ui' AND session_id IS NOT NULL"),
+            ("task session dangles", "SELECT count(*) FROM tasks WHERE session_id IS NOT NULL AND session_id NOT IN (SELECT session_id FROM sessions)"),
+            ("ask session dangles", "SELECT count(*) FROM asks WHERE (from_sid IS NOT NULL AND from_sid NOT IN (SELECT session_id FROM sessions)) OR (to_sid != 'moa' AND to_sid NOT IN (SELECT session_id FROM sessions))"),
+            ("project reference dangles", "SELECT (SELECT count(*) FROM tasks WHERE project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)) + (SELECT count(*) FROM notes WHERE project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)) + (SELECT count(*) FROM sessions WHERE project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects))"),
+            ("unknown or missing session state", "SELECT count(*) FROM sessions WHERE state IS NULL OR state NOT IN ('working','idle','waiting','ended','archived','elsewhere')"),
+            ("waiting session the spike would show otherwise", "SELECT count(*) FROM sessions s WHERE state = 'waiting' AND coalesce((SELECT kind = 'waiting' AND text NOT LIKE '%waiting for your input%' FROM events e WHERE e.session_id = s.session_id AND kind IN ('prompt','stop','waiting') ORDER BY id DESC LIMIT 1), 0) = 0"),
+            ("asleep but not ended", "SELECT count(*) FROM sessions WHERE asleep_at IS NOT NULL AND state != 'ended'"),
+            ("open ask", "SELECT count(*) FROM asks WHERE status NOT IN ('answered','failed','dropped')"),
+            ("unknown task fields", "SELECT count(*) FROM tasks WHERE status NOT IN ('idea','todo','active','waiting','blocked','done','dropped') OR (who IS NOT NULL AND who NOT IN ('you','agent','other')) OR (priority IS NOT NULL AND priority NOT IN ('p0','p1','p2'))"),
+            ("unknown project fields", "SELECT count(*) FROM projects WHERE status NOT IN ('idea','active','paused','done') OR area != 'private'"),
+            ("project names collide ignoring case", "SELECT count(*) - count(DISTINCT lower(name)) FROM projects"),
+            ("bad activity row", "SELECT count(*) FROM activity WHERE text IS NULL OR who NOT IN ('brain','session','you')"),
+            ("group path not normalised", "SELECT count(*) FROM groups WHERE path LIKE '%//%' OR path LIKE '/%' OR path LIKE '%/'"),
+            ("suggestion action", "SELECT count(*) FROM suggestions WHERE action IS NOT NULL AND (json_valid(action) = 0 OR json_type(action) != 'array' OR substr(json_extract(action, '$[0]'), 1, instr(json_extract(action, '$[0]') || ' ', ' ') - 1) NOT IN ('task','set','archive','close','group','note','project'))"),
+        ];
+        violations.extend(checks.iter().map(|(why, sql)| (why.to_string(), count(&conn, sql))));
+        for (why, n) in violations {
+            prop_assert_eq!(n, 0, "{}", why);
+        }
+
+        let mut accounts = conn.prepare("SELECT DISTINCT account FROM sessions").unwrap();
+        let accounts: Vec<Option<String>> = accounts.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        for account in accounts {
+            let account = account.expect("a valid session has an account");
+            if account != "codex" {
+                let rel = Path::new(&account).strip_prefix(dir.path()).expect("under home");
+                prop_assert!(rel.to_string_lossy().starts_with(".acct-"));
+                prop_assert!(Path::new(&account).is_dir());
+            }
+        }
+        let thread: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key='console_thread'", [], |r| r.get(0))
+            .ok();
+        if let Some(thread) = thread {
+            let v: serde_json::Value = serde_json::from_str(&thread).unwrap();
+            let sid = v["sid"].as_str().unwrap();
+            let found = count(&conn, &format!("SELECT count(*) FROM sessions WHERE session_id='{sid}'"));
+            prop_assert_eq!(found, 1);
+            prop_assert!(Path::new(v["account"].as_str().unwrap()).is_dir());
+        }
+    }
 }

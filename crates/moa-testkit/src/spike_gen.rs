@@ -15,11 +15,12 @@ const PROJECT_STATUS: [&str; 4] = ["idea", "active", "paused", "done"];
 const TASK_STATUS: [&str; 7] = [
     "idea", "todo", "active", "waiting", "blocked", "done", "dropped",
 ];
-const NOTE_KIND: [&str; 5] = [
+const NOTE_KIND: [&str; 6] = [
     "fact",
     "preference",
     "routine",
     "observation",
+    "milestone",
     "thread-summary",
 ];
 const SUGGESTION_STATUS: [&str; 4] = ["open", "accepted", "rejected", "later"];
@@ -35,6 +36,8 @@ const EVENT_KIND: [&str; 5] = ["start", "prompt", "stop", "waiting", "end"];
 const ASK_STATUS: [&str; 6] = [
     "pending", "sent", "received", "answered", "failed", "dropped",
 ];
+/// Import closes the other statuses, so valid brains only hold these.
+const ASK_STATUS_CLOSED: [&str; 3] = ["answered", "failed", "dropped"];
 const WHO: [&str; 3] = ["you", "agent", "other"];
 const PRIORITY: [&str; 3] = ["p0", "p1", "p2"];
 /// Stand-ins for the hex letters a-f in "wild" tokens. The mapping is one to one, so wild
@@ -266,6 +269,8 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
 
     // Sessions come before tasks and events, which refer to them.
     let mut sids: Vec<String> = Vec::new();
+    // Sessions on a Claude account, with that account: where a console thread can point.
+    let mut claude: Vec<(String, String)> = Vec::new();
     let mut transcripts = Vec::new();
     let mut groups: Vec<String> = Vec::new();
     for _ in 0..n_group {
@@ -278,7 +283,10 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
         groups.push(path.clone());
         rows.push((
             "groups",
-            vec![("path", Value::Text(path)), ("created_at", g.opt_time())],
+            vec![
+                ("path", Value::Text(path)),
+                ("created_at", if any { g.opt_time() } else { g.time() }),
+            ],
         ));
     }
     for i in 0..n_sess {
@@ -294,11 +302,14 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
             3 => (Value::Null, None),
             _ => (g.text(), None),
         };
+        // A valid brain's Claude sessions always have a transcript, which also makes
+        // `write` create the account's store directory.
         if let Some(store) = store
-            && g.chance(70)
+            && (!any || g.chance(70))
             && sid != ids::AWK_PATH
         {
             transcripts.push((store.to_string(), sid.clone()));
+            claude.push((sid.clone(), format!("{{home}}/{store}")));
         }
         let cwd = if g.chance(20) {
             Value::Null
@@ -321,10 +332,17 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
                 ("cwd", cwd),
                 ("project_id", g.reference(&project_ids)),
                 ("title", g.opt_text()),
-                ("state", g.opt_pick(&SESSION_STATE)),
+                (
+                    "state",
+                    if any {
+                        g.opt_pick(&SESSION_STATE)
+                    } else {
+                        g.pick(&SESSION_STATE)
+                    },
+                ),
                 ("last_prompt", g.opt_text()),
-                ("first_seen", g.opt_time()),
-                ("last_seen", g.opt_time()),
+                ("first_seen", if any { g.opt_time() } else { g.time() }),
+                ("last_seen", if any { g.opt_time() } else { g.time() }),
                 (
                     "pane",
                     if g.chance(50) {
@@ -401,7 +419,7 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
 
     let mut last_event = 0;
     for id in 1..=n_event as i64 {
-        let ui = g.chance(20);
+        let ui = g.chance(20) || sids.is_empty();
         let kind = if ui {
             Value::Text("ui".into())
         } else {
@@ -416,8 +434,6 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
         let text = if g.messy(15) { Value::Null } else { g.text() };
         let sid = if ui {
             Value::Null
-        } else if sids.is_empty() {
-            Value::Text(ids::AWK_GHOST.to_string())
         } else {
             Value::Text(sids[g.below(sids.len())].clone())
         };
@@ -454,7 +470,14 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
                 ("from_name", g.opt_text()),
                 ("to_sid", to),
                 ("text", g.text()),
-                ("status", g.pick(&ASK_STATUS)),
+                (
+                    "status",
+                    g.pick(if any {
+                        &ASK_STATUS[..]
+                    } else {
+                        &ASK_STATUS_CLOSED[..]
+                    }),
+                ),
                 ("reply", g.opt_text()),
                 ("answered_at", g.opt_time()),
             ],
@@ -475,18 +498,21 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
             ],
         ));
     }
-    if g.chance(60) {
-        let thread = if g.messy(20) {
-            "{".to_string()
-        } else {
-            let sid = sids
-                .first()
-                .cloned()
-                .unwrap_or_else(|| ids::AWK_GHOST.to_string());
-            format!(
-                "{{\"sid\":\"{sid}\",\"date\":\"2026-02-03\",\"account\":\"{{home}}/.acct-b\"}}"
-            )
+    let thread = if g.messy(20) {
+        Some("{".to_string())
+    } else if g.chance(60) {
+        let (sid, account) = match claude.first() {
+            Some(found) => found.clone(),
+            None if any => (ids::AWK_GHOST.to_string(), "{home}/.acct-b".to_string()),
+            None => (String::new(), String::new()),
         };
+        (!sid.is_empty()).then(|| {
+            format!("{{\"sid\":\"{sid}\",\"date\":\"2026-02-03\",\"account\":\"{account}\"}}")
+        })
+    } else {
+        None
+    };
+    if let Some(thread) = thread {
         rows.push((
             "meta",
             vec![
@@ -505,11 +531,60 @@ fn build(shape: Shape, any: bool) -> SpikeBrain {
         ));
     }
 
+    if !any {
+        settle_waiting(&mut rows);
+    }
+
     SpikeBrain {
         old: shape.old,
         rows,
         transcripts,
         tokens: g.tokens,
+    }
+}
+
+/// The spike shows a session as waiting only while its newest prompt, stop or waiting event
+/// is a `waiting` that is not the idle ping. Import maps any other waiting session to idle,
+/// so a valid brain must not hold one. Also, only an ended session can be asleep.
+fn settle_waiting(rows: &mut [(&'static str, Row)]) {
+    let newest: Vec<(String, String)> = rows
+        .iter()
+        .filter(|(t, _)| *t == "events")
+        .filter_map(|(_, r)| {
+            let get = |c: &str| r.iter().find(|(k, _)| *k == c).map(|(_, v)| v.clone());
+            match (get("session_id"), get("kind")) {
+                (Some(Value::Text(sid)), Some(Value::Text(kind)))
+                    if matches!(kind.as_str(), "prompt" | "stop" | "waiting") =>
+                {
+                    Some((sid, kind))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    for (_, row) in rows.iter_mut().filter(|(t, _)| *t == "sessions") {
+        let sid = match row.iter().find(|(k, _)| *k == "session_id") {
+            Some((_, Value::Text(s))) => s.clone(),
+            _ => continue,
+        };
+        let last = newest
+            .iter()
+            .rfind(|(s, _)| *s == sid)
+            .map(|(_, k)| k.as_str());
+        let mut state = String::new();
+        for (k, v) in row.iter_mut() {
+            if *k == "state"
+                && let Value::Text(s) = v
+            {
+                if s == "waiting" && last != Some("waiting") {
+                    *s = "idle".to_string();
+                }
+                state = s.clone();
+            }
+            if *k == "asleep_at" && state != "ended" {
+                *v = Value::Null;
+            }
+        }
     }
 }
 
