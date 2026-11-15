@@ -254,3 +254,37 @@ fn names_are_validated() {
     }
     assert!(AccountName::parse(&"a".repeat(64)).is_ok());
 }
+
+#[test]
+fn a_misspelt_accounts_table_is_an_error() {
+    assert_eq!(
+        err("[acounts.x]\nkind = \"claude\"\n"),
+        "moa.toml: [acounts] isn't a table moa knows; did you mean [accounts]?"
+    );
+}
+
+#[test]
+fn a_singular_brain_table_is_an_error() {
+    assert_eq!(
+        err("[brain.work]\nfolders = []\n"),
+        "moa.toml: [brain] isn't a table moa knows; did you mean [brains]?"
+    );
+    // A distant name is still just skipped.
+    assert!(Config::parse("[layouts]\nx = 1\n", home()).is_ok());
+}
+
+#[test]
+fn empty_store_launcher_and_spike_db_are_errors() {
+    assert_eq!(
+        err("[accounts.acct-a]\nkind = \"claude\"\nstore = \"\"\n"),
+        "moa.toml: the store  in accounts.acct-a must start with / or ~"
+    );
+    assert_eq!(
+        err("[accounts.acct-a]\nkind = \"claude\"\nstore = \"/s\"\nlauncher = \"\"\n"),
+        "moa.toml: the launcher  in accounts.acct-a must start with / or ~"
+    );
+    assert_eq!(
+        err("[brains.default]\nspike_db = \"\"\n"),
+        "moa.toml: the spike_db  in brains.default must start with / or ~"
+    );
+}

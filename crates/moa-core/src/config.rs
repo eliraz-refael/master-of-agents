@@ -195,6 +195,34 @@ fn expand(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, Conf
     Ok(PathBuf::from(s))
 }
 
+/// Like `expand`, but for a single path where an empty value is an error.
+fn expand_one(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, ConfigError> {
+    if s.is_empty() {
+        return Err(problem(format_args!(
+            "the {what} {s} in {place} must start with / or ~"
+        )));
+    }
+    expand(s, what, place, home)
+}
+
+const TABLES: [&str; 3] = ["brains", "accounts", "setup"];
+
+/// Levenshtein distance, for catching a misspelt table name.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
 fn expand_all(
     v: &[String],
     what: &str,
@@ -208,11 +236,15 @@ impl Config {
     /// Parses and validates `moa.toml` text, expanding `~` against `home`.
     pub fn parse(text: &str, home: &Path) -> Result<Config, ConfigError> {
         let table: toml::Table = toml::from_str(text).map_err(|e| toml_problem(text, &e))?;
-        let skipped_tables = table
-            .keys()
-            .filter(|k| !matches!(k.as_str(), "brains" | "accounts" | "setup"))
-            .cloned()
-            .collect();
+        let mut skipped_tables = Vec::new();
+        for key in table.keys().filter(|k| !TABLES.contains(&k.as_str())) {
+            if let Some(known) = TABLES.iter().find(|t| distance(key, t) <= 2) {
+                return Err(problem(format_args!(
+                    "[{key}] isn't a table moa knows; did you mean [{known}]?"
+                )));
+            }
+            skipped_tables.push(key.clone());
+        }
         let raw: RawConfig = toml::from_str(text).map_err(|e| toml_problem(text, &e))?;
 
         let mut config = Config {
@@ -239,7 +271,7 @@ impl Config {
                     spike_db: b
                         .spike_db
                         .as_deref()
-                        .map(|s| expand(s, "spike_db", &place, home))
+                        .map(|s| expand_one(s, "spike_db", &place, home))
                         .transpose()?,
                 },
             );
@@ -271,11 +303,11 @@ impl Config {
                 name,
                 AccountConfig {
                     kind,
-                    store: expand(store, "store", &place, home)?,
+                    store: expand_one(store, "store", &place, home)?,
                     launcher: a
                         .launcher
                         .as_deref()
-                        .map(|s| expand(s, "launcher", &place, home))
+                        .map(|s| expand_one(s, "launcher", &place, home))
                         .transpose()?,
                     brain,
                     except: expand_all(&a.except, "folder", &format!("{place}.except"), home)?,
