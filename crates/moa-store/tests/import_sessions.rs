@@ -25,6 +25,7 @@ fn tz() -> TimeZone {
 fn env(home: &Path, brain: &str) -> ImportEnv {
     ImportEnv {
         tz: tz(),
+        tz_spec: None,
         now: NOW,
         brain: brain.into(),
         accounts: AccountMap::new(home.to_path_buf()),

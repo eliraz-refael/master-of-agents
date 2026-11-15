@@ -306,3 +306,59 @@ fn a_failed_adopt_leaves_nothing_behind() {
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+fn event_times(db: &Path) -> Vec<String> {
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    c.prepare("SELECT ts FROM events ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn export_reads_the_zone_the_import_recorded() {
+    let r = rig();
+    let v1 = r.path("moa.db");
+    let o = r.moa(&["adopt-spike", "--from", s(&r.spike), "--into", s(&v1)]);
+    assert!(o.status.success(), "{}", text(&o));
+    let recorded: String = rusqlite::Connection::open(&v1)
+        .unwrap()
+        .query_row(
+            "SELECT json_extract(value, '$.tz') FROM meta WHERE key = 'spike_import'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, TZ);
+
+    // Without --tz the recorded zone is used, whatever this machine's zone is.
+    let run = |into: &Path, tz: Option<&str>| -> Output {
+        let mut cmd = Command::cargo_bin("moa").unwrap();
+        cmd.env("HOME", &r.home).env("TZ", "UTC");
+        cmd.args(["export-spike", "--from", s(&v1), "--into", s(into)]);
+        if let Some(tz) = tz {
+            cmd.args(["--tz", tz]);
+        }
+        cmd.output().unwrap()
+    };
+    let note = "note: exporting with a different time zone than the import used";
+    let plain = r.path("plain.db");
+    let o = run(&plain, None);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!text(&o).contains(note), "{}", text(&o));
+    assert_eq!(event_times(&plain), event_times(&r.spike));
+
+    let same = r.path("same.db");
+    let o = run(&same, Some(TZ));
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!text(&o).contains(note), "{}", text(&o));
+
+    let other = r.path("other.db");
+    let o = run(&other, Some("UTC"));
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(text(&o).matches(note).count(), 1, "{}", text(&o));
+    assert_ne!(event_times(&other), event_times(&r.spike));
+}

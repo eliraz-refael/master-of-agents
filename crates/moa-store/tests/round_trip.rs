@@ -47,6 +47,7 @@ fn rig_with(write: impl FnOnce(&Path, &Path)) -> Rig {
     let mut store = Store::open(&dir.path().join("moa.db"), &dir.path().join("backups")).unwrap();
     let env = ImportEnv {
         tz: tz(),
+        tz_spec: None,
         now: NOW,
         brain: "default".into(),
         accounts: AccountMap::new(home.clone()),

@@ -87,6 +87,9 @@ impl IdGen {
 /// Everything an import needs to know about the world.
 pub struct ImportEnv {
     pub tz: TimeZone,
+    /// How the user named `tz` when it has no IANA name (a POSIX string). It is only
+    /// recorded, so `export-spike` can read the spike's times in the same zone.
+    pub tz_spec: Option<String>,
     pub now: UtcMs,
     /// Names the brain, so derived session ids differ between brains.
     pub brain: String,
@@ -401,6 +404,31 @@ pub(crate) fn conversation_key(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// The zone the import read the spike's times in, for `meta.spike_import`: its IANA name if
+/// it has one, else the POSIX string it was given, else `None` (a zone with neither can't be
+/// written down, and a later export then falls back to the system zone).
+fn zone_label(env: &ImportEnv) -> Option<String> {
+    env.tz
+        .iana_name()
+        .map(str::to_owned)
+        .or_else(|| env.tz_spec.clone())
+}
+
+/// The zone recorded by the import that made this brain, if one was recorded. Its text is an
+/// IANA name or a POSIX string, as `TimeZone::get` / `TimeZone::posix` read them.
+pub fn recorded_zone(store: &Store) -> Option<String> {
+    let json: String = store
+        .conn()
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'spike_import'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+    v.get("tz")?.as_str().map(str::to_owned)
+}
+
 /// Imports the spike brain at `spike_db` into the empty store `dst`, in one transaction.
 pub fn import_spike(
     spike_db: &Path,
@@ -451,6 +479,7 @@ pub fn import_spike(
     let summary = serde_json::json!({
         "source_name": source_name,
         "at": env.now.0,
+        "tz": zone_label(env),
         "tables": run.tables,
         "setup_skipped": run.setup_skipped,
     });

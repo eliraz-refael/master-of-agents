@@ -57,6 +57,7 @@ fn local_brain_imports_and_round_trips() {
         .as_millis() as i64;
     let env = ImportEnv {
         tz: tz.clone(),
+        tz_spec: None,
         now: UtcMs(now),
         brain: "default".into(),
         accounts: accounts(&home),

@@ -24,6 +24,7 @@ fn tz() -> TimeZone {
 fn env(home: &Path) -> ImportEnv {
     ImportEnv {
         tz: tz(),
+        tz_spec: None,
         now: NOW,
         brain: "test-brain".into(),
         accounts: AccountMap::new(home.to_path_buf()),
@@ -464,4 +465,24 @@ fn odd_rows_are_kept_with_fixed_warnings() {
     assert_ne!(reasons[0], reasons[1]);
     let text = report.render_text(false);
     assert!(!text.contains("secret") && !text.contains("Lantern") && !text.contains("garbage"));
+}
+
+#[test]
+fn the_import_records_its_time_zone() {
+    let recorded = |tz: TimeZone, spec: Option<&str>| -> Option<String> {
+        let mut s = setup(Scenario::Typical);
+        let mut e = env(&s.home);
+        e.tz = tz;
+        e.tz_spec = spec.map(str::to_string);
+        import_spike(&s.spike, &mut s.store, &e).unwrap();
+        moa_store::import::recorded_zone(&s.store)
+    };
+    // An IANA zone is recorded by name, whatever else was given.
+    assert_eq!(recorded(TimeZone::UTC, None).as_deref(), Some("UTC"));
+    assert_eq!(recorded(TimeZone::UTC, Some("x")).as_deref(), Some("UTC"));
+    // A POSIX zone is recorded as the string it was given.
+    let posix = "EST5EDT,M3.2.0,M11.1.0";
+    assert_eq!(recorded(tz(), Some(posix)).as_deref(), Some(posix));
+    // A zone with neither is recorded as none.
+    assert_eq!(recorded(tz(), None), None);
 }

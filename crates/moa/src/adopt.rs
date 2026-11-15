@@ -11,7 +11,7 @@ use moa_agents::claude::find_transcript;
 use moa_core::UtcMs;
 use moa_store::accounts::AccountMap;
 use moa_store::export::{ExportEnv, ExportError, export_spike};
-use moa_store::import::{IdSource, ImportEnv, ImportError, import_spike};
+use moa_store::import::{IdSource, ImportEnv, ImportError, import_spike, recorded_zone};
 use moa_store::{Store, StoreError, is_sidecar_name, sidecars};
 
 #[derive(Args)]
@@ -65,16 +65,18 @@ fn file_name(p: &Path) -> String {
         .into_owned()
 }
 
-fn zone(tz: Option<&str>) -> Result<TimeZone, String> {
+/// The zone to use, and the text the user gave for it (`None` for the system zone).
+fn zone(tz: Option<&str>) -> Result<(TimeZone, Option<String>), String> {
     match tz {
         Some(s) => TimeZone::get(s)
             .or_else(|_| TimeZone::posix(s))
+            .map(|z| (z, Some(s.to_string())))
             .map_err(|_| {
                 "that isn't a time zone I know; pass --tz with a name like Europe/Paris".to_string()
             }),
-        None => {
-            TimeZone::try_system().map_err(|_| "can't tell your time zone; pass --tz".to_string())
-        }
+        None => TimeZone::try_system()
+            .map(|z| (z, None))
+            .map_err(|_| "can't tell your time zone; pass --tz".to_string()),
     }
 }
 
@@ -157,7 +159,7 @@ fn backups_for(db: &Path) -> PathBuf {
 }
 
 pub fn adopt(args: &AdoptArgs) -> Result<(), String> {
-    let tz = zone(args.tz.as_deref())?;
+    let (tz, tz_spec) = zone(args.tz.as_deref())?;
     let accounts = accounts(&args.accounts)?;
     if !args.from.is_file() {
         return Err(format!("no spike brain at {}", file_name(&args.from)));
@@ -171,6 +173,7 @@ pub fn adopt(args: &AdoptArgs) -> Result<(), String> {
         .map_or(0, |d| d.as_millis() as i64);
     let env = ImportEnv {
         tz,
+        tz_spec,
         now: UtcMs(now),
         brain: args.brain.clone(),
         accounts,
@@ -242,7 +245,7 @@ fn remove_brain(db: &Path) {
 }
 
 pub fn export(args: &ExportArgs) -> Result<(), String> {
-    let tz = zone(args.tz.as_deref())?;
+    let given = args.tz.as_deref().map(|s| zone(Some(s))).transpose()?;
     let accounts = accounts(&args.accounts)?;
     if !args.from.is_file() {
         return Err(format!("no v1 brain at {}", file_name(&args.from)));
@@ -255,6 +258,22 @@ pub fn export(args: &ExportArgs) -> Result<(), String> {
         }
         other => store_err(other),
     })?;
+    // The spike's times are read in the zone the import used; only a missing record falls
+    // back to this machine's zone.
+    let recorded = recorded_zone(&store);
+    let tz = match given {
+        Some((tz, spec)) => {
+            let label = tz.iana_name().map(str::to_owned).or(spec);
+            if recorded.is_some_and(|r| Some(r) != label) {
+                eprintln!("note: exporting with a different time zone than the import used");
+            }
+            tz
+        }
+        None => match recorded.and_then(|r| zone(Some(&r)).ok()) {
+            Some((tz, _)) => tz,
+            None => zone(None)?.0,
+        },
+    };
     let env = ExportEnv {
         tz,
         accounts,
