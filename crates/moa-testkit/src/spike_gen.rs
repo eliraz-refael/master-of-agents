@@ -122,7 +122,15 @@ impl Gen {
     }
 
     fn text(&mut self) -> Value {
-        Value::Text(self.tok())
+        let t = self.tok();
+        if self.messy(8) {
+            // Invalid UTF-8: a multi-byte character cut off at the end. `write` stores a blob
+            // as TEXT with a CAST, so the column really holds text that isn't valid UTF-8.
+            let mut bytes = t.into_bytes();
+            bytes.extend_from_slice(&[0xE6, 0x97]);
+            return Value::Blob(bytes);
+        }
+        Value::Text(t)
     }
 
     fn opt_text(&mut self) -> Value {
@@ -196,7 +204,12 @@ impl Gen {
     /// An existing id, or none, or (when messy) one that is not there.
     fn reference(&mut self, ids: &[i64]) -> Value {
         if self.messy(10) {
-            return Value::Integer(9999);
+            // Not there, or not even a number.
+            return if self.chance(50) {
+                Value::Integer(9999)
+            } else {
+                Value::Text("n/a".into())
+            };
         }
         if ids.is_empty() || self.chance(30) {
             return Value::Null;

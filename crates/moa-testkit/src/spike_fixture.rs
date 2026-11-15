@@ -170,7 +170,14 @@ impl SpikeBrain {
             let sql = format!(
                 "INSERT INTO {table} ({}) VALUES ({})",
                 kept.iter().map(|(c, _)| *c).collect::<Vec<_>>().join(", "),
-                vec!["?"; kept.len()].join(", ")
+                kept.iter()
+                    .map(|(_, v)| if matches!(v, Value::Blob(_)) {
+                        "CAST(? AS TEXT)"
+                    } else {
+                        "?"
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             let values = kept.iter().map(|(_, v)| match v {
                 Value::Text(t) => Value::Text(t.replace("{home}", &home_str)),

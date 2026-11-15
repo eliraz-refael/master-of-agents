@@ -152,6 +152,7 @@ fn sessions(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), Import
             continue;
         };
         let key = conversation_key(&conv);
+        run.check_text("sessions", &key, r);
         if run.session_ids.contains_key(&conv) {
             run.warn("sessions", &key, R_SESSION_ID_REPEATED);
             warned += run.end_record();
@@ -224,15 +225,7 @@ fn sessions(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), Import
         let title = r.text("title");
         let cwd = r.text("cwd");
         let start_cwd = f.first_cwd.as_ref().map(|(_, c)| c.clone()).or(cwd.clone());
-        let project = run.rule(
-            "sessions",
-            &key,
-            rules::reference(
-                r.int("project_id"),
-                |p| run.project_ids.contains(&p),
-                R_SESSION_PROJECT,
-            ),
-        );
+        let project = run.project_ref("sessions", &key, r, R_SESSION_PROJECT);
         // Task 6 already warned about a group path that needed cleaning.
         let group = r
             .text("grp")
@@ -395,6 +388,7 @@ fn events(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), ImportEr
     let (mut imported, mut warned) = (0, 0);
     for e in events {
         let key = id_key(e.id);
+        run.check_text("events", &key, &e.row);
         let at = run.rule(
             "events",
             &key,

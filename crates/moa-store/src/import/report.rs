@@ -205,3 +205,7 @@ pub fn r_transcript_missing(account: usize) -> &'static str {
         .copied()
         .unwrap_or("transcript missing; resume will fail (another account)")
 }
+
+/// Any text value that was not valid UTF-8 (a multi-byte character cut off, for example).
+pub const R_TEXT_LOSSY: &str =
+    "a text value isn't valid UTF-8; imported with replacement characters";

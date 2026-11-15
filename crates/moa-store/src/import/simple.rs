@@ -31,6 +31,7 @@ pub(super) fn projects(run: &mut Run, tx: &Transaction) -> Result<(), ImportErro
     for r in &rows {
         let Some(id) = r.int("id") else { continue };
         let key = id_key(id);
+        run.check_text("projects", &key, r);
         let name = run.rule(
             "projects",
             &key,
@@ -121,15 +122,8 @@ pub(super) fn notes(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> 
     for r in &rows {
         let Some(id) = r.int("id") else { continue };
         let key = id_key(id);
-        let project = run.rule(
-            "notes",
-            &key,
-            rules::reference(
-                r.int("project_id"),
-                |p| run.project_ids.contains(&p),
-                R_NOTE_PROJECT,
-            ),
-        );
+        run.check_text("notes", &key, r);
+        let project = run.project_ref("notes", &key, r, R_NOTE_PROJECT);
         let kind = run.rule(
             "notes",
             &key,
@@ -170,6 +164,7 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
         raw: String,
         key: String,
         created: Option<String>,
+        lossy: bool,
     }
     let (env_now, tz) = (run.env.now, run.env.tz.clone());
     let mut items: Vec<Item> = Vec::new();
@@ -184,6 +179,7 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
             raw,
             key: id_key(r.int("rowid").unwrap_or(0)),
             created: r.text("created_at"),
+            lossy: r.lossy(),
         });
     }
     for r in run.src.rows("sessions", &["session_id", "grp"], "rowid")? {
@@ -195,6 +191,7 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
                 raw,
                 key: conversation_key(&r.text("session_id").unwrap_or_default()),
                 created: None,
+                lossy: false,
             });
         }
     }
@@ -202,6 +199,9 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
     let (mut imported, mut warned) = (0, 0);
     let mut done: HashSet<String> = HashSet::new();
     for item in &items {
+        if item.lossy {
+            run.warn("groups", &item.key, R_TEXT_LOSSY);
+        }
         let (path, fixed) = rules::group_path(&item.raw);
         if path.is_empty() {
             run.warn("groups", &item.key, R_GROUP_PATH_EMPTY);
@@ -237,6 +237,7 @@ pub(super) fn activity(run: &mut Run, tx: &Transaction) -> Result<(), ImportErro
     for r in &rows {
         let Some(id) = r.int("id") else { continue };
         let key = id_key(id);
+        run.check_text("activity", &key, r);
         let at = run.rule(
             "activity",
             &key,
@@ -276,6 +277,7 @@ pub(super) fn meta(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
     let (mut threads_source, mut threads_imported, mut threads_warned) = (0, 0, 0);
     for r in &rows {
         let key = id_key(r.int("rowid").unwrap_or(0));
+        run.check_text("meta", &key, r);
         let value = r.text("value").unwrap_or_default();
         match r.text("key").unwrap_or_default().as_str() {
             "console_thread" => {

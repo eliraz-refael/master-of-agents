@@ -13,7 +13,7 @@ use std::time::Duration;
 use jiff::tz::TimeZone;
 use moa_core::UtcMs;
 use moa_core::model::{SessionId, TranscriptCheck};
-use rusqlite::types::Value;
+use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
@@ -167,6 +167,8 @@ pub fn snapshot_spike(src: &Path, dest: &Path) -> Result<(), ImportError> {
 pub(crate) struct SrcRow {
     cols: Vec<&'static str>,
     vals: Vec<Value>,
+    /// Some text value was not valid UTF-8 and was read with replacement characters.
+    lossy: bool,
 }
 
 impl SrcRow {
@@ -188,10 +190,22 @@ impl SrcRow {
         }
     }
 
+    /// True when a text value of this row was not valid UTF-8 (see [`Src::rows`]).
+    pub(crate) fn lossy(&self) -> bool {
+        self.lossy
+    }
+
+    /// A reference column holding something other than NULL or a whole number: it can't
+    /// point at anything.
+    pub(crate) fn int_is_bad(&self, col: &str) -> bool {
+        !matches!(self.get(col), Value::Null) && self.int(col).is_none()
+    }
+
     pub(crate) fn int(&self, col: &str) -> Option<i64> {
         match self.get(col) {
             Value::Integer(i) => Some(*i),
             Value::Text(t) => t.trim().parse().ok(),
+            Value::Real(r) if r.fract() == 0.0 && r.abs() < 9.0e15 => Some(*r as i64),
             _ => None,
         }
     }
@@ -247,12 +261,28 @@ impl Src<'_> {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |r| {
-            let vals = (0..cols.len())
-                .map(|i| r.get::<_, Value>(i))
-                .collect::<Result<Vec<_>, _>>()?;
+            // Read by reference so that text which isn't valid UTF-8 can't fail the import:
+            // text and blobs are both read as text, with replacement characters if needed.
+            let mut lossy = false;
+            let mut vals = Vec::with_capacity(cols.len());
+            for i in 0..cols.len() {
+                vals.push(match r.get_ref(i)? {
+                    ValueRef::Null => Value::Null,
+                    ValueRef::Integer(n) => Value::Integer(n),
+                    ValueRef::Real(f) => Value::Real(f),
+                    ValueRef::Text(b) | ValueRef::Blob(b) => match std::str::from_utf8(b) {
+                        Ok(t) => Value::Text(t.to_string()),
+                        Err(_) => {
+                            lossy = true;
+                            Value::Text(String::from_utf8_lossy(b).into_owned())
+                        }
+                    },
+                });
+            }
             Ok(SrcRow {
                 cols: cols.to_vec(),
                 vals,
+                lossy,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -304,6 +334,32 @@ impl Run<'_> {
             level: Level::Info,
             reason,
         });
+    }
+
+    /// Warns when a text value of the record was not valid UTF-8. The generic reason is used
+    /// because the importers read many columns at once and the reading layer doesn't name them.
+    pub(crate) fn check_text(&mut self, table: &'static str, key: &str, row: &SrcRow) {
+        if row.lossy() {
+            self.warn(table, key, report::R_TEXT_LOSSY);
+        }
+    }
+
+    /// G4 for a project reference: NULL is none; a value that isn't a whole number or names
+    /// no project is none with `reason`.
+    pub(crate) fn project_ref(
+        &mut self,
+        table: &'static str,
+        key: &str,
+        row: &SrcRow,
+        reason: &'static str,
+    ) -> Option<i64> {
+        if row.int_is_bad("project_id") {
+            self.warn(table, key, reason);
+            return None;
+        }
+        let ids = &self.project_ids;
+        let ruled = rules::reference(row.int("project_id"), |p| ids.contains(&p), reason);
+        self.rule(table, key, ruled)
     }
 
     /// Takes the value of a rule and warns if the rule had a reason.

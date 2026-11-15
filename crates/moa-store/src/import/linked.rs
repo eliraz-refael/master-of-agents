@@ -41,15 +41,8 @@ fn tasks(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
     for r in &rows {
         let Some(id) = r.int("id") else { continue };
         let key = id_key(id);
-        let project = run.rule(
-            "tasks",
-            &key,
-            rules::reference(
-                r.int("project_id"),
-                |p| run.project_ids.contains(&p),
-                R_TASK_PROJECT,
-            ),
-        );
+        run.check_text("tasks", &key, r);
+        let project = run.project_ref("tasks", &key, r, R_TASK_PROJECT);
         let title = run.rule(
             "tasks",
             &key,
@@ -167,6 +160,7 @@ fn suggestions(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
     for r in &rows {
         let Some(id) = r.int("id") else { continue };
         let key = id_key(id);
+        run.check_text("suggestions", &key, r);
         let text = run.rule(
             "suggestions",
             &key,
@@ -252,6 +246,7 @@ fn asks(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
     for r in &rows {
         let Some(id) = r.int("id") else { continue };
         let key = id_key(id);
+        run.check_text("asks", &key, r);
         let at = run.rule(
             "asks",
             &key,

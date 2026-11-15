@@ -1072,3 +1072,71 @@ fn unusable_session_ids_are_reported_not_fatal() {
     assert!(reasons.contains(&"session_id repeats another session; not imported"));
     assert!(warns(&report).iter().any(|n| n.key.starts_with('#')));
 }
+
+#[test]
+fn invalid_utf8_and_wrong_typed_values_are_read_without_failing() {
+    let mut s = empty_setup();
+    small_brain(&s, &[], &[]);
+    let c = Connection::open(&s.spike).unwrap();
+    // The spike's own connections leave foreign keys off.
+    c.pragma_update(None, "foreign_keys", false).unwrap();
+    // A title cut off in the middle of a multi-byte character, and a project id that isn't a number.
+    c.execute(
+        "INSERT INTO sessions (session_id, account, title, project_id, state, first_seen) \
+         VALUES ('cut', 'codex', CAST(x'41E697' AS TEXT), 'n/a', 'ended', '2026-11-15 09:00:00')",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO tasks (id, title, project_id, session_id) VALUES (1, 'x', 'n/a', 7)",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO events (ts, session_id, cwd, kind, text) \
+         VALUES (1.5, 'cut', '/tmp', 'stop', CAST(x'E697' AS TEXT))",
+        [],
+    )
+    .unwrap();
+    drop(c);
+    let report = import_spike(&s.spike, &mut s.store, &env(&s.home, "default")).unwrap();
+    let db = s.store.conn();
+    let title: String = col(db, "SELECT title FROM sessions");
+    assert_eq!(title, "A\u{FFFD}");
+    assert_eq!(
+        col::<Option<i64>>(db, "SELECT project_id FROM sessions"),
+        None
+    );
+    assert_eq!(col::<Option<i64>>(db, "SELECT project_id FROM tasks"), None);
+    let has = |table: &str, reason: &str| {
+        report
+            .notes
+            .iter()
+            .any(|n| n.table == table && n.level == Level::Warn && n.reason == reason)
+    };
+    let lossy = "a text value isn't valid UTF-8; imported with replacement characters";
+    assert!(has("sessions", lossy));
+    assert!(has("events", lossy));
+    assert!(has(
+        "sessions",
+        "project_id points at no project; imported as none"
+    ));
+    assert!(has(
+        "tasks",
+        "project_id points at no project; imported as none"
+    ));
+    assert!(has(
+        "tasks",
+        "session_id points at no session; imported as none"
+    ));
+    assert!(has(
+        "events",
+        "ts isn't a time; imported as the import time"
+    ));
+    for t in SESSION_TABLES {
+        let n = count(&report, t);
+        assert_eq!(n.source, n.imported, "{t}");
+    }
+    assert!(!report.render_text(false).contains('\u{FFFD}'));
+    assert!(!serde_json::to_string(&report).unwrap().contains('\u{FFFD}'));
+}
