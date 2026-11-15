@@ -14,3 +14,14 @@ moa_brain() {
     export MOA_TMUX="moa-$1" MOA_DB="$HOME/.local/share/moa/$1/brain.db" MOA_SCOPE="$HOME/.config/moa/$1.md"
   fi
 }
+
+# Is PATH under one of these colon-separated FOLDERS? Shared by the tracking hook and the
+# plugin's moactl so they route an account's sessions the same way.
+moa_under() {
+  local r roots; IFS=: read -ra roots <<<"$2"
+  for r in "${roots[@]}"; do
+    [ -n "$r" ] || continue   # an empty entry ("a::b", a trailing ":") must not match everything
+    case "$1/" in "${r%/}"/*) return 0 ;; esac
+  done
+  return 1
+}

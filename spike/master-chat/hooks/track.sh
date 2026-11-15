@@ -18,24 +18,16 @@ q() { printf "'%s'" "${1//\'/\'\'}"; }
 # moves, so it doesn't freeze as "working" or split across two brains.
 # (sqlite3 creates a missing file even to read it, hence the -f)
 tracked() { [ -f "$1" ] && [ -n "$(sqlite3 "$1" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ]; }
-under() {  # is the session's folder under one of these colon-separated folders?
-  local r roots; IFS=: read -ra roots <<<"$1"
-  for r in "${roots[@]}"; do
-    [ -n "$r" ] || continue   # an empty entry ("a::b", a trailing ":") must not match everything
-    case "$cwd/" in "${r%/}"/*) return 0 ;; esac
-  done
-  return 1
-}
+. "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/brain.sh"
 if [ -n "${MOA_ACCOUNT_BRAIN:-}" ]; then
-  . "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/brain.sh"
   other=$(moa_brain "$MOA_ACCOUNT_BRAIN"; echo "$MOA_DB")
-  if under "${MOA_EXCEPT_UNDER:-}"; then
+  if moa_under "$cwd" "${MOA_EXCEPT_UNDER:-}"; then
     if ! tracked "$db" && tracked "$other"; then db="$other"; fi
   elif ! tracked "$db"; then
     db="$other"
   fi
 elif [ -n "${MOA_ONLY_UNDER:-}" ]; then
-  under "$MOA_ONLY_UNDER" || tracked "$db" || exit 0
+  moa_under "$cwd" "$MOA_ONLY_UNDER" || tracked "$db" || exit 0
 fi
 [ -f "$db" ] || exit 0
 event=$(jq -r '.hook_event_name // empty' <<<"$in")

@@ -41,13 +41,13 @@ named brain lives outside the repo, so its data can't be committed:
 `--account` takes an account's command name or its config folder (`~/.claude-something`).
 
 Sessions belong to the moa that opened them. To send an account's sessions to a brain
-wherever they start, and keep some folders with the default moa:
+wherever they start, and keep some folders with the moa that opens them:
 
     moactl setup install claude-work --brain work --except ~/private ~/.config
 
 | claude-work session started in | goes to |
 |---|---|
-| `~/private/…`, `~/.config/…` | the default moa |
+| `~/private/…`, `~/.config/…` | the moa that opened it (the default moa, unless `moa work` did) |
 | anywhere else (`~/workspace/…`, `~`, a clone in `/tmp`) | the work moa |
 
 Anything not listed as an exception is the brain's, so its data can't reach the default

@@ -4,7 +4,7 @@ folder (~/.claude, or ~/.claude-* used with CLAUDE_CONFIG_DIR) that has a projec
 folder or a settings.json. The hook (master-chat/hooks/track.sh) reports only sessions
 moa started (MOA_TRACK=1). "only" limits it to some folders (MOA_ONLY_UNDER); "--brain B"
 sends the account's sessions to brain B's moa (MOA_ACCOUNT_BRAIN), "--except FOLDERS"
-keeping those folders with the default moa (MOA_EXCEPT_UNDER).
+keeping those folders with the moa that opens them (MOA_EXCEPT_UNDER).
 Not product code."""
 import datetime
 import glob
@@ -167,7 +167,7 @@ def _dq(text):
 def install(d, only=None, brain=None, exceptions=None):
     """(Re)install moa's hook for every event it uses, and the moa plugin. `only` limits both
     to those folders; `brain` sends the account's sessions to that brain's moa instead,
-    except in the folders `exceptions`, which stay with the default moa."""
+    except in the folders `exceptions`, which stay with the moa that opens them."""
     p, s = _settings(d)
     _strip(s)
     _unplug(s)
@@ -217,7 +217,7 @@ def short(path):
 def limits(a):
     """Where an account's sessions go, for listings: " → work moa, except ~/x → default moa"."""
     if a["brain"]:
-        return f" → {a['brain']} moa" + (f", except {', '.join(short(x) for x in a['except'])} → default moa" if a["except"] else "")
+        return f" → {a['brain']} moa" + (f", except {', '.join(short(x) for x in a['except'])}" if a["except"] else "")
     return f" (only {', '.join(short(x) for x in a['only'])})" if a["only"] else ""
 
 

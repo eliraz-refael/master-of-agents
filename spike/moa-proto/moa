@@ -22,6 +22,8 @@ done
 # Run from inside another moa (a terminal pane), this shell carries that moa's settings
 # and a session's markers; none of them belong to this brain. Its settings file has them.
 unset MOA_ACCOUNT MOA_OPEN_ACCOUNT MOA_TRACK MOA_TITLE MOA_GROUP MOA_SELF
+# and an agent's account routing (its settings env): it would send this moa's sessions elsewhere
+unset MOA_ACCOUNT_BRAIN MOA_EXCEPT_UNDER MOA_ONLY_UNDER
 # Set every MOA_ variable here, before the tmux server starts: the server keeps this
 # environment, so its panels, key bindings and every session it opens use this brain,
 # even when this was run from inside another brain's moa.

@@ -633,6 +633,8 @@ def setup(conn, a):
         sys.exit(f"no Claude account {a.name!r} (moactl setup list)")
     if (a.brain or a.exceptions) and a.op != "install":
         sys.exit("--brain and --except go with `setup install`")
+    if a.folders and a.op != "only":
+        sys.exit(f"`setup {a.op}` takes no folders" + (" (--except FOLDERS with --brain BRAIN)" if a.op == "install" else ""))
     if a.exceptions and not a.brain:
         sys.exit("--except FOLDERS goes with --brain BRAIN: the account's sessions go to that brain, except in FOLDERS")
     if a.brain and (a.brain == "default" or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.brain)):
@@ -642,7 +644,7 @@ def setup(conn, a):
         where = ""
         if a.brain:
             where = (f"; its sessions go to the {a.brain} moa (start it with: moa {a.brain})"
-                     + (f", except under {', '.join(setup_hooks.short(f) for f in a.exceptions)}, which stay with the default moa"
+                     + (f", except under {', '.join(setup_hooks.short(f) for f in a.exceptions)}, which stay with the moa that opens them (the default one, unless moa {a.brain} does)"
                         if a.exceptions else ""))
         print(f"tracking and the moa plugin installed for {acct['name']}{where}; its running sessions pick them up when they restart"
               + (f"\nbut: {err}" if err else ""))
