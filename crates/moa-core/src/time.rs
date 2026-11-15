@@ -20,7 +20,7 @@ pub enum TimeError {
 /// jiff's civil parser would silently drop.
 fn parse_civil(text: &str) -> Result<DateTime, TimeError> {
     let text = text.trim();
-    // The whole-tail scan is deliberate: a spike time never contains -, +, Z or [ after the date.
+    // The whole-tail scan is deliberate: a spike time never contains -, +, Z, z or [ after the date.
     // After the `YYYY-MM-DD` date, no sign, `Z` or zone annotation may appear.
     let rest = text.get(10..).unwrap_or("");
     if rest.contains(['+', '-', 'Z', 'z', '[']) {
@@ -142,6 +142,9 @@ mod tests {
             "2026-07-01 12:00:00+02:00",
             "2026-07-01T12:00:00Z",
             "2026-13-01",
+            "2026-07-01T12:00:00-05:00",
+            "2026-07-01T12:00:00z",
+            "2026-07-01T12:00:00[America/New_York]",
         ] {
             assert!(spike_local_to_utc(bad, &ny()).is_err(), "{bad}");
         }
