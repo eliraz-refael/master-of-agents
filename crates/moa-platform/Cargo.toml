@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 libc.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
