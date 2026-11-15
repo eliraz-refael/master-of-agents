@@ -43,7 +43,6 @@ except = ["~/private", "~/.config"]
 [accounts.acct-b]
 kind = "claude"
 store = "~/.claude-acct-b"
-only = []
 "#;
 
 #[test]
@@ -237,6 +236,15 @@ fn caller_store_defaults_to_dot_claude() {
     assert_eq!(
         caller_store(Some(OsStr::new("/x")), home()),
         PathBuf::from("/x")
+    );
+}
+
+#[test]
+fn an_explicit_empty_only_is_an_error() {
+    let text = "[accounts.acct-b]\nkind = \"claude\"\nstore = \"~/.c\"\nonly = []\n";
+    assert_eq!(
+        Config::parse(text, home()).unwrap_err().to_string(),
+        "moa.toml: only in accounts.acct-b is empty; remove it to let the account work everywhere"
     );
 }
 

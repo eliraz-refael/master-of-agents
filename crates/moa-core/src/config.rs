@@ -294,6 +294,11 @@ impl Config {
                     "{name} has except folders but no brain to send the rest to"
                 )));
             }
+            if a.only.as_ref().is_some_and(Vec::is_empty) {
+                return Err(problem(format_args!(
+                    "only in accounts.{name} is empty; remove it to let the account work everywhere"
+                )));
+            }
             if brain.is_some() && a.only.is_some() {
                 return Err(problem(format_args!(
                     "{name} can't both go to a brain and be limited to folders"

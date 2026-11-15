@@ -1,7 +1,7 @@
 //! Which brain a folder and account belong to. Pure: callers canonicalise the cwd and, via
 //! `Config::canonicalize_with`, the configured folders; this does no IO.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::config::{AccountName, BrainName, Config};
 
@@ -12,9 +12,14 @@ pub enum Route {
 }
 
 /// Whether `path` is `folder` or inside it, by whole path components. An empty `folder`
-/// and a relative `path` match nothing, so an unset or unresolved entry never grants access.
+/// and a relative `path` match nothing, and neither does a `path` containing `..` (it is
+/// not resolved, so `starts_with` would compare it literally and could be fooled). An unset
+/// or unresolved entry never grants access: routing fails closed.
 pub fn is_under(path: &Path, folder: &Path) -> bool {
-    !folder.as_os_str().is_empty() && path.is_absolute() && path.starts_with(folder)
+    !folder.as_os_str().is_empty()
+        && path.is_absolute()
+        && !path.components().any(|c| matches!(c, Component::ParentDir))
+        && path.starts_with(folder)
 }
 
 pub fn is_under_any(path: &Path, folders: &[PathBuf]) -> bool {
@@ -78,7 +83,6 @@ except = ["~/private"]
 [accounts.acct-b]
 kind = "claude"
 store = "~/.claude-b"
-only = []
 "#,
         )
     }
@@ -167,6 +171,26 @@ only = []
     }
 
     #[test]
+    fn dotdot_never_counts_as_under() {
+        assert!(!is_under(p("/h/private/../work/x"), p("/h/private")));
+        let c = cfg();
+        let a = acct("acct-a");
+        // except: the escape attempt stays in the account's brain, not the opener/default.
+        assert_eq!(
+            route(&c, Some(&a), p("/h/private/../work/x"), None),
+            Route::Brain(brain("work"))
+        );
+        // only: fails closed.
+        let c = cfg_text(
+            "[accounts.acct-b]\nkind = \"claude\"\nstore = \"~/.claude-b\"\nonly = [\"~/private\"]\n",
+        );
+        assert_eq!(
+            route(&c, Some(&acct("acct-b")), p("/h/private/../work/x"), None),
+            Route::NotAvailable
+        );
+    }
+
+    #[test]
     fn a_relative_cwd_never_hides_in_an_except_folder() {
         let c = cfg();
         let a = acct("acct-a");
@@ -193,8 +217,23 @@ only = []
         }
 
         #[test]
-        fn only_outside_its_folders_is_not_available(seg in "[a-z]{1,8}", other in "[a-z]{1,8}") {
+        fn outside_every_except_folder_routes_to_the_account_brain(
+            seg in "[a-z]{1,8}",
+            other in "[a-z]{1,8}",
+            tail in "(/[a-z]{1,8}){0,3}",
+            opener in prop::option::of("[a-z]{1,8}"),
+        ) {
             prop_assume!(other != seg);
+            let c = cfg_text(&format!(
+                "[brains.work]\n[accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.c\"\nbrain = \"work\"\nexcept = [\"~/{seg}\"]\n"
+            ));
+            let opener = opener.map(|o| brain(&o));
+            let got = route(&c, Some(&acct("acct-a")), &PathBuf::from(format!("/h/{other}{tail}")), opener.as_ref());
+            prop_assert_eq!(got, Route::Brain(brain("work")));
+        }
+
+        #[test]
+        fn only_outside_its_folders_is_not_available(seg in "[a-z]{1,8}", other in "[a-z]{1,8}") {
             prop_assume!(format!("{other}x") != seg);
             let c = cfg_text(&format!(
                 "[accounts.acct-b]\nkind = \"claude\"\nstore = \"~/.c\"\nonly = [\"~/{seg}\"]\n"
