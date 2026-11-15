@@ -102,9 +102,17 @@ impl Paths {
                 }
                 (root, true)
             }
-            None => (PathBuf::from(home.ok_or(PathsError::NoHome)?), false),
+            // An empty HOME would put every path under the current folder.
+            None => (
+                PathBuf::from(home.filter(|h| !h.is_empty()).ok_or(PathsError::NoHome)?),
+                false,
+            ),
         };
-        let tmpdir = tmpdir.map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        // An empty or relative TMPDIR would put the socket under the current folder.
+        let tmpdir = tmpdir
+            .map(PathBuf::from)
+            .filter(|t| t.is_absolute())
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
         Ok(Paths {
             home,
             sandboxed,
@@ -230,23 +238,15 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), PathsError> {
     let dir = dir.as_path();
     let with_path =
         |e: io::Error| PathsError::Io(io::Error::new(e.kind(), format!("{}: {e}", dir.display())));
-    // Look before creating: a link (even a dangling one) is refused, never followed.
-    match std::fs::symlink_metadata(dir) {
-        Ok(m) if m.file_type().is_symlink() => {
-            return Err(PathsError::UnsafeDir(dir.to_path_buf(), "is a symlink"));
-        }
-        Ok(m) if !m.is_dir() => {
-            return Err(PathsError::UnsafeDir(dir.to_path_buf(), "isn't a folder"));
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(with_path)?;
-        }
-        Err(e) => return Err(with_path(e)),
+    // `mkdir` never follows the last component, so a link (even a dangling one) or a file
+    // already there is left alone, and the look below refuses it.
+    match std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+    {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(with_path(e)),
+        _ => {}
     }
     let meta = std::fs::symlink_metadata(dir).map_err(with_path)?;
     if meta.file_type().is_symlink() {

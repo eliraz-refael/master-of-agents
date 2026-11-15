@@ -39,6 +39,8 @@ pub fn build_id_of(exe: &Path) -> io::Result<String> {
 }
 
 /// The build id of the running executable, computed once; `"unknown"` if it can't be.
+/// Call it at startup: it hashes the file at the executable's path, so a first call made
+/// after an upgrade replaced that file would name the new build, not the running one.
 pub fn build_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {

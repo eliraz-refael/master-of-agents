@@ -50,7 +50,9 @@ pub fn alarm_arm(fd: &OwnedFd, at: SystemTime) -> io::Result<()> {
     ev.filter = libc::EVFILT_TIMER;
     ev.flags = libc::EV_ADD | libc::EV_ONESHOT;
     ev.fflags = libc::NOTE_ABSOLUTE | NOTE_MACH_CONTINUOUS_TIME | libc::NOTE_USECONDS;
-    ev.data = since_epoch(at).as_micros().min(i64::MAX as u128) as isize;
+    // The kernel turns microseconds into nanoseconds and refuses a product past i64, so a
+    // deadline past 2262 is clamped to the latest one it accepts.
+    ev.data = since_epoch(at).as_micros().min((i64::MAX / 1000) as u128) as isize;
     change(fd, &ev)
 }
 

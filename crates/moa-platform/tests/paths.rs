@@ -271,6 +271,27 @@ fn a_plain_file_is_refused_as_not_a_folder() {
 }
 
 #[test]
+fn an_empty_home_is_no_home() {
+    assert_eq!(
+        vars(None, Some(""), false).unwrap_err().to_string(),
+        "can't tell your home folder: HOME isn't set"
+    );
+}
+
+#[test]
+fn an_empty_or_relative_tmpdir_falls_back_to_tmp() {
+    let root = format!("/{}", "a".repeat(100));
+    for bad in ["", "rel/tmp"] {
+        let x =
+            Paths::from_vars(Some(root.clone().into()), None, Some(bad.into()), 7, false).unwrap();
+        assert!(
+            x.socket("d").unwrap().starts_with("/tmp/moa-7/"),
+            "TMPDIR={bad:?}"
+        );
+    }
+}
+
+#[test]
 fn io_errors_name_the_path() {
     let t = tmp();
     let f = t.path().join("file");

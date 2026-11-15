@@ -47,18 +47,23 @@ pub fn alarm_disarm(fd: &OwnedFd) -> io::Result<()> {
     settime(fd, Duration::ZERO, 0)
 }
 
-/// Read the expiry count to clear it: true if the timer had fired.
+/// Read the expiry count to clear it: true if the timer had fired. An interrupted read is
+/// retried: the caller clears readiness next, and an edge-triggered reactor would never
+/// report the unread expiry again.
 pub fn alarm_drain(fd: &OwnedFd) -> io::Result<bool> {
     let mut count = [0u8; 8];
-    // SAFETY: reads at most 8 bytes into an 8-byte buffer from an open descriptor.
-    let r = unsafe { libc::read(fd.as_raw_fd(), count.as_mut_ptr().cast(), count.len()) };
-    if r == count.len() as isize {
-        return Ok(true);
-    }
-    let e = io::Error::last_os_error();
-    match e.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(false),
-        _ => Err(e),
+    loop {
+        // SAFETY: reads at most 8 bytes into an 8-byte buffer from an open descriptor.
+        let r = unsafe { libc::read(fd.as_raw_fd(), count.as_mut_ptr().cast(), count.len()) };
+        if r == count.len() as isize {
+            return Ok(true);
+        }
+        let e = io::Error::last_os_error();
+        match e.kind() {
+            io::ErrorKind::Interrupted => {}
+            io::ErrorKind::WouldBlock => return Ok(false),
+            _ => return Err(e),
+        }
     }
 }
 
@@ -83,7 +88,7 @@ pub fn notify_open(dir: &Path) -> io::Result<OwnedFd> {
 /// Read every pending event: true if any of them names `name`.
 pub fn notify_drain(fd: &OwnedFd, name: &OsStr) -> io::Result<bool> {
     let mut hit = false;
-    let mut buf = vec![0u8; 4096];
+    let mut buf = [0u8; 4096];
     loop {
         // SAFETY: reads at most `buf.len()` bytes into `buf` from an open descriptor.
         let r = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
