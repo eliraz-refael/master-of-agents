@@ -14,12 +14,15 @@ pub enum Route {
 /// Whether `path` is `folder` or inside it, by whole path components. An empty `folder`
 /// and a relative `path` match nothing, and neither does a `path` containing `..` (it is
 /// not resolved, so `starts_with` would compare it literally and could be fooled). An unset
-/// or unresolved entry never grants access: routing fails closed.
+/// or unresolved entry never grants access: routing fails closed. `route` goes further: for
+/// an account with limits, such a cwd routes to `NotAvailable`.
 pub fn is_under(path: &Path, folder: &Path) -> bool {
-    !folder.as_os_str().is_empty()
-        && path.is_absolute()
-        && !path.components().any(|c| matches!(c, Component::ParentDir))
-        && path.starts_with(folder)
+    !folder.as_os_str().is_empty() && is_resolved(path) && path.starts_with(folder)
+}
+
+/// Absolute and free of `..`: a path whose folder we can name without touching the disk.
+fn is_resolved(path: &Path) -> bool {
+    path.is_absolute() && !path.components().any(|c| matches!(c, Component::ParentDir))
 }
 
 pub fn is_under_any(path: &Path, folders: &[PathBuf]) -> bool {
@@ -37,6 +40,11 @@ pub fn route(
     let Some(acct) = account.and_then(|a| config.accounts.get(a)) else {
         return home();
     };
+    let limited = !acct.except.is_empty() || !acct.only.is_empty();
+    if limited && !is_resolved(cwd) {
+        // Can't tell which folder this is, so it goes nowhere rather than risk a wrong brain.
+        return Route::NotAvailable;
+    }
     if let Some(b) = &acct.brain {
         return if is_under_any(cwd, &acct.except) {
             home()
@@ -175,10 +183,10 @@ store = "~/.claude-b"
         assert!(!is_under(p("/h/private/../work/x"), p("/h/private")));
         let c = cfg();
         let a = acct("acct-a");
-        // except: the escape attempt stays in the account's brain, not the opener/default.
+        // except: an unresolvable cwd could be private or work, so it goes nowhere.
         assert_eq!(
             route(&c, Some(&a), p("/h/private/../work/x"), None),
-            Route::Brain(brain("work"))
+            Route::NotAvailable
         );
         // only: fails closed.
         let c = cfg_text(
@@ -196,8 +204,26 @@ store = "~/.claude-b"
         let a = acct("acct-a");
         assert_eq!(
             route(&c, Some(&a), p("private/x"), None),
-            Route::Brain(brain("work"))
+            Route::NotAvailable
         );
+    }
+
+    #[test]
+    fn accounts_without_limits_are_unchanged_by_unresolved_cwds() {
+        let c = cfg_text(
+            "[brains.work]\n[accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.a\"\nbrain = \"work\"\n\
+             [accounts.acct-b]\nkind = \"claude\"\nstore = \"~/.b\"\n",
+        );
+        for cwd in ["rel/x", "/h/a/../b"] {
+            assert_eq!(
+                route(&c, Some(&acct("acct-a")), p(cwd), None),
+                Route::Brain(brain("work"))
+            );
+            assert_eq!(
+                route(&c, Some(&acct("acct-b")), p(cwd), None),
+                Route::Brain(brain("default"))
+            );
+        }
     }
 
     proptest! {

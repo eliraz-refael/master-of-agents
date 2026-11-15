@@ -285,14 +285,24 @@ fn a_singular_brain_table_is_an_error() {
 fn empty_store_launcher_and_spike_db_are_errors() {
     assert_eq!(
         err("[accounts.acct-a]\nkind = \"claude\"\nstore = \"\"\n"),
-        "moa.toml: the store  in accounts.acct-a must start with / or ~"
+        "moa.toml: the store in accounts.acct-a is empty; it must start with / or ~"
     );
     assert_eq!(
         err("[accounts.acct-a]\nkind = \"claude\"\nstore = \"/s\"\nlauncher = \"\"\n"),
-        "moa.toml: the launcher  in accounts.acct-a must start with / or ~"
+        "moa.toml: the launcher in accounts.acct-a is empty; it must start with / or ~"
     );
     assert_eq!(
         err("[brains.default]\nspike_db = \"\"\n"),
-        "moa.toml: the spike_db  in brains.default must start with / or ~"
+        "moa.toml: the spike_db in brains.default is empty; it must start with / or ~"
+    );
+}
+
+#[test]
+fn two_accounts_cannot_share_a_store() {
+    assert_eq!(
+        err(
+            "[accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.c\"\n[accounts.acct-b]\nkind = \"claude\"\nstore = \"/h/.c\"\n"
+        ),
+        "moa.toml: acct-a and acct-b have the same store /h/.c"
     );
 }

@@ -13,6 +13,19 @@ fn is_id(s: &str) -> bool {
 }
 
 #[test]
+fn a_missing_path_is_canonicalized_through_its_existing_parent() {
+    let t = tmp();
+    let parent = std::fs::canonicalize(t.path()).unwrap();
+    let missing = t.path().join("not").join("yet");
+    assert_eq!(canonical(&missing), parent.join("not").join("yet"));
+    // A relative path is returned unchanged.
+    assert_eq!(
+        canonical(std::path::Path::new("no/such/dir")),
+        std::path::PathBuf::from("no/such/dir")
+    );
+}
+
+#[test]
 fn fnv_known_vectors() {
     assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
     assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);

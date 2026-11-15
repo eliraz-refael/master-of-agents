@@ -199,7 +199,7 @@ fn expand(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, Conf
 fn expand_one(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, ConfigError> {
     if s.is_empty() {
         return Err(problem(format_args!(
-            "the {what} {s} in {place} must start with / or ~"
+            "the {what} in {place} is empty; it must start with / or ~"
         )));
     }
     expand(s, what, place, home)
@@ -339,6 +339,15 @@ impl Config {
             {
                 return Err(problem(format_args!(
                     "{name} sends its sessions to the {b} brain, which isn't in moa.toml"
+                )));
+            }
+        }
+        let mut stores: BTreeMap<&Path, &AccountName> = BTreeMap::new();
+        for (name, a) in &config.accounts {
+            if let Some(other) = stores.insert(&a.store, name) {
+                return Err(problem(format_args!(
+                    "{other} and {name} have the same store {}",
+                    a.store.display()
                 )));
             }
         }

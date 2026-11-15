@@ -91,7 +91,9 @@ impl Now {
 /// The first instant of `day + 1` in `tz`. A midnight that doesn't exist gives the first
 /// instant that does (jiff's start of day).
 pub fn start_of_next_day(day: Date, tz: &TimeZone) -> UtcMs {
-    let next = day.checked_add(jiff::Span::new().days(1)).unwrap_or(day);
+    let Ok(next) = day.checked_add(jiff::Span::new().days(1)) else {
+        return utc_ms(Timestamp::MAX);
+    };
     match next.to_zoned(tz.clone()) {
         Ok(z) => utc_ms(z.timestamp()),
         Err(_) => utc_ms(Timestamp::MAX),
@@ -212,6 +214,10 @@ mod tests {
             start_of_next_day(date(2026, 11, 15), &ny()),
             utc("2026-11-16T05:00:00Z")
         );
+    }
+    #[test]
+    fn start_of_next_day_after_the_last_date_is_the_end_of_time() {
+        assert_eq!(start_of_next_day(Date::MAX, &ny()), utc_ms(Timestamp::MAX));
     }
     #[test]
     fn start_of_next_day_across_dst_is_a_23_or_25_hour_day() {
