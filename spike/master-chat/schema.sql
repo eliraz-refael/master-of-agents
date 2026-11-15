@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   note        TEXT,
   who         TEXT,                          -- you | agent | other: whose move it is
   due         TEXT,                          -- YYYY-MM-DD: when it's expected (a wait) or due
+  priority    TEXT,                          -- p0 urgent | p1 important | p2 / NULL normal
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
   id          INTEGER PRIMARY KEY,
   text        TEXT NOT NULL,
   status      TEXT NOT NULL DEFAULT 'open',  -- open | accepted | rejected | later
+  action      TEXT,                          -- JSON list of moactl argument strings "yes" runs (moactl suggest --do)
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   resolved_at TEXT
 );

@@ -353,7 +353,7 @@ def ls(conn, show_all, as_json=False):
 
 
 def due_date(text):
-    """--due: YYYY-MM-DD, today, tomorrow, +N days, or "" to clear."""
+    """--due: YYYY-MM-DD, today, tomorrow, +N days, a weekday (the next one), or "" to clear."""
     if text is None or text == "":
         return text
     today = datetime.date.today()
@@ -361,10 +361,15 @@ def due_date(text):
         return (today + datetime.timedelta(days=text == "tomorrow")).isoformat()
     if text.startswith("+") and text[1:].isdigit():
         return (today + datetime.timedelta(days=int(text[1:]))).isoformat()
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    day = next((i for i, d in enumerate(days) if text.lower() in (d, d[:3])), None)
+    if day is not None:
+        ahead = (day - today.weekday()) % 7 or 7  # the next one, never today
+        return (today + datetime.timedelta(days=ahead)).isoformat()
     try:
         return datetime.date.fromisoformat(text).isoformat()
     except ValueError:
-        sys.exit(f"--due: {text!r} isn't YYYY-MM-DD, today, tomorrow or +N")
+        sys.exit(f"--due: {text!r} isn't YYYY-MM-DD, today, tomorrow, +N or a weekday (fri, friday)")
 
 
 def session_id(conn, q):
@@ -384,11 +389,56 @@ def task_ls(conn, project=None, show_all=False):
         if t["project"] != last:
             print(f"## {t['project'] or '-'}")
             last = t["project"]
-        extra = [x for x in (t["who"] and f"who={t['who']}", t["due"] and f"due={t['due']}",
+        extra = [x for x in (t["priority"] and t["priority"].upper(), t["today"] == datetime.date.today().isoformat() and "today",
+                             t["who"] and f"who={t['who']}", t["due"] and f"due={t['due']}",
                              t["blocked_on"] and f"on={t['blocked_on']}", t["session_id"] and f"session={t['session_id'][:8]}") if x]
         print(f"- #{t['id']} [{t['status']}] {t['title']}" + (f"  ({', '.join(extra)})" if extra else ""))
     if not rows:
         print("no open tasks")
+
+
+# --- suggestions: moa proposes, Eliraz answers with a button --------------------------------
+DOABLE = {"task", "set", "archive", "close", "group", "note", "project"}  # what a suggestion's "yes" may run
+
+
+def suggest(conn, text, actions):
+    for act in actions:  # checked now, so a bad action fails for moa, not later for Eliraz
+        try:
+            words = shlex.split(act)
+        except ValueError as e:
+            sys.exit(f"--do {act!r}: {e}")
+        if not words or words[0] not in DOABLE:
+            sys.exit(f"--do {act!r}: a suggestion can run moactl {', '.join(sorted(DOABLE))}")
+    dup = conn.execute("SELECT id FROM suggestions WHERE status='open' AND text=?", (text,)).fetchone()
+    if dup:
+        print(f"already suggested (#{dup[0]})")
+        return
+    cur = conn.execute("INSERT INTO suggestions(text, action) VALUES(?,?)", (text, json.dumps(actions) if actions else None))
+    conn.commit()
+    print(f"suggestion #{cur.lastrowid}: Eliraz sees it with yes / later / no buttons")
+
+
+def suggestion(conn, op, sid):
+    if op == "ls":
+        for r in conn.execute("SELECT * FROM suggestions WHERE status IN ('open','later') ORDER BY id"):
+            acts = json.loads(r["action"]) if r["action"] else []
+            print(f"#{r['id']} [{r['status']}] {r['text']}" + (f"  (yes runs: {'; '.join(acts)})" if acts else ""))
+        return
+    r = conn.execute("SELECT * FROM suggestions WHERE id=?", (sid,)).fetchone() if sid else None
+    if not r:
+        sys.exit("moactl suggestion yes|no|later ID")
+    if r["status"] not in ("open", "later"):
+        sys.exit(f"suggestion #{sid} is already {r['status']}")
+    failed = []
+    if op == "yes":
+        for act in json.loads(r["action"]) if r["action"] else []:
+            out = subprocess.run([sys.executable, os.path.abspath(__file__), *shlex.split(act)], capture_output=True, text=True)
+            if out.returncode:
+                failed.append(f"{act}: {(out.stderr or out.stdout).strip()}")
+    status = {"yes": "accepted", "no": "rejected", "later": "later"}[op]
+    conn.execute("UPDATE suggestions SET status=?, resolved_at=datetime('now','localtime') WHERE id=?", (status, sid))
+    log_ui(conn, f"{status} suggestion #{sid}: {r['text']}" + (f" (failed: {'; '.join(failed)})" if failed else ""))
+    print(("done" if op == "yes" else status) + ("" if not failed else "; but " + "; ".join(failed)))
 
 
 def age(ts):
@@ -452,6 +502,23 @@ def attention_lines(conn, limit=20):
     for s in conn.execute("SELECT * FROM suggestions WHERE status='open' ORDER BY id"):
         out.append(f"- ? suggestion #{s['id']}: {s['text']}")
     return out[:limit]
+
+
+def add_project(conn, name, path, summary):
+    """A folder becomes a project: its tasks get their own group on the big picture, and the
+    sessions already working in it are linked to it."""
+    path = os.path.abspath(os.path.expanduser(path))
+    if not private(path):
+        sys.exit(f"{path} isn't a private folder; this brain doesn't track it")
+    if conn.execute("SELECT 1 FROM projects WHERE lower(name)=lower(?) OR path=?", (name, path)).fetchone():
+        sys.exit(f"there's already a project named {name!r} or for {path}")
+    pid = conn.execute("INSERT INTO projects(name, path, summary, last_activity) VALUES(?,?,?,date('now','localtime'))",
+                       (name, path, summary)).lastrowid
+    n = conn.execute("UPDATE sessions SET project_id=? WHERE (cwd=? OR cwd LIKE ? || '/%') AND project_id IS NULL",
+                     (pid, path, path)).rowcount
+    conn.commit()
+    log_ui(conn, f"new project {name} ({path})")
+    print(f"project {name} added for {path}" + (f"; {n} session{'s' if n != 1 else ''} linked" if n else ""))
 
 
 def project(conn, name):
@@ -850,16 +917,22 @@ def main():
     p = sub.add_parser("layout"); p.add_argument("op", choices=["list", "show", "apply", "set"]); p.add_argument("args", nargs="*")
     sub.add_parser("brief"); sub.add_parser("attention")
     p = sub.add_parser("find"); p.add_argument("q")
-    p = sub.add_parser("project"); p.add_argument("name")
+    p = sub.add_parser("project", help="show a project; with --add PATH, make that folder a new project")
+    p.add_argument("name"); p.add_argument("--add", metavar="PATH"); p.add_argument("--summary")
     p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("--title"); p.add_argument("--group")
     p = sub.add_parser("group"); p.add_argument("op", choices=["add", "rename", "rm"]); p.add_argument("args", nargs="+")
     p = sub.add_parser("note"); p.add_argument("text"); p.add_argument("--project"); p.add_argument("--kind", default="fact")
-    p = sub.add_parser("suggest"); p.add_argument("text")
+    p = sub.add_parser("suggest", help="propose something to Eliraz; with --do, a button that does it")
+    p.add_argument("text"); p.add_argument("--do", action="append", default=[], metavar="MOACTL-ARGS",
+                                           help='what "yes" runs, as moactl arguments ("task set 12 --due fri"); repeatable')
+    p = sub.add_parser("suggestion", help="answer a suggestion: yes runs its actions")
+    p.add_argument("op", choices=["yes", "no", "later", "ls"]); p.add_argument("id", nargs="?", type=int)
     p = sub.add_parser("task"); p.add_argument("op", choices=["add", "set", "ls"]); p.add_argument("args", nargs="*")
     p.add_argument("--today", action="store_true"); p.add_argument("--not-today", action="store_true")
     p.add_argument("--status"); p.add_argument("--blocked-on"); p.add_argument("--title")
-    p.add_argument("--who", choices=["you", "agent", "other"]); p.add_argument("--due", help="YYYY-MM-DD, today, tomorrow or +N (days)")
+    p.add_argument("--who", choices=["you", "agent", "other"]); p.add_argument("--due", help="YYYY-MM-DD, today, tomorrow, +N (days) or a weekday (fri, friday)")
     p.add_argument("--session"); p.add_argument("--note"); p.add_argument("--all", action="store_true")
+    p.add_argument("--priority", choices=["p0", "p1", "p2", ""], help="p0 urgent, p1 important, p2 normal; \"\" clears it")
     p = sub.add_parser("peers", help="the agents you can ask: moa and the other sessions running in moa")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("ask", help="send another agent (a session, or moa) a message and wait for its reply",
@@ -935,7 +1008,7 @@ def main():
         for r in candidates(conn, a.q)[:15]:
             print(f"{r['session_id'][:8]}  {label(r)}  {r['state']}  {age(r['last_seen'])}  {r['cwd']}")
     elif a.cmd == "project":
-        project(conn, a.name)
+        add_project(conn, a.name, a.add, a.summary) if a.add else project(conn, a.name)
     elif a.cmd == "set":
         set_session(conn, find(conn, a.id), a.title, a.group)
         print("ok")
@@ -946,7 +1019,9 @@ def main():
         conn.execute("INSERT INTO notes(project_id,kind,text) VALUES(?,?,?)", (p[0] if p else None, a.kind, a.text))
         conn.commit(); print("noted")
     elif a.cmd == "suggest":
-        conn.execute("INSERT INTO suggestions(text) VALUES(?)", (a.text,)); conn.commit(); print("suggested")
+        suggest(conn, a.text, a.do)
+    elif a.cmd == "suggestion":
+        suggestion(conn, a.op, a.id)
     elif a.cmd == "task" and a.op == "ls":
         task_ls(conn, a.args[0] if a.args else None, a.all)
     elif a.cmd == "task" and a.op == "add":
@@ -955,19 +1030,20 @@ def main():
         p = pid(a.args[0])
         if not p:
             sys.exit(f"no project {a.args[0]!r} (moactl project NAME to check)")
-        cur = conn.execute("INSERT INTO tasks(project_id,title,today,status,who,due,session_id,note,blocked_on) VALUES(?,?,?,?,?,?,?,?,?)",
+        cur = conn.execute("INSERT INTO tasks(project_id,title,today,status,who,due,session_id,note,blocked_on,priority) "
+                           "VALUES(?,?,?,?,?,?,?,?,?,?)",
                            (p[0], " ".join(a.args[1:]), datetime.date.today().isoformat() if a.today else None,
                             a.status or ("blocked" if a.blocked_on else "todo"), a.who or "you", due_date(a.due),
-                            session_id(conn, a.session), a.note, a.blocked_on))
+                            session_id(conn, a.session), a.note, a.blocked_on, a.priority or None))
         conn.commit(); print(f"task #{cur.lastrowid} added")
     elif a.cmd == "task" and a.op == "set":
         if not a.args:
-            sys.exit("moactl task set ID [--status S] [--title T] [--who W] [--due D] [--session ID] [--note N]")
+            sys.exit("moactl task set ID [--status S] [--title T] [--who W] [--due D] [--priority P] [--session ID] [--note N]")
         tid = int(a.args[0])
         if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():
             sys.exit(f"no task #{tid}")
         fields = {"status": a.status, "title": a.title, "who": a.who, "due": due_date(a.due),
-                  "session_id": session_id(conn, a.session), "note": a.note}
+                  "session_id": session_id(conn, a.session), "note": a.note, "priority": a.priority}
         if a.title == "":
             sys.exit("--title can't be empty")
         if a.blocked_on is not None:  # "" clears it
