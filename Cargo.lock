@@ -490,6 +490,10 @@ dependencies = [
 name = "moa-testkit"
 version = "0.1.0"
 dependencies = [
+ "moa-store",
+ "proptest",
+ "rusqlite",
+ "serde_json",
  "tempfile",
 ]
 

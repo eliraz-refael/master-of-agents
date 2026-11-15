@@ -7,6 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+moa-store = { path = "../moa-store" }
+proptest.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

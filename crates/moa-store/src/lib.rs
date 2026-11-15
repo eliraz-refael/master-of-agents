@@ -12,6 +12,7 @@ use rusqlite_migration::{Migrations, SchemaVersion};
 
 pub mod backup;
 mod schema;
+pub mod spike;
 
 pub use schema::{SCHEMA_VERSION, migrations};
 
