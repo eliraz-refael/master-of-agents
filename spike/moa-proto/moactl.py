@@ -500,6 +500,23 @@ def attention_lines(conn, limit=20):
     return out[:limit]
 
 
+def add_project(conn, name, path, summary):
+    """A folder becomes a project: its tasks get their own group on the big picture, and the
+    sessions already working in it are linked to it."""
+    path = os.path.abspath(os.path.expanduser(path))
+    if not private(path):
+        sys.exit(f"{path} isn't a private folder; this brain doesn't track it")
+    if conn.execute("SELECT 1 FROM projects WHERE lower(name)=lower(?) OR path=?", (name, path)).fetchone():
+        sys.exit(f"there's already a project named {name!r} or for {path}")
+    pid = conn.execute("INSERT INTO projects(name, path, summary, last_activity) VALUES(?,?,?,date('now','localtime'))",
+                       (name, path, summary)).lastrowid
+    n = conn.execute("UPDATE sessions SET project_id=? WHERE (cwd=? OR cwd LIKE ? || '/%') AND project_id IS NULL",
+                     (pid, path, path)).rowcount
+    conn.commit()
+    log_ui(conn, f"new project {name} ({path})")
+    print(f"project {name} added for {path}" + (f"; {n} session{'s' if n != 1 else ''} linked" if n else ""))
+
+
 def project(conn, name):
     p = conn.execute("SELECT * FROM projects WHERE lower(name)=lower(?) OR lower(name) LIKE lower(?) ORDER BY lower(name)=lower(?) DESC LIMIT 1",
                      (name, f"%{name}%", name)).fetchone()
@@ -896,7 +913,8 @@ def main():
     p = sub.add_parser("layout"); p.add_argument("op", choices=["list", "show", "apply", "set"]); p.add_argument("args", nargs="*")
     sub.add_parser("brief"); sub.add_parser("attention")
     p = sub.add_parser("find"); p.add_argument("q")
-    p = sub.add_parser("project"); p.add_argument("name")
+    p = sub.add_parser("project", help="show a project; with --add PATH, make that folder a new project")
+    p.add_argument("name"); p.add_argument("--add", metavar="PATH"); p.add_argument("--summary")
     p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("--title"); p.add_argument("--group")
     p = sub.add_parser("group"); p.add_argument("op", choices=["add", "rename", "rm"]); p.add_argument("args", nargs="+")
     p = sub.add_parser("note"); p.add_argument("text"); p.add_argument("--project"); p.add_argument("--kind", default="fact")
@@ -986,7 +1004,7 @@ def main():
         for r in candidates(conn, a.q)[:15]:
             print(f"{r['session_id'][:8]}  {label(r)}  {r['state']}  {age(r['last_seen'])}  {r['cwd']}")
     elif a.cmd == "project":
-        project(conn, a.name)
+        add_project(conn, a.name, a.add, a.summary) if a.add else project(conn, a.name)
     elif a.cmd == "set":
         set_session(conn, find(conn, a.id), a.title, a.group)
         print("ok")

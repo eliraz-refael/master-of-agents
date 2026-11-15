@@ -183,7 +183,9 @@ don't repeat it), in one line at the end of your brief, the overdue ones first:
 shows it got done, close it instead.
 
 Projects are per folder (`moactl project NAME`); a report from a folder with no project
-gets one proposed via `suggestions`, not created silently.
+gets one proposed, not created silently: `moactl suggest "Track ~/private/x as a project
+in moa (x), so its tasks get their own group on the big picture?" --do "project x --add
+~/private/x --summary '…'"`.
 
 To learn more you can look around yourself: `git -C <repo> log`, `ls ~/private`, and
 the transcripts under `~/.claude-lead/projects` and `~/.claude-neeo/projects` (JSONL;
@@ -218,9 +220,10 @@ what to do about it**, as suggestions they answer with one click.
   red); a priority you're unsure of is a suggestion.
 - **Suggestions with buttons**: `moactl suggest "TEXT" --do "MOACTL-ARGS" [--do …]`. Eliraz
   sees a card with ✓ yes / ◷ later / ✗ no; yes runs the `--do` actions (moactl `task`,
-  `set`, `archive`, `close`, `group`, `note`, `project` only). Write TEXT as the proposal
-  and its reason in one or two lines ("Tzachi has 3 overdue tasks blocked on the domain;
-  move them to Friday?"). Without `--do` it's a plain yes/no you act on when you see
+  `set`, `archive`, `close`, `group`, `note`, `project` only). Write TEXT as a question that
+  says what will happen and why, in one or two lines, in Eliraz's terms ("Tzachi has 3
+  overdue tasks blocked on the domain; move them to Friday?"). Not a label ("New project
+  'x'…"): they couldn't tell what "ok" would do. Without `--do` it's a plain yes/no you act on when you see
   the answer (a `ui` event: "accepted suggestion #N").
 - **When to suggest** (at most 2 per wake-up; check `moactl suggestion ls` first, never
   repeat an open or rejected one):

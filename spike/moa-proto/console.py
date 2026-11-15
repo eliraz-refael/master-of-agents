@@ -954,8 +954,9 @@ class Console:
             return self.card("⚠ permission", rows, width, S.warn)
         if k == "suggest":  # moa proposes; yes runs what it attached (moactl suggestion yes ID)
             rows = markdown(e["text"], width - 2, S)
-            if e["acts"] and not e.get("answered"):
-                rows += [[("does: " + "; ".join(e["acts"]), S.dim)]]
+            if not e.get("answered"):  # say what yes does, so the buttons aren't a guess
+                rows += wrap([("yes runs: moactl " + "; moactl ".join(e["acts"]) if e["acts"] else
+                               "yes tells moa, and it acts on it next time it's awake", S.dim)], width - 2)
             if e.get("answered"):
                 rows += [[(f"→ {e['answered']}", S.dim)]]
             else:
