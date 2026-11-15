@@ -679,3 +679,33 @@ fn meta_is_read_lossily_and_a_missing_value_is_noted() {
         .collect();
     assert_eq!(got, vec![("meta", "a"), ("meta", "b")]);
 }
+
+#[test]
+fn a_clashing_event_id_fails_the_commit() {
+    let mut rig = empty();
+    rig.store.apply(&[Change::Event(event())]).unwrap();
+    let mut other = event();
+    other.text = Some("overwritten".into());
+    let err = rig
+        .store
+        .apply(&[Change::Project(project(1, "Lantern")), Change::Event(other)])
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Sqlite(_)), "{err}");
+    let text: String = rig
+        .store
+        .conn()
+        .query_row("SELECT text FROM events WHERE id = 7", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(text, "done");
+    assert_eq!(count(&rig.store, "projects"), 0);
+
+    // Activity is history too.
+    rig.store.apply(&[Change::Activity(activity(1))]).unwrap();
+    let mut again = activity(1);
+    again.text = "overwritten".into();
+    assert!(rig.store.apply(&[Change::Activity(again)]).is_err());
+    assert_eq!(
+        rig.store.load_snapshot().unwrap().activity_tail,
+        vec![activity(1)]
+    );
+}

@@ -610,6 +610,17 @@ pub(crate) fn nag(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Nag> {
 
 // ---------- writing ----------
 
+/// A plain `INSERT`, for append-only history (events, activity): an id that is already taken
+/// fails the whole commit instead of overwriting an old row, and the core reloads.
+fn insert(table: &str, cols: &[&str]) -> String {
+    let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+    format!(
+        "INSERT INTO {table} ({}) VALUES ({})",
+        cols.join(", "),
+        marks.join(", ")
+    )
+}
+
 /// `INSERT ... ON CONFLICT(pk) DO UPDATE SET <every other column>`. Never `INSERT OR REPLACE`:
 /// that deletes the row first, and the `ON DELETE SET NULL` keys that point at it would
 /// unlink their rows.
@@ -794,7 +805,7 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
         }
         Change::Event(e) => {
             let detail = e.detail.as_ref().map(serde_json::Value::to_string);
-            tx.prepare_cached(&upsert("events", EVENTS, &["id"]))?
+            tx.prepare_cached(&insert("events", EVENTS))?
                 .execute(params![
                     e.id.0,
                     e.at.0,
@@ -808,7 +819,7 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
                 ])?;
         }
         Change::Activity(a) => {
-            tx.prepare_cached(&upsert("activity", ACTIVITY, &["id"]))?
+            tx.prepare_cached(&insert("activity", ACTIVITY))?
                 .execute(params![
                     a.id.0,
                     a.at.0,
