@@ -20,6 +20,7 @@ pub enum TimeError {
 /// jiff's civil parser would silently drop.
 fn parse_civil(text: &str) -> Result<DateTime, TimeError> {
     let text = text.trim();
+    // The whole-tail scan is deliberate: a spike time never contains -, +, Z or [ after the date.
     // After the `YYYY-MM-DD` date, no sign, `Z` or zone annotation may appear.
     let rest = text.get(10..).unwrap_or("");
     if rest.contains(['+', '-', 'Z', 'z', '[']) {
@@ -58,6 +59,9 @@ pub fn utc_to_spike_local(t: UtcMs, tz: &TimeZone) -> String {
 pub fn parse_date(text: &str) -> Result<Date, TimeError> {
     let text = text.trim();
     let head = text.get(..10).ok_or(TimeError::Unparsable)?;
+    if !text[10..].is_empty() && !text[10..].starts_with([' ', 'T']) {
+        return Err(TimeError::Unparsable);
+    }
     head.parse::<Date>().map_err(|_| TimeError::Unparsable)
 }
 
@@ -146,6 +150,15 @@ mod tests {
     fn parse_date_accepts_timestamp_text() {
         assert_eq!(
             parse_date("2026-07-01 12:00:00").unwrap(),
+            jiff::civil::date(2026, 7, 1)
+        );
+    }
+    #[test]
+    fn parse_date_rejects_trailing_junk() {
+        assert!(parse_date("2026-07-01garbage").is_err());
+        assert!(parse_date("2026-07-01+02:00").is_err());
+        assert_eq!(
+            parse_date("2026-07-01T12:00:00").unwrap(),
             jiff::civil::date(2026, 7, 1)
         );
     }
