@@ -36,8 +36,13 @@ jobs:
       # A CI step, not a test: the Nix build sandbox can't run `cargo tree`.
       - name: moa-core stays free of IO crates
         run: |
-          out=$(cargo tree -p moa-core -e normal --prefix none)
-          ! grep -E '^(tokio|rusqlite|libc) ' <<<"$out"
+          # `if`, not `! grep`: bash -e ignores a `!` command, so a line appended after
+          # it would silently disable this check.
+          out=$(cargo tree -p moa-core -e normal --prefix none --target all)
+          if grep -E '^(tokio|rusqlite|libc) ' <<<"$out"; then
+            echo "moa-core depends on an IO crate (listed above)"
+            exit 1
+          fi
       - run: cargo nextest run --workspace
 
   macos:
