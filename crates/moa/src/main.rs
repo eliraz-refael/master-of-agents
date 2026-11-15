@@ -22,5 +22,3 @@ fn main() -> ExitCode {
         }
     }
 }
-
-fn  badly_formatted( ) {}
