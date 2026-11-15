@@ -2,7 +2,8 @@
 remove moa's tracking hook in each one's settings.json. A Claude account is a config
 folder (~/.claude, or ~/.claude-* used with CLAUDE_CONFIG_DIR) that has a projects/
 folder or a settings.json. The hook (master-chat/hooks/track.sh) reports only sessions
-moa started (MOA_TRACK=1); "only" also limits it to some folders (MOA_ONLY_UNDER).
+moa started (MOA_TRACK=1); "only" also limits it to some folders (MOA_ONLY_UNDER), and
+"--else BRAIN" sends the account's sessions outside them to that brain's moa (MOA_ELSE).
 Not product code."""
 import datetime
 import glob
@@ -33,11 +34,11 @@ def find_accounts(names):
     for d in sorted(glob.glob(os.path.join(home, ".claude")) + glob.glob(os.path.join(home, ".claude-*"))):
         if not os.path.isdir(d) or not (os.path.isdir(os.path.join(d, "projects")) or os.path.isfile(os.path.join(d, "settings.json"))):
             continue
-        state, only = hook_state(d)
+        state, only, other = hook_state(d)
         projects = os.path.join(d, "projects")
         used = os.path.getmtime(projects) if os.path.isdir(projects) else None
         found.append({"name": by_dir.get(os.path.realpath(d), os.path.basename(d).lstrip(".")), "dir": d,
-                      "state": state, "only": only, "last_used": used, "plugin": has_plugin(d)})
+                      "state": state, "only": only, "else": other, "last_used": used, "plugin": has_plugin(d)})
     return found
 
 
@@ -67,20 +68,23 @@ def _moa_commands(s):
 
 
 def hook_state(d):
-    """("installed" | "not installed" | "unreadable", [folders it's limited to])."""
+    """("installed" | "not installed" | "unreadable", [folders it's limited to], the brain
+    sessions outside them go to or None)."""
     try:
         _, s = _settings(d)
     except (OSError, ValueError):
-        return "unreadable", []
+        return "unreadable", [], None
     cmds = _moa_commands(s)
     if not cmds:
-        return "not installed", []
-    only = []
+        return "not installed", [], None
+    only, other = [], None
     for c in cmds:
         for word in shlex.split(c.split(MARK)[0]):
             if word.startswith("MOA_ONLY_UNDER="):
                 only = [os.path.expandvars(x).replace("\\$", "$").replace("\\`", "`") for x in word.split("=", 1)[1].split(":") if x]
-    return "installed", only
+            elif word.startswith("MOA_ELSE="):
+                other = word.split("=", 1)[1] or None
+    return "installed", only, other
 
 
 def _strip(s):
@@ -104,7 +108,8 @@ def _strip(s):
 
 def _unplug(s):
     """Take the plugin's folder limit out of settings `s` in place."""
-    (s.get("env") or {}).pop("MOA_ONLY_UNDER", None)
+    for k in ("MOA_ONLY_UNDER", "MOA_ELSE"):
+        (s.get("env") or {}).pop(k, None)
     if "env" in s and not s["env"]:
         del s["env"]
 
@@ -155,9 +160,9 @@ def _dq(text):
     return re.sub(r'([\\"$`])', r"\\\1", text)
 
 
-def install(d, only=None):
+def install(d, only=None, other=None):
     """(Re)install moa's hook for every event it uses, and the moa plugin; `only` limits both
-    to those folders."""
+    to those folders, and `other` (a brain's name) gets the sessions outside them."""
     p, s = _settings(d)
     _strip(s)
     _unplug(s)
@@ -169,6 +174,9 @@ def install(d, only=None):
                                             for r in roots) + '" '
         # the same limit for the plugin's moactl: settings env reaches the agent's shell (no $HOME expansion there)
         s.setdefault("env", {})["MOA_ONLY_UNDER"] = ":".join(roots)
+        if other:
+            env += f"MOA_ELSE={shlex.quote(other)} "
+            s["env"]["MOA_ELSE"] = other
     hook = {"type": "command", "command": f"{env}bash {shlex.quote(TRACK)} {MARK}", "timeout": 5}
     for ev, matcher in EVENTS.items():
         group = {"hooks": [hook]}
@@ -198,6 +206,20 @@ def short(path):
     return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
 
 
+def limits(a):
+    """How an account's hook is limited, for listings: " (only ~/x; elsewhere: the work moa)"."""
+    if not a["only"]:
+        return ""
+    return f" (only {', '.join(short(x) for x in a['only'])}" + (f"; elsewhere: the {a['else']} moa)" if a["else"] else ")")
+
+
+def again(a):
+    """The moactl setup arguments that reinstall an account as it is."""
+    if not a["only"]:
+        return f"install {a['name']}"
+    return f"only {a['name']} {' '.join(shlex.quote(x) for x in a['only'])}" + (f" --else {a['else']}" if a["else"] else "")
+
+
 def ago(ts):
     if not ts:
         return "never used"
@@ -210,13 +232,12 @@ def interactive(accounts, default_only, skipped):
     print("moa follows your agent sessions through a small hook in each Claude account.")
     print("It only reports sessions moa starts, and you can limit it to some folders.\n")
     for a in accounts:
-        extra = f" (only {', '.join(short(x) for x in a['only'])})" if a["only"] else ""
+        extra = limits(a)
         print(f"  {'✓' if a['state'] == 'installed' else '·'} {a['name']:<16} {short(a['dir']):<22} {a['state']}{extra}  · {ago(a['last_used'])}")
     todo = [a for a in accounts if a["state"] == "not installed"]
     for a in accounts:  # set up before there was a plugin: install again to add it, keeping its folders
         if a["state"] == "installed" and not a["plugin"]:
-            print(f"    {a['name']} has no moa plugin yet: moactl setup "
-                  + (f"only {a['name']} {' '.join(shlex.quote(x) for x in a['only'])}" if a["only"] else f"install {a['name']}"))
+            print(f"    {a['name']} has no moa plugin yet: moactl setup {again(a)}")
     if not todo:
         print("\nEvery account is set up. (moactl setup remove NAME takes it out.)")
         return skipped

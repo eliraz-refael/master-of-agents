@@ -1,7 +1,7 @@
 #!/bin/bash
 # THROWAWAY SPIKE: UserPromptSubmit hook for the master. Prints what tracked
 # sessions did since the master's last turn; prints nothing if nothing happened.
-db="$(cd "$(dirname "$0")/../.." && pwd)/brain.db"
+db="${MOA_DB:-$(cd "$(dirname "$0")/../.." && pwd)/brain.db}"
 [ -f "$db" ] || exit 0
 cur=$(sqlite3 "$db" "SELECT coalesce((SELECT value FROM meta WHERE key='cursor'),0);")
 out=$(sqlite3 -cmd ".timeout 2000" -separator ' | ' "$db" "

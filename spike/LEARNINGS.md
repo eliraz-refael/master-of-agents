@@ -260,3 +260,15 @@
   suggestion. Due dates take weekday names now ("fri"), since that's how moa talks.
 - Emoji in a card title are two columns wide; the card code counts one. Use single-width
   glyphs (✦, ✉) in titles.
+
+## A brain per part of life (2026-11-15)
+
+Private and work want separate moas, not one moa that filters: different accounts,
+different data rules, and work data must never reach the private brain. So a brain is a
+whole moa: `moa work` gets its own tmux server, `brain.db` and scope file, all outside
+the repo. The launcher sets the MOA_ variables before the tmux server starts, so the
+panels, keys, sessions and their hooks all inherit that brain without being told. What
+the moa is for moved out of CLAUDE.md into a scope file the briefing prints, so both moas
+share one set of instructions. The account decides nothing by itself; the folder does:
+an account split between brains routes its sessions outside some folders to another
+brain (`setup only … --else work`), in both the tracking hook and the plugin's moactl.

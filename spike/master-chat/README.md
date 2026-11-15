@@ -22,3 +22,24 @@ contains `moa-spike`). The backup from before it was added is
 
     jq 'walk(if type=="array" then map(select((.hooks? // [] | map(.command) | join(" ") | test("moa-spike")) | not)) else . end)' \
       ~/.claude-lead/settings.json > /tmp/s && mv /tmp/s ~/.claude-lead/settings.json
+
+## More than one moa (brains)
+
+Each brain is its own moa: its own tmux server, `brain.db` and scope (what it's for).
+None sees another's data. `moa` alone is the default brain, kept here in the repo. A
+named brain lives outside the repo, so its data can't be committed:
+
+    moa work --account claude-work      # first run: creates the brain, then opens its cockpit
+    moa work                            # every time after (the account is remembered)
+
+| What | Where |
+|---|---|
+| the brain | `~/.local/share/moa/work/brain.db` |
+| what this moa is for (edit it) | `~/.config/moa/work.md`, read at the start of every thread |
+| its settings (`MOA_ACCOUNT`, `MOA_OPEN_ACCOUNT`) | `~/.config/moa/work.env` (`default.env` for the default brain) |
+
+`--account` takes an account's command name or its config folder (`~/.claude-something`).
+Sessions belong to the moa that opened them. To split one account between brains by
+folder, keep it in the default brain for some folders and send the rest to another:
+
+    moactl setup only claude-work ~/private --else work

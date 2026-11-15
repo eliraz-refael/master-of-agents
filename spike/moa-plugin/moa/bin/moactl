@@ -3,7 +3,8 @@
 # bin/ is). It runs the repo's moactl. On an account moa only follows in some folders
 # (MOA_ONLY_UNDER, which `moactl setup only` writes into that account's settings), moa is
 # off for sessions elsewhere, e.g. day-job work on a shared account: a guard against
-# accidents, checked against the folder the session started in. CLAUDE_PROJECT_DIR isn't in
+# accidents, checked against the folder the session started in. With MOA_ELSE (a brain's
+# name) sessions elsewhere get that brain's moa instead. CLAUDE_PROJECT_DIR isn't in
 # the agent's shell, and $PWD follows its `cd`s, so the start folder is Claude's own cwd.
 here="$(dirname "$(realpath "$0")")"
 if [ -n "${MOA_ONLY_UNDER:-}" ]; then
@@ -14,7 +15,10 @@ if [ -n "${MOA_ONLY_UNDER:-}" ]; then
     [ -n "$r" ] || continue
     case "$dir/" in "${r%/}"/*) ok=1; break ;; esac
   done
-  if [ -z "$ok" ]; then
+  if [ -z "$ok" ] && [ -n "${MOA_ELSE:-}" ]; then  # elsewhere, this account's sessions belong to that brain's moa
+    . "$here/../../../moa-proto/brain.sh"
+    moa_brain "$MOA_ELSE"
+  elif [ -z "$ok" ]; then
     echo "moa isn't available here: on this account it only works in ${MOA_ONLY_UNDER//:/, }." >&2
     exit 1
   fi

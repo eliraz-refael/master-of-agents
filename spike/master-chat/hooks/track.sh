@@ -2,8 +2,7 @@
 # THROWAWAY SPIKE: opt-in session tracker, installed in ~/.claude-lead/settings.json.
 # Does nothing unless the session was started with MOA_TRACK=1.
 [ -n "${MOA_TRACK:-}" ] || exit 0
-db="${MOA_DB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/brain.db}"  # the brain next to this hook
-[ -f "$db" ] || exit 0
+db="${MOA_DB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/brain.db}"  # the moa that started it, else the default brain
 
 in=$(cat)
 sid=$(jq -r '.session_id // ""' <<<"$in")
@@ -11,16 +10,24 @@ cwd=$(jq -r '.cwd // ""' <<<"$in")
 q() { printf "'%s'" "${1//\'/\'\'}"; }
 # MOA_ONLY_UNDER (colon-separated folders), set in one account's hook command: report only
 # sessions under those folders, e.g. for an account that mostly works on things that
-# don't belong in this brain. Checked before any other work; a session already tracked
-# stays tracked if it later moves out, so it doesn't freeze as "working".
+# don't belong in this brain. MOA_ELSE (a brain's name) sends the sessions elsewhere to
+# that brain instead of dropping them. Checked before any other work; a session already
+# tracked stays where it is if it later moves out, so it doesn't freeze as "working".
 if [ -n "${MOA_ONLY_UNDER:-}" ]; then
   ok=""; IFS=: read -ra roots <<<"$MOA_ONLY_UNDER"
   for r in "${roots[@]}"; do
     [ -n "$r" ] || continue   # an empty entry ("a::b", a trailing ":") must not match everything
     case "$cwd/" in "${r%/}"/*) ok=1; break ;; esac
   done
-  [ -n "$ok" ] || [ -n "$(sqlite3 "$db" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ] || exit 0
+  # (sqlite3 creates a missing file even to read it, hence the -f)
+  if [ -z "$ok" ] && ! { [ -f "$db" ] && [ -n "$(sqlite3 "$db" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ]; }; then
+    [ -n "${MOA_ELSE:-}" ] || exit 0
+    . "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/brain.sh"
+    moa_brain "$MOA_ELSE"
+    db="$MOA_DB"
+  fi
 fi
+[ -f "$db" ] || exit 0
 event=$(jq -r '.hook_event_name // empty' <<<"$in")
 text=""
 case "$event" in
