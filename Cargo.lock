@@ -508,7 +508,16 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "jiff",
+ "moa-agents",
+ "moa-core",
+ "moa-store",
+ "moa-testkit",
  "predicates",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
