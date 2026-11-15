@@ -2,25 +2,34 @@
 # THROWAWAY SPIKE: opt-in session tracker, installed in ~/.claude-lead/settings.json.
 # Does nothing unless the session was started with MOA_TRACK=1.
 [ -n "${MOA_TRACK:-}" ] || exit 0
-db="${MOA_DB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/brain.db}"  # the brain next to this hook
-[ -f "$db" ] || exit 0
+db="${MOA_DB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/brain.db}"  # the moa that started it, else the default brain
 
 in=$(cat)
 sid=$(jq -r '.session_id // ""' <<<"$in")
 cwd=$(jq -r '.cwd // ""' <<<"$in")
 q() { printf "'%s'" "${1//\'/\'\'}"; }
-# MOA_ONLY_UNDER (colon-separated folders), set in one account's hook command: report only
-# sessions under those folders, e.g. for an account that mostly works on things that
-# don't belong in this brain. Checked before any other work; a session already tracked
-# stays tracked if it later moves out, so it doesn't freeze as "working".
-if [ -n "${MOA_ONLY_UNDER:-}" ]; then
-  ok=""; IFS=: read -ra roots <<<"$MOA_ONLY_UNDER"
-  for r in "${roots[@]}"; do
-    [ -n "$r" ] || continue   # an empty entry ("a::b", a trailing ":") must not match everything
-    case "$cwd/" in "${r%/}"/*) ok=1; break ;; esac
-  done
-  [ -n "$ok" ] || [ -n "$(sqlite3 "$db" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ] || exit 0
+# Where an account's sessions go, set in its hook command by `moactl setup`:
+# - MOA_ONLY_UNDER (colon-separated folders): report only sessions under those folders and
+#   drop the rest, e.g. for an account that mostly works on things that don't belong here.
+# - MOA_ACCOUNT_BRAIN (a brain's name): the account's sessions go to that brain's moa,
+#   except under MOA_EXCEPT_UNDER (folders), where they stay with the moa that started
+#   them, or the default one.
+# Checked before any other work. A session already tracked stays where it is if it later
+# moves, so it doesn't freeze as "working" or split across two brains.
+# (sqlite3 creates a missing file even to read it, hence the -f)
+tracked() { [ -f "$1" ] && [ -n "$(sqlite3 "$1" "SELECT 1 FROM sessions WHERE session_id=$(q "$sid")" 2>/dev/null)" ]; }
+. "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/brain.sh"
+if [ -n "${MOA_ACCOUNT_BRAIN:-}" ]; then
+  other=$(moa_brain "$MOA_ACCOUNT_BRAIN"; echo "$MOA_DB")
+  if moa_under "$cwd" "${MOA_EXCEPT_UNDER:-}"; then
+    if ! tracked "$db" && tracked "$other"; then db="$other"; fi
+  elif ! tracked "$db"; then
+    db="$other"
+  fi
+elif [ -n "${MOA_ONLY_UNDER:-}" ]; then
+  moa_under "$cwd" "$MOA_ONLY_UNDER" || tracked "$db" || exit 0
 fi
+[ -f "$db" ] || exit 0
 event=$(jq -r '.hook_event_name // empty' <<<"$in")
 text=""
 case "$event" in
@@ -87,7 +96,8 @@ fi
 # A new session learns it has peers (SessionStart output becomes context), so asking
 # another agent needs no setup.
 if [ "$kind" = start ]; then
-  ctl="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto" && pwd)/moactl"
+  # the plugin's moactl: like this hook, it sends the session to its account's brain (MOA_ACCOUNT_BRAIN)
+  ctl="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../moa-plugin/moa/bin" && pwd)/moactl"
   cat <<EOF
 You're running inside moa (master-of-agents), alongside other agent sessions and moa itself, which keeps the big picture.
 - \`$ctl peers\` lists the agents you can talk to.

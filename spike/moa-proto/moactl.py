@@ -31,7 +31,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from picture import connect, tmux, pane_alive, log_ui, SOCK, asleep, epoch, live  # noqa: E402
+from picture import connect, tmux, pane_alive, session_alive, on_this_server, log_ui, SOCK, asleep, epoch, live  # noqa: E402
 import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
@@ -113,7 +113,9 @@ def title_of(conn):
 def resume(conn, s, bg):
     # A stale pane ID (tmux restarts numbering after a server restart) can point at a
     # cockpit panel; only an untagged pane or an agent pane is this session's.
-    if pane_alive(s["pane"]) and layout.panel_of(s["pane"]) in ("", "agent"):
+    if not on_this_server(s) and s["state"] in LIVE and not asleep(s):
+        sys.exit("it's running in another moa's tmux server; switch to it there (or close it there first)")
+    if session_alive(s) and layout.panel_of(s["pane"]) in ("", "agent"):
         print(f"already running in pane {s['pane']}" + ("" if bg else "; " + layout.focus(s["pane"], title_of(conn))))
         return
     if s["state"] == "elsewhere":
@@ -173,7 +175,7 @@ def term(path, title, pane):
 
 
 def close(conn, s):
-    if pane_alive(s["pane"]):
+    if session_alive(s):
         tmux("kill-pane", "-t", s["pane"])
     conn.execute("UPDATE sessions SET state='ended', asleep_at=NULL WHERE session_id=?", (s["session_id"],))
     log_ui(conn, f"closed {s['title'] or s['session_id'][:8]}")
@@ -334,7 +336,7 @@ def ls(conn, show_all, as_json=False):
     for s in conn.execute("SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
                           f"{where} ORDER BY s.last_seen DESC"):
         # asleep first: a session slept in the cockpit's agent spot leaves its pane ID alive (the empty spot)
-        alive = "asleep" if asleep(s) else "live" if pane_alive(s["pane"]) else s["state"]
+        alive = "asleep" if asleep(s) else "live" if session_alive(s) else s["state"]
         if as_json:
             rows.append({"id": s["session_id"], "alive": alive, "state": s["state"], "account": s["account"],
                          "group": s["grp"] or s["project"], "title": s["title"] or (s["last_prompt"] or "")[:40],
@@ -621,19 +623,30 @@ def setup(conn, a):
             print(json.dumps(accounts))
             return
         for x in accounts:
-            only = f" (only {', '.join(setup_hooks.short(f) for f in x['only'])})" if x["only"] else ""
-            again = (f"only {x['name']} {' '.join(shlex.quote(f) for f in x['only'])}" if x["only"] else f"install {x['name']}")
-            plug = ("  + plugin" if x["plugin"] else f"  · no plugin yet (moactl setup {again})") if x["state"] == "installed" else ""
-            print(f"{x['name']:<16} {setup_hooks.short(x['dir']):<22} {x['state']}{only}{plug}{'  [skipped]' if x['skipped'] else ''}")
+            plug = ("  + plugin" if x["plugin"] else f"  · no plugin yet (moactl setup {setup_hooks.again(x)})") if x["state"] == "installed" else ""
+            print(f"{x['name']:<16} {setup_hooks.short(x['dir']):<22} {x['state']}{setup_hooks.limits(x)}{plug}{'  [skipped]' if x['skipped'] else ''}")
         return
     if not a.name:
         sys.exit(f"moactl setup {a.op} NAME (one of: {', '.join(x['name'] for x in accounts)})")
     acct = next((x for x in accounts if a.name in (x["name"], x["dir"], setup_hooks.short(x["dir"]))), None)
     if not acct:
         sys.exit(f"no Claude account {a.name!r} (moactl setup list)")
+    if (a.brain or a.exceptions) and a.op != "install":
+        sys.exit("--brain and --except go with `setup install`")
+    if a.folders and a.op != "only":
+        sys.exit(f"`setup {a.op}` takes no folders" + (" (--except FOLDERS with --brain BRAIN)" if a.op == "install" else ""))
+    if a.exceptions and not a.brain:
+        sys.exit("--except FOLDERS goes with --brain BRAIN: the account's sessions go to that brain, except in FOLDERS")
+    if a.brain and (a.brain == "default" or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.brain)):
+        sys.exit("a brain's name is lowercase letters, digits and dashes (and plain moa is the default brain)")
     if a.op == "install":
-        err = setup_hooks.install(acct["dir"])
-        print(f"tracking and the moa plugin installed for {acct['name']}; its running sessions pick them up when they restart"
+        err = setup_hooks.install(acct["dir"], brain=a.brain, exceptions=a.exceptions)
+        where = ""
+        if a.brain:
+            where = (f"; its sessions go to the {a.brain} moa (start it with: moa {a.brain})"
+                     + (f", except under {', '.join(setup_hooks.short(f) for f in a.exceptions)}, which stay with the moa that opens them (the default one, unless moa {a.brain} does)"
+                        if a.exceptions else ""))
+        print(f"tracking and the moa plugin installed for {acct['name']}{where}; its running sessions pick them up when they restart"
               + (f"\nbut: {err}" if err else ""))
     elif a.op == "only":
         folders = a.folders or PRIVATE_ROOTS
@@ -654,7 +667,6 @@ def setup(conn, a):
 # --- partners: agents asking each other (and moa) through moa ------------------------------
 ASK_WAIT = 540  # an agent's shell command times out at 10 minutes: answer before that
 LANDED = 20     # seconds for a typed-in ask to show up as the peer's prompt before it counts as failed
-_moa_sock = None
 
 
 def caller(conn):
@@ -678,11 +690,7 @@ def caller(conn):
 def reachable(s):
     """A live session in a pane on moa's tmux server. pane_alive asks moa's server, so a pane
     ID recorded on another tmux server could name some other agent's pane here."""
-    global _moa_sock
-    if _moa_sock is None:
-        _moa_sock = tmux("display-message", "-p", "#{socket_path}").stdout.strip()
-    return (s["state"] in LIVE and (not _moa_sock or (s["tmux"] or "") in ("", _moa_sock))
-            and pane_alive(s["pane"]))
+    return s["state"] in LIVE and session_alive(s)
 
 
 def peers(conn, as_json):
@@ -900,7 +908,10 @@ def main():
     p = sub.add_parser("setup", help="install moa's tracking hook in your Claude accounts (asks; no args = interactive)")
     p.add_argument("op", nargs="?", choices=["list", "install", "only", "remove", "skip"])
     p.add_argument("name", nargs="?"); p.add_argument("folders", nargs="*"); p.add_argument("--json", action="store_true")
-    p = sub.add_parser("open"); p.add_argument("path"); p.add_argument("--account", default="claude-lead")
+    p.add_argument("--brain", metavar="BRAIN", help="with install: the account's sessions go to this brain's moa (moa BRAIN)")
+    p.add_argument("--except", dest="exceptions", nargs="+", metavar="FOLDER",
+                   help="with --brain: sessions in these folders stay with the default moa")
+    p = sub.add_parser("open"); p.add_argument("path"); p.add_argument("--account", default=os.environ.get("MOA_OPEN_ACCOUNT") or "claude-lead")
     p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--prompt"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("resume"); p.add_argument("id"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("close"); p.add_argument("id")

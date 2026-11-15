@@ -30,9 +30,11 @@ MASTER_DIR = os.path.normpath(os.path.join(HERE, "..", "master-chat", "master"))
 MOACTL = os.path.join(HERE, "moactl")
 # moa's own Claude account: a config folder, or an account name (claude-neeo → ~/.claude-neeo)
 def account_dir(acct):
+    acct = moactl.CONFIG_DIRS.get(acct, acct)  # an account's command name can differ from its folder
     return os.path.abspath(os.path.expanduser(acct if "/" in acct else f"~/.{acct}"))
 
 
+BRAIN = os.environ.get("MOA_BRAIN", "")  # which moa this is, when there's more than one (moa NAME)
 ACCOUNT = account_dir(os.environ.get("MOA_ACCOUNT") or "claude-lead")
 OPENING = ("(The console just opened a new thread for today.) Give me your opening brief: "
            "at most 6 short lines, what's hot, what's waiting on me, what's going stale, "
@@ -1065,7 +1067,7 @@ class Console:
         if self.reports and self.auto and not self.perms:
             state = [(f"◷ {len(self.reports)} for moa  ", S.dim)] + state
         thread = [(f" thread {self.sid[:8]} ", S.dim)] if self.sid else []
-        chrome.frame(outer, "◆ moa", thread + [(" ", 0)] + state + [(" ", 0)])
+        chrome.frame(outer, "◆ moa" + (f" · {BRAIN}" if BRAIN else ""), thread + [(" ", 0)] + state + [(" ", 0)])
         body = max(1, h - 3)
         lines = self.lines(W)
         self.scroll = min(self.scroll, max(0, len(lines) - body))
