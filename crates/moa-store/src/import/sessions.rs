@@ -179,14 +179,19 @@ fn sessions(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), Import
             rules::instant(r.text("last_seen").as_deref(), &tz, R_SESSION_LAST_SEEN),
         );
         let first_seen = rules::instant(r.text("first_seen").as_deref(), &tz, R_SESSION_CREATED).0;
-        let created = match first_seen {
-            Some(t) => t,
+        // `id_time` is what the derived id is built from. It must be the same in every run,
+        // so a session with no time at all (created_at falls back to now) uses time 0.
+        let (created, id_time) = match first_seen {
+            Some(t) => (t, t),
             None => {
                 run.warn("sessions", &key, R_SESSION_CREATED);
-                f.earliest.or(last_seen).unwrap_or(now)
+                match f.earliest.or(last_seen) {
+                    Some(t) => (t, t),
+                    None => (now, UtcMs(0)),
+                }
             }
         };
-        let id = gen_ids.next_id(&run.env.brain, &conv, created);
+        let id = gen_ids.next_id(&run.env.brain, &conv, id_time);
         run.session_ids.insert(conv.clone(), id);
 
         // State, following the spike's reading.

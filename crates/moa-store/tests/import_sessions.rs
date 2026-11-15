@@ -1140,3 +1140,37 @@ fn invalid_utf8_and_wrong_typed_values_are_read_without_failing() {
     assert!(!report.render_text(false).contains('\u{FFFD}'));
     assert!(!serde_json::to_string(&report).unwrap().contains('\u{FFFD}'));
 }
+
+#[test]
+fn a_session_with_no_time_at_all_keeps_its_id_between_runs() {
+    let one_run = |now: UtcMs| -> (String, i64) {
+        let mut s = empty_setup();
+        let c = Connection::open(&s.spike).unwrap();
+        c.execute_batch(SCHEMA_SQL).unwrap();
+        c.execute(
+            "INSERT INTO sessions (session_id, account, state) \
+             VALUES ('timeless-conversation', 'acct-a', 'ended')",
+            [],
+        )
+        .unwrap();
+        drop(c);
+        let mut e = env(&s.home, "default");
+        e.now = now;
+        let report = import_spike(&s.spike, &mut s.store, &e).unwrap();
+        assert!(!warns(&report).is_empty());
+        s.store
+            .conn()
+            .query_row("SELECT id, created_at FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+    };
+    let (id_a, created_a) = one_run(UtcMs(1_800_000_000_000));
+    let (id_b, created_b) = one_run(UtcMs(1_800_000_999_000));
+    assert_eq!(id_a, id_b);
+    // created_at itself is still the moment of the import.
+    assert_eq!(
+        (created_a, created_b),
+        (1_800_000_000_000, 1_800_000_999_000)
+    );
+}
