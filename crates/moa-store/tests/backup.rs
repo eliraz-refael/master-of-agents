@@ -173,3 +173,34 @@ fn daily_backup_reports_a_leftover_sidecar() {
     );
     assert!(!backups.join("daily-2026-11-15.db").exists());
 }
+
+#[test]
+fn a_refusal_names_the_file_not_its_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("moa.db"), &dir.path().join("pre")).unwrap();
+    let y = dir.path().join("out").join("y");
+    fs::create_dir(dir.path().join("out")).unwrap();
+    fs::write(dir.path().join("out").join("y-wal"), b"w").unwrap();
+    let err = vacuum_into(store.conn(), &y).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "a file could not be used: y-wal already exists"
+    );
+}
+
+#[test]
+fn sidecars_are_the_three_files_sqlite_keeps_beside_a_database() {
+    let db = std::path::Path::new("/x/brain.db");
+    let names: Vec<String> = moa_store::sidecars(db)
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        ["/x/brain.db-wal", "/x/brain.db-shm", "/x/brain.db-journal"]
+    );
+    assert!(moa_store::is_sidecar_name(std::path::Path::new(
+        "/x/brain.db-journal"
+    )));
+    assert!(!moa_store::is_sidecar_name(db));
+}

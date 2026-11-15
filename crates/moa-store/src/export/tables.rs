@@ -124,12 +124,12 @@ impl Exporter<'_> {
         let mut used: HashSet<String> = HashSet::new();
         for s in &rows {
             let Some(cur) = self.current.get(&s.id) else {
-                self.note(Level::Warn, "sessions", &key_of(s.rowid), R_NO_CONVERSATION);
+                self.note(Level::Warn, "sessions", &id_key(s.rowid), R_NO_CONVERSATION);
                 warned += self.end_record();
                 continue;
             };
             let conv = cur.conversation_id.clone();
-            let key = prefix8(&conv);
+            let key = conversation_key(&conv);
             if !used.insert(conv.clone()) {
                 self.note(Level::Warn, "sessions", &key, R_DUP_CONVERSATION);
                 warned += self.end_record();
@@ -382,7 +382,7 @@ impl Exporter<'_> {
                 other if !other.contains('.') => other,
                 _ => {
                     if skipped_kinds.insert(kind.clone()) {
-                        self.note(Level::Info, "events", &key_of(*id), R_EVENT_KIND);
+                        self.note(Level::Info, "events", &id_key(*id), R_EVENT_KIND);
                     }
                     continue;
                 }
@@ -440,7 +440,7 @@ impl Exporter<'_> {
             let to_sid = self.target(to.as_deref());
             let status = if to_sid.is_none() {
                 if to.is_some() {
-                    self.note(Level::Warn, "asks", &key_of(*id), R_ASK_TARGET);
+                    self.note(Level::Warn, "asks", &id_key(*id), R_ASK_TARGET);
                 }
                 "failed"
             } else {

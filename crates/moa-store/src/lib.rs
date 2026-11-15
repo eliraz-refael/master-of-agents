@@ -19,8 +19,32 @@ pub mod spike;
 
 pub use schema::{SCHEMA_VERSION, migrations};
 
+const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// The files SQLite may keep beside a database: `-wal`, `-shm` and `-journal`.
+pub fn sidecars(db: &Path) -> [PathBuf; 3] {
+    SIDECAR_SUFFIXES.map(|suffix| {
+        let mut s = db.as_os_str().to_owned();
+        s.push(suffix);
+        PathBuf::from(s)
+    })
+}
+
+/// Whether the file's name ends the way a database's sidecar does, so it can't be a brain.
+pub fn is_sidecar_name(path: &Path) -> bool {
+    path.file_name()
+        .map(|n| n.to_string_lossy())
+        .is_some_and(|n| SIDECAR_SUFFIXES.iter().any(|s| n.ends_with(s)))
+}
+
+/// The last part of a path, for messages: they name files by file name only.
+pub(crate) fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map_or_else(|| "?".into(), |n| n.to_string_lossy().into_owned())
+}
+
 /// Why a store call failed. No variant carries record contents; `Missing` holds a path the
-/// user chose.
+/// user chose, and its text shows the file name only.
 #[derive(Debug)]
 pub enum StoreError {
     Missing(PathBuf),
@@ -32,7 +56,7 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Missing(p) => write!(f, "there is no database at {}", p.display()),
+            Self::Missing(p) => write!(f, "there is no database at {}", file_name_of(p)),
             Self::Sqlite(e) => write!(f, "the database failed: {e}"),
             Self::Migration(e) => write!(f, "the database could not be upgraded: {e}"),
             Self::Io(e) => write!(f, "a file could not be used: {e}"),

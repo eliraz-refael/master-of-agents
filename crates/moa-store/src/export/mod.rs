@@ -18,7 +18,7 @@ use moa_core::time::utc_to_spike_local;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::accounts::AccountMap;
-use crate::import::{Level, RecordNote, TableCounts};
+use crate::import::{Level, RecordNote, TableCounts, conversation_key, id_key};
 use crate::spike::{SCHEMA_SQL, TRIGGERS_SQL};
 use crate::{Store, StoreError};
 
@@ -140,26 +140,14 @@ const NOT_EXPORTED: [(&str, &str, &str); 12] = [
     ("sessions", "resume_failed", "resume_failed is not exported"),
 ];
 
-fn leftovers(dst: &Path) -> Vec<PathBuf> {
-    ["-wal", "-shm", "-journal"]
-        .iter()
-        .map(|suffix| {
-            let mut s = dst.as_os_str().to_owned();
-            s.push(suffix);
-            PathBuf::from(s)
-        })
-        .collect()
-}
-
 /// Writes the brain in `src` as a spike database at `dst`. `dst` must not exist, nor may a
 /// `-wal`, `-shm` or `-journal` beside it, and its folder must exist. Nothing is changed when
 /// that refuses, and a failed export leaves no partial file.
 pub fn export_spike(src: &Store, dst: &Path, env: &ExportEnv) -> Result<ExportReport, ExportError> {
-    let name = dst.file_name().map(|n| n.to_string_lossy().into_owned());
-    if name.is_some_and(|n| ["-wal", "-shm", "-journal"].iter().any(|s| n.ends_with(s))) {
+    if crate::is_sidecar_name(dst) {
         return Err(ExportError::Exists(dst.to_path_buf()));
     }
-    for path in std::iter::once(dst.to_path_buf()).chain(leftovers(dst)) {
+    for path in std::iter::once(dst.to_path_buf()).chain(crate::sidecars(dst)) {
         if fs::symlink_metadata(&path).is_ok() {
             return Err(ExportError::Exists(path));
         }
@@ -189,7 +177,7 @@ pub fn export_spike(src: &Store, dst: &Path, env: &ExportEnv) -> Result<ExportRe
     let result = write_all(src, dst, env);
     if result.is_err() {
         let _ = fs::remove_file(dst);
-        for p in leftovers(dst) {
+        for p in crate::sidecars(dst) {
             let _ = fs::remove_file(p);
         }
     }
@@ -243,14 +231,6 @@ struct Exporter<'a> {
     notes: Vec<RecordNote>,
     tables: Vec<TableCounts>,
     dirty: bool,
-}
-
-fn key_of(id: i64) -> String {
-    format!("#{id}")
-}
-
-fn prefix8(s: &str) -> String {
-    s.chars().take(8).collect()
 }
 
 fn abs(p: PathBuf) -> PathBuf {

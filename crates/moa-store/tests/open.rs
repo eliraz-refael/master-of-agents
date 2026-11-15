@@ -126,6 +126,8 @@ fn read_only_open_never_creates() {
         matches!(err, StoreError::Missing(ref p) if p == &db),
         "{err}"
     );
+    // The text names the file, not the folder it was looked for in.
+    assert_eq!(err.to_string(), "there is no database at moa.db");
     assert!(!db.exists());
     assert!(!db.parent().unwrap().exists());
 }

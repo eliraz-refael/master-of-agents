@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use jiff::civil::Date;
 use rusqlite::Connection;
 
-use crate::{Store, StoreError, create_private_dirs};
+use crate::{Store, StoreError, create_private_dirs, file_name_of, sidecars};
 
 /// Writes a consistent copy of `conn`'s database to `dest`.
 ///
@@ -19,7 +19,7 @@ pub fn vacuum_into(conn: &Connection, dest: &Path) -> Result<(), StoreError> {
         if fs::symlink_metadata(&path).is_ok() {
             return Err(StoreError::Io(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                format!("{} already exists", path.display()),
+                format!("{} already exists", file_name_of(&path)),
             )));
         }
     }
@@ -38,11 +38,7 @@ pub fn vacuum_into(conn: &Connection, dest: &Path) -> Result<(), StoreError> {
 
 fn occupied_names(dest: &Path) -> Vec<PathBuf> {
     let mut names = vec![dest.to_path_buf()];
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let mut s = dest.as_os_str().to_owned();
-        s.push(suffix);
-        names.push(PathBuf::from(s));
-    }
+    names.extend(sidecars(dest));
     names
 }
 
