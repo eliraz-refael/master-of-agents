@@ -60,7 +60,7 @@ untouched".
 
 | # | Call | Why |
 |---|---|---|
-| D1 | **`upgrade` in slice 2 is a clean stop.** A `moactl` whose build differs from the daemon's sends `upgrade`, reads to EOF, waits (≤ 10 s) until it can take the daemon's lock, which proves the old process is gone, and then autostarts its own build. Slice 9 replaces the stop with re-exec | Rebuilding v1 during dogfood must not need a manual restart. The state is all in SQLite, so a stop loses nothing. Build ids are hashes with no order, so there's no "newer" to compare (P10) |
+| D1 | **`upgrade` in slice 2 is a clean stop.** A `moactl` whose build differs from the daemon's sends `upgrade`, reads to EOF, waits (≤ 10 s) until the old daemon's pid (from `HelloOk.pid`) has exited, and then autostarts its own build. Slice 9 replaces the stop with re-exec | Rebuilding v1 during dogfood must not need a manual restart. The state is all in SQLite, so a stop loses nothing. Build ids are hashes with no order, so there's no "newer" to compare (P10) |
 | D2 | **Autostart waits for one line, not for the socket.** Under `run/<brain>.start` (an exclusive file lock) the client retries the connect once, then spawns `moa daemon --brain B --notify-ready` through `Spawner`. The daemon's first stdout line is `ready`, `already running` or `error: <one line>`. Then it points stdout at `/dev/null`. The client: `ready` → connect; `already running` or EOF → connect once more; `error:` → `couldn't start moa: <line> (log: <stderr log>)`. The wait is capped at 10 s | Event-driven (no connect loop); two racing clients or a launchd copy start one daemon; the real reason reaches the user; a dropped pipe can't hurt the daemon later |
 | D3 | **The daemon lock is `std::fs::File::try_lock` on `run/<brain>.lock`.** "Already running" exits **0** | flock without `unsafe`. Exit 0 lets launchd's `KeepAlive {SuccessfulExit = false}` leave a second copy alone |
 | D4 | **`subscribe` always answers a full snapshot**; `since` is accepted and ignored until a client reconnects with one (slice 5) | YAGNI; the snapshot is small |
@@ -184,7 +184,7 @@ The roadmap's and 2a's Global Constraints apply. Also:
   pub enum Call { Hello(Hello), Status, Shutdown, Upgrade, Subscribe(Subscribe), Op(moa_core::op::Op) }
   pub enum Incoming { Request { id: Id, call: Call }, Hook(serde_json::Value) }  // "hook" is a notification
   pub struct Hello { pub client: String, pub build: String, pub caller: CallerInfo }
-  pub struct HelloOk { pub brain: String, pub build: String, pub rev: u64, pub matched: bool }
+  pub struct HelloOk { pub brain: String, pub build: String, pub rev: u64, pub matched: bool, pub pid: u32 }
   pub struct StatusOk { pub brain: String, pub build: String, pub pid: u32, pub launches: u64,
                         pub sessions: BTreeMap<String, usize>, pub caller: String }
   pub struct Subscribe { pub topics: Vec<Topic>, pub since: Option<u64> }
@@ -357,6 +357,12 @@ The roadmap's and 2a's Global Constraints apply. Also:
     - `State::with_deps(self, deps) -> State`, applied before `Startup`.
     - `project add` now canonicalises its path with `deps.canonical` before checking it, so
       a path typed at the CLI and one in a suggestion action go through the same step.
+      Stored paths imported from the spike were never canonicalised, so the duplicate
+      check and the session back-link compare against both the canonical path and the
+      path as typed (made absolute, not resolved). Test:
+      `project_add_matches_an_imported_path_typed_the_same_way` (an imported project at
+      `<root>/link/lantern`, where `link` is a symlink, is found as a duplicate when the
+      same text is typed).
   - `moa_testkit::brain::TypicalBrain::state_with(&self, deps: Deps) -> State`.
   - New `Op`s:
     ```rust
@@ -721,7 +727,8 @@ The roadmap's and 2a's Global Constraints apply. Also:
     - otherwise the inner error's line (`UnsafeDir` already carries its `chmod 700` hint).
   - **`run`, in order:**
     1. The brain must be in the config (`NoSuchBrain`).
-    2. `ensure_private_dir` for `run/` (or the `$TMPDIR` fallback's directory) and `logs/`.
+    2. `ensure_private_dir` for `run/` (always: the lock and start lock live there), the
+       `$TMPDIR` fallback's directory when the socket uses it, and `logs/`.
     3. `File::try_lock` on `lock(b)`: `WouldBlock` → `AlreadyRunning`.
     4. Holding the lock, remove whatever is at `socket(b)` and bind it.
     5. Start logging, then `CoreHandle::start`. Log the config's `skipped_tables` as one
@@ -865,11 +872,18 @@ The roadmap's and 2a's Global Constraints apply. Also:
        with `env_clear().envs(daemon_env(…))`, `current_dir(paths.state_dir())`,
        `process_group(0)`, stdin null, stdout piped, stderr appended to `stderr_log(b)`.
     3. `read_ready` on its first stdout line, within 10 s: `Ready` → connect; `TryAgain` →
-       connect once more; `Failed(line)` → `Start(line)`. Then drop the start lock.
+       connect once more; `Failed(line)` → `Start(line)`; no line within 10 s →
+       `Start("it didn't say it was ready within 10 s")`. Then drop the start lock.
     4. Send `hello`. When it's not matched and `OnMismatch::Restart`:
        1. send `upgrade` and read to EOF;
-       2. block (≤ 10 s, on a helper thread) until `File::lock(lock(b))` succeeds, then
-          release it;
+       2. wait (≤ 10 s) until `HelloOk.pid` has exited (`moa_platform::pid_alive(pid)`,
+          `kill(pid, 0)` → `ESRCH`), checking every 50 ms. It never touches `lock(b)`, so a
+          daemon that launchd or another client starts meanwhile isn't told "already
+          running" by a client's probe;
+          `pid_alive(pid: u32) -> bool` is new in this task, in `moa-platform`'s `sys`
+          module: one `unsafe` `kill(pid, 0)` with a `// SAFETY:` comment (`EPERM` counts as
+          alive). Test: `pid_alive_sees_itself_and_not_a_reaped_child`. The daemon fills
+          `HelloOk.pid` with `std::process::id()`;
        3. autostart as above.
 
     `exe` is `fs::canonicalize(current_exe())`, so a `moactl` symlink never ends up as the

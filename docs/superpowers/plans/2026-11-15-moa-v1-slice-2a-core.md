@@ -61,7 +61,7 @@ and green CI, and its description says "Restart needed: nothing; the spike is un
 | S1 | **Slice 2 is two plans.** 2a = everything that computes (platform, config, route, core, store actor, the data verbs except suggestions). 2b = everything that talks (protocol, grammar, suggestions, daemon, client, CLI, `moa sql`, service) | 2a is fully testable through `handle` and the store actor with no socket; 2b is IO. Suggestions sit in 2b because validating an action needs the verb grammar (P11), which is 2b's |
 | S2 | **`Snapshot`, `Topic`, `CoreEvent` and `Op` are defined in `moa-core`**; `moa_store` re-exports `Snapshot`, `moa_proto` re-exports `Topic` | `Input::Startup(Snapshot)`, `Effect::Publish` and `Input::Client(op)` are core types, and the core can't depend on store or proto |
 | S3 | **The core renders the spike's text** into every reply (`Done { text, data }`); the CLI prints `text`, or `data` with `--json` | The text needs the brain's clock and zone (ages, "today"), and the console (slice 6) shows the same text. Spec §6.2 already puts brief/attention text in the core |
-| S4 | **Group commit, one batch in flight; nothing leaves the daemon before its data is on disk.** The core task (2b) takes everything waiting in its inbox, up to 64 inputs (a *drain*), and runs `handle` on each in order. The core updates its model at once. The drain's `Persist` changes become **one** batch, and every other effect is held, in order; that includes `Publish` and `Reply`, and from later slices `Tmux`, `Acp` and `Spawn`. Only `SetTimer`, `CancelTimer` and `Log` run at once.<br>• **A drain with changes:** the batch goes to the store as one transaction, and the core waits for it. On success the held effects are released in order, then the next drain starts; inputs that arrive meanwhile queue up, which is how batches grow under load.<br>• **A drain with no changes:** its effects are released at once. Nothing uncommitted exists, because the previous batch was awaited.<br>• **A failed commit:** every held `Reply` of that drain fails with one retry line. That's writes **and** reads, since a read in the drain may have seen the failed state. Held `Publish` and external effects are dropped. Then the core reloads (`Input::Reload`, which replaces the state and re-derives the timers) and publishes the whole model.<br>• **Failures in a row:** after 3, the reload carries a deadline (1 s, doubling to 30 s) before which every write is refused with `moa can't save right now (<reason>); nothing was changed`. The core compares the deadline with `Now`, so the refusal ends by itself, and the next write after it probes the store; no reload just to lift it.<br>So there's no `StoreCommitted` input, no sequence numbers, and nothing to fence | Batching, as the roadmap's item 5 asks, with the spec's ordering rule kept for reads too. Slices 3–6 inherit the hold rule for their side effects. The cost: a write's reply waits for one commit, and a drain doesn't overlap a commit. At one user's scale, with SQLite WAL commits taking milliseconds, that's fine. The pipelined design (seqs, epochs, high-water marks) had three bookkeeping bugs in one review round |
+| S4 | **Group commit, one batch in flight; nothing leaves the daemon before its data is on disk.** The core task (2b) takes everything waiting in its inbox, up to 64 inputs (a *drain*), and runs `handle` on each in order. The core updates its model at once. The drain's `Persist` changes become **one** batch, and every other effect is held, in order; that includes `Publish` and `Reply`, and from later slices `Tmux`, `Acp` and `Spawn`. Only `SetTimer`, `CancelTimer` and `Log` run at once; the executor also starts `Backup` at once (2b Task 4), since it copies only committed data, so a failed or panicked drain never loses the day's backup.<br>• **A drain with changes:** the batch goes to the store as one transaction, and the core waits for it. On success the held effects are released in order, then the next drain starts; inputs that arrive meanwhile queue up, which is how batches grow under load.<br>• **A drain with no changes:** its effects are released at once. Nothing uncommitted exists, because the previous batch was awaited.<br>• **A failed commit:** every held `Reply` of that drain fails with one retry line. That's writes **and** reads, since a read in the drain may have seen the failed state. Held `Publish` and external effects are dropped. Then the core reloads (`Input::Reload`, which replaces the state and re-derives the timers) and publishes the whole model.<br>• **Failures in a row:** after 3, the reload carries a deadline (1 s, doubling to 30 s) before which every write is refused with `moa can't save right now (<reason>); nothing was changed`. The core compares the deadline with `Now`, so the refusal ends by itself, and the next write after it probes the store; no reload just to lift it.<br>So there's no `StoreCommitted` input, no sequence numbers, and nothing to fence | Batching, as the roadmap's item 5 asks, with the spec's ordering rule kept for reads too. Slices 3–6 inherit the hold rule for their side effects. The cost: a write's reply waits for one commit, and a drain doesn't overlap a commit. At one user's scale, with SQLite WAL commits taking milliseconds, that's fine. The pipelined design (seqs, epochs, high-water marks) had three bookkeeping bugs in one review round |
 | S5 | **Inputs and effects arrive with their first user.** 2a has `Startup`, `Reload`, `Client`, `Timer`, `ZoneChanged`, `ActorFailed`; effects `Persist`, `SetTimer`, `CancelTimer`, `Publish`, `Reply`, `Backup`, `Log`. `Hook`, `Tmux*`, `Acp`, `ClientGone`, `ConfigChanged`, `Spawn` and `pending_ops` come in slices 3–9. `Reload`, `ZoneChanged` and `Backup` are additions to spec §6.3 | An input nobody sends or a table nobody fills is untested code (P2). A time-zone change must reach the core (§6.8), and the daily backup must reach the store actor |
 | S6 | **No `DelayQueue` in slice 2**; the scheduler (2b) runs wall-clock deadlines only. The roadmap's "read-only connection for find/history" waits for its first user too: `find` searches the in-memory model, as the spike's `candidates()` searched the sessions table | Slice 2's only timer is the daily backup. Short timers start with slice 3's reconnect backoff |
 | S7 | **The core allocates integer ids** (`NextIds`, max + 1 per table, loaded with the snapshot) | It must answer "task #12 added" before the commit. The daemon is the only writer, so max + 1 is what SQLite would pick |
@@ -173,7 +173,10 @@ writes while an export reads.
     backup is written. Anything else there (a directory) is `Err(AlreadyExists)`.
     The backup is written to `daily-<day>.db.tmp` (a leftover `.tmp` and its sidecars are
     removed first) and then renamed, so a process killed mid-`VACUUM INTO` never leaves a
-    partial file that counts as the day's backup.
+    partial file that counts as the day's backup. A leftover `-wal`, `-shm` or `-journal`
+    beside `daily-<day>.db` itself is still refused before the rename (the existing
+    `daily_backup_reports_a_leftover_sidecar` keeps passing): a fresh file renamed next to
+    a stale journal would have that journal rolled into it on its first open.
   - `export_spike` reads its source inside one read transaction
     (`src.conn().unchecked_transaction()`, held until the `Exporter` is done).
   - `SrcRow::text_cow(&self, col) -> Option<Cow<'_, str>>`; `Ev` drops its `text` field and
@@ -278,7 +281,10 @@ writes while an export reads.
   - `Paths::check_v1_allowed(&self) -> Result<(), PathsError>` (call S17): `Ok` when
     sandboxed or `real_home_ok`, else `NotSwitchedOver`.
   - `pub fn ensure_private_dir(dir: &Path) -> Result<(), PathsError>` (call S16). It
-    creates `dir` (and missing parents) with mode `0700`, then checks `dir`:
+    creates `dir` (and missing parents) with mode `0700`, then checks `dir` with
+    `symlink_metadata` (never following a link, since the socket fallback lives in a shared
+    `$TMPDIR`):
+    - a symlink → `UnsafeDir(dir, "is a symlink")`;
     - owned by another uid → `UnsafeDir(dir, "isn't yours")`;
     - any group or other permission bit set → `UnsafeDir(dir, "is open to other users")`.
   - `pub enum PathsError { NoHome, RootNotAbsolute, SocketTooLong, NotSwitchedOver, UnsafeDir(PathBuf, &'static str), Io(io::Error) }`,
@@ -290,7 +296,7 @@ writes while an export reads.
     | `RootNotAbsolute` | `MOA_ROOT must be a full path` |
     | `SocketTooLong` | `the socket path is too long even under TMPDIR; set a shorter TMPDIR` |
     | `NotSwitchedOver` | `moa v1 isn't switched over yet; set MOA_ROOT to try it (see the try-it)` |
-    | `UnsafeDir` | `{dir} {reason}; moa won't use it (chmod 700 {dir})` (no `chmod` hint for "isn't yours") |
+    | `UnsafeDir` | `{dir} {reason}; moa won't use it (chmod 700 {dir})` (no `chmod` hint for "isn't yours" or "is a symlink") |
 
   - `pub fn canonical(p: &Path) -> PathBuf`: `fs::canonicalize`, or `p` unchanged when that
     fails.
@@ -344,6 +350,7 @@ fn vars(root: Option<&str>, home: Option<&str>, real: bool) -> Result<Paths, Pat
 #[test] fn private_dirs_are_made_0700_and_open_ones_refused() {
     // ensure_private_dir(tmp/a/b) → both exist, b's mode is 0700
     // a pre-made tmp/c with mode 0755 → Err whose text is "<tmp>/c is open to other users; moa won't use it (chmod 700 <tmp>/c)"
+    // tmp/d a symlink to a 0700 dir of ours → Err "<tmp>/d is a symlink; moa won't use it"
 }
 #[test] fn a_long_socket_path_falls_back_to_tmpdir() {
     let long = format!("/{}", "a".repeat(100));
@@ -799,7 +806,8 @@ proptest! {
     - `pub struct NextIds { pub project: i64, pub task: i64, pub note: i64, pub suggestion: i64, pub ask: i64, pub event: i64, pub activity: i64, pub feed: i64 }`
     - `pub struct LoadNote { pub table: &'static str, pub key: String, pub reason: &'static str }`:
       a row loaded with a default for text this build doesn't know (call S14). `key` is
-      `#<id>` or the session's moa id.
+      what `Change::row()` gives for that row: `#<id>`, the session's moa id, or the group's
+      path.
     - `pub struct State`, with:
       - `State::new(brain: BrainName, config: Config) -> State` (empty until `Startup`);
       - read accessors for tests and views: `sessions()`, `session(id)`, `tasks()`,
