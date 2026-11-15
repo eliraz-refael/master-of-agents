@@ -40,6 +40,8 @@ fn home_shell_and_config_are_the_sandboxes() {
         "/bin/sh"
     );
     assert_eq!(sb.tmux(&["show", "-gv", "prefix"]).unwrap(), "C-b");
+    // proves -f tmux.conf was actually loaded
+    assert_eq!(sb.tmux(&["show", "-gv", "@moa-sandbox"]).unwrap(), "1");
     // panes start in the sandbox home, not in the repo the tests run from
     assert_eq!(
         sb.tmux(&[

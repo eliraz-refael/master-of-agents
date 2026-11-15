@@ -41,7 +41,7 @@ impl Sandbox {
         std::fs::create_dir(&home)?;
         std::fs::write(
             dir.path().join("tmux.conf"),
-            "set -g default-shell /bin/sh\n",
+            "set -g default-shell /bin/sh\nset -g @moa-sandbox 1\n",
         )?;
         // Short on purpose: unix socket paths are limited to 104 bytes on macOS.
         let sock_dir = tempfile::Builder::new().prefix("moa").tempdir_in("/tmp")?;
@@ -122,7 +122,7 @@ impl Drop for Sandbox {
                     .args(["-0", &pid])
                     .output()
                     .map(|o| o.status.success())
-                    .unwrap_or(false);
+                    .unwrap_or(true); // can't run kill: assume still alive and keep waiting
                 (!alive).then_some(())
             });
         }
