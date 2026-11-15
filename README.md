@@ -9,6 +9,13 @@ what needs attention, and can open, resume and tidy sessions for you.
 build. `spike/LEARNINGS.md` records what they taught us. The real implementation will
 follow an approved design in `docs/`.
 
+## Building v1 (in progress)
+
+- `nix develop` (or rustup plus tmux >= 3.4);
+- `cargo nextest run --workspace`;
+- `nix run . -- --version`;
+- v1 is not installed on PATH until the switch-over; `moa` on PATH is the spike.
+
 ## Contributing
 
 PRs only, with a linear history (squash or rebase, no merge commits). The `ci` check must
