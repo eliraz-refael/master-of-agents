@@ -81,6 +81,11 @@ call by hand.
   Do it when you notice one; no need to ask.
 - `moactl close ID`: closes it (it stays resumable). `moactl archive ID...` hides
   finished ones from the tree (still resumable).
+- **Sleeping sessions are normal.** The console puts sessions idle for 6 hours to sleep:
+  the agent exits to free memory, the conversation stays resumable, and the tree shows it
+  as 💤 (a ui event says which). Mention them in one short line of your brief at most,
+  never as a problem. `moactl resume ID` wakes one; when Eliraz asks to clean up,
+  `moactl sleep ID...` (or `moactl sleep --idle HOURS`) puts sessions to sleep.
 
 Do these when they ask; no need to confirm. For things they didn't ask for, propose first.
 

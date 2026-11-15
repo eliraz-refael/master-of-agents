@@ -6,6 +6,7 @@ Not product code. A session ID can be any unique prefix, a title or a project na
 Read:     brief | attention | ls [--all] | find Q | project NAME
 Sessions: open PATH [--account A] [--title T] [--group G] [--prompt P] [--bg]
           resume Q [--bg] | close Q | archive Q... | set Q [--title T] [--group G]
+          sleep Q... | sleep --idle HOURS [--dry-run]   (close the window, keep it resumable: 💤 in the tree)
           term [PATH] [--title T]   (a plain shell in a window of its own, e.g. for a dev server)
 Groups:   group add PATH | group rename OLD NEW | group rm PATH
 Brain:    note TEXT [--project P] [--kind K] | suggest TEXT
@@ -30,7 +31,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from picture import connect, tmux, pane_alive, log_ui, SOCK  # noqa: E402
+from picture import connect, tmux, pane_alive, log_ui, SOCK, asleep, epoch, live  # noqa: E402
 import layout  # noqa: E402
 
 LIVE = ("working", "idle", "waiting")
@@ -124,7 +125,8 @@ def resume(conn, s, bg):
     if r.returncode:
         sys.exit(f"tmux failed: {r.stderr.strip()} (is the moa tmux server running?)")
     pane = r.stdout.strip()
-    conn.execute("UPDATE sessions SET pane=? WHERE session_id=?", (pane, s["session_id"]))
+    # awake again (the hook's SessionStart clears asleep_at too; this covers an agent without the hook)
+    conn.execute("UPDATE sessions SET pane=?, asleep_at=NULL WHERE session_id=?", (pane, s["session_id"]))
     conn.commit()
     log_ui(conn, f"resumed {s['title'] or s['session_id'][:8]}")
     how = "in the background" if bg else layout.focus(pane, title_of(conn))
@@ -173,7 +175,7 @@ def term(path, title, pane):
 def close(conn, s):
     if pane_alive(s["pane"]):
         tmux("kill-pane", "-t", s["pane"])
-    conn.execute("UPDATE sessions SET state='ended' WHERE session_id=?", (s["session_id"],))
+    conn.execute("UPDATE sessions SET state='ended', asleep_at=NULL WHERE session_id=?", (s["session_id"],))
     log_ui(conn, f"closed {s['title'] or s['session_id'][:8]}")
     print("closed")
 
@@ -326,11 +328,13 @@ def adopt(conn, pane, title, group, sid=None):
 
 
 def ls(conn, show_all, as_json=False):
-    where = "" if show_all else "WHERE s.state IN ('working','idle','waiting','elsewhere') OR s.last_seen >= datetime('now','localtime','-2 days')"
+    where = "" if show_all else ("WHERE s.state IN ('working','idle','waiting','elsewhere') OR s.last_seen >= datetime('now','localtime','-2 days')"
+                                 " OR (s.asleep_at IS NOT NULL AND s.state = 'ended')")  # asleep: one resume from running
     rows = []
     for s in conn.execute("SELECT s.*, p.name AS project FROM sessions s LEFT JOIN projects p ON p.id=s.project_id "
                           f"{where} ORDER BY s.last_seen DESC"):
-        alive = "live" if pane_alive(s["pane"]) else s["state"]
+        # asleep first: a session slept in the cockpit's agent spot leaves its pane ID alive (the empty spot)
+        alive = "asleep" if asleep(s) else "live" if pane_alive(s["pane"]) else s["state"]
         if as_json:
             rows.append({"id": s["session_id"], "alive": alive, "state": s["state"], "account": s["account"],
                          "group": s["grp"] or s["project"], "title": s["title"] or (s["last_prompt"] or "")[:40],
@@ -415,6 +419,10 @@ def brief(conn):
     out.append("## Live sessions")
     live = conn.execute(SESS + "WHERE s.state IN ('working','idle','waiting','elsewhere') ORDER BY s.last_seen DESC LIMIT 12").fetchall()
     out += [f"- {r['session_id'][:8]} {label(r)} {r['state']} {age(r['last_seen'])}" for r in live] or ["- none"]
+    sleepy = conn.execute(SESS + "WHERE s.asleep_at IS NOT NULL AND s.state='ended' ORDER BY s.asleep_at DESC").fetchall()
+    if sleepy:  # normal, not a problem: mention briefly
+        out.append(f"## Asleep (idle, window closed to save memory; moactl resume ID): "
+                   + ", ".join(f"{r['session_id'][:8]} {label(r)}" for r in sleepy[:12]) + (" …" if len(sleepy) > 12 else ""))
     out.append("## What you know about Eliraz (latest notes)")
     for n in conn.execute("SELECT kind, text FROM notes WHERE kind IN ('preference','routine','fact') ORDER BY id DESC LIMIT 10"):
         out.append(f"- ({n['kind']}) {n['text'][:200]}")
@@ -737,6 +745,87 @@ def asks_ls(conn):
               + " ".join(a["text"].split())[:80])
 
 
+# --- sleep: idle sessions give their memory back, and stay one resume away ------------------
+def put_to_sleep(conn, s):
+    """Close a session's agent and mark it asleep, resumable as ever (`moactl resume`). The
+    mark is a column of its own (asleep_at), not a state: killing the pane makes the
+    SessionEnd hook write state='ended', which would race a state written here. Resuming
+    clears it (here, and the hook's SessionStart). False if it isn't running in moa."""
+    panel = layout.panel_of(s["pane"]) if reachable(s) else None
+    if panel not in ("", "agent") or not runs_in_pane(s):  # not running here, or a stale pane ID (a panel, another agent)
+        return False
+    if panel == "agent":  # in the cockpit's agent spot: the spot stays, empty
+        tmux("respawn-pane", "-k", "-t", s["pane"], layout.EMPTY_SLOT)
+        layout.tag(s["pane"], "agent-slot")
+    else:
+        tmux("kill-pane", "-t", s["pane"])
+    conn.execute("UPDATE sessions SET state='ended', asleep_at=datetime('now','localtime') WHERE session_id=?",
+                 (s["session_id"],))
+    conn.commit()
+    return True
+
+
+def drowsy(conn, hours):
+    """The sessions that can go to sleep: idle for `hours` (no prompt, reply or ping since),
+    in an agent window of their own on moa's server, and nothing you'd miss: not working or
+    waiting on you, no reply you haven't seen (the status panel's "done") or question, not
+    on screen (the window you're in, or the cockpit's agent spot), not in an open ask.
+    The pane has to run this session's agent: pane IDs restart with the tmux server, and a
+    session that died without its SessionEnd still says idle, holding an ID that now
+    belongs to someone else's pane."""
+    rows = live(conn)[0]
+    newest = {}  # pane → the session that last reported from it
+    for s in rows:
+        if s["pane"] and (s["pane"] not in newest or (s["last_seen"] or "") > (newest[s["pane"]]["last_seen"] or "")):
+            newest[s["pane"]] = s
+    panes = {}
+    for line in tmux("list-panes", "-a", "-F", "#{@moa_panel}\t#{@moa_term}\t#{&&:#{window_active},#{session_attached}}\t"
+                     + PANE_FMT).stdout.splitlines():
+        panel, term, shown, info = (line.split("\t", 3) + ["", "", ""])[:4]
+        panes[info.split("\t")[0]] = (panel, term, shown, info)
+    busy = {sid for r in conn.execute("SELECT from_sid, to_sid FROM asks WHERE status IN ('pending','sent','received')")
+            for sid in r}
+    cutoff = time.time() - hours * 3600
+    out = []
+    for s in rows:
+        panel, term, shown, info = panes.get(s["pane"] or "", ("-", "", "", ""))
+        if (s["show"] != "idle" or panel or term or shown == "1" or s["session_id"] in busy
+                or newest.get(s["pane"]) is not s or max(epoch(s["last_seen"]), epoch(s["since"])) > cutoff
+                or not reachable(s)):
+            continue
+        if runs_in_pane(s, info):
+            out.append(s)
+    return out
+
+
+def runs_in_pane(s, info=None):
+    """The session's pane runs its agent, not someone else's that inherited a reused pane ID."""
+    agent = pane_agent(s["pane"], info)
+    return bool(agent) and (agent["sid"] or s["session_id"]) == s["session_id"] and related(agent["cwd"], s["cwd"])
+
+
+def sleep_cmd(conn, ids, hours, dry_run):
+    if ids:
+        rows = [find(conn, q) for q in ids]
+    elif hours is not None:
+        rows = drowsy(conn, hours)
+    else:
+        sys.exit("moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]")
+    if dry_run:
+        print("\n".join(f"would sleep {s['session_id'][:8]}  {label(s)}" for s in rows) or "nothing to put to sleep")
+        return
+    slept = [s for s in rows if put_to_sleep(conn, s)]
+    for s in rows:
+        if s not in slept:
+            print(f"{label(s)} isn't running in moa ({s['state']}); nothing to put to sleep")
+    if slept:
+        names = ", ".join(s["title"] or s["session_id"][:8] for s in slept)
+        log_ui(conn, f"put {len(slept)} session{'s' if len(slept) > 1 else ''} to sleep: {names}")
+        print(f"asleep: {names} (resumable: moactl resume ID)")
+    elif not ids:
+        print("nothing to put to sleep")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="moactl")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -748,6 +837,9 @@ def main():
     p.add_argument("--title"); p.add_argument("--group"); p.add_argument("--prompt"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("resume"); p.add_argument("id"); p.add_argument("--bg", action="store_true")
     p = sub.add_parser("close"); p.add_argument("id")
+    p = sub.add_parser("sleep", help="close sessions' agents to free memory; they stay resumable (moactl resume) and show as 💤")
+    p.add_argument("ids", nargs="*"); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--idle", type=float, metavar="HOURS", help="every session idle that long (what the console does on its own)")
     p = sub.add_parser("term", help="a plain shell in a new window (default folder: the agent you're looking at, else ~)")
     p.add_argument("path", nargs="?"); p.add_argument("--title"); p.add_argument("--pane", help="the focused pane (tmux passes it)")
     p = sub.add_parser("archive"); p.add_argument("ids", nargs="+")
@@ -898,6 +990,8 @@ def main():
         resume(conn, find(conn, a.id), a.bg)
     elif a.cmd == "close":
         close(conn, find(conn, a.id))
+    elif a.cmd == "sleep":
+        sleep_cmd(conn, a.ids, a.idle, a.dry_run)
     elif a.cmd == "term":
         term(a.path, a.title, a.pane)
     elif a.cmd == "archive":

@@ -20,9 +20,10 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from picture import ICON, ago, connect, db_mtime, icon  # noqa: E402
+from picture import ASLEEP, ICON, ago, connect, db_mtime, icon, log_ui  # noqa: E402
 import chrome  # noqa: E402
 import layout  # noqa: E402
+import moactl  # noqa: E402  (sleep: drowsy, put_to_sleep)
 import setup_hooks  # noqa: E402
 
 MASTER_DIR = os.path.normpath(os.path.join(HERE, "..", "master-chat", "master"))
@@ -39,6 +40,8 @@ OPENING = ("(The console just opened a new thread for today.) Give me your openi
 WAKE = "(Automatic wake-up from the console"
 ASK = "(A message for you from another agent"
 SETTLE, GAP = (int(os.environ.get(v, d)) for v, d in (("MOA_WAKE_SETTLE", 45), ("MOA_WAKE_GAP", 180)))  # wake moa 45 s after the last report, at most every 3 min
+# idle sessions go to sleep after MOA_SLEEP_AFTER hours (0: never), looked for every MOA_SLEEP_EVERY seconds
+SLEEP_AFTER, SLEEP_EVERY = (float(os.environ.get(v) or d) for v, d in (("MOA_SLEEP_AFTER", 6), ("MOA_SLEEP_EVERY", 600)))
 COMMANDS = [  # name, arguments, what it does
     ("attention", "", "what needs you, ranked (instant, no LLM)"),
     ("brief", "", "moa's brief"),
@@ -52,6 +55,7 @@ COMMANDS = [  # name, arguments, what it does
     ("archive", "Q", "archive a session"),
     ("new", "", "start a fresh moa thread"),
     ("auto", "[on|off]", "moa reads session reports on its own (default on)"),
+    ("sleep", "[on|off|HOURS]", "idle sessions go to sleep (window closed, resumable); no args: the threshold"),
     ("setup", "", "track sessions on your Claude accounts (installs moa's hook)"),
     ("help", "", "commands and keys"),
     ("quit", "", "close the console"),
@@ -341,6 +345,7 @@ class Console:
                           ("moa's console restarted before moa answered",))
         self.conn.commit()
         self.nagged = set()        # (task id, due, day) moa was already told about, so it nags once a day per task
+        self.sleep_after, self.sleep_check = SLEEP_AFTER, time.monotonic()  # the first look is SLEEP_EVERY after start
         self.hits = []             # buttons on screen: (y, x0, x1, command), in Tab order
         self.focus = None          # the focused hit (y, x0, x1, command), while Tab-hopping
         self.pal, self.pal_key, self.pal_items, self.pal_hits = 0, None, [], []
@@ -540,14 +545,15 @@ class Console:
         if m == self.seen:
             return
         self.load_names()
-        rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name, p.name AS project FROM events e
+        rows = self.conn.execute("""SELECT e.*, coalesce(s.title, p.name) AS name, p.name AS project, s.asleep_at FROM events e
             LEFT JOIN sessions s ON s.session_id=e.session_id LEFT JOIN projects p ON p.id=s.project_id
             WHERE e.id > ? ORDER BY e.id""", (self.cursor,)).fetchall()
         for e in rows:
             name = e["name"] or os.path.basename(e["cwd"] or "") or "?"
             sid = (e["session_id"] or "")[:8]
             text = " ".join((e["text"] or "").split())
-            if e["kind"] in ("stop", "waiting", "start", "end"):
+            # the end of a session put to sleep (by this console or `moactl sleep`) isn't news; resuming clears asleep_at
+            if e["kind"] in ("stop", "waiting", "start", "end") and not (e["kind"] == "end" and e["asleep_at"]):
                 self.add_event(text, what=e["kind"], name=name, sid=sid)
             if e["kind"] in ("stop", "waiting") and e["cwd"] != MASTER_DIR and (e["text"] or "").strip():
                 old = [r for r in self.reports if r["sid"] == sid and r["kind"] == e["kind"]]
@@ -578,6 +584,23 @@ class Console:
                 return
         e = self.add("event", text, what=what, name=name, sid=sid, n=1)
         e["ts"] = e["since"] = now  # a live report, even while moa's thread replays ("earlier")
+
+    def doze(self):
+        """Put sessions idle for `sleep_after` hours to sleep: their agents exit and give their
+        memory back, the conversations stay one resume away (💤 in the tree). Housekeeping on
+        a slow clock (SLEEP_EVERY), separate from tick(), which wakes moa. moactl.drowsy says
+        which; moa hears it from the ui event, not from a wake-up."""
+        now = time.monotonic()
+        if not self.sleep_after or now - self.sleep_check < SLEEP_EVERY:
+            return
+        self.sleep_check = now
+        slept = [s for s in moactl.drowsy(self.conn, self.sleep_after) if moactl.put_to_sleep(self.conn, s)]
+        if not slept:
+            return
+        names = ", ".join(SESSION_NAMES.get(s["session_id"]) or s["title"] or s["session_id"][:8] for s in slept)
+        n = f"{len(slept)} idle session{'s' if len(slept) > 1 else ''}"
+        self.add("sys", f"put {n} to sleep: {names} · resume from the tree", glyph=ASLEEP)
+        log_ui(self.conn, f"put {n} to sleep (idle over {self.sleep_after:g} h): {names}")
 
     def take_ask(self):
         """Another agent's message to moa (moactl ask moa "…"): moa answers it here, in the
@@ -670,6 +693,19 @@ class Console:
             self.auto = args[0] != "off" if args else not self.auto
             self.add("sys", "moa reads session reports on its own" if self.auto else
                      "moa won't read session reports until /auto on")
+        elif cmd == "sleep":  # this console's threshold: on (MOA_SLEEP_AFTER, else 6) | off | HOURS
+            try:
+                self.sleep_after = (0.0 if args[0] == "off" else (SLEEP_AFTER or 6.0) if args[0] == "on"
+                                    else max(0.0, float(args[0]))) if args else self.sleep_after
+                if args:  # a new threshold applies at the next loop, not in 10 minutes
+                    self.sleep_check = time.monotonic() - SLEEP_EVERY
+            except ValueError:
+                self.add("sys", "/sleep on, off, or a number of hours")
+                return
+            asleep_now = self.conn.execute("SELECT count(*) FROM sessions WHERE asleep_at IS NOT NULL AND state='ended'").fetchone()[0]
+            self.add("sys", (f"sessions idle over {self.sleep_after:g} h go to sleep (checked every {SLEEP_EVERY / 60:g} min)"
+                             if self.sleep_after else "idle sessions stay up (/sleep on)")
+                     + f" · {asleep_now} asleep now" + (" · resume from the tree" if asleep_now else ""))
         elif cmd == "setup" and args:
             self.run_ctl("setup", *args)
             if args[0] in ("install", "only", "skip"):
@@ -884,6 +920,8 @@ class Console:
             return self.card(f"✉ {e['name']} asks moa", markdown(e["text"], width - 2, S), width, S.head)
         if k == "err":
             return wrap([(e["text"], S.err)], width, [("✗ ", S.err)], [("  ", 0)])
+        if e.get("glyph"):  # a wide one (💤): its two cells and a space count as three, the text after covers the extra space
+            return wrap([(e["text"], S.dim | S.italic)], width, [(e["glyph"] + "  ", S.dim)], [("   ", 0)])
         return wrap([(e["text"], S.dim | S.italic)], width, [("· ", S.dim)], [("  ", 0)])
 
     def ctl_rows(self, e, width):
@@ -897,7 +935,9 @@ class Console:
                     continue
                 state = s["state"] if s["alive"] == "live" else s["alive"]
                 btn = (" ↩ resume ", S.chip, f"/resume {s['id'][:8]}")
-                left = fit([(f"{icon(state)} ", S.glyph.get(ICON.get(state), S.dim)), (s["title"] or s["id"][:8], curses.A_BOLD),
+                # 💤 is one character in two cells: with its space it counts as two, and the title (drawn next, at x + 2) covers the space
+                glyph = ASLEEP + " " if state == "asleep" else f"{icon(state)} "
+                left = fit([(glyph, S.glyph.get(ICON.get(state), S.dim)), (s["title"] or s["id"][:8], curses.A_BOLD),
                             (f"  {s['group'] or ''}", S.dim), (f"  {ago(s['last'])}", S.dim)], width - len(btn[0]) - 1)
                 rows.append(left + [(" " * (width - len(btn[0]) - seg_len(left)), 0), btn])
             return rows or [[("no sessions", S.dim)]]
@@ -1070,6 +1110,7 @@ def main(scr):
                     con.handle(con.inbox.get())
                 con.watch_events()
                 con.tick()
+                con.doze()
             except Exception as exc:  # keep the console alive; the traceback goes to stderr (console.err)
                 con.error(exc)
             try:
