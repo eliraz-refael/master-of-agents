@@ -1,0 +1,11 @@
+---
+source: crates/moa-core/tests/sessions.rs
+expression: "recent.text.replace(b.home.to_str().unwrap(), \"<home>\")"
+---
+3f9a1c52  working   acct-a       Private/Lantern        Wire up the dimmer                 <home>/private/lantern  last 2026-11-15 09:20:00
+d1c6a9f3  waiting   acct-a       Lantern                Fix the flicker                    <home>/private/lantern  last 2026-11-15 08:10:00
+7b5d2e83  idle      acct-a       Lantern                Calibrate the sensor               <home>/private/lantern  last 2026-11-15 06:30:00
+b84e07d1  idle      acct-b       -                      Read the tide tables               <home>/private/lantern  last 2026-11-14 16:45:00
+6a2f8e40  ended     acct-b       Tidepool               Sketch the harbour                 <home>/private/lantern  last 2026-11-13 12:00:00
+e57b3d96  asleep    acct-a       Lantern                Old lamp notes                     <home>/private/lantern  last 2026-11-12 10:00:00
+90e1f5a8  elsewhere acct-a       -                      Borrowed session                   <home>/private/lantern  last 2026-11-11 14:20:00

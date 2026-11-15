@@ -384,7 +384,23 @@ fn actor_failure_is_published() {
 
 #[test]
 fn op_methods_match_the_variants() {
-    let samples = [Op::GroupAdd { path: "A".into() }];
+    let samples = [
+        Op::GroupAdd { path: "A".into() },
+        Op::GroupRename {
+            old: "A".into(),
+            new: "B".into(),
+        },
+        Op::GroupRm { path: "A".into() },
+        Op::SessionLs { all: true },
+        Op::SessionSet {
+            q: "q".into(),
+            title: Some("t".into()),
+            group: None,
+        },
+        Op::SessionArchive {
+            qs: vec!["a".into(), "b".into()],
+        },
+    ];
     assert_eq!(Op::METHODS.len(), samples.len());
     for op in &samples {
         let v = serde_json::to_value(op).unwrap();
@@ -393,4 +409,19 @@ fn op_methods_match_the_variants() {
         assert_eq!(m, op.method());
         assert_eq!(&serde_json::from_value::<Op>(v).unwrap(), op);
     }
+}
+
+#[test]
+fn session_ops_take_their_flags_as_optional() {
+    let ls: Op = serde_json::from_str(r#"{"method":"session.ls","params":{}}"#).unwrap();
+    assert_eq!(ls, Op::SessionLs { all: false });
+    let set: Op = serde_json::from_str(r#"{"method":"session.set","params":{"q":"x"}}"#).unwrap();
+    assert_eq!(
+        set,
+        Op::SessionSet {
+            q: "x".into(),
+            title: None,
+            group: None
+        }
+    );
 }

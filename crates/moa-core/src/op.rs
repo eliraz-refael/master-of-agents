@@ -16,16 +16,47 @@ pub struct ReqId(pub u64);
 pub enum Op {
     #[serde(rename = "group.add")]
     GroupAdd { path: String },
+    #[serde(rename = "group.rename")]
+    GroupRename { old: String, new: String },
+    #[serde(rename = "group.rm")]
+    GroupRm { path: String },
+    #[serde(rename = "session.ls")]
+    SessionLs {
+        #[serde(default)]
+        all: bool,
+    },
+    #[serde(rename = "session.set")]
+    SessionSet {
+        q: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+    },
+    #[serde(rename = "session.archive")]
+    SessionArchive { qs: Vec<String> },
 }
 
 impl Op {
     /// Every method name, in variant order. A test ties this to the variants.
-    pub const METHODS: &'static [&'static str] = &["group.add"];
+    pub const METHODS: &'static [&'static str] = &[
+        "group.add",
+        "group.rename",
+        "group.rm",
+        "session.ls",
+        "session.set",
+        "session.archive",
+    ];
 
     /// This op's method name.
     pub fn method(&self) -> &'static str {
         match self {
             Op::GroupAdd { .. } => "group.add",
+            Op::GroupRename { .. } => "group.rename",
+            Op::GroupRm { .. } => "group.rm",
+            Op::SessionLs { .. } => "session.ls",
+            Op::SessionSet { .. } => "session.set",
+            Op::SessionArchive { .. } => "session.archive",
         }
     }
 }
