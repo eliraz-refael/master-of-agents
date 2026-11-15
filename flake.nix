@@ -27,9 +27,12 @@
           pkgs = pkgsFor system;
           craneLib = craneLibFor pkgs;
           commonArgs = {
+            # The root Cargo.toml is a virtual workspace, so crane cannot infer these.
+            pname = "moa";
+            version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
             src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
-            buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
             nativeCheckInputs = [ pkgs.tmux ];
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -42,7 +45,6 @@
         let b = buildFor system; in
         {
           default = b.craneLib.buildPackage (b.withArtifacts // {
-            pname = "moa";
             doCheck = false;
             meta.mainProgram = "moa";
           });
@@ -55,7 +57,7 @@
           clippy = b.craneLib.cargoClippy (b.withArtifacts // {
             cargoClippyExtraArgs = "--all-targets -- -D warnings";
           });
-          fmt = b.craneLib.cargoFmt { src = b.withArtifacts.src; };
+          fmt = b.craneLib.cargoFmt { inherit (b.withArtifacts) pname version src; };
           nextest = b.craneLib.cargoNextest (b.withArtifacts // {
             nativeBuildInputs = [ b.pkgs.tmux ];
           });
