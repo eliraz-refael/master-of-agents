@@ -38,7 +38,7 @@ pub fn is_sidecar_name(path: &Path) -> bool {
 }
 
 /// The last part of a path, for messages: they name files by file name only.
-pub(crate) fn file_name_of(p: &Path) -> String {
+pub fn file_name_of(p: &Path) -> String {
     p.file_name()
         .map_or_else(|| "?".into(), |n| n.to_string_lossy().into_owned())
 }

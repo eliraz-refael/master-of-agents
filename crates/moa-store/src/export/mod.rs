@@ -43,7 +43,11 @@ pub enum ExportError {
 impl fmt::Display for ExportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Exists(p) => write!(f, "{} is in the way; nothing was written", p.display()),
+            Self::Exists(p) => write!(
+                f,
+                "{} is in the way; nothing was written",
+                crate::file_name_of(p)
+            ),
             Self::Store(e) => write!(f, "{e}"),
             Self::Sqlite(e) => write!(f, "the database failed: {e}"),
             Self::Io(e) => write!(f, "a file could not be used: {e}"),
@@ -202,9 +206,8 @@ fn write_all(src: &Store, dst: &Path, env: &ExportEnv) -> Result<ExportReport, E
     conn.execute_batch(TRIGGERS_SQL)?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     conn.close().map_err(|(_, e)| e)?;
-    let mut wal = dst.as_os_str().to_owned();
-    wal.push("-wal");
-    if fs::metadata(PathBuf::from(wal)).is_ok_and(|m| m.len() > 0) {
+    let [wal, ..] = crate::sidecars(dst);
+    if fs::metadata(wal).is_ok_and(|m| m.len() > 0) {
         return Err(ExportError::Io(io::Error::other(
             "the exported database still has a write-ahead log",
         )));

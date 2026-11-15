@@ -59,7 +59,9 @@ pub fn utc_to_spike_local(t: UtcMs, tz: &TimeZone) -> String {
 pub fn parse_date(text: &str) -> Result<Date, TimeError> {
     let text = text.trim();
     let head = text.get(..10).ok_or(TimeError::Unparsable)?;
-    if !text[10..].is_empty() && !text[10..].starts_with([' ', 'T']) {
+    // Anything after the date must be a time, as in a spike timestamp.
+    if !text[10..].is_empty() && (!text[10..].starts_with([' ', 'T']) || parse_civil(text).is_err())
+    {
         return Err(TimeError::Unparsable);
     }
     head.parse::<Date>().map_err(|_| TimeError::Unparsable)
@@ -160,6 +162,8 @@ mod tests {
     fn parse_date_rejects_trailing_junk() {
         assert!(parse_date("2026-07-01garbage").is_err());
         assert!(parse_date("2026-07-01+02:00").is_err());
+        assert!(parse_date("2026-07-01 garbage").is_err());
+        assert!(parse_date("2026-07-01T12:00:00+02:00").is_err());
         assert_eq!(
             parse_date("2026-07-01T12:00:00").unwrap(),
             jiff::civil::date(2026, 7, 1)

@@ -2,7 +2,6 @@
 //! spike's schema and v1's. Every message names files by file name only and never quotes a
 //! record.
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -12,7 +11,7 @@ use moa_core::UtcMs;
 use moa_store::accounts::AccountMap;
 use moa_store::export::{ExportEnv, ExportError, export_spike};
 use moa_store::import::{IdSource, ImportEnv, ImportError, import_spike, recorded_zone};
-use moa_store::{Store, StoreError, is_sidecar_name, sidecars};
+use moa_store::{Store, StoreError, file_name_of, is_sidecar_name, sidecars};
 
 #[derive(Args)]
 pub struct AdoptArgs {
@@ -58,13 +57,6 @@ pub struct ExportArgs {
     setup_skipped: Vec<String>,
 }
 
-fn file_name(p: &Path) -> String {
-    p.file_name()
-        .unwrap_or_else(|| OsStr::new("?"))
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// The zone to use, and the text the user gave for it (`None` for the system zone).
 fn zone(tz: Option<&str>) -> Result<(TimeZone, Option<String>), String> {
     match tz {
@@ -96,14 +88,14 @@ fn refuse_existing(into: &Path) -> Result<(), String> {
     if is_sidecar_name(into) {
         return Err(format!(
             "{} is a name SQLite keeps for its own files; pick another",
-            file_name(into)
+            file_name_of(into)
         ));
     }
     for p in std::iter::once(into.to_path_buf()).chain(sidecars(into)) {
         if p.symlink_metadata().is_ok() {
             return Err(format!(
                 "{} already exists; moa never overwrites a brain",
-                file_name(&p)
+                file_name_of(&p)
             ));
         }
     }
@@ -127,14 +119,14 @@ fn refuse_same_file(from: &Path, into: &Path) -> Result<(), String> {
 
 fn store_err(e: StoreError) -> String {
     match e {
-        StoreError::Missing(p) => format!("no brain at {}", file_name(&p)),
+        StoreError::Missing(p) => format!("no brain at {}", file_name_of(&p)),
         other => other.to_string(),
     }
 }
 
 fn import_err(e: ImportError) -> String {
     match e {
-        ImportError::SpikeMissing(p) => format!("no spike brain at {}", file_name(&p)),
+        ImportError::SpikeMissing(p) => format!("no spike brain at {}", file_name_of(&p)),
         ImportError::Store(e) => store_err(e),
         other => other.to_string(),
     }
@@ -144,7 +136,7 @@ fn export_err(e: ExportError) -> String {
     match e {
         ExportError::Exists(p) => format!(
             "{} already exists; moa never overwrites a brain",
-            file_name(&p)
+            file_name_of(&p)
         ),
         ExportError::Store(e) => store_err(e),
         other => other.to_string(),
@@ -162,7 +154,7 @@ pub fn adopt(args: &AdoptArgs) -> Result<(), String> {
     let (tz, tz_spec) = zone(args.tz.as_deref())?;
     let accounts = accounts(&args.accounts)?;
     if !args.from.is_file() {
-        return Err(format!("no spike brain at {}", file_name(&args.from)));
+        return Err(format!("no spike brain at {}", file_name_of(&args.from)));
     }
     if let Some(into) = &args.into {
         refuse_same_file(&args.from, into)?;
@@ -228,10 +220,10 @@ fn claim(into: &Path) -> Result<(), String> {
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::AlreadyExists => format!(
                 "{} already exists; moa never overwrites a brain",
-                file_name(into)
+                file_name_of(into)
             ),
             std::io::ErrorKind::NotFound => {
-                format!("the folder for {} doesn't exist", file_name(into))
+                format!("the folder for {} doesn't exist", file_name_of(into))
             }
             _ => "a file could not be created".to_string(),
         })
@@ -248,13 +240,13 @@ pub fn export(args: &ExportArgs) -> Result<(), String> {
     let given = args.tz.as_deref().map(|s| zone(Some(s))).transpose()?;
     let accounts = accounts(&args.accounts)?;
     if !args.from.is_file() {
-        return Err(format!("no v1 brain at {}", file_name(&args.from)));
+        return Err(format!("no v1 brain at {}", file_name_of(&args.from)));
     }
     refuse_same_file(&args.from, &args.into)?;
     refuse_existing(&args.into)?;
     let store = Store::open_read_only(&args.from).map_err(|e| match e {
         StoreError::NotABrain => {
-            format!("{} isn't a moa brain", file_name(&args.from))
+            format!("{} isn't a moa brain", file_name_of(&args.from))
         }
         other => store_err(other),
     })?;
@@ -269,8 +261,14 @@ pub fn export(args: &ExportArgs) -> Result<(), String> {
             }
             tz
         }
-        None => match recorded.and_then(|r| zone(Some(&r)).ok()) {
-            Some((tz, _)) => tz,
+        None => match recorded.as_deref().map(|r| zone(Some(r))) {
+            Some(Ok((tz, _))) => tz,
+            Some(Err(_)) => {
+                eprintln!(
+                    "note: the time zone the import used isn't known here; using this machine's"
+                );
+                zone(None)?.0
+            }
             None => zone(None)?.0,
         },
     };

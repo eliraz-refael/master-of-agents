@@ -110,7 +110,13 @@ pub enum ImportError {
 impl fmt::Display for ImportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SpikeMissing(p) => write!(f, "there is no spike database at {}", p.display()),
+            Self::SpikeMissing(p) => {
+                write!(
+                    f,
+                    "there is no spike database at {}",
+                    crate::file_name_of(p)
+                )
+            }
             Self::NotEmpty => f.write_str("this brain already has projects, sessions or tasks"),
             Self::Store(e) => write!(f, "{e}"),
             Self::Sqlite(e) => write!(f, "the database failed: {e}"),
@@ -168,7 +174,7 @@ pub fn snapshot_spike(src: &Path, dest: &Path) -> Result<(), ImportError> {
 
 /// One row of a spike table, read by column name.
 pub(crate) struct SrcRow {
-    cols: Vec<&'static str>,
+    cols: &'static [&'static str],
     vals: Vec<Value>,
     /// Some text value was not valid UTF-8 and was read with replacement characters.
     lossy: bool,
@@ -241,7 +247,7 @@ impl Src<'_> {
     pub(crate) fn rows(
         &self,
         table: &str,
-        cols: &[&'static str],
+        cols: &'static [&'static str],
         order: &str,
     ) -> Result<Vec<SrcRow>, ImportError> {
         let have = self.columns(table)?;
@@ -282,11 +288,7 @@ impl Src<'_> {
                     },
                 });
             }
-            Ok(SrcRow {
-                cols: cols.to_vec(),
-                vals,
-                lossy,
-            })
+            Ok(SrcRow { cols, vals, lossy })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
