@@ -209,4 +209,21 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Lantern");
     }
+
+    #[test]
+    fn a_taken_pre_migration_name_gets_a_millisecond_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = dir.path().join("backups");
+        fs::create_dir(&backups).unwrap();
+        fs::write(backups.join("pre-v3.db"), b"old").unwrap();
+
+        let path = backup_path(&backups, 3);
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let ms = name
+            .strip_prefix("pre-v3-")
+            .and_then(|n| n.strip_suffix(".db"))
+            .unwrap_or_else(|| panic!("unexpected name {name}"));
+        assert!(ms.parse::<u128>().is_ok(), "{name}");
+        assert_eq!(fs::read(backups.join("pre-v3.db")).unwrap(), b"old");
+    }
 }

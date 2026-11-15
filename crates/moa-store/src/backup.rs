@@ -5,9 +5,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use jiff::civil::Date;
 use rusqlite::Connection;
 
-use crate::{StoreError, create_private_dirs};
+use crate::{Store, StoreError, create_private_dirs};
 
 /// Writes a consistent copy of `conn`'s database to `dest`.
 ///
@@ -43,4 +44,71 @@ fn occupied_names(dest: &Path) -> Vec<PathBuf> {
         names.push(PathBuf::from(s));
     }
     names
+}
+
+/// Writes `dir/daily-YYYY-MM-DD.db` unless today's backup already exists.
+///
+/// Returns the new file's path, or `None` when that day already has one.
+pub fn daily_backup(store: &Store, dir: &Path, today: Date) -> Result<Option<PathBuf>, StoreError> {
+    let dest = dir.join(daily_name(today));
+    match vacuum_into(store.conn(), &dest) {
+        Ok(()) => Ok(Some(dest)),
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The dates to delete: everything but the 7 newest and, of the rest, the newest date
+/// in each of the 4 most recent ISO weeks that have a date in the rest.
+pub fn backups_to_delete(existing: &[Date]) -> Vec<Date> {
+    let mut newest_first = existing.to_vec();
+    newest_first.sort_unstable_by(|a, b| b.cmp(a));
+    newest_first.dedup();
+
+    let mut keep: Vec<Date> = newest_first.iter().copied().take(7).collect();
+    let mut weeks: Vec<(i16, i8)> = Vec::new();
+    for d in newest_first.iter().skip(7) {
+        let week = d.iso_week_date();
+        let key = (week.year(), week.week());
+        if weeks.contains(&key) {
+            continue;
+        }
+        if weeks.len() == 4 {
+            break;
+        }
+        weeks.push(key);
+        keep.push(*d);
+    }
+    newest_first.retain(|d| !keep.contains(d));
+    newest_first
+}
+
+/// Applies [`backups_to_delete`] to the `daily-YYYY-MM-DD.db` files in `dir`, removing
+/// them. Every other file is left alone. Returns the removed paths.
+pub fn prune_backups(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut dated = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if let Some(date) = entry.file_name().to_str().and_then(parse_daily_name) {
+            dated.push(date);
+        }
+    }
+    let mut removed = Vec::new();
+    for date in backups_to_delete(&dated) {
+        let path = dir.join(daily_name(date));
+        fs::remove_file(&path)?;
+        removed.push(path);
+    }
+    Ok(removed)
+}
+
+fn daily_name(date: Date) -> String {
+    format!("daily-{date}.db")
+}
+
+/// The date in a name that is exactly `daily-YYYY-MM-DD.db`.
+fn parse_daily_name(name: &str) -> Option<Date> {
+    let text = name.strip_prefix("daily-")?.strip_suffix(".db")?;
+    let date: Date = text.parse().ok()?;
+    (daily_name(date) == name).then_some(date)
 }
