@@ -59,8 +59,10 @@ impl Change {
         }
     }
 
-    /// `(table, key)` of the row this edits: `#<id>` for integer ids, the moa id for sessions
-    /// and their panes, the path for groups. `None` for `Meta`.
+    /// `(table, key)` of the row this edits. `.0` is always the SQL table name. Keys: `#<id>` for
+    /// integer ids; the moa id for sessions and their panes; the path for groups; the thread id
+    /// for `moa_threads`; `<agent_kind>/<conversation_id>` for conversations (the table's primary
+    /// key, kind as its SQL text); `#<task_id>/<due>/<day>` for nags. `None` for `Meta`.
     pub fn row(&self) -> Option<(&'static str, String)> {
         Some(match self {
             Change::Project(r) => ("projects", format!("#{}", r.id)),
@@ -68,16 +70,19 @@ impl Change {
             Change::Note(r) => ("notes", format!("#{}", r.id)),
             Change::Suggestion(r) => ("suggestions", format!("#{}", r.id)),
             Change::Session(r) => ("sessions", r.id.to_string()),
-            Change::Conversation(r) => ("conversations", r.conversation_id.clone()),
+            Change::Conversation(r) => (
+                "conversations",
+                format!("{}/{}", r.agent_kind, r.conversation_id),
+            ),
             Change::PaneBinding(r) => ("pane_bindings", r.session_id.to_string()),
             Change::SpikePane(r) => ("spike_panes", r.session_id.to_string()),
             Change::Event(r) => ("events", format!("#{}", r.id)),
             Change::Activity(r) => ("activity", format!("#{}", r.id)),
             Change::Group(r) => ("groups", r.path.clone()),
             Change::Ask(r) => ("asks", format!("#{}", r.id)),
-            Change::Thread(r) => ("threads", r.thread_id.clone()),
+            Change::Thread(r) => ("moa_threads", r.thread_id.clone()),
             Change::Feed(r) => ("feed", format!("#{}", r.id)),
-            Change::Nag(r) => ("nags", format!("#{}", r.task_id)),
+            Change::Nag(r) => ("nags", format!("#{}/{}/{}", r.task_id, r.due, r.day)),
             Change::Meta { .. } => return None,
             Change::DeletePaneBinding(id) => ("pane_bindings", id.to_string()),
             Change::DeleteSpikePane(id) => ("spike_panes", id.to_string()),

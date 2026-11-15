@@ -81,8 +81,8 @@ fn word(state: DisplayState) -> String {
     }
 }
 
-#[allow(dead_code)] // publish gets its caller in Task 9
 impl State {
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Task 9
     fn sessions_rows(&self) -> BTreeMap<String, Value> {
         self.sessions()
             .map(|s| {
@@ -111,6 +111,7 @@ impl State {
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Task 9
     fn status_rows(&self) -> BTreeMap<String, Value> {
         let mut counts: BTreeMap<DisplayState, u64> = DisplayState::ALL
             .iter()
@@ -131,6 +132,7 @@ impl State {
         BTreeMap::from([("counts".to_string(), Value::Object(row))])
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Task 9
     fn build(&self, topic: Topic) -> BTreeMap<String, Value> {
         match topic {
             Topic::Sessions => self.sessions_rows(),
@@ -151,6 +153,7 @@ impl State {
     }
 
     /// Rebuilds `topics` from the rows and bumps `rev`. `None` (and no new rev) when the set is empty.
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Task 9
     pub(crate) fn publish(&mut self, topics: &BTreeSet<Topic>) -> Option<Arc<Model>> {
         if topics.is_empty() {
             return None;

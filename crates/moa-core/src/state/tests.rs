@@ -433,3 +433,166 @@ fn handles_use_the_current_conversation() {
     s.apply(&Change::Conversation(conv(2, "xy", 99)));
     assert_eq!(s.handle_of(sid(2)), "xy");
 }
+
+fn nag(task: i64, due: (i16, i8, i8), day: (i16, i8, i8)) -> Nag {
+    Nag {
+        task_id: TaskId(task),
+        due: date(due.0, due.1, due.2),
+        day: date(day.0, day.1, day.2),
+    }
+}
+
+#[test]
+fn nags_are_keyed_like_their_table() {
+    let a = nag(3, (2026, 11, 20), (2026, 11, 16));
+    let b = nag(3, (2026, 11, 20), (2026, 11, 17));
+    let c = nag(3, (2026, 11, 21), (2026, 11, 16));
+    assert_eq!(
+        Change::Nag(a).row(),
+        Some(("nags", "#3/2026-11-20/2026-11-16".to_string()))
+    );
+    let mut s = new_state();
+    for n in [a, b, c, a] {
+        s.apply(&Change::Nag(n));
+    }
+    assert_eq!(s.nags.len(), 3);
+    s.load(Snapshot {
+        nags: vec![a, b, c],
+        ..Snapshot::default()
+    });
+    assert_eq!(s.nags.len(), 3);
+}
+
+#[test]
+fn row_names_the_sql_table_for_every_variant() {
+    let id = sid(5);
+    let pane = PaneBinding {
+        session_id: id,
+        server_pid: 1,
+        server_start: 1,
+        socket: "s".into(),
+        pane_id: "%1".into(),
+        pane_pid: 2,
+        bound_at: UtcMs(1),
+    };
+    let spike = SpikePane {
+        session_id: id,
+        pane_id: "%1".into(),
+        tmux: None,
+        imported_at: UtcMs(1),
+    };
+    let ev = Event {
+        id: EventId(1),
+        at: UtcMs(1),
+        session_id: None,
+        conversation_id: None,
+        account: None,
+        cwd: None,
+        kind: EventKind(EventKind::UI.into()),
+        text: None,
+        detail: None,
+    };
+    let thread = MoaThread {
+        thread_id: "t1".into(),
+        account: "acct-a".into(),
+        day: date(2026, 11, 16),
+        kind: ThreadKind::Daily,
+        started_at: UtcMs(1),
+    };
+    let feed = FeedEntry {
+        id: 4,
+        thread_id: "t1".into(),
+        at: UtcMs(1),
+        kind: "k".into(),
+        message_id: None,
+        automatic: false,
+        body: "b".into(),
+        state: None,
+    };
+    let note = Note {
+        id: NoteId(2),
+        project_id: None,
+        kind: NoteKind(NoteKind::FACT.into()),
+        text: "t".into(),
+        created_at: UtcMs(1),
+    };
+    let sug = Suggestion {
+        id: SuggestionId(6),
+        text: "t".into(),
+        status: SuggestionStatus::Open,
+        actions: vec![],
+        actions_raw: None,
+        actions_invalid: None,
+        result: None,
+        created_at: UtcMs(1),
+        resolved_at: None,
+    };
+    let ask = Ask {
+        id: AskId(8),
+        at: UtcMs(1),
+        from_session: None,
+        from_name: None,
+        to_session: None,
+        text: "t".into(),
+        status: AskStatus::Pending,
+        reply: None,
+        claimed_at: None,
+        answered_at: None,
+    };
+    let group = Group {
+        path: "Driftwood".into(),
+        collapsed: false,
+        created_at: UtcMs(1),
+    };
+    let cases: Vec<(Change, &str, String)> = vec![
+        (
+            Change::Project(project(1, "Lantern")),
+            "projects",
+            "#1".into(),
+        ),
+        (
+            Change::Task(task(3, TaskStatus::Todo)),
+            "tasks",
+            "#3".into(),
+        ),
+        (Change::Note(note), "notes", "#2".into()),
+        (Change::Suggestion(sug), "suggestions", "#6".into()),
+        (
+            Change::Session(session(5, None, Activity::Idle)),
+            "sessions",
+            id.to_string(),
+        ),
+        (
+            Change::Conversation(conv(5, "aaaa-1", 1)),
+            "conversations",
+            "claude/aaaa-1".into(),
+        ),
+        (Change::PaneBinding(pane), "pane_bindings", id.to_string()),
+        (Change::SpikePane(spike), "spike_panes", id.to_string()),
+        (Change::Event(ev), "events", "#1".into()),
+        (Change::Activity(activity_row(9)), "activity", "#9".into()),
+        (Change::Group(group), "groups", "Driftwood".into()),
+        (Change::Ask(ask), "asks", "#8".into()),
+        (Change::Thread(thread), "moa_threads", "t1".into()),
+        (Change::Feed(feed), "feed", "#4".into()),
+        (
+            Change::Nag(nag(3, (2026, 11, 20), (2026, 11, 16))),
+            "nags",
+            "#3/2026-11-20/2026-11-16".into(),
+        ),
+        (
+            Change::DeletePaneBinding(id),
+            "pane_bindings",
+            id.to_string(),
+        ),
+        (Change::DeleteSpikePane(id), "spike_panes", id.to_string()),
+        (
+            Change::DeleteGroup("Driftwood".into()),
+            "groups",
+            "Driftwood".into(),
+        ),
+    ];
+    for (c, table, key) in cases {
+        assert_eq!(c.row(), Some((table, key)), "{c:?}");
+    }
+}

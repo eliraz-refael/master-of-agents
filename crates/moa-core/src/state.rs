@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
 use crate::UtcMs;
@@ -123,11 +124,14 @@ fn first8(s: &str) -> String {
 
 type ConvKey = (&'static str, String);
 
+fn nag_key(n: &Nag) -> (TaskId, Date, Date) {
+    (n.task_id, n.due, n.day)
+}
+
 fn conv_key(c: &Conversation) -> ConvKey {
     (c.agent_kind.as_str(), c.conversation_id.clone())
 }
 
-#[allow(dead_code)] // rows are read by later tasks (store load, handle)
 pub struct State {
     brain: BrainName,
     config: Config,
@@ -144,14 +148,13 @@ pub struct State {
     pane_bindings: BTreeMap<SessionId, PaneBinding>,
     spike_panes: BTreeMap<SessionId, SpikePane>,
     threads: BTreeMap<String, MoaThread>,
-    nags: BTreeMap<TaskId, Nag>,
+    nags: BTreeMap<(TaskId, Date, Date), Nag>,
     pub(crate) activity: BTreeMap<ActivityId, ActivityRow>,
     meta: BTreeMap<String, String>,
     next_ids: NextIds,
     unknown: Vec<LoadNote>,
 }
 
-#[allow(dead_code)] // the crate-private methods get their callers in Tasks 9-11
 impl State {
     /// Empty until a snapshot is loaded.
     pub fn new(brain: BrainName, config: Config) -> State {
@@ -235,6 +238,7 @@ impl State {
     }
 
     /// The id the next row of `table` takes.
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     pub(crate) fn next_id(&self, table: Table) -> i64 {
         let n = &self.next_ids;
         match table {
@@ -250,6 +254,7 @@ impl State {
     }
 
     /// The time views are computed at. The caller sets it from `Now` before publishing.
+    #[allow(dead_code)] // first caller: Tasks 9-11
     pub(crate) fn set_now(&mut self, now: UtcMs) {
         self.now = now;
     }
@@ -299,6 +304,7 @@ impl State {
     }
 
     /// Replaces every row. The published rev is kept.
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     pub(crate) fn load(&mut self, snap: Snapshot) {
         fn by<K: Ord, V>(rows: Vec<V>, key: impl Fn(&V) -> K) -> BTreeMap<K, V> {
             rows.into_iter().map(|r| (key(&r), r)).collect()
@@ -314,7 +320,7 @@ impl State {
         self.pane_bindings = by(snap.pane_bindings, |r| r.session_id);
         self.spike_panes = by(snap.spike_panes, |r| r.session_id);
         self.threads = by(snap.threads, |r| r.thread_id.clone());
-        self.nags = by(snap.nags, |r| r.task_id);
+        self.nags = by(snap.nags, nag_key);
         self.activity = by(snap.activity_tail, |r| r.id);
         self.trim_activity();
         self.meta = snap.meta.into_iter().collect();
@@ -322,18 +328,21 @@ impl State {
         self.unknown = snap.unknown;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     fn trim_activity(&mut self) {
         while self.activity.len() > ACTIVITY_SHOWN {
             self.activity.pop_first();
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     fn bump(next: &mut i64, id: i64) {
         *next = (*next).max(id.saturating_add(1));
     }
 
     /// The in-memory twin of the store's SQL for this change. Events and feed entries are
     /// not kept, only their ids are counted.
+    #[cfg_attr(not(test), allow(dead_code))] // first caller: Tasks 9-11
     pub(crate) fn apply(&mut self, c: &Change) {
         match c {
             Change::Project(r) => {
@@ -382,7 +391,7 @@ impl State {
             }
             Change::Feed(r) => Self::bump(&mut self.next_ids.feed, r.id),
             Change::Nag(r) => {
-                self.nags.insert(r.task_id, *r);
+                self.nags.insert(nag_key(r), *r);
             }
             Change::Meta { key, value } => match value {
                 Some(v) => {
