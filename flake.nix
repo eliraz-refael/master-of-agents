@@ -36,7 +36,7 @@
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
                 (craneLib.fileset.commonCargoSources ./.)
-                (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap") ./crates)
+                (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap" || f.hasExt "proptest-regressions") ./crates)
                 # read by a DDL check test; removed with the spike
                 ./spike/master-chat/schema.sql
                 ./spike/moa-proto/picture.py

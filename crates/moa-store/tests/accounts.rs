@@ -71,8 +71,8 @@ fn store_for_and_index_of() {
 fn parse_flag_splits_and_expands_the_tilde() {
     let home = PathBuf::from("/h/me");
     assert_eq!(
-        AccountMap::parse_flag("work=~/.claude-work", &home),
-        Ok(("work".to_string(), PathBuf::from("/h/me/.claude-work")))
+        AccountMap::parse_flag("acct-a=~/.acct-other", &home),
+        Ok(("acct-a".to_string(), PathBuf::from("/h/me/.acct-other")))
     );
     assert_eq!(
         AccountMap::parse_flag("a=/x/y", &home),
