@@ -72,6 +72,17 @@ fn col<T: rusqlite::types::FromSql>(c: &Connection, sql: &str) -> T {
     c.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
+/// Every spike session id with its raw account string, read from the spike DB.
+fn spike_pairs(spike: &Path) -> Vec<(String, Option<String>)> {
+    let c = Connection::open_with_flags(spike, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    c.prepare("SELECT session_id, account FROM sessions")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 fn session_id(c: &Connection, conv: &str) -> String {
     col(
         c,
@@ -347,6 +358,13 @@ fn typical_brain_imports_cleanly() {
     assert_eq!(c1.7, Some(NOW.0));
     let c2 = conv(ids::S2_IDLE);
     assert_eq!((c2.5, c2.6, c2.7), (Some(0), None, Some(NOW.0)));
+    let pairs = spike_pairs(&s.spike);
+    assert_eq!(pairs.len(), 9);
+    for (id, raw_acct) in pairs {
+        let cv = conv(&id);
+        assert_eq!(cv.1, id);
+        assert_eq!(cv.3, raw_acct, "{id}");
+    }
     let c8 = conv(ids::S8_CODEX);
     assert_eq!(c8.0, "codex");
     assert_eq!((c8.2, c8.5, c8.6, c8.7), (None, None, None, None));
@@ -706,6 +724,9 @@ fn waiting_follows_the_spikes_rule() {
         Some("May I run it?")
     );
     assert_eq!(why("e-permission-then-stop").as_deref(), Some("Done."));
+    // The latest counted event of g-idle-state is a waiting one, not a stop: no why, so
+    // "asks you" can't be derived for it.
+    assert_eq!(why("g-idle-state").as_deref(), Some(""));
     // Ping events are idle.ping, whatever the session state.
     assert_eq!(
         col::<i64>(c, "SELECT count(*) FROM events WHERE kind = 'idle.ping'"),
@@ -731,12 +752,14 @@ fn why_follows_the_spikes_reading() {
             ("m-markdown", "idle"),
             ("c-command", "idle"),
             ("l-longtext", "idle"),
+            ("p-prompt", "idle"),
         ],
         &[
             ("q-question", "stop", "First line\n**Shall I go on?**\n"),
             ("m-markdown", "stop", "text\n## Heading_ *"),
             ("c-command", "stop", "<command-name>x</command-name>"),
             ("l-longtext", "stop", "a\n\nb\nlast words  "),
+            ("p-prompt", "prompt", "can you check X?"),
         ],
     );
     let c = Connection::open(&s.spike).unwrap();
@@ -763,6 +786,8 @@ fn why_follows_the_spikes_reading() {
     assert_eq!(why("m-markdown"), "Heading");
     assert_eq!(why("c-command"), "");
     assert_eq!(why("l-longtext"), "last words");
+    // A prompt cut off mid-turn is not a question for the user.
+    assert_eq!(why("p-prompt"), "");
 }
 
 #[test]
@@ -1018,4 +1043,32 @@ proptest! {
         }
         prop_assert!(!text.contains(&home) && !json.contains(&home));
     }
+}
+
+#[test]
+fn unusable_session_ids_are_reported_not_fatal() {
+    let mut s = empty_setup();
+    small_brain(&s, &[("fine", "idle")], &[]);
+    let c = Connection::open(&s.spike).unwrap();
+    c.execute(
+        "INSERT INTO sessions (session_id, state) VALUES (NULL, 'idle')",
+        [],
+    )
+    .unwrap();
+    // Two different blobs that both read back as the same text.
+    for bad in [vec![0xffu8, b'x'], vec![0xfeu8, b'x']] {
+        c.execute(
+            "INSERT INTO sessions (session_id, state) VALUES (?1, 'idle')",
+            [bad],
+        )
+        .unwrap();
+    }
+    drop(c);
+    let report = import_spike(&s.spike, &mut s.store, &env(&s.home, "default")).unwrap();
+    let n = count(&report, "sessions");
+    assert_eq!((n.source, n.imported), (4, 2));
+    let reasons: Vec<&str> = warns(&report).iter().map(|n| n.reason).collect();
+    assert!(reasons.contains(&"session_id is missing; not imported"));
+    assert!(reasons.contains(&"session_id repeats another session; not imported"));
+    assert!(warns(&report).iter().any(|n| n.key.starts_with('#')));
 }

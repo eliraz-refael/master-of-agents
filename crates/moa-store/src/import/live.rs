@@ -58,6 +58,12 @@ pub(super) struct Latest<'a> {
 }
 
 /// `live()`'s `why`: one line of context for a session.
+///
+/// This departs from picture.py in one place. v1 doesn't store the kind of the latest event,
+/// and slice 2 derives "asks you" by applying [`asks`] to the stored why. The spike shows
+/// "question" only when the latest event is a `stop` (`last_kind == "stop"`), so outside the
+/// working and needs-permission cases the why carries text only when the latest event is a
+/// stop, and is empty otherwise. Then "asks(why)" is true exactly when the spike shows "question".
 pub(super) fn activity_why(
     state: Option<&str>,
     last_prompt: Option<&str>,
@@ -76,7 +82,7 @@ pub(super) fn activity_why(
         }
     } else if kind == Some("stop") && asks(text) {
         last_line(text).trim_matches([' ', '*', '_']).to_string()
-    } else if text.is_empty() {
+    } else if kind != Some("stop") || text.is_empty() {
         String::new()
     } else {
         last_line(text)
@@ -123,6 +129,11 @@ mod tests {
         assert_eq!(why("idle", None, "stop", Some("<command>x")), "");
         assert_eq!(why("idle", None, "stop", Some("   ")), "");
         assert_eq!(activity_why(Some("idle"), Some("p"), None), "");
+        // Only a stop's text is carried, so "asks you" can't appear for a cut-off prompt.
+        assert_eq!(why("idle", None, "prompt", Some("can you check X?")), "");
+        assert_eq!(why("idle", None, "waiting", Some("May I?")), "");
+        assert_eq!(why("ended", None, "prompt", Some("hello")), "");
+        assert!(asks(&why("idle", None, "stop", Some("Want me to go on?"))));
         assert_eq!(why("ended", None, "stop", Some("Sketched")), "Sketched");
     }
 

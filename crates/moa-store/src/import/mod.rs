@@ -17,7 +17,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
-use crate::accounts::AccountMap;
+use crate::accounts::{AccountMap, ResolvedAccount};
 use crate::{Store, StoreError};
 
 mod linked;
@@ -269,10 +269,24 @@ pub(crate) struct Run<'a> {
     pub(crate) project_ids: HashSet<i64>,
     /// Spike conversation id to the session id it was given.
     pub(crate) session_ids: HashMap<String, SessionId>,
+    resolved: HashMap<String, ResolvedAccount>,
     dirty: bool,
 }
 
 impl Run<'_> {
+    /// Resolves a spike account string, once per distinct string (it looks at the disk), and
+    /// gives the account its report number.
+    pub(crate) fn resolve_account(&mut self, raw: &str) -> ResolvedAccount {
+        let env = self.env;
+        let a = self
+            .resolved
+            .entry(raw.to_string())
+            .or_insert_with(|| env.accounts.resolve(raw))
+            .clone();
+        env.accounts.index_of(&a.name);
+        a
+    }
+
     pub(crate) fn warn(&mut self, table: &'static str, key: &str, reason: &'static str) {
         self.dirty = true;
         self.notes.push(RecordNote {
@@ -363,6 +377,7 @@ pub fn import_spike(
         setup_skipped: Vec::new(),
         project_ids: HashSet::new(),
         session_ids: HashMap::new(),
+        resolved: HashMap::new(),
         dirty: false,
     };
     simple::projects(&mut run, &tx)?;

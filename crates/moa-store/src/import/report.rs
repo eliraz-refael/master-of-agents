@@ -138,6 +138,8 @@ pub const R_SESSION_CREATED: &str =
     "first_seen is missing or isn't a time; imported as another time of the session";
 pub const R_SESSION_LAST_SEEN: &str = "last_seen isn't a time; imported as none";
 pub const R_SESSION_PROJECT: &str = "project_id points at no project; imported as none";
+pub const R_SESSION_ID_NULL: &str = "session_id is missing; not imported";
+pub const R_SESSION_ID_REPEATED: &str = "session_id repeats another session; not imported";
 pub const R_SESSION_STATE: &str = "unknown state; imported as ended";
 pub const R_SESSION_ASLEEP: &str = "asleep_at isn't a time; imported as none";
 pub const R_SESSION_ASLEEP_DROPPED: &str = "stale asleep mark dropped";

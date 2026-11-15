@@ -115,6 +115,7 @@ fn sessions(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), Import
     let rows = run.src.rows(
         "sessions",
         &[
+            "rowid",
             "session_id",
             "account",
             "cwd",
@@ -142,19 +143,26 @@ fn sessions(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), Import
 
     for r in &rows {
         let Some(conv) = r.text("session_id") else {
+            run.warn(
+                "sessions",
+                &id_key(r.int("rowid").unwrap_or(0)),
+                R_SESSION_ID_NULL,
+            );
+            warned += run.end_record();
             continue;
         };
         let key = conversation_key(&conv);
+        if run.session_ids.contains_key(&conv) {
+            run.warn("sessions", &key, R_SESSION_ID_REPEATED);
+            warned += run.end_record();
+            continue;
+        }
         let f = by.get(conv.as_str()).unwrap_or(&none);
         let latest = f.latest.map(|i| &events[i]);
 
         // Account: who the session belongs to and which agent it is.
         let resolved = match r.text("account").filter(|a| !a.trim().is_empty()) {
-            Some(a) => {
-                let resolved = run.env.accounts.resolve(&a);
-                run.env.accounts.index_of(&resolved.name);
-                Some(resolved)
-            }
+            Some(a) => Some(run.resolve_account(&a)),
             None => {
                 run.warn("sessions", &key, R_SESSION_ACCOUNT_NULL);
                 None
@@ -401,11 +409,7 @@ fn events(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), ImportEr
             .row
             .text("account")
             .filter(|a| !a.trim().is_empty())
-            .map(|a| {
-                let name = run.env.accounts.resolve(&a).name;
-                run.env.accounts.index_of(&name);
-                name
-            });
+            .map(|a| run.resolve_account(&a).name);
         let kind = match event_kind(&e.kind, e.text.as_deref()) {
             Some(k) => k.to_string(),
             None => {
