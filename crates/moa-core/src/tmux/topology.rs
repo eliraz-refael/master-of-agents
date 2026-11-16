@@ -116,6 +116,7 @@ impl Topology {
         match n {
             Notification::WindowPaneChanged { window, pane } => {
                 match self.windows.get_mut(window) {
+                    Some(w) if !w.panes.contains(pane) => Applied::Refresh,
                     Some(w) if w.active == Some(*pane) => Applied::Same,
                     Some(w) => {
                         w.active = Some(*pane);

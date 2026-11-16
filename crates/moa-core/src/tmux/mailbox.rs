@@ -192,7 +192,12 @@ impl Mailbox {
                 }))
             }
             "prompt" => {
-                let (token, text) = rest.split_once(' ').ok_or(MailboxError::Bad)?;
+                // tmux may trim the space after the token when the text is empty.
+                let (token, text) = rest.split_once(' ').unwrap_or((rest, ""));
+                // `u64::from_str` would accept a leading '+'.
+                if !token.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(MailboxError::Bad);
+                }
                 Ok(Mailbox::Prompt {
                     token: id(token)?,
                     // tmux 3.4 stores a `$` before a letter as `\$`.

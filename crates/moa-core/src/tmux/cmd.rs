@@ -74,13 +74,25 @@ impl Cmd {
         }
         match self.name {
             "command-prompt" if !self.args.iter().any(|a| a == "-b") => Err(Refused(NEEDS_B)),
-            "source-file" => match self.args.last() {
-                Some(p) if Path::new(p).file_name().is_some_and(|f| f == "moa.tmux") => Ok(()),
-                _ => Err(Refused(OWN_CONFIG)),
-            },
+            "source-file" => {
+                let mut paths = self.args.iter().filter(|a| !a.starts_with('-')).peekable();
+                if paths.peek().is_some() && paths.all(|p| is_own_config(p)) {
+                    Ok(())
+                } else {
+                    Err(Refused(OWN_CONFIG))
+                }
+            }
             _ => Ok(()),
         }
     }
+}
+
+/// An absolute path to a file named exactly `moa.tmux`, with no glob characters.
+fn is_own_config(p: &str) -> bool {
+    let path = Path::new(p);
+    path.is_absolute()
+        && !p.contains(['*', '?', '['])
+        && path.file_name().is_some_and(|f| f == "moa.tmux")
 }
 
 fn is_bare(c: char) -> bool {

@@ -82,6 +82,48 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
 }
 
 #[test]
+fn source_file_checks_every_path() {
+    let source = |args: &[&str]| Cmd::new("source-file").args(args.iter().copied()).check();
+    assert!(source(&["/x/moa.tmux"]).is_ok());
+    assert!(source(&["-q", "/x/moa.tmux"]).is_ok());
+    assert!(source(&["/evil.conf", "/x/moa.tmux"]).is_err());
+    assert!(source(&["/x/*/moa.tmux"]).is_err());
+    assert!(source(&["/x/[a]/moa.tmux"]).is_err());
+    assert!(source(&["/x/?/moa.tmux"]).is_err());
+    assert!(source(&["moa.tmux"]).is_err());
+    assert!(source(&["-q"]).is_err());
+}
+
+#[test]
+fn a_pane_change_for_a_pane_outside_the_window_refreshes() {
+    let mut t = lists(false);
+    assert_eq!(
+        t.apply(&Notification::WindowPaneChanged {
+            window: WindowId(2),
+            pane: PaneId(0)
+        }),
+        Applied::Refresh
+    );
+    assert_eq!(
+        t.client_pane(&ClientName("/dev/ttys1".into())),
+        Some(PaneId(3))
+    );
+}
+
+#[test]
+fn prompt_lines_without_text_or_with_a_signed_token() {
+    assert_eq!(
+        Mailbox::parse("moa:prompt 8"),
+        Ok(Mailbox::Prompt {
+            token: 8,
+            text: String::new()
+        })
+    );
+    assert_eq!(Mailbox::parse("moa:prompt +7 x"), Err(MailboxError::Bad));
+    assert_eq!(Mailbox::parse("moa:prompt  x"), Err(MailboxError::Bad));
+}
+
+#[test]
 fn a_command_line_is_the_name_and_quoted_arguments() {
     let c = Cmd::new("display-message").arg("-p").arg("#{pane_id}");
     assert_eq!(c.line(), "display-message -p '#{pane_id}'");
