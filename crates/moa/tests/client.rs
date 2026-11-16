@@ -206,3 +206,26 @@ async fn a_restart_happens_at_most_once() {
     // The first start and the one restart.
     assert_eq!(spawn::launches() - before, 2);
 }
+
+/// No client stops a daemon it can't restart: with no `autostart` a mismatch is reported
+/// and the daemon is left running.
+#[tokio::test]
+async fn a_mismatch_without_autostart_does_not_stop_the_daemon() {
+    let tb = TempBrain::new(None);
+    let other = tb.root().join("moa-other");
+    std::fs::copy(moa_exe(), &other).unwrap();
+    let other = std::fs::canonicalize(other).unwrap();
+    let old = Client::connect(opts_for(&tb, &other, true)).await.unwrap();
+    let pid = old.hello().pid;
+    // `opts` is another build, and `Restart` is its mode, but there is no exe to start.
+    let err = Client::connect(opts(&tb, false))
+        .await
+        .err()
+        .expect("refused");
+    match &err {
+        ClientError::Rpc(e) => assert_eq!(e.code, code::BUILD_MISMATCH),
+        other => panic!("{other}"),
+    }
+    assert!(pid_alive(pid));
+    drop(old);
+}

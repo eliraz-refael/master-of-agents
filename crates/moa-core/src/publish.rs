@@ -76,7 +76,7 @@ fn by_key<'a, T: Serialize + 'a>(
 }
 
 /// The state word for a display state, as it appears in JSON.
-pub(crate) fn word(state: DisplayState) -> String {
+pub fn word(state: DisplayState) -> String {
     match serde_json::to_value(state) {
         Ok(Value::String(s)) => s,
         _ => String::new(),

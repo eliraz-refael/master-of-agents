@@ -31,7 +31,8 @@ pub fn is_under_any(path: &Path, folders: &[PathBuf]) -> bool {
 
 /// Routes `cwd` for `account`. `home` is the opener's brain, else `default`.
 ///
-/// - No account, or one moa.toml doesn't list: `home`.
+/// - No account, or one moa.toml doesn't list: `home`. (`moactl` writes from an unlisted
+///   account are refused before routing; see `Config::refuses_unlisted`.)
 /// - `brain = B`: a cwd outside its `except` folders goes to B. Inside one, an except
 ///   folder means "not B", so the session goes to the opener when the opener is another
 ///   brain. When there's no opener or the opener is B, it goes to the brain that owns the

@@ -451,9 +451,28 @@ fn op_methods_match_the_variants() {
         let m = v["method"].as_str().unwrap();
         assert!(Op::METHODS.contains(&m), "{m}");
         assert_eq!(m, op.method());
+        // S17: the owner's list of what writes, by method name.
+        assert_eq!(op.writes(), WRITES.contains(&m), "{m}");
         assert_eq!(&serde_json::from_value::<Op>(v).unwrap(), op);
     }
+    assert!(WRITES.iter().all(|w| Op::METHODS.contains(w)));
+    assert!(!Op::DebugPanic.writes());
 }
+
+/// Every op that changes the brain (the rest only read it).
+const WRITES: &[&str] = &[
+    "group.add",
+    "group.rename",
+    "group.rm",
+    "session.set",
+    "session.archive",
+    "task.add",
+    "task.set",
+    "note.add",
+    "project.add",
+    "suggest",
+    "suggestion.answer",
+];
 
 #[test]
 fn session_ops_take_their_flags_as_optional() {

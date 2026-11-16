@@ -223,16 +223,43 @@ impl Wire {
     }
 
     /// Sends `shutdown` or `upgrade` and reads to the end of the connection: the daemon
-    /// closes it after replying, so an end of stream is the expected answer.
+    /// closes it after replying, so an end of stream is the expected answer. An error line
+    /// is the daemon refusing; a connection that stays open is an error too.
     async fn stop(&mut self, method: &str) -> Result<(), ClientError> {
         match self.send(method, json!({})).await {
             Ok(_) | Err(ClientError::Stopped) => {}
             Err(e) => return Err(e),
         }
-        let to_the_end = async { while let Ok(Some(_)) = self.read().await {} };
-        let _ = timeout(CLOSE_WAIT, to_the_end).await;
-        Ok(())
+        let mut refusal = None;
+        let to_the_end = async {
+            loop {
+                match self.read().await {
+                    Ok(Some(ServerLine::Error { error, .. })) => refusal = Some(error),
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        };
+        if timeout(CLOSE_WAIT, to_the_end).await.is_err() {
+            return Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "moa didn't hang up within 5 s",
+            )));
+        }
+        refusal.map_or(Ok(()), |e| Err(ClientError::Rpc(e)))
     }
+}
+
+/// Waits until `pid` has exited, for up to `limit`. Whether it has.
+async fn wait_for_exit(pid: u32, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while pid_alive(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(EXIT_POLL).await;
+    }
+    true
 }
 
 pub struct Client {
@@ -250,6 +277,13 @@ impl Client {
             let client = Client::greet(stream, &opts).await?;
             if client.hello.matched || opts.on_mismatch == OnMismatch::Accept {
                 return Ok(client);
+            }
+            if opts.autostart.is_none() {
+                // Stopping a daemon this client can't start again would just take moa down.
+                return Err(ClientError::Rpc(RpcError {
+                    code: code::BUILD_MISMATCH,
+                    message: "moa is running a different build; stop it with: moa shutdown".into(),
+                }));
             }
             if restarted {
                 return Err(ClientError::Rpc(RpcError {
@@ -279,16 +313,12 @@ impl Client {
         let pid = self.hello.pid;
         self.wire.stop("upgrade").await?;
         drop(self);
-        let deadline = Instant::now() + EXIT_WAIT;
-        while pid_alive(pid) {
-            if Instant::now() >= deadline {
-                return Err(start_error(
-                    &opts.paths,
-                    &opts.brain,
-                    "the old moa didn't stop within 10 s",
-                ));
-            }
-            sleep(EXIT_POLL).await;
+        if !wait_for_exit(pid, EXIT_WAIT).await {
+            return Err(start_error(
+                &opts.paths,
+                &opts.brain,
+                "the old moa didn't stop within 10 s",
+            ));
         }
         Ok(())
     }
@@ -308,9 +338,23 @@ impl Client {
         decode(self.wire.request("status", json!({})).await?)
     }
 
-    /// Asks the daemon to stop. The connection ending is the answer.
+    /// Asks the daemon to stop and returns once its process has exited. An error when the
+    /// daemon refuses or is still running after 10 s.
     pub async fn shutdown(&mut self) -> Result<(), ClientError> {
-        self.wire.stop("shutdown").await
+        self.shutdown_within(EXIT_WAIT).await
+    }
+
+    async fn shutdown_within(&mut self, limit: Duration) -> Result<(), ClientError> {
+        let pid = self.hello.pid;
+        self.wire.stop("shutdown").await?;
+        if wait_for_exit(pid, limit).await {
+            Ok(())
+        } else {
+            Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "moa didn't stop within 10 s",
+            )))
+        }
     }
 
     /// Follows `topics`: the full snapshot now, then `patch`, `snapshot` and `event` notices
@@ -516,13 +560,26 @@ mod tests {
         );
     }
 
-    /// A daemon that answers `hello`, reads `then_read` more lines, and hangs up.
+    /// A daemon that answers `hello` (with `pid`), reads `then_read` more lines, sends
+    /// `reply` if given, and hangs up.
     struct Fake {
         _dir: tempfile::TempDir,
         opts: ClientOptions,
     }
 
     fn fake(then_read: usize) -> Fake {
+        fake_with(then_read, dead_pid(), None)
+    }
+
+    /// The pid of a process that has exited (and been reaped).
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    fn fake_with(then_read: usize, pid: u32, reply: Option<String>) -> Fake {
         let dir = tempfile::Builder::new()
             .prefix("moa")
             .tempdir_in("/tmp")
@@ -542,11 +599,14 @@ mod tests {
                 build: "b".into(),
                 rev: 0,
                 matched: true,
-                pid: 1,
+                pid,
             };
             framed.send(encode_result(&id, &ok)).await.unwrap();
             for _ in 0..then_read {
                 framed.next().await;
+            }
+            if let Some(reply) = reply {
+                framed.send(reply).await.unwrap();
             }
         });
         let opts = ClientOptions {
@@ -592,9 +652,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_ending_the_connection_is_not_an_error() {
+    async fn shutdown_ending_the_connection_with_the_process_gone_is_ok() {
         let f = fake(1);
         let mut client = Client::connect(f.opts.clone()).await.unwrap();
         client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_fails_when_the_process_stays_alive() {
+        // This test process is alive for as long as the test runs.
+        let f = fake_with(1, std::process::id(), None);
+        let mut client = Client::connect(f.opts.clone()).await.unwrap();
+        let err = client
+            .shutdown_within(Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Io(_)), "{err}");
+        assert_eq!(err.to_string(), "moa didn't stop within 10 s");
+    }
+
+    #[tokio::test]
+    async fn shutdown_fails_when_the_daemon_answers_with_an_error() {
+        let refusal = moa_proto::encode_error(
+            Some(&Id::Num(2)),
+            &RpcError {
+                code: code::FAILED,
+                message: "no, not now".into(),
+            },
+        );
+        let f = fake_with(1, dead_pid(), Some(refusal));
+        let mut client = Client::connect(f.opts.clone()).await.unwrap();
+        let err = client.shutdown().await.unwrap_err();
+        assert!(matches!(err, ClientError::Rpc(_)), "{err}");
+        assert_eq!(err.to_string(), "no, not now");
+    }
+
+    #[tokio::test]
+    async fn waiting_for_an_exit_sees_a_gone_pid_and_a_live_one() {
+        assert!(wait_for_exit(dead_pid(), Duration::from_millis(200)).await);
+        assert!(!wait_for_exit(std::process::id(), Duration::from_millis(200)).await);
     }
 }

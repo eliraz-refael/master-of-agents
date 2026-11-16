@@ -459,6 +459,12 @@ impl Config {
         }
     }
 
+    /// Whether a `moactl` write from `account` is refused: `moa.toml` lists accounts and this
+    /// caller isn't one of them. With no accounts listed nothing is refused.
+    pub fn refuses_unlisted(&self, account: Option<&AccountName>) -> bool {
+        !self.accounts.is_empty() && account.is_none()
+    }
+
     pub fn account_for_store(&self, store: &Path) -> Option<&AccountName> {
         self.accounts
             .iter()

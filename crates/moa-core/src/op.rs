@@ -228,6 +228,32 @@ impl Op {
         "suggestion.ls",
     ];
 
+    /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
+    /// classified (`moactl` refuses writes from an account `moa.toml` doesn't list).
+    pub fn writes(&self) -> bool {
+        match self {
+            Op::GroupAdd { .. }
+            | Op::GroupRename { .. }
+            | Op::GroupRm { .. }
+            | Op::SessionSet { .. }
+            | Op::SessionArchive { .. }
+            | Op::TaskAdd(_)
+            | Op::TaskSet(_)
+            | Op::NoteAdd { .. }
+            | Op::ProjectAdd { .. }
+            | Op::Suggest { .. }
+            | Op::SuggestionAnswer { .. } => true,
+            Op::SessionLs { .. }
+            | Op::SessionFind { .. }
+            | Op::TaskLs { .. }
+            | Op::ProjectShow { .. }
+            | Op::Brief(_)
+            | Op::Attention(_)
+            | Op::SuggestionLs(_)
+            | Op::DebugPanic => false,
+        }
+    }
+
     /// This op's method name.
     pub fn method(&self) -> &'static str {
         match self {

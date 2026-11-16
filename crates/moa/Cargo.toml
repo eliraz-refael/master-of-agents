@@ -14,6 +14,7 @@ path = "src/main.rs"
 clap.workspace = true
 jiff.workspace = true
 moa-agents = { path = "../moa-agents" }
+moa-client = { path = "../moa-client" }
 moa-core = { path = "../moa-core" }
 moa-daemon = { path = "../moa-daemon" }
 moa-platform = { path = "../moa-platform" }
@@ -26,7 +27,6 @@ tracing.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
-moa-client = { path = "../moa-client" }
 moa-testkit = { path = "../moa-testkit" }
 rusqlite.workspace = true
 serde_json.workspace = true
