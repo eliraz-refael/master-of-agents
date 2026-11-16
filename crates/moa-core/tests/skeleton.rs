@@ -439,6 +439,12 @@ fn op_methods_match_the_variants() {
         },
         Op::SuggestionLs(NoParams),
     ];
+    // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
+    // be serialized or parsed.
+    assert_eq!(Op::DebugPanic.method(), "debug.panic");
+    assert!(!Op::METHODS.contains(&"debug.panic"));
+    assert!(serde_json::to_value(Op::DebugPanic).is_err());
+    assert!(serde_json::from_str::<Op>(r#"{"method":"debug.panic"}"#).is_err());
     assert_eq!(Op::METHODS.len(), samples.len());
     for op in &samples {
         let v = serde_json::to_value(op).unwrap();

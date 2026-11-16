@@ -8,7 +8,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -16,12 +18,12 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, LogLevel, LogLine, Publish, check_order};
+use moa_core::effect::{Effect, Input, LogLevel, LogLine, Publish, RefuseWrites, check_order};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
-use moa_core::{Now, handle};
-use moa_store::actor::{Fault, StoreHandle};
+use moa_core::{Now, UtcMs, handle};
+use moa_store::actor::{CommitError, Fault, StoreHandle};
 use moa_store::{Store, StoreError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::task::TaskTracker;
@@ -40,6 +42,9 @@ pub enum DaemonError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// The core can't go on and has stopped; the daemon exits 1 with this line.
+    #[error("{0}")]
+    Fatal(String),
 }
 
 pub struct CoreOptions {
@@ -97,7 +102,8 @@ enum Held {
         req: ReqId,
         result: Result<Done, OpError>,
     },
-    Status(oneshot::Sender<StatusData>, StatusData),
+    /// The answer so far, and the caller, so a reload can compute it again.
+    Status(oneshot::Sender<StatusData>, StatusData, CallerInfo),
     Barrier(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
 }
@@ -108,12 +114,17 @@ pub struct CoreHandle {
     sched: mpsc::UnboundedSender<SchedCmd>,
     conns: Conns,
     next_conn: Arc<AtomicU64>,
-    store: StoreHandle,
+    /// The store's current handle: the core swaps it when the thread dies.
+    store: SharedStore,
     model: watch::Receiver<Arc<Model>>,
     events: broadcast::Sender<CoreEvent>,
     generation: watch::Receiver<u64>,
     stats: Arc<Stats>,
+    finished: watch::Receiver<Option<Result<(), String>>>,
+    panic_next: Arc<AtomicBool>,
 }
+
+type SharedStore = Arc<Mutex<StoreHandle>>;
 
 impl CoreHandle {
     /// Opens the store, loads it and runs `Startup`. Returns once Startup's batch has been
@@ -137,28 +148,37 @@ impl CoreHandle {
             .snapshot()
             .await
             .map_err(|e| io::Error::other(e.to_string()))?;
+        let store: SharedStore = Arc::new(Mutex::new(store));
         let stats = Arc::new(Stats::default());
+        let (finished_tx, finished) = watch::channel(None);
+        let panic_next = Arc::new(AtomicBool::new(false));
         let (inbox, inbox_rx) = mpsc::unbounded_channel();
         let state = State::new(opts.brain, opts.config).with_deps(opts.deps);
         let (model_tx, model) = watch::channel(state.model());
         let (events, _) = broadcast::channel(opts.events_capacity.max(1));
         let (generation_tx, generation) = watch::channel(0);
 
-        let fire_inbox = inbox.clone();
-        let failed_inbox = inbox.clone();
+        // Weak: the core owns the scheduler, so a strong sender here would be a cycle that
+        // keeps the inbox open after every handle has gone.
+        let fire_inbox = inbox.downgrade();
+        let failed_inbox = inbox.downgrade();
         let sched = scheduler::start(
             opts.clock.clone(),
             opts.alarm,
             stats.clone(),
             move |key| {
-                let _ = fire_inbox.send(Item::Input(Input::Timer(key)));
+                if let Some(inbox) = fire_inbox.upgrade() {
+                    let _ = inbox.send(Item::Input(Input::Timer(key)));
+                }
             },
             // The raw message stays here: it may carry contents (2a's no-contents rule).
             move |actor, _message| {
-                let _ = failed_inbox.send(Item::Input(Input::ActorFailed {
-                    actor,
-                    message: String::new(),
-                }));
+                if let Some(inbox) = failed_inbox.upgrade() {
+                    let _ = inbox.send(Item::Input(Input::ActorFailed {
+                        actor,
+                        message: String::new(),
+                    }));
+                }
             },
         );
 
@@ -175,6 +195,12 @@ impl CoreHandle {
             generation_tx,
             sched: sched.clone(),
             backups: TaskTracker::new(),
+            db: opts.db,
+            backups_dir: opts.backups,
+            failures_in_row: 0,
+            carry: VecDeque::new(),
+            panic_next: panic_next.clone(),
+            finished_tx,
         };
         let _ = inbox.send(Item::Input(Input::Startup(Box::new(snapshot))));
         tokio::spawn(core.run(inbox_rx));
@@ -189,10 +215,32 @@ impl CoreHandle {
             events,
             generation,
             stats,
+            finished,
+            panic_next,
         };
-        // Startup is the first item, so this barrier answers after its commit.
+        // Startup is the first item, so this barrier answers after its commit. If Startup
+        // brought the core down, the barrier is dropped and returns, and the line is here.
         handle.barrier().await;
+        let ended = handle.finished.borrow().clone();
+        if let Some(Err(line)) = ended {
+            return Err(DaemonError::Fatal(line));
+        }
         Ok(handle)
+    }
+
+    /// Resolves when the core task has ended: `Ok` after `stop`, `Err(Fatal)` when it can't
+    /// go on (the store can't be reopened, or a bug while loading). The daemon then stops
+    /// accepting and exits.
+    pub async fn finished(&self) -> Result<(), DaemonError> {
+        let mut rx = self.finished.clone();
+        let ended = match rx.wait_for(Option::is_some).await {
+            Ok(v) => v.clone(),
+            Err(_) => Some(Ok(())),
+        };
+        match ended {
+            Some(Err(line)) => Err(DaemonError::Fatal(line)),
+            _ => Ok(()),
+        }
     }
 
     /// A new connection and the channel its replies arrive on.
@@ -270,10 +318,17 @@ impl CoreHandle {
         }
     }
 
+    /// Tests only: the next input panics inside the core's `catch_unwind`, before `handle`.
+    #[doc(hidden)]
+    pub fn panic_next_handle(&self) {
+        self.panic_next.store(true, Ordering::SeqCst);
+    }
+
     /// Tests only.
     #[doc(hidden)]
     pub fn store_fault(&self, f: Fault) {
-        self.store.fault(f);
+        let store = lock(&self.store).clone();
+        store.fault(f);
     }
 }
 
@@ -293,42 +348,73 @@ fn reply_to(conns: &Conns, conn: ConnId, req: ReqId, result: Result<Done, OpErro
 
 struct Core {
     state: State,
-    store: StoreHandle,
+    store: SharedStore,
     clock: Arc<dyn Clock>,
     tz: TimeZone,
     conns: Conns,
     stats: Arc<Stats>,
     model_tx: watch::Sender<Arc<Model>>,
     events: broadcast::Sender<CoreEvent>,
-    // Task 5 bumps it on every reload.
-    #[allow(dead_code)]
     generation_tx: watch::Sender<u64>,
     sched: mpsc::UnboundedSender<SchedCmd>,
     backups: TaskTracker,
+    /// Where the store reopens from when its thread dies.
+    db: PathBuf,
+    backups_dir: PathBuf,
+    /// Failed commits since the last good one; from the third, writes are refused for a while.
+    failures_in_row: u32,
+    /// Items a drain left for the next one: what followed a panic.
+    carry: VecDeque<Item>,
+    panic_next: Arc<AtomicBool>,
+    finished_tx: watch::Sender<Option<Result<(), String>>>,
 }
 
+/// What a drain leaves the loop to do.
+enum Flow {
+    Go,
+    /// The drain held a `stop`; the sender answers once the loop has ended.
+    Stop(oneshot::Sender<()>),
+    /// The core can't go on: the loop ends and `finished()` says why.
+    Fatal(String),
+}
+
+/// How one input went through `handle`.
+enum Stepped {
+    Done,
+    /// `handle` panicked. `loading` is true for `Startup` and `Reload`, which aren't retried.
+    Panicked {
+        loading: bool,
+    },
+}
+
+const BUG_REPLY: &str = "moa hit a bug answering that; it reloaded";
+const BUG_LOADING: &str = "moa hit a bug loading the brain; see the log";
+
 impl Core {
+    fn store(&self) -> StoreHandle {
+        lock(&self.store).clone()
+    }
+
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Item>) {
-        // Items a drain left for the next one (Task 5: after a panic or a failed commit).
-        let mut carry: VecDeque<Item> = VecDeque::new();
-        let stop = loop {
-            if carry.is_empty() {
+        let end = loop {
+            if self.carry.is_empty() {
                 match inbox.recv().await {
-                    Some(item) => carry.push_back(item),
-                    None => break None,
+                    Some(item) => self.carry.push_back(item),
+                    None => break Flow::Go,
                 }
             }
-            let work = take_drain(&mut carry, &mut inbox);
+            let work = take_drain(&mut self.carry, &mut inbox);
             self.stats.drains.fetch_add(1, Ordering::SeqCst);
-            if let Some(stop) = self.drain(work).await {
-                break Some(stop);
+            match self.drain(work).await {
+                Flow::Go => {}
+                end => break end,
             }
         };
         self.wait_for_backups().await;
         // Nobody waits for the process to exit: what is left is told to try again, and the
         // connections' senders drop.
         inbox.close();
-        let rest: Vec<Item> = carry
+        let rest: Vec<Item> = std::mem::take(&mut self.carry)
             .into_iter()
             .chain(std::iter::from_fn(|| inbox.try_recv().ok()))
             .collect();
@@ -338,47 +424,253 @@ impl Core {
             }
         }
         lock(&self.conns).clear();
-        if let Some(stop) = stop {
-            let _ = stop.send(());
+        match end {
+            Flow::Fatal(line) => {
+                self.finished_tx.send_replace(Some(Err(line)));
+            }
+            Flow::Stop(stop) => {
+                self.finished_tx.send_replace(Some(Ok(())));
+                let _ = stop.send(());
+            }
+            Flow::Go => {
+                self.finished_tx.send_replace(Some(Ok(())));
+            }
         }
     }
 
-    /// Runs one drain: every item, then one commit, then what it held. `Some` when the drain
-    /// held a `stop`; the sender answers once the loop has ended.
-    async fn drain(&mut self, mut work: VecDeque<Item>) -> Option<oneshot::Sender<()>> {
+    /// Runs one drain: every item, then one commit, then what it held. A failed commit, a
+    /// dead store or a panic is put right (see `recover`) before anything is released.
+    async fn drain(&mut self, mut work: VecDeque<Item>) -> Flow {
         let mut batch: Vec<Change> = Vec::new();
         let mut held: Vec<Held> = Vec::new();
+        let mut panicked = false;
         while let Some(item) = work.pop_front() {
-            match item {
+            let stepped = match item {
                 Item::Input(input) => self.step(input, &mut batch, &mut held),
                 Item::Zone(tz) => {
                     self.tz = tz;
-                    self.step(Input::ZoneChanged, &mut batch, &mut held);
+                    self.step(Input::ZoneChanged, &mut batch, &mut held)
                 }
                 Item::Status { caller, reply } => {
-                    self.state.set_now(self.clock.wall());
-                    let data = self.state.status(&caller);
-                    held.push(Held::Status(reply, data));
+                    let data = self.state.status(&caller, self.clock.wall());
+                    held.push(Held::Status(reply, data, caller));
+                    Stepped::Done
                 }
-                Item::Barrier(reply) => held.push(Held::Barrier(reply)),
-                Item::Stop(reply) => held.push(Held::Stop(reply)),
+                Item::Barrier(reply) => {
+                    held.push(Held::Barrier(reply));
+                    Stepped::Done
+                }
+                Item::Stop(reply) => {
+                    held.push(Held::Stop(reply));
+                    Stepped::Done
+                }
+            };
+            match stepped {
+                Stepped::Done => {}
+                Stepped::Panicked { loading: true } => {
+                    return self.fatal(BUG_LOADING.to_string(), held);
+                }
+                Stepped::Panicked { loading: false } => {
+                    // The drain stops here: what is before it is committed below, what is
+                    // after it goes first into the next drain, in order.
+                    panicked = true;
+                    while let Some(rest) = work.pop_back() {
+                        self.carry.push_front(rest);
+                    }
+                    break;
+                }
             }
         }
+        let mut failed = None;
         if !batch.is_empty() {
             self.stats.commits.fetch_add(1, Ordering::SeqCst);
-            if let Err(why) = self.store.commit(batch).await {
-                self.commit_failed(&why, &mut held);
+            match self.store().commit(batch).await {
+                Ok(()) => self.failures_in_row = 0,
+                Err(why) => failed = Some(why),
             }
         }
-        self.release(held).await
+        if (failed.is_some() || panicked)
+            && let Err(line) = self.recover(failed, panicked, &mut held).await
+        {
+            return self.fatal(line, held);
+        }
+        match self.release(held).await {
+            Some(stop) => Flow::Stop(stop),
+            None => Flow::Go,
+        }
     }
 
-    /// One input through `handle`; its effects go to the batch, the held list, or run now.
-    fn step(&mut self, input: Input, batch: &mut Vec<Change>, held: &mut Vec<Held>) {
+    /// Puts the core right after a failed commit, a dead store or a panic: tells the drain's
+    /// callers, then reloads the in-memory state from disk. `Err` is the line the daemon
+    /// stops with.
+    async fn recover(
+        &mut self,
+        failed: Option<CommitError>,
+        panicked: bool,
+        held: &mut Vec<Held>,
+    ) -> Result<(), String> {
+        // Reloading lifts a refusal unless it is handed back.
+        let mut refuse = self.state.refuse_writes().cloned();
+        let mut restarted = false;
+        match failed {
+            Some(CommitError::Failed(why)) => {
+                self.stats.commit_failures.fetch_add(1, Ordering::SeqCst);
+                self.failures_in_row += 1;
+                tracing::error!("a commit failed: {why}");
+                fail_held(
+                    held,
+                    format!("moa couldn't save that ({why}); nothing was changed, try again"),
+                );
+                held.push(error_event(
+                    "moa couldn't save a change; it reloaded from disk",
+                ));
+                refuse = self.backoff(&why);
+            }
+            Some(CommitError::Stopped) => {
+                tracing::error!("the store thread stopped");
+                fail_held(
+                    held,
+                    "moa couldn't save that: the store stopped".to_string(),
+                );
+                self.reopen_store().await?;
+                restarted = true;
+            }
+            None => {}
+        }
+        if panicked {
+            held.push(error_event("moa hit a bug and reloaded"));
+        }
+        self.reload(refuse, held, restarted).await?;
+        // A status asked in the failed drain shows the reloaded state, not the failed one.
+        let now = self.clock.wall();
+        for h in held.iter_mut() {
+            if let Held::Status(_, data, caller) = h {
+                *data = self.state.status(caller, now);
+            }
+        }
+        Ok(())
+    }
+
+    /// How long writes are refused after this failure, if they are: nothing for the first
+    /// two in a row, then 1 s, 2 s, 4 s ... up to 30 s.
+    fn backoff(&self, why: &str) -> Option<RefuseWrites> {
+        let n = self.failures_in_row;
+        if n < 3 {
+            return None;
+        }
+        let secs = (1u64 << (n - 3).min(5)).min(30);
+        let wait = i64::try_from(secs * 1000).unwrap_or(i64::MAX);
+        Some(RefuseWrites {
+            until: UtcMs(self.clock.wall().0.saturating_add(wait)),
+            reason: why.to_string(),
+        })
+    }
+
+    /// Loads the store's state back into the core and publishes the whole model. When the
+    /// store can't even snapshot, its thread is restarted once. A reload doesn't count as a
+    /// failure.
+    async fn reload(
+        &mut self,
+        refuse_writes: Option<RefuseWrites>,
+        held: &mut Vec<Held>,
+        mut restarted: bool,
+    ) -> Result<(), String> {
+        let snapshot = match self.store().snapshot().await {
+            Ok(s) => s,
+            Err(_) => {
+                self.reopen_store().await?;
+                restarted = true;
+                self.store()
+                    .snapshot()
+                    .await
+                    .map_err(|e| cannot_open(&e.to_string()))?
+            }
+        };
+        let input = Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes,
+        };
+        // A reload persists nothing.
+        let mut scratch = Vec::new();
+        if !matches!(self.step(input, &mut scratch, held), Stepped::Done) {
+            return Err(BUG_LOADING.to_string());
+        }
+        self.generation_tx.send_modify(|g| *g += 1);
+        self.stats.reloads.fetch_add(1, Ordering::SeqCst);
+        if restarted {
+            // The message stays out: it may carry contents.
+            let input = Input::ActorFailed {
+                actor: "the store",
+                message: String::new(),
+            };
+            let _ = self.step(input, &mut scratch, held);
+        }
+        Ok(())
+    }
+
+    /// Opens the database again on a new store thread. `Err` is the line to stop with.
+    async fn reopen_store(&mut self) -> Result<(), String> {
+        let (db, backups) = (self.db.clone(), self.backups_dir.clone());
+        let opened = tokio::task::spawn_blocking(move || Store::open(&db, &backups)).await;
+        let store = match opened {
+            Ok(Ok(store)) => store,
+            Ok(Err(e)) => return Err(cannot_open(&e.to_string())),
+            Err(e) => return Err(cannot_open(&e.to_string())),
+        };
+        *lock(&self.store) = StoreHandle::spawn(store, self.backups_dir.clone());
+        Ok(())
+    }
+
+    /// The core is done for: say why once (event and log), answer what the drain held, and
+    /// let the loop end.
+    fn fatal(&mut self, line: String, held: Vec<Held>) -> Flow {
+        tracing::error!("the core stops: {line}");
+        let _ = self.events.send(CoreEvent::Error {
+            message: line.clone(),
+        });
+        for h in held {
+            if let Held::Reply { conn, req, .. } = h {
+                reply_to(&self.conns, conn, req, Err(OpError(line.clone())));
+            }
+        }
+        Flow::Fatal(line)
+    }
+
+    /// One input through `handle`, inside `catch_unwind`; its effects go to the batch, the
+    /// held list, or run now. A panicking input's partial changes die with its unwound call:
+    /// `handle` returns effects only when it finishes.
+    fn step(&mut self, input: Input, batch: &mut Vec<Change>, held: &mut Vec<Held>) -> Stepped {
+        let loading = matches!(input, Input::Startup(_) | Input::Reload { .. });
+        let target = match &input {
+            Input::Client { conn, req, .. } => Some((*conn, *req)),
+            _ => None,
+        };
         let now = Now::at(self.clock.wall(), self.clock.mono(), self.tz.clone());
-        let effects = handle(&mut self.state, input, now);
-        debug_assert!(check_order(&effects).is_ok(), "effects out of order");
         self.stats.inputs.fetch_add(1, Ordering::SeqCst);
+        let panic_next = &self.panic_next;
+        let state = &mut self.state;
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            if panic_next.swap(false, Ordering::SeqCst) {
+                panic!("a test asked for a panic");
+            }
+            handle(state, input, now)
+        }));
+        let effects = match outcome {
+            Ok(effects) => effects,
+            Err(_) => {
+                // The payload stays out of the log: it may carry contents.
+                tracing::error!("handle panicked");
+                if let Some((conn, req)) = target {
+                    held.push(Held::Reply {
+                        conn,
+                        req,
+                        result: Err(OpError(BUG_REPLY.into())),
+                    });
+                }
+                return Stepped::Panicked { loading };
+            }
+        };
+        debug_assert!(check_order(&effects).is_ok(), "effects out of order");
         for effect in effects {
             if effect.runs_at_once() {
                 self.run_now(effect);
@@ -393,6 +685,7 @@ impl Core {
                 Effect::SetTimer { .. } | Effect::CancelTimer(_) | Effect::Log(_) => {}
             }
         }
+        Stepped::Done
     }
 
     fn run_now(&self, effect: Effect) {
@@ -415,7 +708,7 @@ impl Core {
     /// The backup runs on its own task so the core never waits for the copy. The log line
     /// has counts only.
     fn start_backup(&self, day: Date) {
-        let store = self.store.clone();
+        let store = self.store();
         self.backups.spawn(async move {
             match store.backup(day).await {
                 Ok(done) => tracing::info!(
@@ -436,19 +729,6 @@ impl Core {
         self.backups.reopen();
     }
 
-    /// Task 5 replaces this with a reload from the store. Until then the drain's replies say
-    /// it was not saved and nothing it held is published.
-    fn commit_failed(&self, why: &moa_store::actor::CommitError, held: &mut Vec<Held>) {
-        self.stats.commit_failures.fetch_add(1, Ordering::SeqCst);
-        tracing::error!("a commit failed: {why}");
-        held.retain(|h| !matches!(h, Held::Publish(_)));
-        for h in held.iter_mut() {
-            if let Held::Reply { result, .. } = h {
-                *result = Err(OpError("moa could not save that; try again".into()));
-            }
-        }
-    }
-
     async fn release(&mut self, held: Vec<Held>) -> Option<oneshot::Sender<()>> {
         let mut stop = None;
         for h in held {
@@ -461,11 +741,11 @@ impl Core {
                     let _ = self.events.send(e);
                 }
                 Held::Reply { conn, req, result } => reply_to(&self.conns, conn, req, result),
-                Held::Status(reply, data) => {
+                Held::Status(reply, data, _) => {
                     let _ = reply.send(data);
                 }
                 Held::Barrier(reply) => {
-                    self.store.sync().await;
+                    self.store().sync().await;
                     sync_scheduler(&self.sched).await;
                     self.wait_for_backups().await;
                     let _ = reply.send(());
@@ -475,6 +755,31 @@ impl Core {
         }
         stop
     }
+}
+
+fn error_event(message: &str) -> Held {
+    Held::Publish(Publish::Event(CoreEvent::Error {
+        message: message.to_string(),
+    }))
+}
+
+/// The drain's callers are told it wasn't saved, and nothing it would have said is said:
+/// every held reply (a read may have seen the failed state) becomes `line`, and held
+/// publishes are dropped.
+fn fail_held(held: &mut Vec<Held>, line: String) {
+    held.retain(|h| !matches!(h, Held::Publish(_)));
+    for h in held.iter_mut() {
+        if let Held::Reply { result, .. } = h {
+            *result = Err(OpError(line.clone()));
+        }
+    }
+}
+
+fn cannot_open(why: &str) -> String {
+    format!(
+        "the store can't be opened: {}",
+        why.lines().next().unwrap_or("")
+    )
 }
 
 /// The carried-over items, then what is already waiting, up to [`DRAIN_CAP`]. A `stop` ends

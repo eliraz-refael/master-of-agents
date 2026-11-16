@@ -252,8 +252,8 @@ impl State {
         self.refuse_writes.as_ref()
     }
 
-    /// The answer to `status` at the time last set with [`State::set_now`].
-    pub fn status(&self, caller: &CallerInfo) -> StatusData {
+    /// The answer to `status`, with sessions' states as of `now`.
+    pub fn status(&self, caller: &CallerInfo, now: UtcMs) -> StatusData {
         use crate::live::{DisplayState, display_state};
         let mut sessions: BTreeMap<String, usize> = DisplayState::ALL
             .iter()
@@ -261,7 +261,7 @@ impl State {
             .map(|d| (crate::publish::word(*d), 0))
             .collect();
         for s in self.sessions() {
-            let (state, _) = display_state(s, self.now);
+            let (state, _) = display_state(s, now);
             if let Some(n) = sessions.get_mut(&crate::publish::word(state)) {
                 *n += 1;
             }
@@ -342,9 +342,8 @@ impl State {
         }
     }
 
-    /// The time views are computed at. `handle` sets it from `Now`; the daemon sets it before
-    /// a [`State::status`].
-    pub fn set_now(&mut self, now: UtcMs) {
+    /// The time views are computed at. `handle` sets it from `Now`.
+    pub(crate) fn set_now(&mut self, now: UtcMs) {
         self.now = now;
     }
 

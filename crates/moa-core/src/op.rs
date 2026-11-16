@@ -88,6 +88,12 @@ pub enum Op {
     },
     #[serde(rename = "suggestion.ls")]
     SuggestionLs(NoParams),
+    /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
+    /// [`Op::METHODS`] or the schema, and a client can't send it.
+    #[doc(hidden)]
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    DebugPanic,
 }
 
 /// How a suggestion is answered.
@@ -199,7 +205,8 @@ pub struct TaskSet {
 }
 
 impl Op {
-    /// Every method name, in variant order. A test ties this to the variants.
+    /// Every method name on the wire, in variant order (`DebugPanic` is not one). A test ties
+    /// this to the variants.
     pub const METHODS: &'static [&'static str] = &[
         "group.add",
         "group.rename",
@@ -242,6 +249,7 @@ impl Op {
             Op::Suggest { .. } => "suggest",
             Op::SuggestionAnswer { .. } => "suggestion.answer",
             Op::SuggestionLs(_) => "suggestion.ls",
+            Op::DebugPanic => "debug.panic",
         }
     }
 }
