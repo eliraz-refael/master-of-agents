@@ -1,0 +1,11 @@
+---
+source: crates/moa-core/tests/read.rs
+expression: "mask(&b, &d.text)"
+---
+- ⚠ Fix the flicker [Lantern] is blocked on you (permission/question) for 3h  → moactl resume d1c6a9f3
+- ● Read the tide tables [-] finished its turn 19h ago; your move  → moactl resume b84e07d1
+- ● Calibrate the sensor [Lantern] finished its turn 5h ago; your move  → moactl resume 7b5d2e83
+- ▸ today: Lantern: Order the dimmer board [todo]
+- ⧗ blocked: Tidepool: Survey the tide flats on a permit
+- ? suggestion #1: Mark the board order done
+- ? suggestion #2: Rename the working session

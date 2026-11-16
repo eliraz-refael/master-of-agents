@@ -86,8 +86,11 @@ async fn a_commit_is_one_transaction() {
     assert_eq!(count(&db(&rig), "tasks"), 0);
 }
 
+/// `FailNextCommit` answers before anything is applied, so this can't show that a commit
+/// failing partway rolls back (`a_commit_is_one_transaction` does). It pins the rest of the
+/// contract: the caller hears `Failed`, nothing is on disk, and the store keeps working.
 #[tokio::test]
-async fn a_failed_commit_writes_nothing() {
+async fn an_injected_failure_answers_failed_and_the_next_commit_works() {
     let rig = rig();
     rig.handle.fault(Fault::FailNextCommit);
     let changes = vec![project(1), task(1, 1)];

@@ -1,5 +1,7 @@
 //! What a client can ask the core to do, and what it gets back.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// A client connection, as the daemon numbers them.
@@ -16,22 +18,179 @@ pub struct ReqId(pub u64);
 pub enum Op {
     #[serde(rename = "group.add")]
     GroupAdd { path: String },
+    #[serde(rename = "group.rename")]
+    GroupRename { old: String, new: String },
+    #[serde(rename = "group.rm")]
+    GroupRm { path: String },
+    #[serde(rename = "session.ls")]
+    SessionLs {
+        #[serde(default)]
+        all: bool,
+    },
+    #[serde(rename = "session.set")]
+    SessionSet {
+        q: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+    },
+    #[serde(rename = "session.archive")]
+    SessionArchive { qs: Vec<String> },
+    #[serde(rename = "session.find")]
+    SessionFind { q: String },
+    #[serde(rename = "task.ls")]
+    TaskLs {
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        all: bool,
+    },
+    #[serde(rename = "task.add")]
+    TaskAdd(TaskAdd),
+    #[serde(rename = "task.set")]
+    TaskSet(TaskSet),
+    #[serde(rename = "note.add")]
+    NoteAdd {
+        text: String,
+        #[serde(default)]
+        project: Option<String>,
+        /// `None` is `fact`.
+        #[serde(default)]
+        kind: Option<String>,
+    },
+    #[serde(rename = "project.show")]
+    ProjectShow { name: String },
+    #[serde(rename = "project.add")]
+    ProjectAdd {
+        name: String,
+        path: PathBuf,
+        #[serde(default)]
+        summary: Option<String>,
+    },
+    #[serde(rename = "brief")]
+    Brief(NoParams),
+    #[serde(rename = "attention")]
+    Attention(NoParams),
+}
+
+/// The params of an op that takes none. Missing, `null` and `{}` all decode (a unit variant
+/// would reject `{}`); it encodes as `{}`. Anything else is refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct NoParams;
+
+impl Serialize for NoParams {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        s.serialize_map(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for NoParams {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Empty {}
+        // A missing `params` arrives as `None` (serde's missing-field deserializer).
+        Option::<Empty>::deserialize(d).map(|_| NoParams)
+    }
+}
+
+/// `task add`'s arguments, all the user's raw text.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct TaskAdd {
+    pub project: String,
+    pub title: String,
+    #[serde(default)]
+    pub today: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub blocked_on: Option<String>,
+    #[serde(default)]
+    pub who: Option<String>,
+    #[serde(default)]
+    pub due: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+/// `task set`'s arguments. `Some("")` clears `due`, `priority`, `session`, `note` and
+/// `blocked_on`.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct TaskSet {
+    pub id: i64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub who: Option<String>,
+    #[serde(default)]
+    pub due: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub blocked_on: Option<String>,
+    #[serde(default)]
+    pub today: bool,
+    #[serde(default)]
+    pub not_today: bool,
 }
 
 impl Op {
     /// Every method name, in variant order. A test ties this to the variants.
-    pub const METHODS: &'static [&'static str] = &["group.add"];
+    pub const METHODS: &'static [&'static str] = &[
+        "group.add",
+        "group.rename",
+        "group.rm",
+        "session.ls",
+        "session.set",
+        "session.archive",
+        "session.find",
+        "task.ls",
+        "task.add",
+        "task.set",
+        "note.add",
+        "project.show",
+        "project.add",
+        "brief",
+        "attention",
+    ];
 
     /// This op's method name.
     pub fn method(&self) -> &'static str {
         match self {
             Op::GroupAdd { .. } => "group.add",
+            Op::GroupRename { .. } => "group.rename",
+            Op::GroupRm { .. } => "group.rm",
+            Op::SessionLs { .. } => "session.ls",
+            Op::SessionSet { .. } => "session.set",
+            Op::SessionArchive { .. } => "session.archive",
+            Op::SessionFind { .. } => "session.find",
+            Op::TaskLs { .. } => "task.ls",
+            Op::TaskAdd(_) => "task.add",
+            Op::TaskSet(_) => "task.set",
+            Op::NoteAdd { .. } => "note.add",
+            Op::ProjectShow { .. } => "project.show",
+            Op::ProjectAdd { .. } => "project.add",
+            Op::Brief(_) => "brief",
+            Op::Attention(_) => "attention",
         }
     }
 }
 
-/// A successful reply: the line the CLI prints and the data a script reads.
-#[derive(Clone, PartialEq, Debug, Serialize)]
+/// A successful reply: the line the CLI prints and the data a script reads. A client decodes
+/// it, so it round-trips.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Done {
     pub text: String,
     pub data: serde_json::Value,

@@ -8,6 +8,7 @@ pub mod due;
 pub mod effect;
 pub mod live;
 pub mod model;
+pub mod names;
 pub mod op;
 mod ops;
 pub mod publish;

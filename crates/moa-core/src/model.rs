@@ -130,6 +130,13 @@ str_enum!(ProjectStatus, project_status_round_trips, "project status",
 str_enum!(TaskStatus, task_status_round_trips, "task status", {
     Idea => "idea", Todo => "todo", Active => "active", Waiting => "waiting",
     Blocked => "blocked", Done => "done", Dropped => "dropped" });
+
+impl TaskStatus {
+    /// Not finished: neither done nor dropped.
+    pub fn is_open(self) -> bool {
+        !matches!(self, TaskStatus::Done | TaskStatus::Dropped)
+    }
+}
 str_enum!(Who, who_round_trips, "who", { You => "you", Agent => "agent", Other => "other" });
 str_enum!(Priority, priority_round_trips, "priority", { P0 => "p0", P1 => "p1", P2 => "p2" });
 str_enum!(SuggestionStatus, suggestion_status_round_trips, "suggestion status",

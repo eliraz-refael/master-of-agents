@@ -30,6 +30,17 @@ pub fn is_under_any(path: &Path, folders: &[PathBuf]) -> bool {
 }
 
 /// Routes `cwd` for `account`. `home` is the opener's brain, else `default`.
+///
+/// - No account, or one moa.toml doesn't list: `home`.
+/// - `brain = B`: a cwd outside its `except` folders goes to B. Inside one, an except
+///   folder means "not B", so the session goes to the opener when the opener is another
+///   brain. When there's no opener or the opener is B, it goes to the brain that owns the
+///   folder (`Config::brain_for_folder`) if that isn't B, else to `default`; if B is
+///   `default` itself, there is nowhere left and it's `NotAvailable`. Never B.
+/// - `only`: inside its folders, `home`; outside, `NotAvailable`.
+/// - Otherwise `home`.
+///
+/// For an account with limits, a cwd that is relative or has `..` is `NotAvailable`.
 pub fn route(
     config: &Config,
     account: Option<&AccountName>,
@@ -46,10 +57,16 @@ pub fn route(
         return Route::NotAvailable;
     }
     if let Some(b) = &acct.brain {
-        return if is_under_any(cwd, &acct.except) {
-            home()
-        } else {
-            Route::Brain(b.clone())
+        if !is_under_any(cwd, &acct.except) {
+            return Route::Brain(b.clone());
+        }
+        if let Some(o) = opener.filter(|o| *o != b) {
+            return Route::Brain(o.clone());
+        }
+        return match config.brain_for_folder(cwd) {
+            Some(owner) if owner != *b => Route::Brain(owner),
+            _ if *b != BrainName::default_brain() => Route::Brain(BrainName::default_brain()),
+            _ => Route::NotAvailable,
         };
     }
     if acct.only.is_empty() {
@@ -108,9 +125,15 @@ store = "~/.claude-b"
             route(&c, Some(&a), p("/h/private/lantern"), None),
             Route::Brain(brain("default"))
         );
+        // The work opener is ignored in an except folder: that folder is "not work".
         assert_eq!(
             route(&c, Some(&a), p("/h/private/lantern"), Some(&brain("work"))),
-            Route::Brain(brain("work"))
+            Route::Brain(brain("default"))
+        );
+        // Another brain's opener keeps it.
+        assert_eq!(
+            route(&c, Some(&a), p("/h/private/lantern"), Some(&brain("home"))),
+            Route::Brain(brain("home"))
         );
         assert_eq!(
             route(&c, Some(&b), p("/anywhere"), None),
@@ -226,9 +249,102 @@ store = "~/.claude-b"
         }
     }
 
+    #[test]
+    fn an_except_folder_without_another_opener_goes_to_its_owning_brain() {
+        let c = cfg_text(
+            "[brains.work]\nfolders = [\"~/work\"]\n[brains.home]\nfolders = [\"~/private\"]\n\
+             [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.a\"\nbrain = \"work\"\n\
+             except = [\"~/private\", \"~/scratch\"]\n",
+        );
+        let a = acct("acct-a");
+        for opener in [None, Some(brain("work"))] {
+            assert_eq!(
+                route(&c, Some(&a), p("/h/private/x"), opener.as_ref()),
+                Route::Brain(brain("home"))
+            );
+            // No brain owns ~/scratch: default.
+            assert_eq!(
+                route(&c, Some(&a), p("/h/scratch/x"), opener.as_ref()),
+                Route::Brain(brain("default"))
+            );
+        }
+        // An except folder inside the account's own brain's folder still isn't that brain.
+        let c = cfg_text(
+            "[brains.work]\nfolders = [\"~\"]\n\
+             [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.a\"\nbrain = \"work\"\n\
+             except = [\"~/private\"]\n",
+        );
+        assert_eq!(
+            route(&c, Some(&a), p("/h/private/x"), Some(&brain("work"))),
+            Route::Brain(brain("default"))
+        );
+    }
+
+    #[test]
+    fn a_default_brain_account_has_nowhere_for_its_except_folders() {
+        let c = cfg_text(
+            "[brains.home]\nfolders = [\"~/home\"]\n\
+             [accounts.acct-b]\nkind = \"claude\"\nstore = \"~/.b\"\nbrain = \"default\"\n\
+             except = [\"~/private\", \"~/home\"]\n",
+        );
+        let b = acct("acct-b");
+        for opener in [None, Some(brain("default"))] {
+            assert_eq!(
+                route(&c, Some(&b), p("/h/private/x"), opener.as_ref()),
+                Route::NotAvailable
+            );
+            assert_eq!(
+                route(&c, Some(&b), p("/h/home/x"), opener.as_ref()),
+                Route::Brain(brain("home"))
+            );
+        }
+        assert_eq!(
+            route(&c, Some(&b), p("/h/elsewhere"), None),
+            Route::Brain(brain("default"))
+        );
+    }
+
     proptest! {
+        /// Whatever the opener and whoever owns the folder, an except folder never routes to
+        /// the account's own brain.
         #[test]
-        fn an_except_folder_routes_to_the_opener(
+        fn an_except_folder_never_routes_to_the_account_brain(
+            own in prop::sample::select(vec!["work", "default"]),
+            owner in 0..3u8,
+            seg in "[a-z]{1,8}",
+            tail in "(/[a-z]{1,8}){0,3}",
+            opener in prop::option::of(prop_oneof![
+                Just("work".to_string()),
+                Just("default".to_string()),
+                "[a-z]{1,8}",
+            ]),
+        ) {
+            // 0: no brain owns the folder; 1: the account's brain owns all of ~; 2: another
+            // brain owns exactly the except folder.
+            let mut text = String::new();
+            match owner {
+                1 => text.push_str(&format!("[brains.{own}]\nfolders = [\"~\"]\n")),
+                2 => text.push_str(&format!("[brains.zz-other]\nfolders = [\"~/{seg}\"]\n")),
+                _ => {}
+            }
+            if own == "work" && owner != 1 {
+                text.push_str("[brains.work]\n");
+            }
+            text.push_str(&format!(
+                "[accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.c\"\nbrain = \"{own}\"\nexcept = [\"~/{seg}\"]\n"
+            ));
+            let c = cfg_text(&text);
+            let opener = opener.map(|o| brain(&o));
+            let cwd = PathBuf::from(format!("/h/{seg}{tail}"));
+            let got = route(&c, Some(&acct("acct-a")), &cwd, opener.as_ref());
+            prop_assert_ne!(&got, &Route::Brain(brain(own)));
+            if let Some(o) = opener.filter(|o| o.as_str() != own) {
+                prop_assert_eq!(got, Route::Brain(o));
+            }
+        }
+
+        #[test]
+        fn an_except_folder_routes_to_another_brains_opener(
             seg in "[a-z]{1,8}",
             tail in "(/[a-z]{1,8}){0,3}",
             opener in prop::option::of("[a-z]{1,8}"),
@@ -238,7 +354,9 @@ store = "~/.claude-b"
             ));
             let opener = opener.map(|o| brain(&o));
             let got = route(&c, Some(&acct("acct-a")), &PathBuf::from(format!("/h/{seg}{tail}")), opener.as_ref());
-            let want = opener.unwrap_or_else(BrainName::default_brain);
+            let want = opener
+                .filter(|o| o.as_str() != "work")
+                .unwrap_or_else(BrainName::default_brain);
             prop_assert_eq!(got, Route::Brain(want));
         }
 

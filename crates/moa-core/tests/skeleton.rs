@@ -12,7 +12,7 @@ use moa_core::effect::{
     reply_of,
 };
 use moa_core::model::{ActivityWho, EventKind, Group};
-use moa_core::op::{ConnId, Op, OpError, ReqId};
+use moa_core::op::{ConnId, NoParams, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model, Topic};
 use moa_core::state::{CallerInfo, LoadNote, NextIds, Snapshot, State};
 use moa_core::{Now, UtcMs};
@@ -384,7 +384,52 @@ fn actor_failure_is_published() {
 
 #[test]
 fn op_methods_match_the_variants() {
-    let samples = [Op::GroupAdd { path: "A".into() }];
+    let samples = [
+        Op::GroupAdd { path: "A".into() },
+        Op::GroupRename {
+            old: "A".into(),
+            new: "B".into(),
+        },
+        Op::GroupRm { path: "A".into() },
+        Op::SessionLs { all: true },
+        Op::SessionSet {
+            q: "q".into(),
+            title: Some("t".into()),
+            group: None,
+        },
+        Op::SessionArchive {
+            qs: vec!["a".into(), "b".into()],
+        },
+        Op::TaskLs {
+            project: Some("P".into()),
+            all: true,
+        },
+        Op::TaskAdd(moa_core::op::TaskAdd {
+            project: "P".into(),
+            title: "t".into(),
+            due: Some("fri".into()),
+            ..Default::default()
+        }),
+        Op::TaskSet(moa_core::op::TaskSet {
+            id: 1,
+            not_today: true,
+            ..Default::default()
+        }),
+        Op::NoteAdd {
+            text: "n".into(),
+            project: None,
+            kind: Some("fact".into()),
+        },
+        Op::ProjectShow { name: "P".into() },
+        Op::ProjectAdd {
+            name: "P".into(),
+            path: "/x".into(),
+            summary: None,
+        },
+        Op::SessionFind { q: "q".into() },
+        Op::Brief(NoParams),
+        Op::Attention(NoParams),
+    ];
     assert_eq!(Op::METHODS.len(), samples.len());
     for op in &samples {
         let v = serde_json::to_value(op).unwrap();
@@ -393,4 +438,60 @@ fn op_methods_match_the_variants() {
         assert_eq!(m, op.method());
         assert_eq!(&serde_json::from_value::<Op>(v).unwrap(), op);
     }
+}
+
+#[test]
+fn session_ops_take_their_flags_as_optional() {
+    let ls: Op = serde_json::from_str(r#"{"method":"session.ls","params":{}}"#).unwrap();
+    assert_eq!(ls, Op::SessionLs { all: false });
+    let set: Op = serde_json::from_str(r#"{"method":"session.set","params":{"q":"x"}}"#).unwrap();
+    assert_eq!(
+        set,
+        Op::SessionSet {
+            q: "x".into(),
+            title: None,
+            group: None
+        }
+    );
+}
+
+#[test]
+fn ops_without_params_take_missing_null_or_empty_params() {
+    for (method, want) in [
+        ("brief", Op::Brief(NoParams)),
+        ("attention", Op::Attention(NoParams)),
+    ] {
+        for text in [
+            format!(r#"{{"method":"{method}"}}"#),
+            format!(r#"{{"method":"{method}","params":null}}"#),
+            format!(r#"{{"method":"{method}","params":{{}}}}"#),
+        ] {
+            let got: Op = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(got, want, "{text}");
+        }
+        // It encodes with empty params, and a field it doesn't take is refused.
+        assert_eq!(
+            serde_json::to_value(&want).unwrap(),
+            serde_json::json!({ "method": method, "params": {} })
+        );
+        let extra = format!(r#"{{"method":"{method}","params":{{"x":1}}}}"#);
+        assert!(serde_json::from_str::<Op>(&extra).is_err(), "{extra}");
+    }
+}
+
+#[test]
+fn done_round_trips() {
+    let done = moa_core::op::Done {
+        text: "task #4 added".into(),
+        data: serde_json::json!({ "id": 4, "project": "Lantern", "tags": [] }),
+    };
+    let v = serde_json::to_value(&done).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({ "text": "task #4 added", "data": { "id": 4, "project": "Lantern", "tags": [] } })
+    );
+    assert_eq!(
+        serde_json::from_value::<moa_core::op::Done>(v).unwrap(),
+        done
+    );
 }

@@ -23,6 +23,8 @@ pub enum TimerKey {
     Backup,
 }
 
+// `Client` carries a whole `Op`; one is built per request, so boxing it buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Input {
     Startup(Box<Snapshot>),
