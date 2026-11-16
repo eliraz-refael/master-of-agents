@@ -6,8 +6,9 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::paths::{Paths, PathsError};
 use crate::spawn::Spawner;
@@ -16,6 +17,7 @@ use crate::sys;
 #[derive(Debug)]
 pub enum ServiceError {
     NixStore,
+    NotAbsolute(PathBuf),
     NotAllowed(PathsError),
     Io(io::Error),
 }
@@ -28,6 +30,7 @@ impl fmt::Display for ServiceError {
                 "that moa is a Nix store path that changes on upgrade; run it from your \
                  profile (~/.nix-profile/bin/moa) or pass --exe"
             ),
+            Self::NotAbsolute(p) => write!(f, "--exe must be a full path, not {}", p.display()),
             Self::NotAllowed(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -39,7 +42,7 @@ impl std::error::Error for ServiceError {
         match self {
             Self::NotAllowed(e) => Some(e),
             Self::Io(e) => Some(e),
-            Self::NixStore => None,
+            Self::NixStore | Self::NotAbsolute(_) => None,
         }
     }
 }
@@ -70,7 +73,8 @@ fn unit_name(brain: &str) -> String {
 /// resolved, so an upgrade is picked up), else this program. Never a Nix store path.
 pub fn stable_exe(given: Option<&Path>, home: &Path) -> Result<PathBuf, ServiceError> {
     let exe = match given {
-        Some(p) => p.to_path_buf(),
+        Some(p) if p.is_absolute() => lexical(p),
+        Some(p) => return Err(ServiceError::NotAbsolute(p.to_path_buf())),
         None => {
             let profile = home.join(".nix-profile/bin/moa");
             if fs::metadata(&profile).is_ok() {
@@ -84,6 +88,22 @@ pub fn stable_exe(given: Option<&Path>, home: &Path) -> Result<PathBuf, ServiceE
         return Err(ServiceError::NixStore);
     }
     Ok(exe)
+}
+
+/// `p` with `.` and `..` folded away by name alone: a link is never followed, so the
+/// profile's stays unresolved.
+fn lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn xml(s: &str) -> String {
@@ -162,12 +182,19 @@ pub fn systemd_unit(exe: &Path, brain: &str, paths: &Paths) -> String {
 struct Step {
     args: Vec<String>,
     ignore_failure: bool,
+    /// How many times to try it (a failure is only final after the last).
+    tries: u32,
 }
+
+/// `launchctl bootstrap` right after a `bootout` can fail while the old job tears down.
+const BOOTSTRAP_TRIES: u32 = 5;
+const RETRY_DELAY: Duration = Duration::from_millis(200);
 
 fn step(args: &[&str], ignore_failure: bool) -> Step {
     Step {
         args: args.iter().map(|a| a.to_string()).collect(),
         ignore_failure,
+        tries: 1,
     }
 }
 
@@ -178,7 +205,10 @@ fn install_steps(mac: bool, uid: u32, brain: &str, file: &Path) -> Vec<Step> {
         let file = file.to_string_lossy();
         vec![
             step(&["launchctl", "bootout", &target], true),
-            step(&["launchctl", "bootstrap", &domain, &file], false),
+            Step {
+                tries: BOOTSTRAP_TRIES,
+                ..step(&["launchctl", "bootstrap", &domain, &file], false)
+            },
         ]
     } else {
         let unit = unit_name(brain);
@@ -186,6 +216,15 @@ fn install_steps(mac: bool, uid: u32, brain: &str, file: &Path) -> Vec<Step> {
             step(&["systemctl", "--user", "daemon-reload"], false),
             step(&["systemctl", "--user", "enable", "--now", &unit], false),
         ]
+    }
+}
+
+/// What to run to register: nothing when the file was already as wanted.
+fn install_plan(same: bool, mac: bool, uid: u32, brain: &str, file: &Path) -> Vec<Step> {
+    if same {
+        Vec::new()
+    } else {
+        install_steps(mac, uid, brain, file)
     }
 }
 
@@ -204,19 +243,27 @@ fn uninstall_steps(mac: bool, uid: u32, brain: &str) -> Vec<Step> {
 
 fn run_steps(steps: &[Step]) -> Result<(), ServiceError> {
     for s in steps {
-        let mut cmd = Command::new(&s.args[0]);
-        cmd.args(&s.args[1..]);
         let name = s.args[..s.args.len().min(3)].join(" ");
-        let outcome = Spawner.spawn(&mut cmd).and_then(|mut c| c.wait());
-        match outcome {
-            Ok(status) if status.success() || s.ignore_failure => {}
-            Ok(status) => {
-                return Err(ServiceError::Io(io::Error::other(format!(
-                    "{name} failed ({status})"
-                ))));
+        let mut last = None;
+        for attempt in 0..s.tries.max(1) {
+            if attempt > 0 {
+                std::thread::sleep(RETRY_DELAY);
             }
-            Err(_) if s.ignore_failure => {}
-            Err(e) => return Err(io::Error::new(e.kind(), format!("{name}: {e}")).into()),
+            let mut cmd = Command::new(&s.args[0]);
+            cmd.args(&s.args[1..]);
+            match Spawner.spawn(&mut cmd).and_then(|mut c| c.wait()) {
+                Ok(status) if status.success() => {
+                    last = None;
+                    break;
+                }
+                Ok(status) => last = Some(io::Error::other(format!("{name} failed ({status})"))),
+                Err(e) => last = Some(io::Error::new(e.kind(), format!("{name}: {e}"))),
+            }
+        }
+        if let Some(e) = last
+            && !s.ignore_failure
+        {
+            return Err(e.into());
         }
     }
     Ok(())
@@ -268,34 +315,29 @@ pub fn install(paths: &Paths, brain: &str, exe: &Path) -> Result<ServiceOutcome,
     if !same {
         write_atomic(&file, &text)?;
     }
-    let said = if same {
-        "already installed"
-    } else {
-        "installed"
-    };
+    if same {
+        // Nothing changed, so nothing is restarted or re-registered.
+        return Ok(ServiceOutcome {
+            message: format!("already installed: {}", file.display()),
+            file,
+            registered: false,
+        });
+    }
     if paths.is_sandboxed() {
-        let message = if same {
-            format!(
-                "{said}: {}; not registered with {} (sandbox)",
-                file.display(),
-                manager(mac)
-            )
-        } else {
-            format!(
-                "sandbox: wrote {}; not registered with {}",
-                file.display(),
-                manager(mac)
-            )
-        };
+        let message = format!(
+            "sandbox: wrote {}; not registered with {}",
+            file.display(),
+            manager(mac)
+        );
         return Ok(ServiceOutcome {
             file,
             registered: false,
             message,
         });
     }
-    run_steps(&install_steps(mac, sys::current_uid(), brain, &file))?;
+    run_steps(&install_plan(same, mac, sys::current_uid(), brain, &file))?;
     let message = format!(
-        "{said}: {}; registered with {}",
+        "installed: {}; registered with {}",
         file.display(),
         manager(mac)
     );
@@ -353,10 +395,13 @@ mod tests {
             install_steps(true, 501, "work", f),
             vec![
                 step(&["launchctl", "bootout", "gui/501/moa.daemon.work"], true),
-                step(
-                    &["launchctl", "bootstrap", "gui/501", &f.to_string_lossy()],
-                    false
-                ),
+                Step {
+                    tries: BOOTSTRAP_TRIES,
+                    ..step(
+                        &["launchctl", "bootstrap", "gui/501", &f.to_string_lossy()],
+                        false
+                    )
+                },
             ]
         );
         assert_eq!(
@@ -369,6 +414,15 @@ mod tests {
                 ),
             ]
         );
+        // Unchanged content: nothing to run at all. A changed file retries the bootstrap.
+        assert!(install_plan(true, true, 501, "work", f).is_empty());
+        assert!(install_plan(true, false, 501, "work", f).is_empty());
+        let plan = install_plan(false, true, 501, "work", f);
+        assert_eq!(plan, install_steps(true, 501, "work", f));
+        assert_eq!(plan[0].tries, 1);
+        assert_eq!(plan[1].tries, BOOTSTRAP_TRIES);
+        assert_eq!(BOOTSTRAP_TRIES, 5);
+        assert_eq!(RETRY_DELAY, Duration::from_millis(200));
         assert_eq!(
             uninstall_steps(true, 501, "work"),
             vec![step(

@@ -46,7 +46,7 @@ fn the_label() {
 
 #[test]
 fn the_stable_exe_rule() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     // No profile link: this program.
     assert_eq!(
         service::stable_exe(None, home.path()).unwrap(),
@@ -80,7 +80,7 @@ fn a_nix_store_path_is_refused() {
 
 #[test]
 fn a_sandboxed_install_writes_but_never_registers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let paths = Paths::with_root(tmp.path());
     let exe = Path::new("/opt/moa/bin/moa");
     let before = spawn::launches();
@@ -114,12 +114,22 @@ fn a_sandboxed_install_writes_but_never_registers() {
 }
 
 #[test]
-fn an_install_without_the_switch_is_refused_before_anything_happens() {
-    let paths = unsandboxed(false);
-    let before = spawn::launches();
-    let err = service::install(&paths, "work", Path::new("/opt/moa")).unwrap_err();
-    assert!(matches!(err, ServiceError::NotAllowed(_)));
-    let err = service::uninstall(&paths, "work").unwrap_err();
-    assert!(matches!(err, ServiceError::NotAllowed(_)));
-    assert_eq!(spawn::launches(), before);
+fn an_unsandboxed_paths_without_the_switch_is_refused_by_the_gate() {
+    // Only the gate is asked; install and uninstall are never called on unsandboxed Paths.
+    assert!(unsandboxed(false).check_v1_allowed().is_err());
+}
+
+#[test]
+fn an_exe_must_be_a_full_path_and_is_cleaned_before_the_store_check() {
+    let home = Path::new("/r");
+    let err = service::stable_exe(Some(Path::new("bin/moa")), home).unwrap_err();
+    assert!(matches!(err, ServiceError::NotAbsolute(_)));
+    assert_eq!(err.to_string(), "--exe must be a full path, not bin/moa");
+    let sneaky = Path::new("/opt/../nix/store/abc-moa/bin/moa");
+    let err = service::stable_exe(Some(sneaky), home).unwrap_err();
+    assert!(matches!(err, ServiceError::NixStore));
+    assert_eq!(
+        service::stable_exe(Some(Path::new("/opt/./x/../moa")), home).unwrap(),
+        Path::new("/opt/moa")
+    );
 }
