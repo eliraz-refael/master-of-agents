@@ -477,3 +477,30 @@ fn an_unlisted_account_may_not_write() {
         err(&o)
     );
 }
+
+/// M1: the daemon launches nothing for data verbs. (`launches` counts processes the daemon
+/// launched, not daemon starts.)
+#[test]
+fn cli_flow_launches_nothing_after_start() {
+    let r = typical();
+    ok(&r.moactl(&["brief"]));
+    let verbs: [&[&str]; 10] = [
+        &["attention"],
+        &["ls"],
+        &["ls", "--all"],
+        &["find", "lantern"],
+        &["project", "Lantern"],
+        &["task", "ls"],
+        &["task", "add", "Lantern", "Solder", "--due", "fri"],
+        &["note", "volts", "--project", "Lantern"],
+        &["group", "add", "Work/Infra"],
+        &["suggestion", "ls"],
+    ];
+    for v in verbs {
+        let o = r.moactl(v);
+        assert!(o.status.success(), "{v:?}: {}{}", out(&o), err(&o));
+    }
+    let o = r.moa(&["status"]);
+    ok(&o);
+    assert!(out(&o).contains(" 0 launches"), "{}", out(&o));
+}

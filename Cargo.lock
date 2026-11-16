@@ -670,8 +670,10 @@ dependencies = [
 name = "moa-daemon"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "futures-util",
  "jiff",
+ "moa-client",
  "moa-core",
  "moa-platform",
  "moa-proto",
