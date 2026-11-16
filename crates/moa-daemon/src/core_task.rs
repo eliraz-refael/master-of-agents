@@ -45,6 +45,15 @@ pub enum DaemonError {
     /// The core can't go on and has stopped; the daemon exits 1 with this line.
     #[error("{0}")]
     Fatal(String),
+    #[error("the {0} brain's moa is already running")]
+    AlreadyRunning(BrainName),
+    #[error("there's no brain named {} in {}", .0, .1.display())]
+    NoSuchBrain(BrainName, PathBuf),
+    #[error(transparent)]
+    Paths(#[from] moa_platform::PathsError),
+    /// A problem with `moa.toml`; the line starts with `moa.toml`.
+    #[error("{0}")]
+    Config(#[from] moa_core::config::ConfigError),
 }
 
 pub struct CoreOptions {
@@ -123,6 +132,8 @@ pub struct CoreHandle {
     generation: watch::Receiver<u64>,
     stats: Arc<Stats>,
     finished: watch::Receiver<Option<Result<(), String>>>,
+    /// Closes when the core task is gone, cleanup included.
+    ended: watch::Receiver<()>,
     panic_next: Arc<AtomicU32>,
 }
 
@@ -153,6 +164,7 @@ impl CoreHandle {
         let store: SharedStore = Arc::new(Mutex::new(store));
         let stats = Arc::new(Stats::default());
         let (finished_tx, finished) = watch::channel(None);
+        let (ended_tx, ended) = watch::channel(());
         let panic_next = Arc::new(AtomicU32::new(0));
         let (inbox, inbox_rx) = mpsc::unbounded_channel();
         let state = State::new(opts.brain, opts.config).with_deps(opts.deps);
@@ -203,6 +215,7 @@ impl CoreHandle {
             carry: VecDeque::new(),
             panic_next: panic_next.clone(),
             finished_tx,
+            _ended: ended_tx,
         };
         let _ = inbox.send(Item::Input(Input::Startup(Box::new(snapshot))));
         tokio::spawn(core.run(inbox_rx));
@@ -218,6 +231,7 @@ impl CoreHandle {
             generation,
             stats,
             finished,
+            ended,
             panic_next,
         };
         // Startup is the first item, so this barrier answers after its commit. If Startup
@@ -243,6 +257,13 @@ impl CoreHandle {
             Some(Err(line)) => Err(DaemonError::Fatal(line)),
             _ => Ok(()),
         }
+    }
+
+    /// Resolves once the core task is gone: after its cleanup (backups waited for, queued
+    /// callers told to try again). `finished()` can resolve with a fatal line before that.
+    pub async fn ended(&self) {
+        let mut rx = self.ended.clone();
+        while rx.changed().await.is_ok() {}
     }
 
     /// A new connection and the channel its replies arrive on.
@@ -381,6 +402,8 @@ struct Core {
     carry: VecDeque<Item>,
     panic_next: Arc<AtomicU32>,
     finished_tx: watch::Sender<Option<Result<(), String>>>,
+    /// Dropped with the core, which is what [`CoreHandle::ended`] waits for.
+    _ended: watch::Sender<()>,
 }
 
 /// What a drain leaves the loop to do.
@@ -439,6 +462,8 @@ impl Core {
             }
         }
         lock(&self.conns).clear();
+        // The alarm would otherwise stay armed into a closed inbox.
+        let _ = self.sched.send(SchedCmd::Stop);
         match end {
             // Already said by `fatal`.
             Flow::Fatal => {}

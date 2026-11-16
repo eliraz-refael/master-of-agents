@@ -15,8 +15,13 @@ clap.workspace = true
 jiff.workspace = true
 moa-agents = { path = "../moa-agents" }
 moa-core = { path = "../moa-core" }
+moa-daemon = { path = "../moa-daemon" }
+moa-platform = { path = "../moa-platform" }
+moa-proto = { path = "../moa-proto" }
 moa-store = { path = "../moa-store" }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

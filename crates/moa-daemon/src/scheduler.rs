@@ -27,6 +27,8 @@ pub(crate) enum SchedCmd {
     /// Answers once every command sent before it has been applied. It fires nothing: only
     /// the alarm does, in tests as in production.
     Sync(oneshot::Sender<()>),
+    /// The core has ended: stop, which disarms the alarm.
+    Stop,
 }
 
 /// Pause after the alarm itself fails, so a broken timer doesn't spin.
@@ -86,6 +88,10 @@ impl Scheduler {
                     }
                     Some(SchedCmd::Sync(done)) => {
                         let _ = done.send(());
+                    }
+                    Some(SchedCmd::Stop) => {
+                        let _ = self.alarm.disarm();
+                        return;
                     }
                 },
                 fired = self.alarm.fired() => {

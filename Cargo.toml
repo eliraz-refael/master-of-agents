@@ -36,3 +36,5 @@ sha2 = "0.10"
 shell-words = "1"
 toml = "1.2.1"
 schemars = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }

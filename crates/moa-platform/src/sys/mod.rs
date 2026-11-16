@@ -6,6 +6,17 @@ pub fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// Points file descriptor 1 at `/dev/null`, so nothing the daemon prints later reaches the
+/// pipe its starter read `ready` from.
+pub fn stdout_to_null() -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    // SAFETY: `dup2` of two descriptors that are open here: descriptor 1 is replaced, and
+    // `null` closes its own copy when it drops.
+    check(unsafe { libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO) })?;
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
