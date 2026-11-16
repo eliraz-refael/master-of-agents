@@ -30,6 +30,14 @@ fn zone(s: &str) -> TimeZone {
         .expect("MOA_LOCAL_BRAIN_TZ is not a time zone")
 }
 
+/// The variant name of an error's Debug text, with no payload: the payload can hold records.
+fn kind(e: &impl std::fmt::Debug) -> String {
+    format!("{e:?}")
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
 struct Rig {
     tb: TempBrain,
     tz_spec: String,
@@ -68,7 +76,8 @@ fn stdout(o: &Output) -> String {
 
 /// The `id` of a `--json` reply.
 fn id_of(o: &Output) -> String {
-    let v: serde_json::Value = serde_json::from_str(&stdout(o)).expect("a JSON reply");
+    let v: serde_json::Value = serde_json::from_str(&stdout(o))
+        .unwrap_or_else(|e| panic!("not a JSON reply ({})", kind(&e)));
     match &v["id"] {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => s.clone(),
@@ -170,21 +179,28 @@ async fn local_verbs_work_and_survive_a_reload() {
         build: build_id_of(Path::new(MOA)).expect("a build id"),
     })
     .await
-    .expect("the daemon is running");
-    let kept = client.subscribe(Topic::ALL).await.expect("a snapshot");
+    .unwrap_or_else(|e| panic!("no daemon to ask ({})", kind(&e)));
+    let kept = client
+        .subscribe(Topic::ALL)
+        .await
+        .unwrap_or_else(|e| panic!("no snapshot ({})", kind(&e)));
     drop(client);
     let o = r.run(Path::new(MOA), &["shutdown"]);
     assert_eq!(o.status.code(), Some(0));
 
     // 5. A fresh state from the file equals what the daemon showed.
-    let store = Store::open(&db, &paths.backups("default")).expect("the brain opens");
-    let snapshot = store.load_snapshot().expect("the snapshot loads");
+    let store = Store::open(&db, &paths.backups("default"))
+        .unwrap_or_else(|e| panic!("the brain did not open ({})", kind(&e)));
+    let snapshot = store
+        .load_snapshot()
+        .unwrap_or_else(|e| panic!("the snapshot did not load ({})", kind(&e)));
     let deps = Deps {
         parse_action: Some(moa_proto::cli::parse_action),
         canonical: moa_platform::canonical,
         home: paths.home().to_path_buf(),
     };
-    let mut config = moa_daemon::load_config(&paths).expect("a config");
+    let mut config =
+        moa_daemon::load_config(&paths).unwrap_or_else(|e| panic!("no config ({})", kind(&e)));
     config.canonicalize_with(deps.canonical);
     let mut state = State::new(BrainName::default_brain(), config).with_deps(deps);
     let now_ms = std::time::SystemTime::now()

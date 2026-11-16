@@ -120,10 +120,17 @@ async fn twenty_verbs_launch_nothing() {
         let result = client.call(op_of(line, tb.root())).await;
         if i == 19 {
             // S2 is still in the group.
-            assert!(
-                matches!(result, Err(ClientError::Rpc(_))),
-                "{line}: {result:?}"
-            );
+            // (a rename at #15 that silently failed would say "no group" instead).
+            match result {
+                Err(ClientError::Rpc(e)) => {
+                    assert_eq!(e.code, moa_proto::code::FAILED, "{}", e.message);
+                    assert_eq!(
+                        e.message,
+                        "Work/Platform still has 1 session(s); move or archive them first"
+                    );
+                }
+                other => panic!("{line}: {other:?}"),
+            }
         } else {
             result.unwrap_or_else(|e| panic!("{line}: {e}"));
         }
