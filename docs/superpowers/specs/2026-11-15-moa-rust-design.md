@@ -220,6 +220,7 @@ Each is justified where it's described.
 | ACP adapter (`claude-agent-acp`) | Once per moa account; restart on crash | It is the agent |
 | Agent sessions and plain shells | When the user or moa opens or resumes one | They are the product; tmux launches them |
 | `moa panel` | Once per panel pane; parked, reused; respawned on crash or Repair | Long-lived, not per action |
+| `moa daemon` (autostart) | Once per daemon start, by a client that found none | The daemon is the product |
 | `moa hook` | Per agent hook event | The agent's launch; exec form, ~6 ms, async (C8) |
 | `moactl` / `moa <verb>` | When a user, script or agent runs it | Their launch, not moa's |
 | `moa pick` in a `display-popup` | When the user opens the popup picker | User-chosen (U17); never per poll or event |
@@ -233,12 +234,13 @@ Not allowed: `ps`, `pgrep`, `lsof`, `git`, `sqlite3`, `jq`, `bash` helpers, `run
 ### 6.2 Crates **[call C1]**
 One binary, `moa`, with subcommands (`moa`, `moa daemon`, `moa panel`, `moa hook`, the
 agent-facing verbs; `moactl` is a symlink that dispatches on `argv[0]`). One binary means
-the hook, panels and daemon can't drift apart (R4 §7).
+the hook, panels and daemon can't drift apart (R4 §7). `moa-core` does no IO of its own: IO
+the core needs is injected as plain functions in `Deps`.
 
 | Crate | Holds | Depends on IO? |
 |---|---|---|
 | `moa-core` | Domain types, the pure Core (`State`, `Input`, `Effect`, `handle`), the routing function, the live-state model, wake/sleep/ask state machines, brief/attention text | No (no tokio, no clock) |
-| `moa-proto` | Wire types (requests, results, patches, events, hook envelope), JSON Schema export | No |
+| `moa-proto` | Wire types (requests, results, patches, events, hook envelope) and the verb grammar, JSON Schema export | No |
 | `moa-store` | Store actor (rusqlite), schema and migrations, spike import, spike export, backups | SQLite |
 | `moa-tmux` | Control-mode client: byte parser, FIFO reply matching, typed notifications, mailbox messages, command escaping | tmux |
 | `moa-agents` | Agent kinds (Claude now, Codex later): launch/resume argv, hook normalization, plugin-dir generation, transcript checks; the ACP host | ACP |
@@ -617,13 +619,14 @@ the injected plugin and so full tracking.
   spike's tested semantics (lesson 34): if the account has `brain = B`, a cwd under one of its
   `except` folders stays with the opener (or the default brain when there's no opener),
   anything else goes to B; with `only`, a cwd outside those folders gets `None` ("moa isn't
-  available here"); otherwise the opener or the default brain. Paths are compared on whole
+  available here"); otherwise the opener or the default brain (but see unlisted accounts below). Paths are compared on whole
   components after `~` expansion and canonicalization; empty entries are ignored (lesson 37).
   Isolation guards (v1 slice 2a): an `except` cwd never goes to B. It stays with the opener
   when the opener isn't B; otherwise it goes to the brain that owns the folder (the most
   specific configured folder wins), else `default`, and `None` when that would be B. For an account with limits, a cwd that is relative or contains `..`
   gets `None`. The same folder in two brains is a config error.
   A session's brain is fixed when it's first seen and never changes when its cwd moves.
+- **Unlisted accounts don't write (owner, slice 2b).** When `moa.toml` lists any `[accounts]`, a `moactl` write from an account it doesn't list (its store, `CLAUDE_CONFIG_DIR` or `~/.claude`, matches no `store`) is refused in one line, so a forgotten work account can't write into the default brain. Reads still route to the default brain. With no accounts listed, routing is unchanged. `MOA_BRAIN` is an explicit override. The hook path is not covered by this.
 - **Opening in another brain's folder is refused [C14]**: if `route(account, cwd, self)` isn't
   this brain, `open` says "~/work/x belongs to the work brain; open it from `moa work`". In the
   spike such a session would run on this brain's tmux server but be tracked by the other
@@ -766,7 +769,7 @@ touch moa's turn (lesson 54).
 
 **Suggestions** (R1 §2.9; lesson 63). `suggest TEXT --do "VERB ARGS"…`: actions are parsed and
 validated at creation against the whitelist (task, set, archive, close, group, note, project),
-so failures are moa's, not the user's; duplicate open text is refused. Yes runs the actions
+so failures are moa's, not the user's; duplicate open text isn't added again (the answer is `already suggested (#N)`). Yes runs the actions
 **in-process** in the daemon (the spike launched a Python process per action), records the
 result, logs a ui event; without actions, yes is a signal delivered to moa through the one
 channel. Cards update everywhere when answered anywhere. moa's rules (≤ 2 per wake, never

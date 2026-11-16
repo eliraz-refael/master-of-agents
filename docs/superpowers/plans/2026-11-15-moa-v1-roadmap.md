@@ -737,7 +737,8 @@ Spec §9.
      paths. The export refuses leftover `-wal`/`-shm` files.
    - Remove the flag, re-source the spike config, run the spike launcher.
 7. **The real home opens up**: remove slice 2's `MOA_ROOT` gate (`Paths::check_v1_allowed`
-   and `MOA_REAL_HOME`), so `moa daemon`, autostart and `moa service` use the real home.
+   and `MOA_REAL_HOME`), so `moa daemon`, autostart and `moa service` use the real home. The service file's
+   `MOA_REAL_HOME=1` environment entry (slice 2b) goes with it.
 8. **Rehearsal test**:
    - A sandbox server runs the real spike code from the repo with fake agents and copied
      brains.
