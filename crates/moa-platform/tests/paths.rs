@@ -1,7 +1,7 @@
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use moa_platform::{Paths, PathsError, ensure_private_dir};
+use moa_platform::{Paths, PathsError, TmuxSocket, ensure_private_dir};
 
 fn p(root: &str) -> Paths {
     Paths::with_root(Path::new(root))
@@ -303,6 +303,80 @@ fn an_empty_or_relative_tmpdir_falls_back_to_tmp() {
             "TMPDIR={bad:?}"
         );
     }
+}
+
+#[test]
+fn tmux_socket_is_inside_the_root_when_sandboxed() {
+    let x = p("/r");
+    let s = x.tmux_socket("work").unwrap();
+    assert_eq!(
+        s,
+        TmuxSocket::Path("/r/.local/state/moa/run/tmux-work".into())
+    );
+    assert_eq!(
+        s.args(),
+        [
+            std::ffi::OsString::from("-S"),
+            "/r/.local/state/moa/run/tmux-work".into()
+        ]
+    );
+    assert_eq!(s.path(Some(Path::new("/x")), 1), s.path(None, 2));
+    assert_eq!(
+        x.tmux_conf("work"),
+        Path::new("/r/.local/share/moa/work/tmux.conf")
+    );
+    assert_eq!(
+        x.moa_tmux("work"),
+        Path::new("/r/.local/share/moa/work/moa.tmux")
+    );
+}
+
+#[test]
+fn real_brains_keep_the_spike_names() {
+    let x = vars(None, Some("/home/u"), true).unwrap();
+    assert_eq!(
+        x.tmux_socket("default").unwrap(),
+        TmuxSocket::Name("moa".into())
+    );
+    let w = x.tmux_socket("work").unwrap();
+    assert_eq!(w, TmuxSocket::Name("moa-work".into()));
+    assert_eq!(
+        w.args(),
+        [std::ffi::OsString::from("-L"), "moa-work".into()]
+    );
+}
+
+#[test]
+fn a_long_sandbox_socket_falls_back() {
+    let long = format!("/{}", "a".repeat(100));
+    let x = Paths::from_vars(Some(long.into()), None, Some("/t".into()), 501, false).unwrap();
+    let Ok(TmuxSocket::Path(s)) = x.tmux_socket("default") else {
+        panic!("no path socket")
+    };
+    assert!(s.starts_with("/t/moa-501/") && s.to_str().unwrap().ends_with("-tmux-default"));
+    assert!(s.as_os_str().len() <= 103);
+    let tiny = Paths::from_vars(
+        Some(format!("/{}", "a".repeat(100)).into()),
+        None,
+        Some(format!("/{}", "t".repeat(100)).into()),
+        501,
+        false,
+    )
+    .unwrap();
+    assert!(matches!(
+        tiny.tmux_socket("default"),
+        Err(PathsError::SocketTooLong)
+    ));
+}
+
+#[test]
+fn name_sockets_follow_tmux_tmpdir() {
+    let s = TmuxSocket::Name("moa".into());
+    assert_eq!(s.path(None, 501), Path::new("/tmp/tmux-501/moa"));
+    assert_eq!(
+        s.path(Some(Path::new("/x/y")), 7),
+        Path::new("/x/y/tmux-7/moa")
+    );
 }
 
 #[test]

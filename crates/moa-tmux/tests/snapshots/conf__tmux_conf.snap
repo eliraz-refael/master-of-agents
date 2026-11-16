@@ -1,0 +1,6 @@
+---
+source: crates/moa-tmux/tests/conf.rs
+expression: "tmux_conf(Path::new(\"/r/.local/share/moa/default/moa.tmux\"))"
+---
+source-file -q ~/.tmux.conf
+source-file /r/.local/share/moa/default/moa.tmux

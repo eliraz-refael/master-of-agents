@@ -14,6 +14,34 @@ use crate::sys;
 /// The longest socket path `sockaddr_un` holds on macOS (104 with the NUL).
 const SOCKET_LIMIT: usize = 103;
 
+/// Which tmux server: a name under tmux's own socket folder, or a socket path.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TmuxSocket {
+    Name(String),
+    Path(PathBuf),
+}
+
+impl TmuxSocket {
+    /// `["-L", name]` or `["-S", path]`.
+    pub fn args(&self) -> [OsString; 2] {
+        match self {
+            TmuxSocket::Name(n) => ["-L".into(), n.into()],
+            TmuxSocket::Path(p) => ["-S".into(), p.clone().into_os_string()],
+        }
+    }
+
+    /// The socket's file. A name lives in `<tmux_tmpdir or /tmp>/tmux-<uid>/<name>`.
+    pub fn path(&self, tmux_tmpdir: Option<&Path>, uid: u32) -> PathBuf {
+        match self {
+            TmuxSocket::Name(n) => tmux_tmpdir
+                .unwrap_or(Path::new("/tmp"))
+                .join(format!("tmux-{uid}"))
+                .join(n),
+            TmuxSocket::Path(p) => p.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     home: PathBuf,
@@ -213,6 +241,43 @@ impl Paths {
         } else {
             Err(PathsError::SocketTooLong)
         }
+    }
+
+    /// Sandboxed brains use a socket path (`run/tmux-<b>`, with `socket`'s length rule and
+    /// fallback), so they never reach a real server. Real brains use the names `moa` and
+    /// `moa-<b>`.
+    pub fn tmux_socket(&self, b: &str) -> Result<TmuxSocket, PathsError> {
+        if !self.sandboxed {
+            return Ok(TmuxSocket::Name(if b == "default" {
+                "moa".to_string()
+            } else {
+                format!("moa-{b}")
+            }));
+        }
+        let intended = self.run_dir().join(format!("tmux-{b}"));
+        if intended.as_os_str().len() <= SOCKET_LIMIT {
+            return Ok(TmuxSocket::Path(intended));
+        }
+        let hash = fnv1a64(intended.as_os_str().as_bytes());
+        let fallback = self
+            .tmpdir
+            .join(format!("moa-{}", self.uid))
+            .join(format!("{:08x}-tmux-{b}", hash & 0xffff_ffff));
+        if fallback.as_os_str().len() <= SOCKET_LIMIT {
+            Ok(TmuxSocket::Path(fallback))
+        } else {
+            Err(PathsError::SocketTooLong)
+        }
+    }
+
+    /// The `-f` file moa gives tmux.
+    pub fn tmux_conf(&self, b: &str) -> PathBuf {
+        self.brain_dir(b).join("tmux.conf")
+    }
+
+    /// moa's own options, keys and menu, which the daemon sources on every connect.
+    pub fn moa_tmux(&self, b: &str) -> PathBuf {
+        self.brain_dir(b).join("moa.tmux")
     }
 
     pub fn spool(&self, b: &str) -> PathBuf {
