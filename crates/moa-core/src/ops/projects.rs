@@ -150,10 +150,15 @@ pub(crate) fn add(
     }
     // The store keeps names unique ignoring case; refuse here so memory never gets ahead of
     // the disk.
+    // A stored path may be another spelling of the same folder (a spike row reached through a
+    // symlink), so it is compared canonical too.
+    let canonical = state.deps().canonical;
     if project_named(state, name).is_some()
-        || state
-            .projects()
-            .any(|p| p.path.as_deref() == Some(&shown) || p.path.as_deref() == Some(&typed_shown))
+        || state.projects().any(|p| {
+            p.path
+                .as_deref()
+                .is_some_and(|q| q == shown || q == typed_shown || canonical(Path::new(q)) == canon)
+        })
     {
         return Err(OpError(format!(
             "there's already a project named '{name}' or for {shown}"

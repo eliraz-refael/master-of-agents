@@ -43,31 +43,32 @@ fn split(act: &str) -> Result<SuggestionAction, String> {
 /// Startup flags only once. If its commit later fails and the core reloads, the flag is gone
 /// from memory; that is accepted, because `yes` parses every action again and records a bad
 /// one as a failure instead of running it.
-pub(crate) fn startup_flags(state: &State) -> Vec<Change> {
+pub(crate) fn startup_flags(state: &State) -> Vec<Suggestion> {
     let deps = state.deps();
     let Some(parse) = deps.parse_action else {
         return Vec::new();
     };
     state
         .suggestions()
-        .filter(|s| matches!(s.status, SuggestionStatus::Open | SuggestionStatus::Later))
+        .filter(|s| waiting(s))
         .filter(|s| s.actions_invalid.is_none() && !s.actions.is_empty())
         .filter(|s| !is_unknown(state, s.id))
         .filter(|s| s.actions.iter().any(|a| parse(a, &deps.home).is_err()))
         .map(|s| {
             let mut s = s.clone();
             s.actions_invalid = Some(INVALID.to_string());
-            Change::Suggestion(s)
+            s
         })
         .collect()
 }
 
 fn is_unknown(state: &State, id: SuggestionId) -> bool {
-    let key = format!("#{id}");
-    state
-        .unknown()
-        .iter()
-        .any(|n| n.table == "suggestions" && n.key == key)
+    state.is_unknown("suggestions", &format!("#{id}"))
+}
+
+/// Open or later: not answered for good yet.
+fn waiting(s: &Suggestion) -> bool {
+    matches!(s.status, SuggestionStatus::Open | SuggestionStatus::Later)
 }
 
 pub(crate) fn suggest(
@@ -122,10 +123,7 @@ pub(crate) fn suggest(
 }
 
 pub(crate) fn ls(state: &State) -> Result<Done, OpError> {
-    let open: Vec<&Suggestion> = state
-        .suggestions()
-        .filter(|s| matches!(s.status, SuggestionStatus::Open | SuggestionStatus::Later))
-        .collect();
+    let open: Vec<&Suggestion> = state.suggestions().filter(|s| waiting(s)).collect();
     let lines: Vec<String> = open
         .iter()
         .map(|s| {
@@ -172,7 +170,7 @@ pub(crate) fn answer(
             &format!("#{}", s.id),
         )));
     }
-    if !matches!(s.status, SuggestionStatus::Open | SuggestionStatus::Later) {
+    if !waiting(&s) {
         return Err(OpError(format!(
             "suggestion #{} is already {}",
             s.id, s.status

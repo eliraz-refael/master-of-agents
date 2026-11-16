@@ -44,17 +44,17 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
             // is told about the state.
             let flags = ops::suggestions::startup_flags(state);
             if !flags.is_empty() {
-                fx.extend(flags.iter().filter_map(|c| match c {
-                    Change::Suggestion(s) => Some(Effect::Log(LogLine {
+                fx.extend(flags.iter().map(|s| {
+                    Effect::Log(LogLine {
                         level: LogLevel::Warn,
                         message: format!("suggestion #{} has an action that doesn't parse", s.id),
-                    })),
-                    _ => None,
+                    })
                 }));
-                for c in &flags {
+                let changes: Vec<Change> = flags.into_iter().map(Change::Suggestion).collect();
+                for c in &changes {
                     state.apply(c);
                 }
-                fx.push(Effect::Persist(flags));
+                fx.push(Effect::Persist(changes));
             }
             fx.extend(publish_all(state));
             fx
@@ -190,11 +190,7 @@ impl Tx {
             let Some((table, key)) = c.row() else {
                 continue;
             };
-            if state
-                .unknown()
-                .iter()
-                .any(|n| n.table == table && n.key == key)
-            {
+            if state.is_unknown(table, &key) {
                 return Err(OpError(unknown_message(state, table, &key)));
             }
         }

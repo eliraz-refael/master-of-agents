@@ -508,6 +508,15 @@ pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Action, String>
         .into_iter()
         .chain(a.args.iter().map(String::as_str));
     let parsed = Moactl::try_parse_from(argv).map_err(|e| {
+        // `--help` is an `Err` whose text is the help page; its first line isn't a reason.
+        if matches!(
+            e.kind(),
+            clap::error::ErrorKind::DisplayHelp
+                | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                | clap::error::ErrorKind::DisplayVersion
+        ) {
+            return "a suggestion action can't ask for help".to_string();
+        }
         let text = e.render().to_string();
         let first = text.lines().next().unwrap_or("");
         first.strip_prefix("error: ").unwrap_or(first).to_string()

@@ -289,6 +289,13 @@ impl State {
         &self.unknown
     }
 
+    /// Whether the row `key` of `table` was loaded with a value this build doesn't know.
+    pub fn is_unknown(&self, table: &str, key: &str) -> bool {
+        self.unknown
+            .iter()
+            .any(|n| n.table == table && n.key == key)
+    }
+
     /// The id the next row of `table` takes.
     pub(crate) fn next_id(&self, table: Table) -> i64 {
         let n = &self.next_ids;
