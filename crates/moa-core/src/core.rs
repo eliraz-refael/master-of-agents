@@ -90,7 +90,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             vec![Effect::Backup { day: now.local_day }, backup_timer(now)]
         }
         // The status clock reads the time when `handle` ends.
-        Input::Timer(TimerKey::Clock) => Vec::new(),
+        Input::Timer(TimerKey::Clock) => {
+            state.tmux.clock_fired();
+            Vec::new()
+        }
         Input::ZoneChanged => vec![backup_timer(now)],
         Input::ActorFailed { actor, message: _ } => {
             // The message may carry contents; it stays with the executor.

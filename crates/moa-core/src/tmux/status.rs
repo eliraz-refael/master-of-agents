@@ -56,10 +56,6 @@ pub fn next_minute(at: UtcMs) -> UtcMs {
     UtcMs((at.0.div_euclid(60_000) + 1) * 60_000)
 }
 
-fn window_key(w: WindowId) -> String {
-    format!("{WINDOW_STATE} {w}")
-}
-
 /// The commands that bring the server's status options up to date, or `None` when nothing
 /// changed or the link isn't up.
 pub(crate) fn sync(state: &mut State) -> Option<Effect> {
@@ -74,18 +70,21 @@ pub(crate) fn sync(state: &mut State) -> Option<Effect> {
             continue;
         };
         let d = display_state(s, state.now).0;
+        // Only the states the counts show mark a window.
+        if colour(d).is_none() {
+            continue;
+        }
         let e = windows.entry(w).or_insert(d);
         *e = (*e).min(d);
     }
     let mut cmds = Vec::new();
     let tmux = &mut state.tmux;
-    if tmux.written.get(STATUS) != Some(&text) {
+    if tmux.written.status.as_ref() != Some(&text) {
         cmds.push(Cmd::new("set-option").args(["-g", STATUS, &text]));
-        tmux.written.insert(STATUS.into(), text);
+        tmux.written.status = Some(text);
     }
     for (w, d) in &windows {
-        let key = window_key(*w);
-        if tmux.written.get(&key).map(String::as_str) != Some(d.word()) {
+        if tmux.written.windows.get(w) != Some(&d.word()) {
             cmds.push(Cmd::new("set-option").args([
                 "-w",
                 "-t",
@@ -93,29 +92,38 @@ pub(crate) fn sync(state: &mut State) -> Option<Effect> {
                 WINDOW_STATE,
                 d.word(),
             ]));
-            tmux.written.insert(key, d.word().into());
+            tmux.written.windows.insert(*w, d.word());
         }
     }
-    let gone: Vec<(String, WindowId)> = tmux
+    // Windows written before that have no state now: unset the ones still there. Gone
+    // ones are forgotten.
+    let gone: Vec<WindowId> = tmux
         .written
+        .windows
         .keys()
-        .filter_map(|k| {
-            let w: WindowId = k.strip_prefix(WINDOW_STATE)?.trim().parse().ok()?;
-            (!windows.contains_key(&w)).then(|| (k.clone(), w))
-        })
+        .filter(|w| !windows.contains_key(w))
+        .copied()
         .collect();
-    for (key, w) in gone {
-        tmux.written.remove(&key);
-        // A window that is gone has nothing to unset.
-        if tmux.topology.has_window(w) {
-            cmds.push(Cmd::new("set-option").args([
-                "-w",
-                "-u",
-                "-t",
-                &w.to_string(),
-                WINDOW_STATE,
-            ]));
-        }
+    let mut clear: Vec<WindowId> = gone
+        .iter()
+        .copied()
+        .filter(|w| tmux.topology.has_window(*w))
+        .collect();
+    for w in gone {
+        tmux.written.windows.remove(&w);
+    }
+    // After a reset the server may hold a state for any window.
+    if tmux.written.fresh && tmux.topology.window_ids().next().is_some() {
+        tmux.written.fresh = false;
+        let rest: Vec<WindowId> = tmux
+            .topology
+            .window_ids()
+            .filter(|w| !windows.contains_key(w) && !clear.contains(w))
+            .collect();
+        clear.extend(rest);
+    }
+    for w in clear {
+        cmds.push(Cmd::new("set-option").args(["-w", "-u", "-t", &w.to_string(), WINDOW_STATE]));
     }
     (!cmds.is_empty()).then_some(Effect::Tmux {
         conn,
@@ -131,7 +139,7 @@ pub(crate) fn clock(state: &mut State, now: &Now) -> Vec<Effect> {
         return Vec::new();
     };
     if !tmux.topology.users_attached() {
-        tmux.written.remove(CLOCK);
+        tmux.written.clock = None;
         return match tmux.clock_at.take() {
             Some(_) => vec![Effect::CancelTimer(TimerKey::Clock)],
             None => Vec::new(),
@@ -140,13 +148,13 @@ pub(crate) fn clock(state: &mut State, now: &Now) -> Vec<Effect> {
     let text = clock_text(now);
     // A deadline that has passed has fired and is spent.
     let due = tmux.clock_at.is_none_or(|at| at <= now.wall);
-    if !due && tmux.written.get(CLOCK) == Some(&text) {
+    if !due && tmux.written.clock.as_ref() == Some(&text) {
         return Vec::new();
     }
     let at = next_minute(now.wall);
     tmux.clock_at = Some(at);
     let cmds = vec![Cmd::new("set-option").args(["-g", CLOCK, &text])];
-    tmux.written.insert(CLOCK.into(), text);
+    tmux.written.clock = Some(text);
     vec![
         Effect::Tmux {
             conn,

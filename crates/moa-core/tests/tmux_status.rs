@@ -205,6 +205,10 @@ fn counts_text_matches_the_spike() {
     // Not counted.
     add(2, &|n| session(n, Activity::Idle, Lifecycle::Ended));
     add(1, &|n| Session {
+        asleep_at: Some(UtcMs(3)),
+        ..session(n, Activity::Idle, Lifecycle::Ended)
+    });
+    add(1, &|n| Session {
         archived_at: Some(UtcMs(3)),
         ..live(n, Activity::Idle)
     });
@@ -232,10 +236,13 @@ fn the_status_is_written_once_per_change() {
         vec![live(1, Activity::Working), live(2, Activity::Idle)],
         vec![],
     );
-    // Connecting writes nothing: the link isn't up yet.
+    // Connecting writes the counts at once; the lists change nothing.
     let fx = connect(&mut s);
     check_order(&fx).unwrap();
-    let all = [fx, feed(&mut s, lists(&[], CONTROL_ONLY))].concat();
+    assert_eq!(untokened(&fx), 1);
+    let more = feed(&mut s, lists(&[], CONTROL_ONLY));
+    assert_eq!(untokened(&more), 0);
+    let all = [fx, more].concat();
     let status = writes_of(&all, "@moa_status");
     assert_eq!(
         status,
@@ -278,37 +285,143 @@ fn the_status_is_written_once_per_change() {
 
 #[test]
 fn a_reconnect_writes_everything_again() {
-    let mut s = started(vec![live(1, Activity::Working)], vec![]);
-    up_at(&mut s, &[], USER, now());
+    let mut s = started(vec![live(1, Activity::Working)], vec![binding(1, "%1")]);
+    let panes = ["P %1 @1 $0 1 1 0 "];
+    up_at(&mut s, &panes, USER, now());
     let fx = feed(&mut s, TmuxIn::Down(Down::Lost));
     assert_eq!(untokened(&fx), 0);
-    let all = [connect(&mut s), feed(&mut s, lists(&[], USER))].concat();
+    let all = [connect(&mut s), feed(&mut s, lists(&panes, USER))].concat();
     assert_eq!(writes_of(&all, "@moa_status").len(), 1);
     assert_eq!(writes_of(&all, "@moa_clock").len(), 1);
+    assert_eq!(
+        writes_of(&all, "@moa_state"),
+        vec!["set-option -w -t @1 @moa_state working"]
+    );
+}
+
+#[test]
+fn a_window_the_server_still_marks_is_unset_after_a_reset() {
+    // A window with no trusted pane, found by the first lists: whatever an earlier run
+    // left on it goes.
+    let mut s = started(vec![live(1, Activity::Working)], vec![]);
+    let fx = up_at(&mut s, &["P %7 @1 $0 1 1 0 "], CONTROL_ONLY, now());
+    assert_eq!(
+        writes_of(&fx, "@moa_state"),
+        vec!["set-option -w -u -t @1 @moa_state"]
+    );
+    // Once.
+    let fx = feed(&mut s, lists(&["P %7 @1 $0 1 1 0 "], CONTROL_ONLY));
+    assert!(writes_of(&fx, "@moa_state").is_empty());
+
+    // A window marked, then a reload after it lost its binding: the reload forgot what
+    // was written, so it clears the mark again.
+    let mut s = started(vec![live(1, Activity::Working)], vec![binding(1, "%1")]);
+    let panes = ["P %1 @1 $0 1 1 0 "];
+    let fx = up_at(&mut s, &panes, CONTROL_ONLY, now());
+    assert_eq!(
+        writes_of(&fx, "@moa_state"),
+        vec!["set-option -w -t @1 @moa_state working"]
+    );
+    let fx = handle_checked(
+        &mut s,
+        Input::Reload {
+            snapshot: Box::new(Snapshot {
+                sessions: vec![live(1, Activity::Working)],
+                ..Snapshot::default()
+            }),
+            refuse_writes: None,
+        },
+        now(),
+    );
+    check_order(&fx).unwrap();
+    assert_eq!(
+        writes_of(&fx, "@moa_state"),
+        vec!["set-option -w -u -t @1 @moa_state"]
+    );
+}
+
+#[test]
+fn only_counted_states_mark_a_window() {
+    let mut s = started(
+        vec![
+            session(1, Activity::Idle, Lifecycle::Ended),
+            Session {
+                asleep_at: Some(UtcMs(3)),
+                ..session(2, Activity::Idle, Lifecycle::Ended)
+            },
+            Session {
+                archived_at: Some(UtcMs(3)),
+                ..live(3, Activity::Idle)
+            },
+        ],
+        vec![binding(1, "%1"), binding(2, "%2"), binding(3, "%3")],
+    );
+    let fx = up_at(
+        &mut s,
+        &[
+            "P %1 @1 $0 1 1 0 ",
+            "P %2 @2 $0 1 0 0 ",
+            "P %3 @3 $0 1 0 0 ",
+        ],
+        CONTROL_ONLY,
+        now(),
+    );
+    // No state is set; each window is only cleared of whatever it had.
+    assert_eq!(
+        writes_of(&fx, "@moa_state"),
+        vec![
+            "set-option -w -u -t @1 @moa_state",
+            "set-option -w -u -t @2 @moa_state",
+            "set-option -w -u -t @3 @moa_state",
+        ]
+    );
+}
+
+#[test]
+fn a_clock_timer_that_fires_early_is_re_armed() {
+    let mut s = started(vec![], vec![]);
+    up_at(&mut s, &[], USER, now());
+    // The wall clock stepped back: the timer fires while the text is still the same.
+    let fx = handle_checked(
+        &mut s,
+        Input::Timer(TimerKey::Clock),
+        utc("2026-11-15T14:05:40Z"),
+    );
+    assert_eq!(
+        timers(&fx),
+        vec![(TimerKey::Clock, ts("2026-11-15T14:06:00Z"))]
+    );
 }
 
 #[test]
 fn window_states_follow_trusted_panes_and_are_unset_when_gone() {
     // Two sessions share window @1; a third is alone in @2; a fourth's binding is for
-    // a pane that doesn't exist.
+    // a pane that doesn't exist; a fifth's binding is from another server run.
+    let stale = PaneBinding {
+        server_pid: 99,
+        ..binding(5, "%5")
+    };
     let mut s = started(
         vec![
             live(1, Activity::Working),
             live(2, Activity::NeedsPermission),
             done(3),
             live(4, Activity::Idle),
+            live(5, Activity::NeedsPermission),
         ],
         vec![
             binding(1, "%1"),
             binding(2, "%2"),
             binding(3, "%3"),
             binding(4, "%9"),
+            stale,
         ],
     );
     let panes = [
         "P %1 @1 $0 1 1 0 ",
         "P %2 @1 $0 0 1 0 ",
         "P %3 @2 $0 1 0 0 ",
+        "P %5 @3 $0 1 0 0 ",
     ];
     let fx = up_at(&mut s, &panes, CONTROL_ONLY, now());
     check_order(&fx).unwrap();
@@ -318,6 +431,8 @@ fn window_states_follow_trusted_panes_and_are_unset_when_gone() {
         vec![
             "set-option -w -t @1 @moa_state waiting",
             "set-option -w -t @2 @moa_state done",
+            // The stale binding is ignored; the window is only cleared.
+            "set-option -w -u -t @3 @moa_state",
         ]
     );
 
@@ -333,6 +448,7 @@ fn window_states_follow_trusted_panes_and_are_unset_when_gone() {
                 "P %1 @1 $0 1 1 0 ",
                 "P %2 @1 $0 0 1 0 ",
                 "P %7 @2 $0 1 0 0 ",
+                "P %5 @3 $0 1 0 0 ",
             ],
             CONTROL_ONLY,
         ),

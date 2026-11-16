@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::cmd::Cmd;
-use super::ids::{ClientName, Generation};
+use super::ids::{ClientName, Generation, WindowId};
 use super::mailbox::Mailbox;
 use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
@@ -46,6 +46,34 @@ enum Refresh {
     Again,
 }
 
+/// The status options last written to the server.
+#[derive(Debug)]
+pub(super) struct Written {
+    pub status: Option<String>,
+    pub clock: Option<String>,
+    pub windows: BTreeMap<WindowId, &'static str>,
+    /// Nothing is known of what the server holds (a start, a reload, a new connection):
+    /// the next sync with windows to look at clears every one it has no state for.
+    pub fresh: bool,
+}
+
+impl Default for Written {
+    fn default() -> Self {
+        Written {
+            status: None,
+            clock: None,
+            windows: BTreeMap::new(),
+            fresh: true,
+        }
+    }
+}
+
+impl Written {
+    pub fn reset(&mut self) {
+        *self = Written::default();
+    }
+}
+
 /// The link's state. `State::load` never touches it: it describes the server, not the
 /// brain.
 #[derive(Debug)]
@@ -65,7 +93,7 @@ pub struct TmuxState {
     tmux: Option<PathBuf>,
     /// The status options last written to the server, by name. Forgotten whenever the
     /// server may not have them.
-    pub(super) written: BTreeMap<String, String>,
+    pub(super) written: Written,
     /// When the status clock's timer fires, while it is armed.
     pub(super) clock_at: Option<UtcMs>,
 }
@@ -81,7 +109,7 @@ impl Default for TmuxState {
             cockpit: false,
             generation: None,
             tmux: None,
-            written: BTreeMap::new(),
+            written: Written::default(),
             clock_at: None,
         }
     }
@@ -184,12 +212,17 @@ impl TmuxState {
     pub(crate) fn reload(&mut self) -> Vec<Effect> {
         self.refresh = Refresh::Idle;
         self.cockpit = false;
-        self.written.clear();
+        self.written.reset();
         match self.link {
             Link::Up { .. } => self.refresh(),
             Link::Connecting => vec![self.connect()],
             Link::Down => Vec::new(),
         }
+    }
+
+    /// The clock's timer fired: its deadline is spent, whatever the wall clock says.
+    pub(crate) fn clock_fired(&mut self) {
+        self.clock_at = None;
     }
 
     fn conn(&self) -> Option<u64> {
@@ -250,7 +283,7 @@ impl TmuxState {
             version,
             ctl,
         };
-        self.written.clear();
+        self.written.reset();
         fx.extend(self.refresh());
         fx
     }
@@ -262,7 +295,7 @@ impl TmuxState {
             _ => Link::Down,
         };
         self.topology = Topology::default();
-        self.written.clear();
+        self.written.reset();
         self.refresh = Refresh::Idle;
         self.cockpit = false;
         // Nobody is known to be attached any more: the status clock stops.

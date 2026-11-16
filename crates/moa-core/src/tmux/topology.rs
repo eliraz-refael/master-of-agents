@@ -179,6 +179,10 @@ impl Topology {
             .find_map(|(id, n)| (n == name).then_some(*id))
     }
 
+    pub fn window_ids(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.windows.keys().copied()
+    }
+
     pub fn has_window(&self, w: WindowId) -> bool {
         self.windows.contains_key(&w)
     }
