@@ -110,7 +110,13 @@ pub struct Client {
 impl Client {
     pub fn connect(sock: &Path) -> Client {
         let s = UnixStream::connect(sock).expect("the daemon's socket accepts");
-        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        // macOS returns EINVAL from setsockopt once the peer has closed (the daemon
+        // turns a rejected connection away at once); the next read then sees EOF.
+        match s.set_read_timeout(Some(Duration::from_secs(10))) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+            Err(e) => panic!("set_read_timeout: {e}"),
+        }
         Client {
             r: BufReader::new(s),
             next: 0,
