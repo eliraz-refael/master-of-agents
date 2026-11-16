@@ -20,6 +20,7 @@ moa-daemon = { path = "../moa-daemon" }
 moa-platform = { path = "../moa-platform" }
 moa-proto = { path = "../moa-proto" }
 moa-store = { path = "../moa-store" }
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
@@ -28,7 +29,6 @@ tracing.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 moa-testkit = { path = "../moa-testkit" }
-rusqlite.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

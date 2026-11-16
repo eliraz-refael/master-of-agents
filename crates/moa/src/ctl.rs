@@ -23,14 +23,14 @@ pub struct BrainArgs {
 }
 
 /// Where this command was typed, as the environment and the folder say.
-struct Here {
-    paths: Paths,
+pub(crate) struct Here {
+    pub(crate) paths: Paths,
     /// The folder, in its canonical form.
     cwd: PathBuf,
 }
 
 impl Here {
-    fn new() -> Result<Here, String> {
+    pub(crate) fn new() -> Result<Here, String> {
         let paths = Paths::from_env().map_err(|e| e.to_string())?;
         let cwd = std::env::current_dir().map_err(|_| "can't tell which folder this is")?;
         Ok(Here { paths, cwd })
@@ -43,6 +43,11 @@ impl Here {
             claude_session: var("CLAUDE_CODE_SESSION_ID"),
             cwd: Some(canonical(&self.cwd)),
         }
+    }
+
+    /// The config, for commands that only read: not gated by `MOA_ROOT`.
+    pub(crate) fn read_config(&self) -> Result<Config, String> {
+        load_config(&self.paths).map_err(|e| e.to_string())
     }
 
     fn config(&self) -> Result<Config, String> {
@@ -85,7 +90,7 @@ fn with_tilde(path: &Path, home: &Path) -> String {
 
 /// The brain a command goes to: `flag` (`--brain`), else `MOA_BRAIN`, else where this folder
 /// and account route to. `writes` is whether the command changes the brain.
-fn pick_brain(
+pub(crate) fn pick_brain(
     here: &Here,
     config: &Config,
     flag: Option<&str>,
