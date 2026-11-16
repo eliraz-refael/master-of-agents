@@ -9,6 +9,7 @@ use serde_json::json;
 
 use super::cmd::Cmd;
 use super::ids::{ClientName, Generation};
+use super::mailbox::Mailbox;
 use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
 use crate::effect::{Down, Effect, LogLevel, LogLine, TmuxIn, TmuxToken};
@@ -283,8 +284,14 @@ impl TmuxState {
             return Vec::new();
         }
         match n {
-            // The mailbox is read elsewhere; the link reports its own end as `Down`.
-            Notification::Message(_) | Notification::Exit => Vec::new(),
+            // Hooks say the tree changed in a way no notification does.
+            Notification::Message(m) => match Mailbox::parse(m) {
+                Ok(Mailbox::Hook(_)) => self.refresh(),
+                // Keys and prompts are read elsewhere.
+                _ => Vec::new(),
+            },
+            // The link reports its own end as `Down`.
+            Notification::Exit => Vec::new(),
             n => match self.topology.apply(n) {
                 Applied::Refresh => self.refresh(),
                 Applied::Changed | Applied::Same => Vec::new(),

@@ -2,6 +2,7 @@
 //! commands with an allow-list, the focus topology, and the link's state.
 
 pub mod cmd;
+pub(crate) mod focus;
 pub mod ids;
 pub mod link;
 pub mod mailbox;

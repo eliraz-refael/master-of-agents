@@ -11,6 +11,7 @@ use crate::ops;
 use crate::publish::{CoreEvent, Topic};
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
+use crate::tmux::focus::mark_seen;
 use crate::{Now, UtcMs};
 
 /// The effects of one input. Persist first, then what people hear about it.
@@ -71,7 +72,27 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
             fx.extend(state.tmux.reload());
             fx
         }
-        Input::Tmux(t) => state.tmux.input(t),
+        Input::Tmux(t) => {
+            let mut fx = state.tmux.input(t);
+            // Whatever moved, a session a user can now see becomes seen.
+            let mut tx = Tx::new(&now);
+            mark_seen(state, &mut tx, &now);
+            if !tx.changes.is_empty() {
+                let topics: BTreeSet<Topic> = tx
+                    .changes
+                    .iter()
+                    .flat_map(|c| c.topics().iter().copied())
+                    .collect();
+                // Saved before anyone hears of it, including this input's own replies.
+                fx.insert(0, Effect::Persist(tx.changes));
+                fx.extend(
+                    state
+                        .publish(&topics)
+                        .map(|m| Effect::Publish(Publish::Model(m))),
+                );
+            }
+            fx
+        }
         Input::Timer(TimerKey::Backup) => {
             vec![Effect::Backup { day: now.local_day }, backup_timer(&now)]
         }

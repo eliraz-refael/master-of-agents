@@ -316,6 +316,10 @@ impl State {
         self.sessions.values()
     }
 
+    pub(crate) fn pane_bindings(&self) -> impl Iterator<Item = &PaneBinding> {
+        self.pane_bindings.values()
+    }
+
     pub fn session(&self, id: SessionId) -> Option<&Session> {
         self.sessions.get(&id)
     }
