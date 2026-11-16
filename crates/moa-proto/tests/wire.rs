@@ -205,7 +205,28 @@ fn string_ids_round_trip() {
 #[test]
 fn hook_is_a_notification() {
     let got = decode(json!({"jsonrpc":"2.0","method":"hook","params":{"event":"Stop"}})).unwrap();
-    assert_eq!(got, Incoming::Hook(json!({"event": "Stop"})));
+    assert_eq!(
+        got,
+        Incoming::Hook {
+            id: None,
+            params: json!({"event": "Stop"})
+        }
+    );
+}
+
+#[test]
+fn a_hook_request_keeps_its_id() {
+    let got = decode(
+        json!({"jsonrpc":"2.0","id":"h1","method":"hook","params":{"event":"SessionStart"}}),
+    )
+    .unwrap();
+    assert_eq!(
+        got,
+        Incoming::Hook {
+            id: Some(Id::Str("h1".into())),
+            params: json!({"event": "SessionStart"})
+        }
+    );
 }
 
 #[test]

@@ -128,8 +128,12 @@ pub enum Incoming {
         id: Id,
         call: Call,
     },
-    /// The agent hook's message. A notification: it gets no reply.
-    Hook(Value),
+    /// The agent hook's message. `id` is `None` for a notification (no reply is due) and
+    /// `Some` when the hook sent a request, which expects a reply.
+    Hook {
+        id: Option<Id>,
+        params: Value,
+    },
     /// A well-formed line the server has nothing to do with: a notification other than `hook`.
     Ignored,
 }
@@ -140,8 +144,8 @@ pub enum Incoming {
 ///   or not: unknown methods are additive (spec 6.4), and a known verb sent without an id
 ///   has nowhere to send its answer, so it is dropped rather than run.
 /// - A request whose `id` is `null`, or neither a number nor a string, is `INVALID_REQUEST`.
-/// - `hook` with an id is accepted as `Hook` too (its id is dropped). Slice 4 sends the
-///   hook's SessionStart as a request, allowed before `hello`; nothing here forbids that.
+/// - `hook` with an id is `Hook` with that id kept, so the server can reply. Slice 4 sends
+///   the hook's SessionStart as a request, allowed before `hello`; nothing here forbids that.
 pub fn decode_incoming(line: &str) -> Result<Incoming, (Option<Id>, RpcError)> {
     let value: Value =
         serde_json::from_str(line).map_err(|_| (None, err(code::PARSE, "that isn't JSON")))?;
@@ -180,7 +184,7 @@ pub fn decode_incoming(line: &str) -> Result<Incoming, (Option<Id>, RpcError)> {
     };
     let params = obj.get("params").cloned().unwrap_or(Value::Null);
     if method == "hook" {
-        return Ok(Incoming::Hook(params));
+        return Ok(Incoming::Hook { id, params });
     }
     let Some(id) = id else {
         return Ok(Incoming::Ignored);
