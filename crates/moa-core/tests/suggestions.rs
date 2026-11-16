@@ -148,11 +148,13 @@ fn startup_flags_the_action_the_spike_could_not_run() {
 fn startup_leaves_a_suggestion_with_an_unknown_value_alone() {
     let b = TypicalBrain::new();
     let mut snap = b.snapshot();
-    snap.unknown.push(LoadNote {
-        table: "suggestions",
-        key: "#1".into(),
-        reason: "status",
-    });
+    for key in ["#1", "#2"] {
+        snap.unknown.push(LoadNote {
+            table: "suggestions",
+            key: key.into(),
+            reason: "status",
+        });
+    }
     let d = deps(&b);
     let mut st = State::new(BrainName::default_brain(), b.config()).with_deps(d);
     let fx = handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
@@ -168,6 +170,22 @@ fn startup_leaves_a_suggestion_with_an_unknown_value_alone() {
         "suggestion #1 has a value this build doesn't know; update moa"
     );
     assert_eq!(row(&st, 1).status, SuggestionStatus::Open);
+    // #2's action is valid, so without the guard it would run and commit, and only then the
+    // suggestion's own write would be refused.
+    let s1 = st.resolve(S1_WORKING).unwrap();
+    let title = st.session(s1).unwrap().title.clone();
+    let fx = effects(&mut st, answer(2, Answer::Yes), &now);
+    assert_eq!(
+        moa_core::effect::reply_of(&fx)
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .0,
+        "suggestion #2 has a value this build doesn't know; update moa"
+    );
+    assert_eq!(st.session(s1).unwrap().title, title);
+    assert_ne!(title.as_deref(), Some("New name"));
+    assert!(persists(&fx).is_empty());
 }
 
 #[test]
