@@ -96,6 +96,14 @@ async fn subscribe_sends_a_snapshot_then_patches() {
     assert_eq!(patch["rev"].as_u64(), Some(rev + 1));
 }
 
+/// The `path`s of the group rows in a snapshot or patch (none when the topic is absent).
+fn paths_of(rows: &Value) -> std::collections::BTreeSet<String> {
+    let rows = rows.as_array().map(Vec::as_slice).unwrap_or_default();
+    rows.iter()
+        .map(|g| g["path"].as_str().expect("a path").to_string())
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lagging_subscriber_gets_a_fresh_snapshot() {
     let brain = TypicalBrain::new();
@@ -173,22 +181,37 @@ async fn a_lagging_subscriber_gets_a_fresh_snapshot() {
     }
     core.barrier().await;
 
-    // Reading again, a snapshot arrives (after whatever patches were already in flight).
-    let mut snapshot = None;
+    // Reading again, the subscriber must be brought up to date: a snapshot at some rev (when
+    // the lag happens depends on timing), then patches (or a newer snapshot) up to the model's
+    // rev. Patches only carry their new rev, so follow the state, not the revs.
+    let target = core.model().borrow().rev;
+    let mut seen_snapshot = false;
+    let mut rev = 0;
+    let mut groups = std::collections::BTreeSet::new();
     for _ in 0..200 {
-        let v = read().await;
-        if v["method"] == json!("snapshot") {
-            snapshot = Some(v["params"].clone());
+        if seen_snapshot && rev >= target {
             break;
         }
+        let v = read().await;
+        let p = &v["params"];
+        match v["method"].as_str() {
+            Some("snapshot") => {
+                seen_snapshot = true;
+                rev = p["rev"].as_u64().expect("a rev");
+                groups = paths_of(&p["topics"]["groups"]);
+            }
+            // A patch before the first snapshot was already in flight; the snapshot replaces it.
+            Some("patch") if seen_snapshot => {
+                assert!(p["rev"].as_u64().expect("a rev") > rev, "{v}");
+                rev = p["rev"].as_u64().unwrap();
+                groups.extend(paths_of(&p["upsert"]["groups"]));
+            }
+            _ => {}
+        }
     }
-    let snapshot = snapshot.expect("a snapshot notice");
-    assert_eq!(snapshot["rev"].as_u64(), Some(core.model().borrow().rev));
-    let groups = snapshot["topics"]["groups"].as_array().unwrap();
-    assert!(
-        groups.iter().any(|g| g["path"] == json!("lag9")),
-        "{groups:?}"
-    );
+    assert!(seen_snapshot, "a snapshot notice");
+    assert_eq!(rev, target, "the subscriber reached the model's rev");
+    assert!(groups.contains("lag9"), "{groups:?}");
     stop.cancel();
 }
 

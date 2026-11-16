@@ -21,6 +21,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+clap.workspace = true
+moa-client = { path = "../moa-client" }
 moa-testkit = { path = "../moa-testkit" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util", "net", "io-util", "sync"] }

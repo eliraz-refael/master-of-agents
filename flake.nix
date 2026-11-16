@@ -58,9 +58,18 @@
           default = b.craneLib.buildPackage (b.withArtifacts // {
             cargoExtraArgs = "--locked -p moa";
             doCheck = false;
+            # `moactl` is `moa` under another name: the binary dispatches on argv[0].
+            postInstall = "ln -s moa $out/bin/moactl";
             meta.mainProgram = "moa";
           });
         });
+
+      apps = forAllSystems (system: {
+        moactl = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/moactl";
+        };
+      });
 
       checks = forAllSystems (system:
         let b = builds.${system}; in

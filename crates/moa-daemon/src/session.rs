@@ -100,7 +100,10 @@ async fn next_push(sub: &mut Option<Sub>) -> Push {
     let Some(sub) = sub else {
         return std::future::pending().await;
     };
+    // Biased, model first: the core publishes a drain's model before its events, so a
+    // subscriber gets the patch before an event about the rows it changed.
     tokio::select! {
+        biased;
         r = sub.model.changed() => match r {
             Ok(()) => Push::State,
             Err(_) => std::future::pending().await,
@@ -310,7 +313,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             .as_ref()
             .map(|g| g.caller.clone())
             .unwrap_or_default();
-        let data = self.core.status(caller).await;
+        let Some(data) = self.core.status(caller).await else {
+            return self.refuse(id, code::FAILED, STOPPING).await;
+        };
         let ok = StatusOk {
             brain: data.brain,
             build: moa_platform::build_id().to_string(),

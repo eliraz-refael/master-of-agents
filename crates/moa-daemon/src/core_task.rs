@@ -290,14 +290,11 @@ impl CoreHandle {
         }
     }
 
-    /// Answered in drain order, after the drain's commit. When the core has stopped, an
-    /// empty answer.
-    pub async fn status(&self, caller: CallerInfo) -> StatusData {
+    /// Answered in drain order, after the drain's commit. `None` when the core has stopped.
+    pub async fn status(&self, caller: CallerInfo) -> Option<StatusData> {
         let (reply, answer) = oneshot::channel();
-        if self.inbox.send(Item::Status { caller, reply }).is_err() {
-            return StatusData::default();
-        }
-        answer.await.unwrap_or_default()
+        self.inbox.send(Item::Status { caller, reply }).ok()?;
+        answer.await.ok()
     }
 
     /// Tests only: the core task panics where nothing catches it.

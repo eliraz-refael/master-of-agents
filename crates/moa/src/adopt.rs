@@ -2,12 +2,15 @@
 //! spike's schema and v1's. Every message names files by file name only and never quotes a
 //! record.
 
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use jiff::tz::TimeZone;
 use moa_agents::claude::find_transcript;
 use moa_core::UtcMs;
+use moa_core::config::BrainName;
+use moa_platform::{Paths, canonical, ensure_private_dir};
 use moa_store::accounts::AccountMap;
 use moa_store::export::{ExportEnv, ExportError, export_spike};
 use moa_store::import::{IdSource, ImportEnv, ImportError, import_spike, recorded_zone};
@@ -123,6 +126,46 @@ fn refuse_same_file(from: &Path, into: &Path) -> Result<(), String> {
     }
 }
 
+/// The brain `path` is the database of (`<data>/moa/<b>/moa.db` under this environment's
+/// folders), with the paths to look at it by.
+fn brain_db_of(path: &Path) -> Option<(Paths, BrainName)> {
+    let paths = Paths::from_env().ok()?;
+    let brain = BrainName::parse(path.parent()?.file_name()?.to_str()?).ok()?;
+    (canonical(path) == canonical(&paths.db(brain.as_str()))).then_some((paths, brain))
+}
+
+/// D14: refuses a brain's database while that brain's moa runs (it holds the brain's lock).
+fn refuse_running(path: &Path) -> Result<(), String> {
+    let Some((paths, brain)) = brain_db_of(path) else {
+        return Ok(());
+    };
+    let held = File::options()
+        .read(true)
+        .write(true)
+        .open(paths.lock(brain.as_str()))
+        .is_ok_and(|lock| matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+    if held {
+        return Err(format!(
+            "the {brain} brain's moa is running; stop it first with: moa shutdown --brain {brain}"
+        ));
+    }
+    Ok(())
+}
+
+/// D14: `--into` a brain's own database makes the brain's folder (private) when it's missing,
+/// but only where v1 is allowed to touch (a sandbox root). Any other folder isn't made.
+fn make_brain_dir(into: &Path) -> Result<(), String> {
+    let Some((paths, brain)) = brain_db_of(into) else {
+        return Ok(());
+    };
+    let dir = paths.brain_dir(brain.as_str());
+    if dir.exists() || paths.check_v1_allowed().is_err() {
+        return Ok(());
+    }
+    ensure_private_dir(&dir)
+        .map_err(|_| format!("the folder for {} couldn't be created", file_name_of(into)))
+}
+
 fn store_err(e: StoreError) -> String {
     match e {
         StoreError::Missing(p) => format!("no brain at {}", file_name_of(&p)),
@@ -163,8 +206,10 @@ pub fn adopt(args: &AdoptArgs) -> Result<(), String> {
         return Err(format!("no spike brain at {}", file_name_of(&args.from)));
     }
     if let Some(into) = &args.into {
+        refuse_running(into)?;
         refuse_same_file(&args.from, into)?;
         refuse_existing(into)?;
+        make_brain_dir(into)?;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -249,6 +294,7 @@ pub fn export(args: &ExportArgs) -> Result<(), String> {
         return Err(format!("no v1 brain at {}", file_name_of(&args.from)));
     }
     refuse_same_file(&args.from, &args.into)?;
+    refuse_running(&args.from)?;
     // An existing target is `export_spike`'s to refuse (`ExportError::Exists`).
     refuse_sidecar_name(&args.into)?;
     let store = Store::open_read_only(&args.from).map_err(|e| match e {

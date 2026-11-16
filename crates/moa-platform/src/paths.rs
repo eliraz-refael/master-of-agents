@@ -137,6 +137,12 @@ impl Paths {
         &self.home
     }
 
+    /// Where the fallback socket lives. A client gives its daemon this as `TMPDIR`, so both
+    /// sides compute the same socket path.
+    pub fn tmpdir(&self) -> &Path {
+        &self.tmpdir
+    }
+
     pub fn is_sandboxed(&self) -> bool {
         self.sandboxed
     }

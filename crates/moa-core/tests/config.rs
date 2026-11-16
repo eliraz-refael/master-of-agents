@@ -231,6 +231,15 @@ fn account_for_store_matches_the_store() {
 }
 
 #[test]
+fn only_a_config_with_accounts_refuses_an_unlisted_one() {
+    let listed = Config::parse(SPEC_EXAMPLE, home()).unwrap();
+    assert!(listed.refuses_unlisted(None));
+    assert!(!listed.refuses_unlisted(Some(&account("acct-a"))));
+    let none = Config::parse("[brains.default]\nfolders = []\n", home()).unwrap();
+    assert!(!none.refuses_unlisted(None));
+}
+
+#[test]
 fn caller_store_defaults_to_dot_claude() {
     assert_eq!(caller_store(None, home()), PathBuf::from("/h/.claude"));
     assert_eq!(

@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 moa-agents = { path = "../moa-agents" }
 moa-core = { path = "../moa-core" }
+moa-platform = { path = "../moa-platform" }
 jiff.workspace = true
 moa-store = { path = "../moa-store" }
 proptest.workspace = true

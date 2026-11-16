@@ -606,6 +606,7 @@ dependencies = [
  "clap",
  "jiff",
  "moa-agents",
+ "moa-client",
  "moa-core",
  "moa-daemon",
  "moa-platform",
@@ -627,6 +628,22 @@ version = "0.1.0"
 dependencies = [
  "moa-core",
  "tempfile",
+]
+
+[[package]]
+name = "moa-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "moa-core",
+ "moa-platform",
+ "moa-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -653,8 +670,10 @@ dependencies = [
 name = "moa-daemon"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "futures-util",
  "jiff",
+ "moa-client",
  "moa-core",
  "moa-platform",
  "moa-proto",
@@ -673,6 +692,7 @@ dependencies = [
 name = "moa-platform"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "libc",
  "tempfile",
  "tokio",
@@ -717,6 +737,7 @@ dependencies = [
  "jiff",
  "moa-agents",
  "moa-core",
+ "moa-platform",
  "moa-store",
  "proptest",
  "rusqlite",

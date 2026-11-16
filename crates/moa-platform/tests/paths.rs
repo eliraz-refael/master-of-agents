@@ -232,6 +232,20 @@ fn tmpdir_defaults_to_slash_tmp() {
 }
 
 #[test]
+fn tmpdir_is_the_given_absolute_one_else_slash_tmp() {
+    let with = |t: Option<&str>| {
+        Paths::from_vars(Some("/r".into()), None, t.map(Into::into), 7, false)
+            .unwrap()
+            .tmpdir()
+            .to_path_buf()
+    };
+    assert_eq!(with(Some("/var/t")), Path::new("/var/t"));
+    assert_eq!(with(Some("relative")), Path::new("/tmp"));
+    assert_eq!(with(None), Path::new("/tmp"));
+    assert_eq!(p("/r").tmpdir(), Path::new("/tmp"));
+}
+
+#[test]
 fn a_trailing_slash_does_not_hide_a_symlink() {
     let t = tmp();
     let real = t.path().join("real");

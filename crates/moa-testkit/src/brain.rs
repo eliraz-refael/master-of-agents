@@ -30,11 +30,11 @@ pub struct TypicalBrain {
     pub db: PathBuf,
 }
 
-fn tz() -> TimeZone {
+pub(crate) fn tz() -> TimeZone {
     TimeZone::posix(TYPICAL_TZ).expect("TYPICAL_TZ is a valid POSIX zone")
 }
 
-fn typical_now_ms() -> UtcMs {
+pub(crate) fn typical_now_ms() -> UtcMs {
     let at: Timestamp = TYPICAL_NOW.parse().expect("TYPICAL_NOW is a valid instant");
     UtcMs(at.as_millisecond())
 }
