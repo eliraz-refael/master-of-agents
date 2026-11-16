@@ -165,6 +165,16 @@ impl Default for Deps {
     }
 }
 
+/// What `status` says about the brain, the sessions and the caller.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct StatusData {
+    pub brain: String,
+    /// Live sessions per display state word (`working`, `idle`, ...).
+    pub sessions: BTreeMap<String, usize>,
+    /// Who is asking, as [`Caller`] shows it.
+    pub caller: String,
+}
+
 pub struct State {
     deps: Deps,
     brain: BrainName,
@@ -242,6 +252,27 @@ impl State {
         self.refuse_writes.as_ref()
     }
 
+    /// The answer to `status`, with sessions' states as of `now`.
+    pub fn status(&self, caller: &CallerInfo, now: UtcMs) -> StatusData {
+        use crate::live::{DisplayState, display_state};
+        let mut sessions: BTreeMap<String, usize> = DisplayState::ALL
+            .iter()
+            .filter(|d| !matches!(d, DisplayState::Ended | DisplayState::Archived))
+            .map(|d| (crate::publish::word(*d), 0))
+            .collect();
+        for s in self.sessions() {
+            let (state, _) = display_state(s, now);
+            if let Some(n) = sessions.get_mut(&crate::publish::word(state)) {
+                *n += 1;
+            }
+        }
+        StatusData {
+            brain: self.brain.as_str().to_string(),
+            sessions,
+            caller: self.caller(caller).to_string(),
+        }
+    }
+
     pub fn model(&self) -> Arc<Model> {
         self.model.clone()
     }
@@ -311,7 +342,7 @@ impl State {
         }
     }
 
-    /// The time views are computed at. The caller sets it from `Now` before publishing.
+    /// The time views are computed at. `handle` sets it from `Now`.
     pub(crate) fn set_now(&mut self, now: UtcMs) {
         self.now = now;
     }
