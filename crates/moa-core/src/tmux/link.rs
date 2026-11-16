@@ -331,16 +331,16 @@ impl TmuxState {
     }
 
     fn notification(&mut self, n: &Notification) -> Vec<Effect> {
-        if self.conn().is_none() {
+        let Some(conn) = self.conn() else {
             return Vec::new();
-        }
+        };
         match n {
             // Hooks say the tree changed in a way no notification does.
             // The log lines never carry the message text.
             Notification::Message(m) => match Mailbox::parse(m) {
                 Ok(Mailbox::Hook(_)) => self.refresh(),
                 Ok(Mailbox::Key { action, client, .. }) => vec![Effect::Tmux {
-                    conn: self.conn().unwrap_or_default(),
+                    conn,
                     cmds: vec![notice(&client, action.not_yet())],
                     token: None,
                 }],

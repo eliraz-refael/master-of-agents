@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use super::ids::PaneId;
+use super::ids::{PaneId, WindowId};
 use super::link::Link;
 use crate::Now;
 use crate::change::Change;
@@ -12,8 +12,8 @@ use crate::model::SessionId;
 use crate::state::State;
 
 /// The panes whose binding can be believed: bound on the server the link is connected to,
-/// and still there. Nothing is trusted while the link isn't up.
-pub(crate) fn trusted_panes(state: &State) -> BTreeMap<PaneId, SessionId> {
+/// and still there, with the window each is in. Nothing is trusted while the link isn't up.
+pub(crate) fn trusted_panes(state: &State) -> BTreeMap<PaneId, (WindowId, SessionId)> {
     let tmux = state.tmux();
     let Link::Up { generation, .. } = &tmux.link else {
         return BTreeMap::new();
@@ -24,7 +24,8 @@ pub(crate) fn trusted_panes(state: &State) -> BTreeMap<PaneId, SessionId> {
         .filter(|b| b.server_pid == generation.pid && b.server_start == generation.start)
         .filter_map(|b| {
             let pane: PaneId = b.pane_id.parse().ok()?;
-            tmux.topology.has_pane(pane).then_some((pane, b.session_id))
+            let window = tmux.topology.window_of(pane)?;
+            Some((pane, (window, b.session_id)))
         })
         .collect()
 }
@@ -37,7 +38,7 @@ pub(crate) fn mark_seen(state: &mut State, tx: &mut Tx, now: &Now) {
     let due: Vec<SessionId> = trusted_panes(state)
         .into_iter()
         .filter(|(pane, _)| visible.contains(pane))
-        .map(|(_, session)| session)
+        .map(|(_, (_, session))| session)
         .collect();
     for id in due {
         let Some(s) = state.session(id) else {

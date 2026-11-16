@@ -65,8 +65,8 @@ pub(crate) fn sync(state: &mut State) -> Option<Effect> {
     let text = counts_text(state);
     // Each window's most urgent trusted pane.
     let mut windows: BTreeMap<WindowId, DisplayState> = BTreeMap::new();
-    for (pane, id) in trusted_panes(state) {
-        let (Some(w), Some(s)) = (state.tmux().topology.window_of(pane), state.session(id)) else {
+    for (w, id) in trusted_panes(state).into_values() {
+        let Some(s) = state.session(id) else {
             continue;
         };
         let d = display_state(s, state.now).0;

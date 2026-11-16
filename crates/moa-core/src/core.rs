@@ -136,10 +136,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             if result.is_err() {
                 events.clear();
             }
-            let topics: BTreeSet<Topic> = changes
-                .iter()
-                .flat_map(|c| c.topics().iter().copied())
-                .collect();
+            let topics = topics_of(&changes);
             let mut fx = Vec::new();
             if !changes.is_empty() {
                 fx.push(Effect::Persist(changes));
@@ -166,17 +163,21 @@ pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>)
     if tx.changes.is_empty() {
         return;
     }
-    let topics: BTreeSet<Topic> = tx
-        .changes
-        .iter()
-        .flat_map(|c| c.topics().iter().copied())
-        .collect();
+    let topics = topics_of(&tx.changes);
     fx.insert(0, Effect::Persist(tx.changes));
     fx.extend(
         state
             .publish(&topics)
             .map(|m| Effect::Publish(Publish::Model(m))),
     );
+}
+
+/// The topics a set of changes touches.
+fn topics_of(changes: &[Change]) -> BTreeSet<Topic> {
+    changes
+        .iter()
+        .flat_map(|c| c.topics().iter().copied())
+        .collect()
 }
 
 fn backup_timer(now: &Now) -> Effect {
