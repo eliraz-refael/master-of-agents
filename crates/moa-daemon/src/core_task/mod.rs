@@ -81,6 +81,8 @@ pub struct Stats {
     pub timer_fires: AtomicU64,
     pub commit_failures: AtomicU64,
     pub reloads: AtomicU64,
+    /// Views of saved state for the terminal server that were released after a commit.
+    pub views_released: AtomicU64,
 }
 
 /// One reply on a connection.
@@ -326,6 +328,12 @@ impl CoreHandle {
     #[doc(hidden)]
     pub fn crash_core(&self) {
         let _ = self.inbox.send(Item::Crash);
+    }
+
+    /// Tests only: the link reports `input`, as the terminal link will once it exists.
+    #[doc(hidden)]
+    pub fn tmux_in(&self, input: moa_core::effect::TmuxIn) {
+        let _ = self.inbox.send(Item::Input(Input::Tmux(input)));
     }
 
     pub fn zone_changed(&self, tz: TimeZone) {

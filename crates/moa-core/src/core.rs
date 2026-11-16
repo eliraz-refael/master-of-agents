@@ -12,16 +12,24 @@ use crate::publish::{CoreEvent, Topic};
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::focus::mark_seen;
+use crate::tmux::status;
 use crate::{Now, UtcMs};
 
 /// The effects of one input. Persist first, then what people hear about it.
 pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     state.set_now(now.wall);
+    let mut fx = decide(state, input, &now);
+    // Last, so the status line shows what this input saved, after its `Persist`.
+    status::run(state, &now, &mut fx);
+    fx
+}
+
+fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
     match input {
         Input::Startup(snapshot) => {
             state.refuse_writes = None;
             state.load(*snapshot);
-            let mut fx = vec![Effect::Backup { day: now.local_day }, backup_timer(&now)];
+            let mut fx = vec![Effect::Backup { day: now.local_day }, backup_timer(now)];
             // A row's notes sit together, one per reason; the line names no reason, so one
             // line per row.
             let mut rows: Vec<&crate::state::LoadNote> = state.unknown().iter().collect();
@@ -67,7 +75,7 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
         } => {
             state.load(*snapshot);
             state.refuse_writes = refuse_writes;
-            let mut fx = vec![backup_timer(&now)];
+            let mut fx = vec![backup_timer(now)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
             fx
@@ -75,13 +83,15 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
         Input::Tmux(t) => {
             let mut fx = state.tmux.input(t);
             // Whatever moved, a session a user can now see becomes seen.
-            mark_seen_into(state, &now, &mut fx);
+            mark_seen_into(state, now, &mut fx);
             fx
         }
         Input::Timer(TimerKey::Backup) => {
-            vec![Effect::Backup { day: now.local_day }, backup_timer(&now)]
+            vec![Effect::Backup { day: now.local_day }, backup_timer(now)]
         }
-        Input::ZoneChanged => vec![backup_timer(&now)],
+        // The status clock reads the time when `handle` ends.
+        Input::Timer(TimerKey::Clock) => Vec::new(),
+        Input::ZoneChanged => vec![backup_timer(now)],
         Input::ActorFailed { actor, message: _ } => {
             // The message may carry contents; it stays with the executor.
             vec![
@@ -107,8 +117,8 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
             op,
         } => {
             let caller = state.caller(&caller);
-            let mut tx = Tx::new(&now);
-            let result = ops::run(state, &mut tx, &caller, op, &now);
+            let mut tx = Tx::new(now);
+            let result = ops::run(state, &mut tx, &caller, op, now);
             let Tx {
                 changes,
                 mut events,

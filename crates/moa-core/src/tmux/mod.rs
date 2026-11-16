@@ -7,4 +7,5 @@ pub mod ids;
 pub mod link;
 pub mod mailbox;
 pub mod notify;
+pub mod status;
 pub mod topology;

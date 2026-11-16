@@ -10,9 +10,11 @@ use std::time::Duration;
 use jiff::tz::TimeZone;
 use moa_core::UtcMs;
 use moa_core::config::BrainName;
+use moa_core::effect::{TmuxIn, TmuxToken};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId, TaskAdd, TaskSet};
 use moa_core::publish::{CoreEvent, Topic};
 use moa_core::state::{CallerInfo, Deps};
+use moa_core::tmux::ids::{ClientName, Generation};
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, CoreOptions};
 use moa_store::Store;
@@ -491,4 +493,62 @@ async fn a_core_that_dies_unexpectedly_says_so_and_closes_connections() {
     );
     // The connection's channel is closed, so a client sees the end instead of waiting.
     assert!(within(rx.recv()).await.is_none());
+}
+
+fn link_up() -> TmuxIn {
+    TmuxIn::Connected {
+        conn: 1,
+        generation: Generation { pid: 1, start: 1 },
+        version: "3.5a".into(),
+        ctl: ClientName("client-9".into()),
+    }
+}
+
+/// Someone attached: the clock's first write.
+fn lists_with_a_user() -> TmuxIn {
+    TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Refresh,
+        results: vec![
+            Ok(vec!["S $0 moa".into()]),
+            Ok(vec![]),
+            Ok(vec!["C 0 $0 /dev/ttys1".into()]),
+        ],
+    }
+}
+
+// There is no terminal link in the daemon yet, so a released view has no observable but
+// the counter: it counts views let go after a commit, dropped or not.
+#[tokio::test]
+async fn a_status_write_waits_for_the_commit_and_is_dropped_when_it_fails() {
+    let rig = rig().await;
+    let stats = rig.core.stats();
+    let (c, mut rx) = rig.core.open_conn();
+    // The daemon's own "no link" answer is in before the test's link comes up.
+    rig.core.barrier().await;
+    let commits = stats.commits.load(Ordering::SeqCst);
+    let release = pause(&rig.core);
+    send(&rig.core, c, 1, group_add("Primer"));
+    wait_until(|| stats.commits.load(Ordering::SeqCst) == commits + 1).await;
+    rig.core.store_fault(Fault::FailNextCommit);
+    // Queued behind the primer: a write that fails, and the link coming up (a status
+    // write that shows state the failed commit never saved).
+    send(&rig.core, c, 2, group_add("Doomed"));
+    rig.core.tmux_in(link_up());
+    release.send(()).unwrap();
+    reply(&mut rx).await.expect("Primer is ok");
+    assert!(
+        err_text(&mut rx)
+            .await
+            .starts_with("moa couldn't save that (")
+    );
+    rig.core.barrier().await;
+    // The write of the link coming up was dropped with the failed commit; the one
+    // released is the reload's, which writes everything again from the saved state.
+    assert_eq!(stats.views_released.load(Ordering::SeqCst), 1);
+
+    // A write after a good commit is released.
+    rig.core.tmux_in(lists_with_a_user());
+    rig.core.barrier().await;
+    assert_eq!(stats.views_released.load(Ordering::SeqCst), 2);
 }

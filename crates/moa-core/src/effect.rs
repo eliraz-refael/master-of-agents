@@ -25,6 +25,8 @@ pub struct RefuseWrites {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum TimerKey {
     Backup,
+    /// The status line's minute clock.
+    Clock,
 }
 
 // `Client` carries a whole `Op`; one is built per request, so boxing it buys nothing.

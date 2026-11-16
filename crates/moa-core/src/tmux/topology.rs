@@ -179,6 +179,10 @@ impl Topology {
             .find_map(|(id, n)| (n == name).then_some(*id))
     }
 
+    pub fn has_window(&self, w: WindowId) -> bool {
+        self.windows.contains_key(&w)
+    }
+
     pub fn has_pane(&self, p: PaneId) -> bool {
         self.window_of(p).is_some()
     }

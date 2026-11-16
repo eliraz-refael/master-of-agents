@@ -122,9 +122,10 @@ fn cockpit_effect(conn: u64) -> Effect {
     }
 }
 
+/// The link's own plumbing; the status line's writes are tested in `tmux_status`.
 fn tmux_effects(fx: &[Effect]) -> Vec<&Effect> {
     fx.iter()
-        .filter(|e| matches!(e, Effect::Tmux { .. }))
+        .filter(|e| matches!(e, Effect::Tmux { token: Some(_), .. }))
         .collect()
 }
 
@@ -168,14 +169,16 @@ fn startup_asks_to_connect() {
     let mut s = State::new(BrainName::default_brain(), Config::default());
     let fx = handle_checked(&mut s, Input::Startup(Box::default()), now());
     assert_eq!(connects(&fx), vec![&Effect::TmuxConnect { tmux: None }]);
-    // It comes after anything Startup saves.
+    // It comes after the state is published: Startup has nothing to save here.
     let connect = fx
         .iter()
-        .position(|e| matches!(e, Effect::TmuxConnect { .. }));
-    let persist = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
-    if let (Some(c), Some(p)) = (connect, persist) {
-        assert!(p < c);
-    }
+        .position(|e| matches!(e, Effect::TmuxConnect { .. }))
+        .unwrap();
+    let publish = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Publish(_)))
+        .unwrap();
+    assert!(publish < connect);
     assert_eq!(s.tmux().link, Link::Connecting);
 }
 

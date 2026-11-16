@@ -12,7 +12,8 @@ use super::ids::{ClientName, Generation};
 use super::mailbox::Mailbox;
 use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
-use crate::effect::{Down, Effect, LogLevel, LogLine, TmuxIn, TmuxToken};
+use crate::UtcMs;
+use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::op::{ConnId, Done, OpError, ReqId};
 
 /// The session moa's front door attaches to.
@@ -64,7 +65,9 @@ pub struct TmuxState {
     tmux: Option<PathBuf>,
     /// The status options last written to the server, by name. Forgotten whenever the
     /// server may not have them.
-    written: BTreeMap<String, String>,
+    pub(super) written: BTreeMap<String, String>,
+    /// When the status clock's timer fires, while it is armed.
+    pub(super) clock_at: Option<UtcMs>,
 }
 
 impl Default for TmuxState {
@@ -79,6 +82,7 @@ impl Default for TmuxState {
             generation: None,
             tmux: None,
             written: BTreeMap::new(),
+            clock_at: None,
         }
     }
 }
@@ -261,9 +265,13 @@ impl TmuxState {
         self.written.clear();
         self.refresh = Refresh::Idle;
         self.cockpit = false;
-        // The status clock, once there is one, stops here too.
+        // Nobody is known to be attached any more: the status clock stops.
+        let mut fx = Vec::new();
+        if self.clock_at.take().is_some() {
+            fx.push(Effect::CancelTimer(TimerKey::Clock));
+        }
         let result = match d {
-            Down::Lost => return Vec::new(),
+            Down::Lost => return fx,
             Down::NoServer => running(false),
             Down::GaveUp => Err(OpError(GAVE_UP.into())),
             Down::TooOld(v) => Err(OpError(format!(
@@ -276,7 +284,8 @@ impl TmuxState {
             }
             Down::Disabled => Err(OpError(DISABLED.into())),
         };
-        self.answer(&result)
+        fx.extend(self.answer(&result));
+        fx
     }
 
     fn notification(&mut self, n: &Notification) -> Vec<Effect> {

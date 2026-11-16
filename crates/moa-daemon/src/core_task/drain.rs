@@ -344,6 +344,7 @@ impl Core {
                 }
                 // The commands stay out of the log.
                 Held::Tmux { conn, cmds } => {
+                    self.stats.views_released.fetch_add(1, Ordering::SeqCst);
                     tracing::debug!(conn, cmds = cmds.len(), "no terminal link: dropped");
                 }
                 Held::Barrier(reply) => {
