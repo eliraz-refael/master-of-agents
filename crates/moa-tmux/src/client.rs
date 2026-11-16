@@ -25,8 +25,10 @@ pub const INFO_FORMAT: &str = "V #{version} #{pid} #{start_time} #{client_name}"
 /// How long `close` waits for the child to exit before it signals it.
 const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
-/// How long `connect` waits for the server's first reply.
-const CONNECT_WAIT: Duration = Duration::from_secs(5);
+/// How long `connect` waits for the server's first reply. A bound on a hang, not a latency
+/// target: CI runners are slow and cold, and a loaded machine can take seconds to start
+/// tmux. It has no test of its own, because it would need a fake tmux and a wait this long.
+const CONNECT_WAIT: Duration = Duration::from_secs(20);
 
 pub struct ConnectOptions {
     /// The tmux program (an absolute path).
@@ -277,7 +279,11 @@ impl ControlClient {
             let n = match tokio::time::timeout_at(deadline, stdout.read(&mut buf)).await {
                 Err(_) => {
                     kill_unless_exited(pid, &exited);
-                    return Err(ConnectError::Protocol("tmux didn't answer"));
+                    // If tmux said why on stderr, that is the better error.
+                    return Err(match stderr_line(first_line).await {
+                        Some(line) => ConnectError::Exited(line),
+                        None => ConnectError::Protocol("tmux didn't answer"),
+                    });
                 }
                 Ok(Ok(0) | Err(_)) => return Err(exited_error(first_line).await),
                 Ok(Ok(n)) => n,
@@ -407,14 +413,15 @@ fn first_stderr_line(stderr: ChildStderr) -> oneshot::Receiver<String> {
     rx
 }
 
+/// The first stderr line, if tmux wrote one within a short wait.
+async fn stderr_line(first_line: oneshot::Receiver<String>) -> Option<String> {
+    let line = tokio::time::timeout(CLOSE_WAIT, first_line).await;
+    line.ok().and_then(Result::ok).filter(|l| !l.is_empty())
+}
+
 async fn exited_error(first_line: oneshot::Receiver<String>) -> ConnectError {
-    let line = tokio::time::timeout(CLOSE_WAIT, first_line)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .filter(|l| !l.is_empty())
-        .unwrap_or_else(|| "tmux exited".to_string());
-    ConnectError::Exited(line)
+    let line = stderr_line(first_line).await;
+    ConnectError::Exited(line.unwrap_or_else(|| "tmux exited".to_string()))
 }
 
 fn parse_info(lines: &[String]) -> Option<ServerInfo> {
@@ -457,7 +464,7 @@ async fn write_loop(
                     // sentinel right after marks where they end.
                     sentinels.push(cmd.nests().then(|| {
                         nonce += 1;
-                        let text = format!("Z {nonce}");
+                        let text = format!("moa:sentinel {nonce}");
                         let probe = Cmd::new("display-message").args(["-p", text.as_str()]);
                         lines.push_str(&probe.line());
                         lines.push('\n');
@@ -584,7 +591,10 @@ fn handle(frame: Frame, shared: &Mutex<Shared>, events: &mpsc::UnboundedSender<E
             };
             if let Some(s) = &mut front.sentinel {
                 if error || lines != [s.text.as_str()] {
-                    // One of the blocks of the command that nests.
+                    // One of the blocks of the command that nests. tmux keeps its config
+                    // parse errors server-wide (`cfg_causes`), so another client's parse
+                    // error can be blamed on our `source-file`, or ours on theirs. That
+                    // stays inside this one slot and never shifts the FIFO.
                     if error && s.error.is_none() {
                         s.error = Some(lines.join("\n"));
                     }
@@ -620,7 +630,9 @@ fn handle(frame: Frame, shared: &Mutex<Shared>, events: &mpsc::UnboundedSender<E
     }
 }
 
-/// A file that didn't parse fails the command that nests, which is at the front.
+/// A file that didn't parse fails the command that nests, which is at the front. tmux keeps
+/// config parse errors server-wide (`cfg_causes`), so this may also be another client's
+/// error; it is still only ever applied to the one source-file slot.
 fn file_error(shared: &Mutex<Shared>) {
     let mut sh = lock(shared);
     if let Some(s) = sh.pending.front_mut().and_then(|f| f.sentinel.as_mut()) {
