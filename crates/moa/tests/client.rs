@@ -143,9 +143,11 @@ async fn an_adopted_brain_is_served_and_subscribed() {
     );
 }
 
+/// (Counts this process's launches, so it needs nextest's process per test.)
 #[tokio::test]
 async fn clients_starting_at_once_share_one_daemon() {
     let tb = TempBrain::new(None);
+    let before = spawn::launches();
     let (a, b) = tokio::join!(
         Client::connect(opts(&tb, true)),
         Client::connect(opts(&tb, true))
@@ -154,6 +156,8 @@ async fn clients_starting_at_once_share_one_daemon() {
     assert_eq!(a.hello().pid, b.hello().pid);
     assert_eq!(a.status().await.unwrap().pid, a.hello().pid);
     assert_eq!(b.status().await.unwrap().launches, 0);
+    // The start lock: one of the two launched, the other found it running.
+    assert_eq!(spawn::launches() - before, 1);
 }
 
 #[tokio::test]

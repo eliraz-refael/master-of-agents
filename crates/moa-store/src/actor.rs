@@ -55,6 +55,8 @@ pub enum Fault {
     FailNextCommit,
     /// The next commit waits until the receiver gets a message (or its sender is dropped).
     PauseNextCommit(mpsc::Receiver<()>),
+    /// The next backup waits until the receiver gets a message (or its sender is dropped).
+    PauseNextBackup(mpsc::Receiver<()>),
     /// The thread panics.
     Crash,
 }
@@ -135,6 +137,7 @@ impl StoreHandle {
 fn run(mut store: Store, backups: &Path, rx: &mpsc::Receiver<Cmd>) {
     let mut fail_next = false;
     let mut pause_next: Option<mpsc::Receiver<()>> = None;
+    let mut pause_backup: Option<mpsc::Receiver<()>> = None;
     // A reply to a caller that has gone fails to send; that never stops the thread.
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -155,6 +158,9 @@ fn run(mut store: Store, backups: &Path, rx: &mpsc::Receiver<Cmd>) {
                 let _ = reply.send(store.load_snapshot().map_err(|e| one_line(&e)));
             }
             Cmd::Backup(day, reply) => {
+                if let Some(gate) = pause_backup.take() {
+                    let _ = gate.recv();
+                }
                 let _ = reply.send(backup(&store, backups, day));
             }
             Cmd::Sync(reply) => {
@@ -162,6 +168,7 @@ fn run(mut store: Store, backups: &Path, rx: &mpsc::Receiver<Cmd>) {
             }
             Cmd::Fault(Fault::FailNextCommit) => fail_next = true,
             Cmd::Fault(Fault::PauseNextCommit(gate)) => pause_next = Some(gate),
+            Cmd::Fault(Fault::PauseNextBackup(gate)) => pause_backup = Some(gate),
             Cmd::Fault(Fault::Crash) => panic!("the store thread was told to crash"),
         }
     }

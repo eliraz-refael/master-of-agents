@@ -100,6 +100,7 @@ enum Item {
         reply: oneshot::Sender<StatusData>,
     },
     Barrier(oneshot::Sender<()>),
+    Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
     /// Tests only: panics outside `catch_unwind`.
     Crash,
@@ -116,6 +117,7 @@ enum Held {
     /// The answer so far, and the caller, so a reload can compute it again.
     Status(oneshot::Sender<StatusData>, StatusData, CallerInfo),
     Barrier(oneshot::Sender<()>),
+    Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
 }
 
@@ -156,7 +158,20 @@ impl CoreHandle {
         opts: CoreOptions,
         store: Store,
     ) -> Result<CoreHandle, DaemonError> {
+        Self::start_with_faults(opts, store, Vec::new()).await
+    }
+
+    /// Like `start_with_store`, with `faults` queued on the store thread before `Startup`.
+    #[doc(hidden)]
+    pub async fn start_with_faults(
+        opts: CoreOptions,
+        store: Store,
+        faults: Vec<Fault>,
+    ) -> Result<CoreHandle, DaemonError> {
         let store = StoreHandle::spawn(store, opts.backups.clone());
+        for fault in faults {
+            store.fault(fault);
+        }
         let snapshot = store
             .snapshot()
             .await
@@ -209,6 +224,7 @@ impl CoreHandle {
             generation_tx,
             sched: sched.clone(),
             backups: TaskTracker::new(),
+            due_backups: Vec::new(),
             db: opts.db,
             backups_dir: opts.backups,
             failures_in_row: 0,
@@ -234,9 +250,10 @@ impl CoreHandle {
             ended,
             panic_next,
         };
-        // Startup is the first item, so this barrier answers after its commit. If Startup
-        // brought the core down, the barrier is dropped and returns, and the line is here.
-        handle.barrier().await;
+        // Startup is the first item, so this answers after its commit, not after its daily
+        // backup (the store thread is busy copying; `barrier()` and `stop()` wait for it). If
+        // Startup brought the core down, the answer is dropped and returns, and the line is here.
+        handle.committed().await;
         let ended = handle.finished.borrow().clone();
         if let Some(Err(line)) = ended {
             return Err(DaemonError::Fatal(line));
@@ -307,6 +324,20 @@ impl CoreHandle {
         let _ = self.inbox.send(Item::Zone(tz));
     }
 
+    /// An actor outside the core panicked and was restarted: the core publishes an error
+    /// event (and logs it). The raw panic message stays with the caller: it may carry
+    /// contents.
+    pub fn actor_failed(&self, actor: &'static str) {
+        let sent = self.inbox.send(Item::Input(Input::ActorFailed {
+            actor,
+            message: String::new(),
+        }));
+        if sent.is_err() {
+            // The core is gone and can't log it.
+            tracing::error!("actor {actor} failed and was restarted");
+        }
+    }
+
     pub fn model(&self) -> watch::Receiver<Arc<Model>> {
         self.model.clone()
     }
@@ -331,6 +362,16 @@ impl CoreHandle {
         sync_scheduler(&self.sched).await;
         let (reply, answer) = oneshot::channel();
         if self.inbox.send(Item::Barrier(reply)).is_ok() {
+            let _ = answer.await;
+        }
+    }
+
+    /// Answers once everything before it has been committed and released, without waiting
+    /// for the store's queue or the backups.
+    async fn committed(&self) {
+        sync_scheduler(&self.sched).await;
+        let (reply, answer) = oneshot::channel();
+        if self.inbox.send(Item::Committed(reply)).is_ok() {
             let _ = answer.await;
         }
     }
@@ -390,6 +431,9 @@ struct Core {
     generation_tx: watch::Sender<u64>,
     sched: mpsc::UnboundedSender<SchedCmd>,
     backups: TaskTracker,
+    /// Backups the drain asked for: started once its commit has been sent, so the commit is
+    /// ahead of the copy on the store thread.
+    due_backups: Vec<Date>,
     /// Where the store reopens from when its thread dies.
     db: PathBuf,
     backups_dir: PathBuf,
@@ -496,6 +540,10 @@ impl Core {
                     held.push(Held::Barrier(reply));
                     Stepped::Done
                 }
+                Item::Committed(reply) => {
+                    held.push(Held::Committed(reply));
+                    Stepped::Done
+                }
                 Item::Crash => panic!("a test crashed the core task"),
                 Item::Stop(reply) => {
                     held.push(Held::Stop(reply));
@@ -536,6 +584,9 @@ impl Core {
             && let Err(line) = self.recover(failed, panicked, &mut held).await
         {
             return self.fatal(line, held);
+        }
+        for day in std::mem::take(&mut self.due_backups) {
+            self.start_backup(day);
         }
         match self.release(held).await {
             Some(stop) => Flow::Stop(stop),
@@ -669,7 +720,7 @@ impl Core {
     /// happened (`fail_held` has turned the replies of a drain that didn't save into errors).
     fn fatal(&mut self, line: String, held: Vec<Held>) -> Flow {
         tracing::error!("the core stops: {line}");
-        // Before anything is dropped: a `start()` woken by a dropped barrier must find it.
+        // Before anything is dropped: a `start()` woken by a dropped `committed()` must find it.
         self.finished_tx.send_replace(Some(Err(line.clone())));
         let _ = self.events.send(CoreEvent::Error {
             message: line.clone(),
@@ -728,7 +779,7 @@ impl Core {
             }
             match effect {
                 Effect::Persist(changes) => batch.extend(changes),
-                Effect::Backup { day } => self.start_backup(day),
+                Effect::Backup { day } => self.due_backups.push(day),
                 Effect::Publish(p) => held.push(Held::Publish(p)),
                 Effect::Reply { conn, req, result } => held.push(Held::Reply { conn, req, result }),
                 // Handled above.
@@ -798,6 +849,9 @@ impl Core {
                     self.store().sync().await;
                     sync_scheduler(&self.sched).await;
                     self.wait_for_backups().await;
+                    let _ = reply.send(());
+                }
+                Held::Committed(reply) => {
                     let _ = reply.send(());
                 }
                 Held::Stop(reply) => stop = Some(reply),
