@@ -399,3 +399,96 @@ async fn stop_ends_finished_with_ok() {
     rig.core.stop().await;
     within(rig.core.finished()).await.expect("a normal stop");
 }
+
+const BUG_LOADING: &str = "moa hit a bug loading the brain; see the log";
+
+fn fatal_line(e: Result<(), moa_daemon::DaemonError>) -> String {
+    match e.expect_err("the core ended with an error") {
+        moa_daemon::DaemonError::Fatal(line) => line,
+        other => panic!("not a fatal stop: {other}"),
+    }
+}
+
+// Multi-thread, so `start()` can wake on another worker while the core task is still ending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panic_in_startup_fails_start() {
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let deps = Deps {
+        parse_action: Some(|_, _| panic!("x")),
+        ..Deps::default()
+    };
+    let started = within(CoreHandle::start(CoreOptions {
+        brain: BrainName::default_brain(),
+        config: brain.config(),
+        deps,
+        tz: TimeZone::posix(TYPICAL_TZ).unwrap(),
+        clock: time.clone(),
+        alarm: Box::new(time.alarm()),
+        db: brain.db.clone(),
+        backups: brain.dir.path().join("backups"),
+        events_capacity: 256,
+    }))
+    .await;
+    match started {
+        Err(moa_daemon::DaemonError::Fatal(line)) => assert_eq!(line, BUG_LOADING),
+        Err(other) => panic!("not a fatal stop: {other}"),
+        Ok(_) => panic!("start should fail"),
+    }
+}
+
+#[tokio::test]
+async fn a_panic_while_reloading_stops_the_core() {
+    let rig = rig().await;
+    let (c, mut rx) = rig.core.open_conn();
+    let mut events = rig.core.events();
+    // The input panics, and so does the reload that follows it.
+    rig.core.panic_next_handles(2);
+    send(&rig.core, c, 1, group_add("Work"));
+    assert_eq!(err_text(&mut rx).await, BUG_LOADING);
+    assert_eq!(error_event(&mut events).await, BUG_LOADING);
+    assert_eq!(fatal_line(within(rig.core.finished()).await), BUG_LOADING);
+    send(&rig.core, c, 2, group_add("Later"));
+    // Either told to try again (the core was still sweeping its inbox) or the connection is
+    // already closed; never an answer, never a hang.
+    match within(rx.recv()).await {
+        None => {}
+        Some((_, result)) => assert_eq!(result.unwrap_err().0, "moa is stopping; try again"),
+    }
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_reopened_stops_the_core() {
+    let rig = rig().await;
+    let (c, mut rx) = rig.core.open_conn();
+    let mut events = rig.core.events();
+    rig.core.store_fault(Fault::Crash);
+    // The reopen finds something that is not a brain.
+    let db = &rig.brain.db;
+    std::fs::write(db, b"not a database").unwrap();
+    for ext in ["-wal", "-shm"] {
+        let mut side = db.clone().into_os_string();
+        side.push(ext);
+        let _ = std::fs::remove_file(side);
+    }
+    send(&rig.core, c, 1, group_add("Work"));
+    let said = err_text(&mut rx).await;
+    assert!(said.starts_with("the store can't be opened: "), "{said}");
+    let event = error_event(&mut events).await;
+    assert!(event.starts_with("the store can't be opened: "), "{event}");
+    let line = fatal_line(within(rig.core.finished()).await);
+    assert!(line.starts_with("the store can't be opened: "), "{line}");
+}
+
+#[tokio::test]
+async fn a_core_that_dies_unexpectedly_says_so_and_closes_connections() {
+    let rig = rig().await;
+    let (_c, mut rx) = rig.core.open_conn();
+    rig.core.crash_core();
+    assert_eq!(
+        fatal_line(within(rig.core.finished()).await),
+        "the core stopped unexpectedly; see the log"
+    );
+    // The connection's channel is closed, so a client sees the end instead of waiting.
+    assert!(within(rx.recv()).await.is_none());
+}

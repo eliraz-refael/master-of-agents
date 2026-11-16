@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -92,6 +92,8 @@ enum Item {
     },
     Barrier(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
+    /// Tests only: panics outside `catch_unwind`.
+    Crash,
 }
 
 /// What a drain says after its commit, in order.
@@ -121,7 +123,7 @@ pub struct CoreHandle {
     generation: watch::Receiver<u64>,
     stats: Arc<Stats>,
     finished: watch::Receiver<Option<Result<(), String>>>,
-    panic_next: Arc<AtomicBool>,
+    panic_next: Arc<AtomicU32>,
 }
 
 type SharedStore = Arc<Mutex<StoreHandle>>;
@@ -151,7 +153,7 @@ impl CoreHandle {
         let store: SharedStore = Arc::new(Mutex::new(store));
         let stats = Arc::new(Stats::default());
         let (finished_tx, finished) = watch::channel(None);
-        let panic_next = Arc::new(AtomicBool::new(false));
+        let panic_next = Arc::new(AtomicU32::new(0));
         let (inbox, inbox_rx) = mpsc::unbounded_channel();
         let state = State::new(opts.brain, opts.config).with_deps(opts.deps);
         let (model_tx, model) = watch::channel(state.model());
@@ -235,7 +237,7 @@ impl CoreHandle {
         let mut rx = self.finished.clone();
         let ended = match rx.wait_for(Option::is_some).await {
             Ok(v) => v.clone(),
-            Err(_) => Some(Ok(())),
+            Err(_) => Some(Err(UNEXPECTED.to_string())),
         };
         match ended {
             Some(Err(line)) => Err(DaemonError::Fatal(line)),
@@ -275,6 +277,12 @@ impl CoreHandle {
             return StatusData::default();
         }
         answer.await.unwrap_or_default()
+    }
+
+    /// Tests only: the core task panics where nothing catches it.
+    #[doc(hidden)]
+    pub fn crash_core(&self) {
+        let _ = self.inbox.send(Item::Crash);
     }
 
     pub fn zone_changed(&self, tz: TimeZone) {
@@ -321,7 +329,13 @@ impl CoreHandle {
     /// Tests only: the next input panics inside the core's `catch_unwind`, before `handle`.
     #[doc(hidden)]
     pub fn panic_next_handle(&self) {
-        self.panic_next.store(true, Ordering::SeqCst);
+        self.panic_next_handles(1);
+    }
+
+    /// Tests only: the next `n` calls panic (2 hits an input, then the reload after it).
+    #[doc(hidden)]
+    pub fn panic_next_handles(&self, n: u32) {
+        self.panic_next.store(n, Ordering::SeqCst);
     }
 
     /// Tests only.
@@ -365,7 +379,7 @@ struct Core {
     failures_in_row: u32,
     /// Items a drain left for the next one: what followed a panic.
     carry: VecDeque<Item>,
-    panic_next: Arc<AtomicBool>,
+    panic_next: Arc<AtomicU32>,
     finished_tx: watch::Sender<Option<Result<(), String>>>,
 }
 
@@ -375,7 +389,7 @@ enum Flow {
     /// The drain held a `stop`; the sender answers once the loop has ended.
     Stop(oneshot::Sender<()>),
     /// The core can't go on: the loop ends and `finished()` says why.
-    Fatal(String),
+    Fatal,
 }
 
 /// How one input went through `handle`.
@@ -388,6 +402,7 @@ enum Stepped {
 }
 
 const BUG_REPLY: &str = "moa hit a bug answering that; it reloaded";
+const UNEXPECTED: &str = "the core stopped unexpectedly; see the log";
 const BUG_LOADING: &str = "moa hit a bug loading the brain; see the log";
 
 impl Core {
@@ -425,9 +440,8 @@ impl Core {
         }
         lock(&self.conns).clear();
         match end {
-            Flow::Fatal(line) => {
-                self.finished_tx.send_replace(Some(Err(line)));
-            }
+            // Already said by `fatal`.
+            Flow::Fatal => {}
             Flow::Stop(stop) => {
                 self.finished_tx.send_replace(Some(Ok(())));
                 let _ = stop.send(());
@@ -460,6 +474,7 @@ impl Core {
                     held.push(Held::Barrier(reply));
                     Stepped::Done
                 }
+                Item::Crash => panic!("a test crashed the core task"),
                 Item::Stop(reply) => {
                     held.push(Held::Stop(reply));
                     Stepped::Done
@@ -625,6 +640,8 @@ impl Core {
     /// let the loop end.
     fn fatal(&mut self, line: String, held: Vec<Held>) -> Flow {
         tracing::error!("the core stops: {line}");
+        // Before anything is dropped: a `start()` woken by a dropped barrier must find it.
+        self.finished_tx.send_replace(Some(Err(line.clone())));
         let _ = self.events.send(CoreEvent::Error {
             message: line.clone(),
         });
@@ -633,7 +650,7 @@ impl Core {
                 reply_to(&self.conns, conn, req, Err(OpError(line.clone())));
             }
         }
-        Flow::Fatal(line)
+        Flow::Fatal
     }
 
     /// One input through `handle`, inside `catch_unwind`; its effects go to the batch, the
@@ -650,7 +667,10 @@ impl Core {
         let panic_next = &self.panic_next;
         let state = &mut self.state;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            if panic_next.swap(false, Ordering::SeqCst) {
+            if panic_next
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
                 panic!("a test asked for a panic");
             }
             handle(state, input, now)
@@ -754,6 +774,19 @@ impl Core {
             }
         }
         stop
+    }
+}
+
+/// However the core task ends, `finished()` says so and the connections close, so nobody
+/// waits on a core that is gone. After a normal end both are already done.
+impl Drop for Core {
+    fn drop(&mut self) {
+        if self.finished_tx.borrow().is_none() {
+            tracing::error!("the core task ended unexpectedly");
+            self.finished_tx
+                .send_replace(Some(Err(UNEXPECTED.to_string())));
+        }
+        lock(&self.conns).clear();
     }
 }
 
