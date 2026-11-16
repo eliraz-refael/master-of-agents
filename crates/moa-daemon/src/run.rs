@@ -296,7 +296,10 @@ async fn keep_up(
                 )
             }
         },
-        |name, _message| tracing::error!("the {name} panicked and was restarted"),
+        {
+            let core = core.clone();
+            move |name, _message| core.actor_failed(name)
+        },
     ));
 
     let outcome = loop {

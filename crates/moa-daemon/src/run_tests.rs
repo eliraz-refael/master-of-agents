@@ -143,3 +143,24 @@ async fn an_op_held_by_the_core_at_shutdown_is_answered() {
         assert!(ended.is_ok(), "{ended:?}");
     }
 }
+
+/// A panic in the accept loop is published like the scheduler's: an error event, with no
+/// contents. (The accept loop has no panic hook, so this goes through what its failure
+/// callback calls.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_actor_failure_is_published_as_an_error_event() {
+    let brain = TypicalBrain::new();
+    let (core, _sock, _daemon) = up(&brain).await;
+    let mut events = core.events();
+    core.actor_failed("accept loop");
+    let message = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let moa_core::publish::CoreEvent::Error { message } = events.recv().await.unwrap() {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("an error event");
+    assert_eq!(message, "accept loop stopped and was restarted");
+}

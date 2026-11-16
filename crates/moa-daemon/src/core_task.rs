@@ -100,6 +100,7 @@ enum Item {
         reply: oneshot::Sender<StatusData>,
     },
     Barrier(oneshot::Sender<()>),
+    Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
     /// Tests only: panics outside `catch_unwind`.
     Crash,
@@ -116,6 +117,7 @@ enum Held {
     /// The answer so far, and the caller, so a reload can compute it again.
     Status(oneshot::Sender<StatusData>, StatusData, CallerInfo),
     Barrier(oneshot::Sender<()>),
+    Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
 }
 
@@ -156,7 +158,20 @@ impl CoreHandle {
         opts: CoreOptions,
         store: Store,
     ) -> Result<CoreHandle, DaemonError> {
+        Self::start_with_faults(opts, store, Vec::new()).await
+    }
+
+    /// Like `start_with_store`, with `faults` queued on the store thread before `Startup`.
+    #[doc(hidden)]
+    pub async fn start_with_faults(
+        opts: CoreOptions,
+        store: Store,
+        faults: Vec<Fault>,
+    ) -> Result<CoreHandle, DaemonError> {
         let store = StoreHandle::spawn(store, opts.backups.clone());
+        for fault in faults {
+            store.fault(fault);
+        }
         let snapshot = store
             .snapshot()
             .await
@@ -234,9 +249,10 @@ impl CoreHandle {
             ended,
             panic_next,
         };
-        // Startup is the first item, so this barrier answers after its commit. If Startup
-        // brought the core down, the barrier is dropped and returns, and the line is here.
-        handle.barrier().await;
+        // Startup is the first item, so this answers after its commit, not after its daily
+        // backup (the store thread is busy copying; `barrier()` and `stop()` wait for it). If
+        // Startup brought the core down, the answer is dropped and returns, and the line is here.
+        handle.committed().await;
         let ended = handle.finished.borrow().clone();
         if let Some(Err(line)) = ended {
             return Err(DaemonError::Fatal(line));
@@ -307,6 +323,16 @@ impl CoreHandle {
         let _ = self.inbox.send(Item::Zone(tz));
     }
 
+    /// An actor outside the core panicked and was restarted: the core publishes an error
+    /// event (and logs it). The raw panic message stays with the caller: it may carry
+    /// contents.
+    pub fn actor_failed(&self, actor: &'static str) {
+        let _ = self.inbox.send(Item::Input(Input::ActorFailed {
+            actor,
+            message: String::new(),
+        }));
+    }
+
     pub fn model(&self) -> watch::Receiver<Arc<Model>> {
         self.model.clone()
     }
@@ -331,6 +357,16 @@ impl CoreHandle {
         sync_scheduler(&self.sched).await;
         let (reply, answer) = oneshot::channel();
         if self.inbox.send(Item::Barrier(reply)).is_ok() {
+            let _ = answer.await;
+        }
+    }
+
+    /// Answers once everything before it has been committed and released, without waiting
+    /// for the store's queue or the backups.
+    async fn committed(&self) {
+        sync_scheduler(&self.sched).await;
+        let (reply, answer) = oneshot::channel();
+        if self.inbox.send(Item::Committed(reply)).is_ok() {
             let _ = answer.await;
         }
     }
@@ -494,6 +530,10 @@ impl Core {
                 }
                 Item::Barrier(reply) => {
                     held.push(Held::Barrier(reply));
+                    Stepped::Done
+                }
+                Item::Committed(reply) => {
+                    held.push(Held::Committed(reply));
                     Stepped::Done
                 }
                 Item::Crash => panic!("a test crashed the core task"),
@@ -798,6 +838,9 @@ impl Core {
                     self.store().sync().await;
                     sync_scheduler(&self.sched).await;
                     self.wait_for_backups().await;
+                    let _ = reply.send(());
+                }
+                Held::Committed(reply) => {
                     let _ = reply.send(());
                 }
                 Held::Stop(reply) => stop = Some(reply),

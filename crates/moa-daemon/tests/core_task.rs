@@ -217,3 +217,35 @@ async fn status_names_the_brain_and_the_caller() {
     assert_eq!(status.caller, "an agent outside moa");
     assert!(!status.sessions.is_empty());
 }
+
+/// Startup's daily backup runs on the store thread: `start()` doesn't wait for it, while
+/// `barrier()` does.
+#[tokio::test]
+async fn a_slow_startup_backup_does_not_delay_start() {
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let backups = brain.dir.path().join("backups");
+    let (release, gate) = mpsc::channel();
+    let core = within(CoreHandle::start_with_faults(
+        CoreOptions {
+            brain: BrainName::default_brain(),
+            config: brain.config(),
+            deps: Deps::default(),
+            tz: TimeZone::posix(TYPICAL_TZ).unwrap(),
+            clock: time.clone(),
+            alarm: Box::new(time.alarm()),
+            db: brain.db.clone(),
+            backups: backups.clone(),
+            events_capacity: 256,
+        },
+        brain.store(),
+        vec![Fault::PauseNextBackup(gate)],
+    ))
+    .await
+    .expect("the core starts with its backup still held");
+    assert!(!backups.join("daily-2026-11-15.db").exists());
+
+    release.send(()).unwrap();
+    within(core.barrier()).await;
+    assert!(backups.join("daily-2026-11-15.db").exists());
+}
