@@ -15,6 +15,7 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::clock::Clock;
 use crate::core_task::{CoreHandle, CoreOptions, DaemonError};
@@ -24,6 +25,9 @@ use crate::supervise::supervise;
 
 /// How long a stop waits for the core to finish what it holds (backups included).
 const STOP_WAIT: Duration = Duration::from_secs(30);
+/// How long `run` waits, after closing the sessions, for them to finish writing what they
+/// owe (a session's own grace is 1 s).
+const SESSIONS_WAIT: Duration = Duration::from_millis(2500);
 
 /// How `run` says it is ready for clients.
 pub enum Ready {
@@ -268,12 +272,18 @@ async fn keep_up(
     // line first.
     let stop = CancellationToken::new();
     let close = CancellationToken::new();
+    let sessions = TaskTracker::new();
     let listener = Arc::new(listener);
     let accept = tokio::spawn(supervise(
         "accept loop",
         {
-            let (core, brain, stop, close) =
-                (core.clone(), brain.clone(), stop.clone(), close.clone());
+            let (core, brain, stop, close, sessions) = (
+                core.clone(),
+                brain.clone(),
+                stop.clone(),
+                close.clone(),
+                sessions.clone(),
+            );
             move || {
                 accept_loop(
                     listener.clone(),
@@ -281,6 +291,7 @@ async fn keep_up(
                     brain.clone(),
                     stop.clone(),
                     close.clone(),
+                    sessions.clone(),
                     my_uid,
                 )
             }
@@ -341,6 +352,18 @@ async fn keep_up(
     // Sessions that still wait for something are closed now; the rest already closed when
     // the core dropped their reply channels.
     close.cancel();
+    // Wait for them, bounded: the process may exit right after this returns, and a session
+    // cut off mid-write leaves its client with EOF instead of its line.
+    sessions.close();
+    if tokio::time::timeout(SESSIONS_WAIT, sessions.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "some sessions were still open after {} ms",
+            SESSIONS_WAIT.as_millis()
+        );
+    }
     remove_socket(&sock);
     tracing::info!("stopped");
     outcome

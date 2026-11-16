@@ -187,7 +187,9 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
     async fn run(&mut self) {
         loop {
+            // `close` first: once it is cancelled the session reads nothing new.
             let flow = tokio::select! {
+                biased;
                 _ = self.close.cancelled() => {
                     self.flush_replies().await;
                     Flow::Close
@@ -370,6 +372,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
                 other => self.pending = other,
             }
         }
+        // Still owed a line (the request reached a core that had already ended, or the core
+        // hung): every request gets exactly one.
+        if let Some((_, id)) = self.pending.take() {
+            let line = encode_error(Some(&id), &rpc(code::FAILED, STOPPING));
+            let _ = tokio::time::timeout(FLUSH_TIME, self.framed.send(line)).await;
+        }
     }
 
     async fn on_push(&mut self, push: Push) -> Flow {
@@ -413,7 +421,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
         self.send(line).await;
         if !self.framed.read_buffer().contains(&b'\n') {
             let io = self.framed.get_mut();
-            let _ = tokio::time::timeout(DISCARD_TIME, async {
+            let discard = tokio::time::timeout(DISCARD_TIME, async {
                 let mut left = DISCARD_LIMIT;
                 let mut buf = vec![0u8; 64 << 10];
                 while left > 0 {
@@ -423,8 +431,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
                         Ok(n) => left = left.saturating_sub(n),
                     }
                 }
-            })
-            .await;
+            });
+            // A daemon that is closing its sessions doesn't wait for this.
+            tokio::select! {
+                _ = discard => {}
+                _ = self.close.cancelled() => {}
+            }
         }
         Flow::Close
     }
@@ -432,10 +444,60 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
 
 #[cfg(test)]
 mod tests {
+    use jiff::tz::TimeZone;
+    use moa_core::state::Deps;
+    use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
+    use tokio::io::{AsyncBufReadExt, BufReader, duplex};
+
     use super::*;
+    use crate::core_task::CoreOptions;
+    use crate::testing::FakeTime;
 
     #[test]
     fn only_our_own_uid_is_allowed() {
         assert!(peer_allowed(501, 501) && !peer_allowed(502, 501));
+    }
+
+    /// A request still owed a line when the session closes (it reached a core that had
+    /// ended, so no reply is queued) gets the stopping line, exactly one.
+    #[tokio::test]
+    async fn a_pending_op_gets_a_line_when_the_session_closes() {
+        let brain = TypicalBrain::new();
+        let time = FakeTime::new(brain.now().wall);
+        let core = CoreHandle::start(CoreOptions {
+            brain: BrainName::default_brain(),
+            config: brain.config(),
+            deps: Deps::default(),
+            tz: TimeZone::posix(TYPICAL_TZ).unwrap(),
+            clock: time.clone(),
+            alarm: Box::new(time.alarm()),
+            db: brain.db.clone(),
+            backups: brain.dir.path().join("backups"),
+            events_capacity: 4,
+        })
+        .await
+        .unwrap();
+        let (conn, replies) = core.open_conn();
+        let (client, server) = duplex(4096);
+        let mut session = Session {
+            framed: Framed::new(server, LinesCodec::new()),
+            core,
+            brain: BrainName::default_brain(),
+            shutdown: CancellationToken::new(),
+            close: CancellationToken::new(),
+            conn,
+            replies,
+            greeted: None,
+            sub: None,
+            pending: Some((ReqId(1), Id::Num(7))),
+            next_req: 1,
+        };
+        session.close.cancel();
+        session.run().await;
+        drop(session);
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).await.unwrap();
+        assert!(line.contains(r#""id":7"#), "{line}");
+        assert!(line.contains(STOPPING), "{line}");
     }
 }

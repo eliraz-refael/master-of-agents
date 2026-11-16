@@ -6,6 +6,7 @@ use std::time::Duration;
 use moa_core::config::BrainName;
 use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::core_task::CoreHandle;
 use crate::session::{peer_allowed, serve};
@@ -20,6 +21,7 @@ pub(crate) async fn accept_loop(
     brain: BrainName,
     stop: CancellationToken,
     close: CancellationToken,
+    sessions: TaskTracker,
     my_uid: u32,
 ) {
     loop {
@@ -40,7 +42,7 @@ pub(crate) async fn accept_loop(
         };
         match stream.peer_cred() {
             Ok(cred) if peer_allowed(cred.uid(), my_uid) => {
-                tokio::spawn(serve(
+                sessions.spawn(serve(
                     stream,
                     core.clone(),
                     brain.clone(),
