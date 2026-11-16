@@ -253,7 +253,7 @@ impl CoreHandle {
     /// Answers after everything before it has settled: its drain's commit, the store's queue,
     /// the scheduler's, and the backups in flight. Meant for tests.
     pub async fn barrier(&self) {
-        // Fire what is already due first, so its `Timer` is ahead of the barrier in the inbox.
+        // Commands already sent to the scheduler are applied first. It fires nothing here.
         sync_scheduler(&self.sched).await;
         let (reply, answer) = oneshot::channel();
         if self.inbox.send(Item::Barrier(reply)).is_ok() {

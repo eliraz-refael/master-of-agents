@@ -128,6 +128,11 @@ async fn a_read_during_a_pending_commit_waits_for_it() {
     wait_until(|| stats.commits.load(Ordering::SeqCst) == commits + 1).await;
     let inputs = stats.inputs.load(Ordering::SeqCst);
     send(&rig.core, b, 2, task_ls());
+    // Give the core every chance to take B: on this current-thread runtime it would run
+    // here. The right core is parked on the commit and is not woken.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
     // B was not handled, so it cannot have been answered.
     assert_eq!(stats.inputs.load(Ordering::SeqCst), inputs);
     assert!(b_rx.try_recv().is_err());

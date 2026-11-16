@@ -24,8 +24,8 @@ use crate::supervise::supervise;
 pub(crate) enum SchedCmd {
     Set(TimerKey, UtcMs),
     Cancel(TimerKey),
-    /// Answers once every command sent before it has been applied, and any deadline that is
-    /// already due has been fired.
+    /// Answers once every command sent before it has been applied. It fires nothing: only
+    /// the alarm does, in tests as in production.
     Sync(oneshot::Sender<()>),
 }
 
@@ -85,7 +85,6 @@ impl Scheduler {
                         self.deadlines.remove(&key);
                     }
                     Some(SchedCmd::Sync(done)) => {
-                        self.fire_due();
                         let _ = done.send(());
                     }
                 },

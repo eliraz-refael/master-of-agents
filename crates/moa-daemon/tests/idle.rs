@@ -34,13 +34,23 @@ async fn an_idle_brain_wakes_only_for_the_backup() {
     .expect("start is in time")
     .expect("the core starts");
     let launches = moa_platform::spawn::launches();
-    for _ in 0..24 {
+    let stats = core.stats();
+    for hour in 1..=24 {
         time.advance(Duration::from_secs(3600));
+        if hour == 12 {
+            // Local midnight: the wake must come from the alarm, not from a barrier.
+            timeout(PATIENCE, async {
+                while stats.timer_fires.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the alarm fired");
+        }
         timeout(PATIENCE, core.barrier())
             .await
             .expect("barrier is in time");
     }
-    let stats = core.stats();
     // Startup and the midnight Timer(Backup), not counting the barriers.
     assert_eq!(stats.inputs.load(Ordering::SeqCst), 2);
     assert_eq!(stats.timer_fires.load(Ordering::SeqCst), 1);
