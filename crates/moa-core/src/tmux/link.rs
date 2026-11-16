@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::cmd::Cmd;
 use super::ids::{ClientName, Generation, WindowId};
-use super::mailbox::Mailbox;
+use super::mailbox::{Mailbox, MailboxError};
 use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
 use crate::UtcMs;
@@ -125,6 +125,15 @@ fn running(yes: bool) -> Result<Done, OpError> {
         text: String::new(),
         data: json!({ "running": yes }),
     })
+}
+
+/// A four-second notice on one client. `-l` keeps the text literal.
+pub fn notice(client: &ClientName, text: &str) -> Cmd {
+    Cmd::new("display-message")
+        .arg("-c")
+        .arg(client.0.as_str())
+        .args(["-d", "4000", "-l"])
+        .arg(format!("moa: {text}"))
 }
 
 fn log(level: LogLevel, message: String) -> Effect {
@@ -327,10 +336,25 @@ impl TmuxState {
         }
         match n {
             // Hooks say the tree changed in a way no notification does.
+            // The log lines never carry the message text.
             Notification::Message(m) => match Mailbox::parse(m) {
                 Ok(Mailbox::Hook(_)) => self.refresh(),
-                // Keys and prompts are read elsewhere.
-                _ => Vec::new(),
+                Ok(Mailbox::Key { action, client, .. }) => vec![Effect::Tmux {
+                    conn: self.conn().unwrap_or_default(),
+                    cmds: vec![notice(&client, action.not_yet())],
+                    token: None,
+                }],
+                Ok(Mailbox::Prompt { .. }) => vec![log(
+                    LogLevel::Info,
+                    "a prompt answer arrived that nothing waits for".into(),
+                )],
+                Err(MailboxError::NotMoa) => vec![log(
+                    LogLevel::Warn,
+                    "tmux sent a message moa didn't ask for".into(),
+                )],
+                Err(MailboxError::Bad) => {
+                    vec![log(LogLevel::Warn, "a moa message didn't parse".into())]
+                }
             },
             // The link reports its own end as `Down`.
             Notification::Exit => Vec::new(),
