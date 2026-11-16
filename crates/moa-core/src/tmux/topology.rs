@@ -145,7 +145,9 @@ impl Topology {
             Notification::WindowAdd { .. }
             | Notification::WindowClose { .. }
             | Notification::SessionsChanged
-            | Notification::LayoutChange { .. } => Applied::Refresh,
+            | Notification::LayoutChange { .. }
+            // A renamed session changes what `session_named` answers.
+            | Notification::Other("session-renamed") => Applied::Refresh,
             _ => Applied::Same,
         }
     }

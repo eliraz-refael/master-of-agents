@@ -336,6 +336,7 @@ fn topology_apply() {
         Notification::LayoutChange {
             window: WindowId(2),
         },
+        Notification::Other("session-renamed"),
     ] {
         assert_eq!(t.apply(&n), Applied::Refresh, "{n:?}");
     }

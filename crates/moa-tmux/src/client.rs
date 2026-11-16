@@ -285,7 +285,12 @@ impl ControlClient {
                         None => ConnectError::Protocol("tmux didn't answer"),
                     });
                 }
-                Ok(Ok(0) | Err(_)) => return Err(exited_error(first_line).await),
+                Ok(Ok(0)) => return Err(exited_error(first_line).await),
+                Ok(Err(_)) => {
+                    // A read error doesn't mean the child is gone.
+                    kill_unless_exited(pid, &exited);
+                    return Err(exited_error(first_line).await);
+                }
                 Ok(Ok(n)) => n,
             };
             let frames = match parser.push(&buf[..n]) {

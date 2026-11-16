@@ -39,8 +39,14 @@ impl Terminal {
         cols: u16,
         rows: u16,
     ) -> io::Result<Terminal> {
-        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
-        // Not every platform has an open flag for it, and a child must never inherit it.
+        // Linux sets CLOEXEC atomically at open, so a parallel test's spawn can't inherit the
+        // master; elsewhere there is no open flag for it, so it is set right after.
+        #[cfg(target_os = "linux")]
+        let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY;
+        let master = openpt(flags)?;
+        // A child must never inherit it.
         fcntl_setfd(&master, FdFlags::CLOEXEC)?;
         grantpt(&master)?;
         unlockpt(&master)?;
