@@ -589,7 +589,7 @@ fn vars(root: Option<&str>, home: Option<&str>, real: bool) -> Result<Paths, Pat
     assert_eq!(route(&c, Some(&a), p("/h/work/x"), None), Route::Brain(brain("work")));
     assert_eq!(route(&c, Some(&a), p("/h/private/lantern"), None), Route::Brain(brain("default")));
     assert_eq!(route(&c, Some(&a), p("/h/private/lantern"), Some(&brain("work"))), Route::Brain(brain("work")));  // except → the opener
-    assert_eq!(route(&c, Some(&b), p("/anywhere"), None), Route::Brain(brain("default")));                  // only = [] is no limit
+    assert_eq!(route(&c, Some(&b), p("/anywhere"), None), Route::Brain(brain("default")));                  // no `only` is no limit (an explicit `only = []` is a config error)
     assert_eq!(route(&c, None, p("/h/work/x"), None), Route::Brain(brain("default")));
 }
 proptest! {

@@ -1,0 +1,15 @@
+---
+source: crates/moa-core/src/live.rs
+expression: "DisplayState::ALL"
+---
+[
+  "waiting",
+  "question",
+  "failed",
+  "done",
+  "working",
+  "idle",
+  "asleep",
+  "ended",
+  "archived"
+]

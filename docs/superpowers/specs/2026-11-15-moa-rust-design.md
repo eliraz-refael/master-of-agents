@@ -610,7 +610,7 @@ the injected plugin and so full tracking.
   [accounts.acct-b]
   kind = "claude"
   store = "~/.claude-acct-b"
-  only = []                              # setup only: the account works with moa only here
+  only = ["~/private"]                   # setup only: the account works with moa only here
   ```
 - **The routing function** (`moa-core`, pure, one implementation used by the hook, `moactl`,
   the daemon's guard and setup): `route(account, cwd, opener) -> Option<Brain>`, with the

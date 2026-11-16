@@ -81,7 +81,8 @@ fn facts(events: &[Ev]) -> HashMap<&str, Facts> {
             }
         }
         let counts = matches!(e.kind.as_str(), "prompt" | "stop" | "waiting")
-            && !(e.kind == "waiting" && live::is_idle_ping(e.row.text_cow("text").as_deref()));
+            && !(e.kind == "waiting"
+                && moa_core::live::is_idle_ping(e.row.text_cow("text").as_deref()));
         if counts {
             f.latest = Some(i);
         }
@@ -95,7 +96,7 @@ fn event_kind(kind: &str, text: Option<&str>) -> Option<&'static str> {
         "start" => EventKind::SESSION_STARTED,
         "prompt" => EventKind::TURN_STARTED,
         "stop" => EventKind::TURN_ENDED,
-        "waiting" if live::is_idle_ping(text) => EventKind::IDLE_PING,
+        "waiting" if moa_core::live::is_idle_ping(text) => EventKind::IDLE_PING,
         "waiting" => EventKind::NEEDS_PERMISSION,
         "end" => EventKind::SESSION_ENDED,
         "ui" => EventKind::UI,

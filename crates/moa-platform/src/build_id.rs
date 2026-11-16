@@ -7,9 +7,32 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
-/// `fs::canonicalize`, or `p` unchanged when that fails.
+/// `fs::canonicalize`. When that fails (the path or a tail of it is missing), the longest
+/// existing prefix is canonicalized and the remaining components are appended, so a missing
+/// folder under a symlinked parent still resolves like its neighbours. A relative `p` is
+/// returned unchanged.
 pub fn canonical(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    if !p.is_absolute() {
+        return p.to_path_buf();
+    }
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let mut tail = Vec::new();
+    let mut head = p;
+    while let Some(parent) = head.parent() {
+        let Some(name) = head.file_name() else {
+            // A `..` tail: keep the whole path literal rather than guess.
+            return p.to_path_buf();
+        };
+        tail.push(name);
+        if let Ok(mut c) = std::fs::canonicalize(parent) {
+            c.extend(tail.iter().rev());
+            return c;
+        }
+        head = parent;
+    }
+    p.to_path_buf()
 }
 
 /// FNV-1a, 64 bit.

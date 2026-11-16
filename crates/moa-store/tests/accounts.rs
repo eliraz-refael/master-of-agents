@@ -97,3 +97,33 @@ proptest! {
         prop_assert_eq!(m.resolve(&once).name, once);
     }
 }
+
+#[test]
+fn from_config_names_the_configured_stores() {
+    let config = moa_core::config::Config::parse(
+        "[accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n",
+        Path::new("/h"),
+    )
+    .unwrap();
+    let m = AccountMap::from_config(&config, Path::new("/h"));
+    assert_eq!(
+        m.resolve("acct-a").store,
+        Some(PathBuf::from("/h/.claude-acct-a"))
+    );
+    assert_eq!(m.resolve("/h/.claude-acct-a").name, "acct-a");
+}
+
+#[test]
+fn from_config_keeps_each_account_kind() {
+    let config = moa_core::config::Config::parse(
+        "[accounts.cx]\nkind = \"codex\"\nstore = \"~/.codex-cx\"\n",
+        Path::new("/h"),
+    )
+    .unwrap();
+    let m = AccountMap::from_config(&config, Path::new("/h"));
+    assert_eq!(m.resolve("cx").kind, moa_core::model::AgentKind::Codex);
+    assert_eq!(
+        m.resolve("/h/.codex-cx").kind,
+        moa_core::model::AgentKind::Codex
+    );
+}

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use moa_core::config::Config;
 use moa_core::model::AgentKind;
 
 /// An account as moa knows it. `store` is the agent's data directory when there is one.
@@ -20,7 +21,7 @@ pub struct ResolvedAccount {
 #[derive(Debug)]
 pub struct AccountMap {
     home: PathBuf,
-    explicit: Vec<(String, PathBuf)>,
+    explicit: Vec<(String, PathBuf, AgentKind)>,
     seen: RefCell<Vec<String>>,
 }
 
@@ -41,9 +42,24 @@ impl AccountMap {
         }
     }
 
+    /// One explicit entry per account in `moa.toml`.
+    pub fn from_config(config: &Config, home: &Path) -> Self {
+        config
+            .accounts
+            .iter()
+            .fold(Self::new(home.to_path_buf()), |m, (name, a)| {
+                m.with_kind(name.as_str(), a.store.clone(), a.kind)
+            })
+    }
+
     /// Adds an explicit `name` for the agent store at `store`.
-    pub fn with(mut self, name: impl Into<String>, store: PathBuf) -> Self {
-        self.explicit.push((name.into(), store));
+    pub fn with(self, name: impl Into<String>, store: PathBuf) -> Self {
+        self.with_kind(name, store, AgentKind::Claude)
+    }
+
+    /// Adds an explicit `name` for the store at `store`, run by an agent of `kind`.
+    pub fn with_kind(mut self, name: impl Into<String>, store: PathBuf, kind: AgentKind) -> Self {
+        self.explicit.push((name.into(), store, kind));
         self
     }
 
@@ -58,8 +74,8 @@ impl AccountMap {
         Ok((name.to_string(), expand_tilde(store, home)))
     }
 
-    fn explicit_owning(&self, dir: &Path) -> Option<&(String, PathBuf)> {
-        self.explicit.iter().find(|(_, s)| same_path(s, dir))
+    fn explicit_owning(&self, dir: &Path) -> Option<&(String, PathBuf, AgentKind)> {
+        self.explicit.iter().find(|(_, s, _)| same_path(s, dir))
     }
 
     /// Works out which account a spike `account` value means.
@@ -69,6 +85,11 @@ impl AccountMap {
             store,
             kind: AgentKind::Claude,
         };
+        let explicit = |(name, store, kind): &(String, PathBuf, AgentKind)| ResolvedAccount {
+            name: name.clone(),
+            store: Some(store.clone()),
+            kind: *kind,
+        };
         if spike_account == "codex" {
             return ResolvedAccount {
                 name: "codex".into(),
@@ -76,13 +97,13 @@ impl AccountMap {
                 kind: AgentKind::Codex,
             };
         }
-        if let Some((name, store)) = self.explicit.iter().find(|(n, _)| n == spike_account) {
-            return claude(name, Some(store.clone()));
+        if let Some(e) = self.explicit.iter().find(|(n, _, _)| n == spike_account) {
+            return explicit(e);
         }
         if spike_account.starts_with('/') || spike_account.starts_with('~') {
             let path = expand_tilde(spike_account, &self.home);
-            if let Some((name, store)) = self.explicit_owning(&path) {
-                return claude(name, Some(store.clone()));
+            if let Some(e) = self.explicit_owning(&path) {
+                return explicit(e);
             }
             let base = path
                 .file_name()
@@ -94,8 +115,8 @@ impl AccountMap {
         }
         let dotted = self.home.join(format!(".{spike_account}"));
         if dotted.is_dir() {
-            if let Some((name, store)) = self.explicit_owning(&dotted) {
-                return claude(name, Some(store.clone()));
+            if let Some(e) = self.explicit_owning(&dotted) {
+                return explicit(e);
             }
             return claude(spike_account, Some(dotted));
         }
@@ -105,7 +126,7 @@ impl AccountMap {
     /// The agent store of an account name: an explicit entry, else `<home>/.<name>` if it
     /// is a directory.
     pub fn store_for(&self, name: &str) -> Option<PathBuf> {
-        if let Some((_, s)) = self.explicit.iter().find(|(n, _)| n == name) {
+        if let Some((_, s, _)) = self.explicit.iter().find(|(n, _, _)| n == name) {
             return Some(s.clone());
         }
         let dotted = self.home.join(format!(".{name}"));
