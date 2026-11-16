@@ -34,7 +34,7 @@ use crate::scheduler::{self, SchedCmd};
 /// The most items one drain takes.
 pub const DRAIN_CAP: usize = 64;
 
-const STOPPING: &str = "moa is stopping; try again";
+pub(crate) const STOPPING: &str = "moa is stopping; try again";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -508,6 +508,12 @@ impl Core {
             match stepped {
                 Stepped::Done => {}
                 Stepped::Panicked { loading: true } => {
+                    // Nothing was committed: what the drain held is not true. What follows is
+                    // left for the end of the loop, which tells its callers to try again.
+                    fail_held(&mut held, BUG_LOADING.to_string());
+                    while let Some(rest) = work.pop_back() {
+                        self.carry.push_front(rest);
+                    }
                     return self.fatal(BUG_LOADING.to_string(), held);
                 }
                 Stepped::Panicked { loading: false } => {
@@ -662,7 +668,8 @@ impl Core {
     }
 
     /// The core is done for: say why once (event and log), answer what the drain held, and
-    /// let the loop end.
+    /// let the loop end. A held error becomes `line`; a held `Ok` stays: its commit already
+    /// happened (`fail_held` has turned the replies of a drain that didn't save into errors).
     fn fatal(&mut self, line: String, held: Vec<Held>) -> Flow {
         tracing::error!("the core stops: {line}");
         // Before anything is dropped: a `start()` woken by a dropped barrier must find it.
@@ -671,8 +678,9 @@ impl Core {
             message: line.clone(),
         });
         for h in held {
-            if let Held::Reply { conn, req, .. } = h {
-                reply_to(&self.conns, conn, req, Err(OpError(line.clone())));
+            if let Held::Reply { conn, req, result } = h {
+                let result = result.map_err(|_| OpError(line.clone()));
+                reply_to(&self.conns, conn, req, result);
             }
         }
         Flow::Fatal

@@ -31,16 +31,20 @@ impl Default for SystemClock {
 
 impl Clock for SystemClock {
     fn wall(&self) -> UtcMs {
-        let ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
-            Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
-        };
-        UtcMs(ms)
+        utc_ms(SystemTime::now())
     }
 
     fn mono(&self) -> Duration {
         self.started.elapsed()
     }
+}
+
+/// A `SystemTime` as a [`UtcMs`]: the inverse of [`system_time`].
+pub fn utc_ms(at: SystemTime) -> UtcMs {
+    UtcMs(match at.duration_since(UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
+        Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
+    })
 }
 
 /// A [`UtcMs`] as a `SystemTime`, for arming a `WallTimer`.

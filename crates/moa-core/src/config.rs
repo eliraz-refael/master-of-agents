@@ -459,17 +459,6 @@ impl Config {
         }
     }
 
-    /// `Err` is the line to show when `b` isn't in the config. (`default` always is.)
-    pub fn require_brain(&self, b: &BrainName, config_file: &Path) -> Result<(), String> {
-        match self.brain(b) {
-            Some(_) => Ok(()),
-            None => Err(format!(
-                "there's no brain named {b} in {}",
-                config_file.display()
-            )),
-        }
-    }
-
     pub fn account_for_store(&self, store: &Path) -> Option<&AccountName> {
         self.accounts
             .iter()

@@ -101,9 +101,9 @@ async fn bring_up(
     events_capacity: usize,
 ) -> Result<Up, DaemonError> {
     let b = brain.as_str();
-    config
-        .require_brain(brain, &paths.config_file())
-        .map_err(|_| DaemonError::NoSuchBrain(brain.clone(), paths.config_file()))?;
+    if config.brain(brain).is_none() {
+        return Err(DaemonError::NoSuchBrain(brain.clone(), paths.config_file()));
+    }
 
     let sock = paths.socket(b)?;
     ensure_private_dir(&paths.run_dir())?;

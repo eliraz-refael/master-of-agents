@@ -5,13 +5,13 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use moa_core::UtcMs;
 use moa_platform::WallTimer;
 use tokio::sync::Notify;
 
-use crate::clock::Clock;
+use crate::clock::{Clock, utc_ms};
 
 struct Inner {
     wall: i64,
@@ -79,16 +79,9 @@ pub struct FakeAlarm {
     time: Arc<FakeTime>,
 }
 
-fn millis(at: SystemTime) -> i64 {
-    match at.duration_since(UNIX_EPOCH) {
-        Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
-        Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
-    }
-}
-
 impl WallTimer for FakeAlarm {
     fn arm(&mut self, at: SystemTime) -> io::Result<()> {
-        self.time.lock().armed = Some(millis(at));
+        self.time.lock().armed = Some(utc_ms(at).0);
         // A deadline already past fires at once.
         self.time.changed.notify_one();
         Ok(())

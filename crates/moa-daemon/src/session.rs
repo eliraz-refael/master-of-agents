@@ -24,7 +24,7 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::codec::{Framed, LinesCodec, LinesCodecError};
 use tokio_util::sync::CancellationToken;
 
-use crate::core_task::{ConnReply, CoreHandle};
+use crate::core_task::{ConnReply, CoreHandle, STOPPING};
 
 /// How much input is thrown away after an over-long line, looking for its end.
 const DISCARD_LIMIT: usize = 16 << 20;
@@ -35,7 +35,6 @@ const DISCARD_TIME: Duration = Duration::from_secs(5);
 const FLUSH_TIME: Duration = Duration::from_secs(1);
 
 const MISMATCH: &str = "this moa is a different build; run the command again to restart it";
-const STOPPING: &str = "moa is stopping; try again";
 
 /// Whether a peer with this uid may talk to a daemon run by `my_uid`.
 pub fn peer_allowed(peer_uid: u32, my_uid: u32) -> bool {
