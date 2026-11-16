@@ -167,9 +167,27 @@ fn expected_after_tmux(version: &str, s: &str) -> String {
         if c == '$'
             && it
                 .peek()
-                .is_some_and(|n| !n.is_ascii() || n.is_ascii_alphabetic() || *n == '_' || *n == '{')
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '_' || *n == '{')
         {
             out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Whether 3.4 also escapes a `$` before a non-ASCII character depends on the C library's
+/// `isalpha` (macOS's does, glibc's doesn't), so both spellings of that case compare equal.
+fn either_dollar(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\\' && it.peek() == Some(&'$') {
+            let mut ahead = it.clone();
+            ahead.next();
+            if ahead.peek().is_some_and(|n| !n.is_ascii()) {
+                continue;
+            }
         }
         out.push(c);
     }
@@ -207,7 +225,11 @@ fn quote_round_trips_through_tmux() {
                     .run(&display("#{@q}"))
                     .await
                     .map_err(|e| TestCaseError::fail(e.to_string()))?;
-                prop_assert_eq!(got.join("\n"), expected_after_tmux(&info.version, &s));
+                let (mut got, mut want) = (got.join("\n"), expected_after_tmux(&info.version, &s));
+                if info.version.starts_with("3.4") {
+                    (got, want) = (either_dollar(&got), either_dollar(&want));
+                }
+                prop_assert_eq!(got, want);
                 Ok(())
             })
         })
