@@ -311,7 +311,8 @@ pub fn install(paths: &Paths, brain: &str, exe: &Path) -> Result<ServiceOutcome,
     } else {
         systemd_unit(exe, brain, paths)
     };
-    let same = fs::read_to_string(&file).is_ok_and(|old| old == text);
+    let old = fs::read_to_string(&file).ok();
+    let same = old.as_deref() == Some(text.as_str());
     if !same {
         write_atomic(&file, &text)?;
     }
@@ -335,7 +336,15 @@ pub fn install(paths: &Paths, brain: &str, exe: &Path) -> Result<ServiceOutcome,
             message,
         });
     }
-    run_steps(&install_plan(same, mac, sys::current_uid(), brain, &file))?;
+    if let Err(e) = run_steps(&install_plan(same, mac, sys::current_uid(), brain, &file)) {
+        // Put the file back as it was, so running install again registers it rather than
+        // finding it unchanged and saying "already installed".
+        let _ = match &old {
+            Some(old) => write_atomic(&file, old),
+            None => fs::remove_file(&file),
+        };
+        return Err(e);
+    }
     let message = format!(
         "installed: {}; registered with {}",
         file.display(),

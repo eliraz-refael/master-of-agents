@@ -210,7 +210,9 @@ async fn a_zone_change_moves_the_backup_deadline() {
 #[tokio::test]
 async fn status_names_the_brain_and_the_caller() {
     let rig = rig().await;
-    let status = within(rig.core.status(CallerInfo::default())).await;
+    let status = within(rig.core.status(CallerInfo::default()))
+        .await
+        .expect("the core is running");
     assert_eq!(status.brain, "default");
     assert_eq!(status.caller, "an agent outside moa");
     assert!(!status.sessions.is_empty());

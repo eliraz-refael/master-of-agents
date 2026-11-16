@@ -37,6 +37,9 @@ const READY_WAIT: Duration = Duration::from_secs(10);
 /// How long a daemon told to `upgrade` has to exit.
 const EXIT_WAIT: Duration = Duration::from_secs(10);
 const EXIT_POLL: Duration = Duration::from_millis(50);
+/// How long to retry connecting to a daemon another starter holds the brain for: it may not
+/// have bound its socket yet.
+const BIND_WAIT: Duration = Duration::from_secs(2);
 /// How long to read to the end of a connection after `shutdown` or `upgrade`.
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
@@ -478,9 +481,20 @@ async fn start(opts: &ClientOptions, exe: &Path, sock: &Path) -> Result<UnixStre
         ReadyLine::Failed(line) => Err(start_error(paths, brain, &line)),
         ReadyLine::Ready => Ok(UnixStream::connect(sock).await?),
         // Another daemon holds the brain; it may still be binding its socket.
-        ReadyLine::TryAgain => UnixStream::connect(sock)
+        ReadyLine::TryAgain => connect_soon(sock, BIND_WAIT)
             .await
             .map_err(|e| start_error(paths, brain, &format!("it didn't answer: {e}"))),
+    }
+}
+
+/// Connects, retrying while nothing listens yet, for up to `limit`.
+async fn connect_soon(sock: &Path, limit: Duration) -> io::Result<UnixStream> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match UnixStream::connect(sock).await {
+            Err(e) if is_absent(&e) && Instant::now() < deadline => sleep(EXIT_POLL).await,
+            other => return other,
+        }
     }
 }
 
