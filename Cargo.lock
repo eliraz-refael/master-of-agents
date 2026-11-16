@@ -741,6 +741,7 @@ dependencies = [
  "moa-store",
  "proptest",
  "rusqlite",
+ "rustix",
  "serde_json",
  "tempfile",
 ]
@@ -750,8 +751,11 @@ name = "moa-tmux"
 version = "0.1.0"
 dependencies = [
  "moa-core",
+ "moa-platform",
+ "moa-testkit",
  "proptest",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

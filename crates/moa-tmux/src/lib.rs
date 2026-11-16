@@ -1,5 +1,6 @@
-//! The tmux layer: the control-mode byte parser (and, later, the client built on it).
+//! The tmux layer: the control-mode byte parser and the control client built on it.
 
+pub mod client;
 mod parse;
 
 pub use moa_core::tmux::cmd::Cmd;

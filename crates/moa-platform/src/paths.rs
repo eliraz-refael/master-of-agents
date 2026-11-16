@@ -1,7 +1,7 @@
 //! Where moa keeps things. `MOA_ROOT` moves everything; nothing here creates
 //! directories except [`ensure_private_dir`].
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -271,4 +271,13 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), PathsError> {
         ));
     }
     Ok(())
+}
+
+/// The first `dir/name` in `path` that is a regular file with an execute bit. Only
+/// absolute entries count: an empty or relative one would mean the current folder.
+pub fn which(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0))
 }
