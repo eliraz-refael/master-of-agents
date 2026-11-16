@@ -16,6 +16,7 @@ use crate::effect::RefuseWrites;
 use crate::model::*;
 use crate::op::Action;
 use crate::publish::{ACTIVITY_SHOWN, Model};
+use crate::tmux::link::{Link, TmuxState};
 
 /// The next id for each integer-id table. SQLite rowids start at 1, so does this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -173,6 +174,19 @@ pub struct StatusData {
     pub sessions: BTreeMap<String, usize>,
     /// Who is asking, as [`Caller`] shows it.
     pub caller: String,
+    /// The terminal server, while linked.
+    pub tmux: Option<TmuxLinkData>,
+    /// How many times the terminal server restarted while this daemon ran.
+    pub tmux_restarts: u32,
+}
+
+/// The terminal server the daemon is linked to: its tmux version and generation.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TmuxLinkData {
+    pub version: String,
+    pub pid: i64,
+    pub start: i64,
 }
 
 pub struct State {
@@ -198,6 +212,7 @@ pub struct State {
     meta: BTreeMap<String, String>,
     next_ids: NextIds,
     unknown: Vec<LoadNote>,
+    pub(crate) tmux: TmuxState,
 }
 
 impl State {
@@ -226,6 +241,7 @@ impl State {
             meta: BTreeMap::new(),
             next_ids: NextIds::default(),
             unknown: Vec::new(),
+            tmux: TmuxState::default(),
         }
     }
 
@@ -266,11 +282,30 @@ impl State {
                 *n += 1;
             }
         }
+        let tmux = match &self.tmux.link {
+            Link::Up {
+                generation,
+                version,
+                ..
+            } => Some(TmuxLinkData {
+                version: version.clone(),
+                pid: generation.pid,
+                start: generation.start,
+            }),
+            Link::Down | Link::Connecting => None,
+        };
         StatusData {
             brain: self.brain.as_str().to_string(),
             sessions,
             caller: self.caller(caller).to_string(),
+            tmux,
+            tmux_restarts: self.tmux.restarts,
         }
+    }
+
+    /// The terminal server link.
+    pub fn tmux(&self) -> &TmuxState {
+        &self.tmux
     }
 
     pub fn model(&self) -> Arc<Model> {
@@ -279,6 +314,10 @@ impl State {
 
     pub fn sessions(&self) -> impl Iterator<Item = &Session> {
         self.sessions.values()
+    }
+
+    pub(crate) fn pane_bindings(&self) -> impl Iterator<Item = &PaneBinding> {
+        self.pane_bindings.values()
     }
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {
@@ -391,7 +430,7 @@ impl State {
         Caller::Unknown { folder }
     }
 
-    /// Replaces every row. The published rev is kept.
+    /// Replaces every row. The published rev and the tmux link are kept.
     pub(crate) fn load(&mut self, snap: Snapshot) {
         fn by<K: Ord, V>(rows: Vec<V>, key: impl Fn(&V) -> K) -> BTreeMap<K, V> {
             rows.into_iter().map(|r| (key(&r), r)).collect()

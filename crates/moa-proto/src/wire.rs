@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use moa_core::op::{NoParams, Op};
 use moa_core::publish::Topic;
-use moa_core::state::CallerInfo;
+use moa_core::state::{CallerInfo, TmuxLinkData};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -45,6 +45,11 @@ pub struct StatusOk {
     pub launches: u64,
     pub sessions: BTreeMap<String, usize>,
     pub caller: String,
+    /// The terminal server, while linked.
+    #[serde(default)]
+    pub tmux: Option<TmuxLinkData>,
+    #[serde(default)]
+    pub tmux_restarts: u32,
 }
 
 /// Which topics a connection follows. `since` is the rev the client already holds.

@@ -323,6 +323,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             launches: moa_platform::spawn::launches(),
             sessions: data.sessions,
             caller: data.caller,
+            tmux: data.tmux,
+            tmux_restarts: data.tmux_restarts,
         };
         self.say(encode_result(id, &ok)).await
     }

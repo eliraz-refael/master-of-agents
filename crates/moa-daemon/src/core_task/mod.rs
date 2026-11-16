@@ -19,6 +19,7 @@ use moa_core::effect::{Input, Publish};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
+use moa_core::tmux::cmd::Cmd;
 use moa_store::actor::{Fault, StoreHandle};
 use moa_store::{Store, StoreError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -80,6 +81,8 @@ pub struct Stats {
     pub timer_fires: AtomicU64,
     pub commit_failures: AtomicU64,
     pub reloads: AtomicU64,
+    /// Views of saved state for the terminal server that were released after a commit.
+    pub views_released: AtomicU64,
 }
 
 /// One reply on a connection.
@@ -117,6 +120,11 @@ enum Held {
     },
     /// The answer so far, and the caller, so a reload can compute it again.
     Status(oneshot::Sender<StatusData>, StatusData, CallerInfo),
+    /// A view of saved state for the terminal server.
+    Tmux {
+        conn: u64,
+        cmds: Vec<Cmd>,
+    },
     Barrier(oneshot::Sender<()>),
     Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
@@ -214,6 +222,7 @@ impl CoreHandle {
 
         let conns = Conns::default();
         let core = Core {
+            inbox: inbox.downgrade(),
             state,
             store: store.clone(),
             clock: opts.clock,
@@ -319,6 +328,12 @@ impl CoreHandle {
     #[doc(hidden)]
     pub fn crash_core(&self) {
         let _ = self.inbox.send(Item::Crash);
+    }
+
+    /// Tests only: the link reports `input`, as the terminal link will once it exists.
+    #[doc(hidden)]
+    pub fn tmux_in(&self, input: moa_core::effect::TmuxIn) {
+        let _ = self.inbox.send(Item::Input(Input::Tmux(input)));
     }
 
     pub fn zone_changed(&self, tz: TimeZone) {

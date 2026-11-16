@@ -88,6 +88,14 @@ pub enum Op {
     },
     #[serde(rename = "suggestion.ls")]
     SuggestionLs(NoParams),
+    /// The front door's handshake: answers `{"running": bool}` once moa's terminal server is
+    /// linked and has its `moa` session, or when there is no server. `tmux` is the
+    /// absolute path of the tmux program the front door found.
+    #[serde(rename = "tmux.ensure")]
+    TmuxEnsure {
+        #[serde(default)]
+        tmux: Option<PathBuf>,
+    },
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -226,6 +234,7 @@ impl Op {
         "suggest",
         "suggestion.answer",
         "suggestion.ls",
+        "tmux.ensure",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -250,6 +259,7 @@ impl Op {
             | Op::Brief(_)
             | Op::Attention(_)
             | Op::SuggestionLs(_)
+            | Op::TmuxEnsure { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -275,6 +285,7 @@ impl Op {
             Op::Suggest { .. } => "suggest",
             Op::SuggestionAnswer { .. } => "suggestion.answer",
             Op::SuggestionLs(_) => "suggestion.ls",
+            Op::TmuxEnsure { .. } => "tmux.ensure",
             Op::DebugPanic => "debug.panic",
         }
     }

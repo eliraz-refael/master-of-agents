@@ -37,6 +37,21 @@ impl DisplayState {
         DisplayState::Archived,
     ];
 
+    /// The lowercase name: what `@moa_state` holds.
+    pub fn word(self) -> &'static str {
+        match self {
+            DisplayState::Waiting => "waiting",
+            DisplayState::Question => "question",
+            DisplayState::Failed => "failed",
+            DisplayState::Done => "done",
+            DisplayState::Working => "working",
+            DisplayState::Idle => "idle",
+            DisplayState::Asleep => "asleep",
+            DisplayState::Ended => "ended",
+            DisplayState::Archived => "archived",
+        }
+    }
+
     pub fn glyph(self) -> &'static str {
         match self {
             DisplayState::Waiting => "⚠",

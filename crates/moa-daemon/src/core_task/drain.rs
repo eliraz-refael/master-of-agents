@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use moa_core::change::Change;
-use moa_core::effect::{Effect, Input, LogLevel, LogLine, Publish, check_order};
+use moa_core::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, check_order};
 use moa_core::op::OpError;
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::State;
@@ -25,6 +25,9 @@ use crate::clock::Clock;
 use crate::scheduler::SchedCmd;
 
 pub(super) struct Core {
+    /// The core's own inbox, for answers it gives itself. Weak, so the loop still ends
+    /// when every handle has gone.
+    pub(super) inbox: mpsc::WeakUnboundedSender<Item>,
     pub(super) state: State,
     pub(super) store: SharedStore,
     pub(super) clock: Arc<dyn Clock>,
@@ -252,8 +255,18 @@ impl Core {
                 Effect::Backup { day } => self.due_backups.push(day),
                 Effect::Publish(p) => held.push(Held::Publish(p)),
                 Effect::Reply { conn, req, result } => held.push(Held::Reply { conn, req, result }),
+                // A view of saved state waits for the commit, as replies do.
+                Effect::Tmux {
+                    conn,
+                    cmds,
+                    token: None,
+                } => held.push(Held::Tmux { conn, cmds }),
                 // Handled above.
-                Effect::SetTimer { .. } | Effect::CancelTimer(_) | Effect::Log(_) => {}
+                Effect::SetTimer { .. }
+                | Effect::CancelTimer(_)
+                | Effect::Log(_)
+                | Effect::Tmux { token: Some(_), .. }
+                | Effect::TmuxConnect { .. } => {}
             }
         }
         Stepped::Done
@@ -272,6 +285,20 @@ impl Core {
                 LogLevel::Warn => tracing::warn!("{message}"),
                 LogLevel::Error => tracing::error!("{message}"),
             },
+            // There is no terminal link yet: the core hears so through its inbox, never
+            // inside the `handle` that asked.
+            Effect::TmuxConnect { .. } => {
+                if let Some(inbox) = self.inbox.upgrade() {
+                    let down = Input::Tmux(TmuxIn::Down(Down::Disabled));
+                    let _ = inbox.send(Item::Input(down));
+                }
+            }
+            // The commands stay out of the log.
+            Effect::Tmux {
+                conn,
+                cmds,
+                token: Some(token),
+            } => tracing::debug!(conn, cmds = cmds.len(), ?token, "no terminal link: dropped"),
             _ => {}
         }
     }
@@ -314,6 +341,11 @@ impl Core {
                 Held::Reply { conn, req, result } => reply_to(&self.conns, conn, req, result),
                 Held::Status(reply, data, _) => {
                     let _ = reply.send(data);
+                }
+                // The commands stay out of the log.
+                Held::Tmux { conn, cmds } => {
+                    self.stats.views_released.fetch_add(1, Ordering::SeqCst);
+                    tracing::debug!(conn, cmds = cmds.len(), "no terminal link: dropped");
                 }
                 Held::Barrier(reply) => {
                     self.store().sync().await;
