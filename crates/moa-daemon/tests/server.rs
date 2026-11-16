@@ -219,7 +219,11 @@ async fn another_uid_is_turned_away() {
     // The daemon closes the connection without a word: the write may or may not get
     // through, and the read ends in EOF or a reset.
     c.try_write(&request(1, "status", json!({})));
-    assert!(c.read().is_none());
+    let got = c.read();
+    assert!(
+        got.is_none(),
+        "expected the connection to close, got {got:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -350,7 +354,7 @@ async fn an_op_in_flight_at_shutdown_is_answered_not_cut_off() {
         b.hello();
         let mut sub = Client::connect(&d.sock);
         sub.hello();
-        sub.call("subscribe", json!({"topics": ["tasks"]}));
+        sub.call("subscribe", json!({"topics": ["groups"]}));
         let mut a = Client::connect(&d.sock);
         a.hello();
 
@@ -359,6 +363,10 @@ async fn an_op_in_flight_at_shutdown_is_answered_not_cut_off() {
             "group.add",
             json!({"path": format!("late{round}")}),
         ));
+        // The core has handled B's op once the subscriber sees it; B's reply is then on its
+        // way as the shutdown comes. (That B's line was read before the shutdown is what
+        // makes the op in flight: a line that arrives after the daemon closes is never read.)
+        sub.notice("patch");
         // The requester of the shutdown still gets its reply.
         assert_eq!(a.call("shutdown", json!({}))["result"], json!({}));
 
