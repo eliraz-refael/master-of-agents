@@ -606,6 +606,7 @@ dependencies = [
 name = "moa-proto"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "insta",
  "moa-core",
  "schemars",

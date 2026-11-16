@@ -75,6 +75,14 @@ pub enum Op {
     Attention(NoParams),
 }
 
+/// What a suggestion action parses to: an op the core runs, or a verb this build can't run yet.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[allow(clippy::large_enum_variant)] // short-lived, never stored in bulk
+pub enum Action {
+    Op(Op),
+    NotYet(&'static str),
+}
+
 /// The params of an op that takes none. Missing, `null` and `{}` all decode (a unit variant
 /// would reject `{}`); it encodes as `{}`. Anything else is refused.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

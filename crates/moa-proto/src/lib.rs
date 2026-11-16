@@ -3,6 +3,7 @@
 //! Pure: no IO, no async runtime. The daemon and the client both depend on this crate, so
 //! a line means the same thing at both ends.
 
+pub mod cli;
 mod patch;
 mod wire;
 
