@@ -140,6 +140,10 @@ fn racing_clients_start_one_daemon() {
     }
     ok(&r.moa(&["status"]));
     assert_eq!(r.sockets().len(), 1, "{:?}", r.sockets());
+    // A daemon that gets past the lock logs one start line; a second one would show here.
+    let log = fs::read_to_string(r.tb.paths().log("default")).unwrap();
+    let starts = log.matches("moa daemon starting for brain default").count();
+    assert_eq!(starts, 1, "one daemon took the lock:\n{log}");
 }
 
 #[test]
@@ -276,9 +280,10 @@ fn status_prints_three_lines_in_state_order() {
         .split(", ")
         .map(|p| p.split(' ').next().unwrap())
         .collect();
-    let order = [
-        "waiting", "question", "failed", "done", "working", "idle", "asleep",
-    ];
+    let order: Vec<String> = moa_core::live::DisplayState::ALL
+        .iter()
+        .map(|d| moa_core::publish::word(*d))
+        .collect();
     let mut at = 0;
     for w in &words {
         let i = order
