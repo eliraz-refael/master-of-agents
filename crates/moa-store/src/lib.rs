@@ -11,12 +11,16 @@ use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::{Migrations, SchemaVersion};
 
 pub mod accounts;
+pub mod actor;
 pub mod backup;
 pub mod export;
 pub mod import;
+mod rows;
 mod schema;
+mod snapshot;
 pub mod spike;
 
+pub use moa_core::state::Snapshot;
 pub use schema::{SCHEMA_VERSION, migrations};
 
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];

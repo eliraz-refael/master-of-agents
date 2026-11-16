@@ -115,11 +115,7 @@ pub fn text_not_null(text: Option<String>, reason: &'static str) -> Ruled<String
 
 /// Trims `/` and drops empty segments (`A//B/` becomes `A/B`), warning when that changed the path.
 pub fn group_path(raw: &str) -> Ruled<String> {
-    let clean = raw
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/");
+    let clean = moa_core::model::normalize_group_path(raw);
     let note = (clean != raw).then_some(R_GROUP_PATH_FIXED);
     (clean, note)
 }

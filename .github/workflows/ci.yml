@@ -33,6 +33,11 @@ jobs:
         with: { tool: cargo-nextest }
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # A CI step, not a test: the Nix build sandbox can't run `cargo tree`.
+      - name: moa-core stays free of IO crates
+        run: |
+          out=$(cargo tree -p moa-core -e normal --prefix none)
+          ! grep -E '^(tokio|rusqlite|libc) ' <<<"$out"
       - run: cargo nextest run --workspace
 
   macos:

@@ -12,6 +12,7 @@ jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 shell-words.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
@@ -22,6 +23,7 @@ rusqlite_migration.workspace = true
 moa-agents = { path = "../moa-agents" }
 moa-testkit = { path = "../moa-testkit" }
 proptest.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true
