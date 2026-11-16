@@ -240,6 +240,45 @@ fn export_spike_round_trip_via_cli() {
 }
 
 #[test]
+fn export_spike_refuses_an_existing_target() {
+    let r = rig();
+    let v1 = r.path("v1.db");
+    let o = r.moa(&["adopt-spike", "--from", s(&r.spike), "--into", s(&v1)]);
+    assert!(o.status.success(), "{}", text(&o));
+    let into = r.path("moa.db");
+    fs::write(&into, b"mine").unwrap();
+
+    let o = r.moa(&["export-spike", "--from", s(&v1), "--into", s(&into)]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("moa.db already exists; moa never overwrites a brain"),
+        "{}",
+        text(&o)
+    );
+    assert!(!text(&o).contains(s(r.dir.path())));
+    assert_eq!(fs::read(&into).unwrap(), b"mine");
+}
+
+#[test]
+fn export_spike_refuses_a_sidecar_name() {
+    let r = rig();
+    let v1 = r.path("v1.db");
+    let o = r.moa(&["adopt-spike", "--from", s(&r.spike), "--into", s(&v1)]);
+    assert!(o.status.success(), "{}", text(&o));
+    let into = r.path("x.db-wal");
+
+    let o = r.moa(&["export-spike", "--from", s(&v1), "--into", s(&into)]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("x.db-wal is a name SQLite keeps for its own files; pick another"),
+        "{}",
+        text(&o)
+    );
+    assert!(!text(&o).contains("already exists"), "{}", text(&o));
+    assert!(!into.exists());
+}
+
+#[test]
 fn export_from_a_file_that_is_not_a_v1_brain_says_so() {
     let r = rig();
     let garbage = r.path("garbage.db");

@@ -25,6 +25,8 @@ serde_json = "1"
 uuid = { version = "1", default-features = false, features = ["serde"] }
 thiserror = "2"
 proptest = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util", "signal"] }
 rusqlite = { version = "0.41", features = ["bundled", "backup", "hooks", "functions"] }  # held at 0.41 by rusqlite_migration 2.7
 rusqlite_migration = "2.7"
 sha2 = "0.10"
