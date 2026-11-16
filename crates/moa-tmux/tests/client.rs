@@ -264,3 +264,61 @@ async fn prompt_text_round_trips() {
     );
     client.close().await;
 }
+
+fn source_cmd(sb: &Sandbox, body: &str) -> Cmd {
+    let path = sb.home().join("moa.tmux");
+    std::fs::write(&path, body).unwrap();
+    Cmd::new("source-file").arg(path.to_string_lossy())
+}
+
+const THREE: &str = "set-option -g @a 1\nset-option -g @b 2\nset-option -g @c 3\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_file_is_one_result_and_does_not_shift_the_rest() {
+    let sb = Sandbox::start().unwrap();
+    let (client, _events, _) = connect(&sb).await;
+    let r = client.run(&source_cmd(&sb, THREE)).await;
+    assert_eq!(r, Ok(vec![]));
+    assert_eq!(client.run(&display("next")).await, Ok(vec!["next".into()]));
+    assert_eq!(
+        client.run(&display("#{@c}")).await,
+        Ok(vec!["3".to_string()])
+    );
+    client.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_source_file_is_an_error_and_does_not_shift_the_rest() {
+    let sb = Sandbox::start().unwrap();
+    let (client, _events, _) = connect(&sb).await;
+    let bad = "set-option -g @a 1\nno-such-command\nset-option -g @c 3\n";
+    let r = client.run(&source_cmd(&sb, bad)).await;
+    assert!(matches!(r, Err(CmdError::Tmux(_))), "{r:?}");
+    assert_eq!(client.run(&display("next")).await, Ok(vec!["next".into()]));
+    client.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tagged_batch_with_source_file_keeps_its_results_aligned() {
+    let sb = Sandbox::start().unwrap();
+    let (client, mut events, _) = connect(&sb).await;
+    client.send(vec![source_cmd(&sb, THREE), display("a")], Some(3));
+    let (tag, results) = next_replies(&mut events).await;
+    assert_eq!(tag, 3);
+    assert_eq!(results, vec![Ok(vec![]), Ok(vec!["a".to_string()])]);
+    client.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_file_command_that_fails_at_run_time_is_an_error() {
+    let sb = Sandbox::start().unwrap();
+    let (client, _events, _) = connect(&sb).await;
+    let body = "set-option -g @a 1\nset-option -t nosuch: @b 2\nset-option -g @c 3\n";
+    let r = client.run(&source_cmd(&sb, body)).await;
+    match &r {
+        Err(CmdError::Tmux(t)) => assert!(t.contains("no such session"), "{t}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(client.run(&display("next")).await, Ok(vec!["next".into()]));
+    client.close().await;
+}

@@ -67,6 +67,13 @@ impl Cmd {
         line
     }
 
+    /// Whether this command runs other commands, each of which tmux answers with its own
+    /// reply block over a control client. Only `source-file` does; the client sends a
+    /// sentinel after it to find where its blocks end.
+    pub fn nests(&self) -> bool {
+        self.name == "source-file"
+    }
+
     /// Whether moa may send this command.
     pub fn check(&self) -> Result<(), Refused> {
         if !ALLOWED.contains(&self.name) {

@@ -25,6 +25,9 @@ pub const INFO_FORMAT: &str = "V #{version} #{pid} #{start_time} #{client_name}"
 /// How long `close` waits for the child to exit before it signals it.
 const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
+/// How long `connect` waits for the server's first reply.
+const CONNECT_WAIT: Duration = Duration::from_secs(5);
+
 pub struct ConnectOptions {
     /// The tmux program (an absolute path).
     pub tmux: PathBuf,
@@ -125,7 +128,12 @@ pub fn version_ok(v: &str) -> bool {
 
 /// From 3.8 tmux holds notifications back until after a reply block.
 fn notifications_after_blocks(v: &str) -> bool {
-    v == "master" || v.starts_with("next-") || major_minor(v).is_some_and(|mm| mm >= (3, 8))
+    // Unsure (`master`, or a version that doesn't parse) keeps in-block notifications on:
+    // the parser's `%`-line rule then applies, which is the safer way to be wrong.
+    match v.strip_prefix("next-") {
+        Some(rest) => major_minor(rest).is_some_and(|mm| mm >= (3, 9)),
+        None => major_minor(v).is_some_and(|mm| mm >= (3, 8)),
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -193,6 +201,14 @@ fn deliver(mut results: Vec<Reply>, done: Done, events: Option<&mpsc::UnboundedS
 struct Slot {
     batch: Arc<Batch>,
     index: usize,
+    /// For a command that nests: its blocks are absorbed up to the block that holds this.
+    sentinel: Option<Sentinel>,
+}
+
+struct Sentinel {
+    text: String,
+    /// The first error among the absorbed blocks.
+    error: Option<String>,
 }
 
 /// What the writer and the reader share. The writer pushes a command's slot before it
@@ -247,7 +263,7 @@ impl ControlClient {
         };
         let first_line = first_stderr_line(stderr);
 
-        let first = format!("display-message -p '{INFO_FORMAT}'\n");
+        let first = Cmd::new("display-message").args(["-p", INFO_FORMAT]).line() + "\n";
         if stdin.write_all(first.as_bytes()).await.is_err() {
             return Err(exited_error(first_line).await);
         }
@@ -256,10 +272,15 @@ impl ControlClient {
         let mut parser = Parser::new();
         let mut buf = vec![0u8; 64 << 10];
         let mut leftover = Vec::new();
+        let deadline = tokio::time::Instant::now() + CONNECT_WAIT;
         let reply = 'read: loop {
-            let n = match stdout.read(&mut buf).await {
-                Ok(0) | Err(_) => return Err(exited_error(first_line).await),
-                Ok(n) => n,
+            let n = match tokio::time::timeout_at(deadline, stdout.read(&mut buf)).await {
+                Err(_) => {
+                    kill_unless_exited(pid, &exited);
+                    return Err(ConnectError::Protocol("tmux didn't answer"));
+                }
+                Ok(Ok(0) | Err(_)) => return Err(exited_error(first_line).await),
+                Ok(Ok(n)) => n,
             };
             let frames = match parser.push(&buf[..n]) {
                 Ok(f) => f,
@@ -337,7 +358,8 @@ impl ControlClient {
     }
 
     /// Writes the commands in one go. With a tag, the results arrive as `Event::Replies`;
-    /// without one, failures are logged.
+    /// without one, failures are logged. A batch in which every command is refused is
+    /// answered at once, possibly before earlier batches that are still in flight.
     pub fn send(&self, cmds: Vec<Cmd>, tag: Option<u64>) {
         let done = match tag {
             Some(t) => Done::Tag(t),
@@ -415,6 +437,7 @@ async fn write_loop(
     mut rx: mpsc::UnboundedReceiver<Msg>,
     shared: Arc<Mutex<Shared>>,
 ) {
+    let mut nonce = 0u64;
     while let Some(msg) = rx.recv().await {
         let Msg::Batch { cmds, done } = msg else {
             break;
@@ -422,6 +445,7 @@ async fn write_loop(
         let mut results: Vec<Option<Reply>> = Vec::with_capacity(cmds.len());
         let mut lines = String::new();
         let mut written = Vec::new();
+        let mut sentinels: Vec<Option<String>> = Vec::new();
         for (i, cmd) in cmds.iter().enumerate() {
             match cmd.check() {
                 Ok(()) => {
@@ -429,6 +453,16 @@ async fn write_loop(
                     written.push(i);
                     lines.push_str(&cmd.line());
                     lines.push('\n');
+                    // A command that runs others gets one block per command it ran; a
+                    // sentinel right after marks where they end.
+                    sentinels.push(cmd.nests().then(|| {
+                        nonce += 1;
+                        let text = format!("Z {nonce}");
+                        let probe = Cmd::new("display-message").args(["-p", text.as_str()]);
+                        lines.push_str(&probe.line());
+                        lines.push('\n');
+                        text
+                    }));
                 }
                 Err(r) => results.push(Some(Err(CmdError::Refused(r.0)))),
             }
@@ -451,10 +485,11 @@ async fn write_loop(
                 }
                 continue;
             }
-            for &index in &written {
+            for (&index, sentinel) in written.iter().zip(sentinels) {
                 sh.pending.push_back(Slot {
                     batch: Arc::clone(&batch),
                     index,
+                    sentinel: sentinel.map(|text| Sentinel { text, error: None }),
                 });
             }
             sh.events.clone()
@@ -537,12 +572,38 @@ async fn read_loop(
 fn handle(frame: Frame, shared: &Mutex<Shared>, events: &mpsc::UnboundedSender<Event>) {
     match frame {
         // Flag 0 is a block tmux ran for itself (a hook, a config file), not our command.
-        Frame::Reply { flags: 0, .. } | Frame::Stray => {}
+        Frame::Reply { flags: 0, .. } => {}
+        // tmux reports a file it couldn't parse outside any block: a bare line before 3.8,
+        // `%config-error` from 3.8, and the file's own block still ends with `%end`.
+        Frame::Stray => file_error(shared),
         Frame::Reply { error, lines, .. } => {
-            let Some(slot) = lock(shared).pending.pop_front() else {
+            let mut sh = lock(shared);
+            let Some(front) = sh.pending.front_mut() else {
                 tracing::warn!("a reply from tmux matched no command");
                 return;
             };
+            if let Some(s) = &mut front.sentinel {
+                if error || lines != [s.text.as_str()] {
+                    // One of the blocks of the command that nests.
+                    if error && s.error.is_none() {
+                        s.error = Some(lines.join("\n"));
+                    }
+                    return;
+                }
+                // The sentinel itself: the command is done, and callers never see it.
+                let failure = s.error.take();
+                let Some(slot) = sh.pending.pop_front() else {
+                    return;
+                };
+                drop(sh);
+                let r = failure.map_or(Ok(Vec::new()), |e| Err(CmdError::Tmux(e)));
+                slot.batch.set(slot.index, r, Some(events));
+                return;
+            }
+            let Some(slot) = sh.pending.pop_front() else {
+                return;
+            };
+            drop(sh);
             let r = if error {
                 Err(CmdError::Tmux(lines.join("\n")))
             } else {
@@ -551,8 +612,20 @@ fn handle(frame: Frame, shared: &Mutex<Shared>, events: &mpsc::UnboundedSender<E
             slot.batch.set(slot.index, r, Some(events));
         }
         Frame::Notification(n) => {
+            if n == Notification::Other("config-error") {
+                file_error(shared);
+            }
             let _ = events.send(Event::Notification(n));
         }
+    }
+}
+
+/// A file that didn't parse fails the command that nests, which is at the front.
+fn file_error(shared: &Mutex<Shared>) {
+    let mut sh = lock(shared);
+    if let Some(s) = sh.pending.front_mut().and_then(|f| f.sentinel.as_mut()) {
+        s.error
+            .get_or_insert_with(|| "the file has an error".to_string());
     }
 }
 
@@ -572,10 +645,10 @@ mod tests {
 
     #[test]
     fn the_notification_knob_flips_at_3_8() {
-        for v in ["3.8", "3.8a", "4.0", "next-3.9", "master"] {
+        for v in ["3.8", "3.8a", "4.0", "next-3.9", "next-3.10"] {
             assert!(notifications_after_blocks(v), "{v}");
         }
-        for v in ["3.4", "3.5a", "3.7"] {
+        for v in ["3.4", "3.5a", "3.7", "next-3.8", "master", "", "openbsd-7"] {
             assert!(!notifications_after_blocks(v), "{v}");
         }
     }

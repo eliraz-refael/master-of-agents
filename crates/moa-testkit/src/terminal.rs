@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use rustix::fs::{Mode, OFlags};
+use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::termios::{Winsize, tcsetwinsize};
 
@@ -39,12 +40,17 @@ impl Terminal {
         rows: u16,
     ) -> io::Result<Terminal> {
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+        // Not every platform has an open flag for it, and a child must never inherit it.
+        fcntl_setfd(&master, FdFlags::CLOEXEC)?;
         grantpt(&master)?;
         unlockpt(&master)?;
         let tty = ptsname(&master, Vec::new())?;
         let tty = tty.to_string_lossy().into_owned();
-        let slave: OwnedFd =
-            rustix::fs::open(tty.as_str(), OFlags::RDWR | OFlags::NOCTTY, Mode::empty())?;
+        let slave: OwnedFd = rustix::fs::open(
+            tty.as_str(),
+            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
         tcsetwinsize(
             &slave,
             Winsize {
