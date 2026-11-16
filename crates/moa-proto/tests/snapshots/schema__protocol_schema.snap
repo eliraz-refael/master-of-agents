@@ -1,0 +1,1076 @@
+---
+source: crates/moa-proto/tests/schema.rs
+expression: all
+---
+{
+  "Call": {
+    "$defs": {
+      "Answer": {
+        "description": "How a suggestion is answered.",
+        "enum": [
+          "yes",
+          "no",
+          "later"
+        ],
+        "type": "string"
+      },
+      "CallerInfo": {
+        "description": "What a caller says about itself (the hook environment).",
+        "properties": {
+          "claude_session": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "moa_session": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Hello": {
+        "description": "A client's greeting: who it is, which build, and what it says about its caller.",
+        "properties": {
+          "build": {
+            "type": "string"
+          },
+          "caller": {
+            "$ref": "#/$defs/CallerInfo"
+          },
+          "client": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client",
+          "build",
+          "caller"
+        ],
+        "type": "object"
+      },
+      "NoParams": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "Op": {
+        "description": "One verb with its arguments. On the wire: `{\"method\": \"group.add\", \"params\": {...}}`.",
+        "oneOf": [
+          {
+            "properties": {
+              "method": {
+                "const": "group.add",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "group.rename",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "new": {
+                    "type": "string"
+                  },
+                  "old": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "old",
+                  "new"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "group.rm",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "session.ls",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "all": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "session.set",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "group": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "q": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "q"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "session.archive",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "qs": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "qs"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "session.find",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "task.ls",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "all": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "project": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "task.add",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/TaskAdd"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "task.set",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/TaskSet"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "note.add",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "kind": {
+                    "default": null,
+                    "description": "`None` is `fact`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "project": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "project.show",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "project.add",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "brief",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "attention",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "suggest",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "actions": {
+                    "default": [],
+                    "description": "Each is a moactl action, as typed: `task set 1 --status done`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "suggestion.answer",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "answer": {
+                    "$ref": "#/$defs/Answer"
+                  },
+                  "id": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "answer"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "suggestion.ls",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Subscribe": {
+        "description": "Which topics a connection follows. `since` is the rev the client already holds.",
+        "properties": {
+          "since": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/$defs/Topic"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "topics"
+        ],
+        "type": "object"
+      },
+      "TaskAdd": {
+        "description": "`task add`'s arguments, all the user's raw text.",
+        "properties": {
+          "blocked_on": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "type": "string"
+          },
+          "session": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "today": {
+            "default": false,
+            "type": "boolean"
+          },
+          "who": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "project",
+          "title"
+        ],
+        "type": "object"
+      },
+      "TaskSet": {
+        "description": "`task set`'s arguments. `Some(\"\")` clears `due`, `priority`, `session`, `note` and\n`blocked_on`.",
+        "properties": {
+          "blocked_on": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "not_today": {
+            "default": false,
+            "type": "boolean"
+          },
+          "note": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "today": {
+            "default": false,
+            "type": "boolean"
+          },
+          "who": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "Topic": {
+        "description": "A named set of rows a view can subscribe to.",
+        "enum": [
+          "sessions",
+          "groups",
+          "projects",
+          "tasks",
+          "suggestions",
+          "asks",
+          "activity",
+          "status"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "properties": {
+          "method": {
+            "const": "hello"
+          },
+          "params": {
+            "$ref": "#/$defs/Hello"
+          }
+        },
+        "required": [
+          "method",
+          "params"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "method": {
+            "const": "status"
+          },
+          "params": {
+            "$ref": "#/$defs/NoParams"
+          }
+        },
+        "required": [
+          "method"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "method": {
+            "const": "shutdown"
+          },
+          "params": {
+            "$ref": "#/$defs/NoParams"
+          }
+        },
+        "required": [
+          "method"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "method": {
+            "const": "upgrade"
+          },
+          "params": {
+            "$ref": "#/$defs/NoParams"
+          }
+        },
+        "required": [
+          "method"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "method": {
+            "const": "subscribe"
+          },
+          "params": {
+            "$ref": "#/$defs/Subscribe"
+          }
+        },
+        "required": [
+          "method",
+          "params"
+        ],
+        "type": "object"
+      },
+      {
+        "$ref": "#/$defs/Op"
+      }
+    ],
+    "title": "Call"
+  },
+  "CoreEvent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Something the core tells its views that is not a row.",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "error",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "ui",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "CoreEvent"
+  },
+  "HelloOk": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "brain": {
+        "type": "string"
+      },
+      "build": {
+        "type": "string"
+      },
+      "matched": {
+        "type": "boolean"
+      },
+      "pid": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "rev": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "brain",
+      "build",
+      "rev",
+      "matched",
+      "pid"
+    ],
+    "title": "HelloOk",
+    "type": "object"
+  },
+  "Patch": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What changed since the subscriber's last rev: rows to insert or replace (each carries its\n`\"key\"`) and keys to remove, by topic. A topic that did not change is absent.",
+    "properties": {
+      "delete": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "asks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sessions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "suggestions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tasks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "rev": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "upsert": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "items": true,
+            "type": "array"
+          },
+          "asks": {
+            "items": true,
+            "type": "array"
+          },
+          "groups": {
+            "items": true,
+            "type": "array"
+          },
+          "projects": {
+            "items": true,
+            "type": "array"
+          },
+          "sessions": {
+            "items": true,
+            "type": "array"
+          },
+          "status": {
+            "items": true,
+            "type": "array"
+          },
+          "suggestions": {
+            "items": true,
+            "type": "array"
+          },
+          "tasks": {
+            "items": true,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "required": [
+      "rev",
+      "upsert",
+      "delete"
+    ],
+    "title": "Patch",
+    "type": "object"
+  },
+  "SnapshotMsg": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The full rows of the subscribed topics at one rev.",
+    "properties": {
+      "rev": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "topics": {
+        "additionalProperties": false,
+        "properties": {
+          "activity": {
+            "items": true,
+            "type": "array"
+          },
+          "asks": {
+            "items": true,
+            "type": "array"
+          },
+          "groups": {
+            "items": true,
+            "type": "array"
+          },
+          "projects": {
+            "items": true,
+            "type": "array"
+          },
+          "sessions": {
+            "items": true,
+            "type": "array"
+          },
+          "status": {
+            "items": true,
+            "type": "array"
+          },
+          "suggestions": {
+            "items": true,
+            "type": "array"
+          },
+          "tasks": {
+            "items": true,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "required": [
+      "rev",
+      "topics"
+    ],
+    "title": "SnapshotMsg",
+    "type": "object"
+  },
+  "StatusOk": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "brain": {
+        "type": "string"
+      },
+      "build": {
+        "type": "string"
+      },
+      "caller": {
+        "type": "string"
+      },
+      "launches": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "pid": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sessions": {
+        "additionalProperties": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": "object"
+      }
+    },
+    "required": [
+      "brain",
+      "build",
+      "pid",
+      "launches",
+      "sessions",
+      "caller"
+    ],
+    "title": "StatusOk",
+    "type": "object"
+  }
+}

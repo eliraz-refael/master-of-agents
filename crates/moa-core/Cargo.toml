@@ -12,7 +12,13 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+shell-words.workspace = true
 toml.workspace = true
+schemars = { workspace = true, optional = true }
+
+[features]
+# JsonSchema derives for the wire types, used by moa-proto's protocol schema.
+schema = ["dep:schemars"]
 
 [dev-dependencies]
 proptest.workspace = true
@@ -20,6 +26,7 @@ insta.workspace = true
 tempfile.workspace = true
 moa-platform = { path = "../moa-platform" }
 moa-testkit = { path = "../moa-testkit" }
+moa-proto = { path = "../moa-proto" }
 
 [lints]
 workspace = true

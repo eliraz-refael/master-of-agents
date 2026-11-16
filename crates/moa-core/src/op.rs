@@ -14,6 +14,7 @@ pub struct ReqId(pub u64);
 
 /// One verb with its arguments. On the wire: `{"method": "group.add", "params": {...}}`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "method", content = "params")]
 pub enum Op {
     #[serde(rename = "group.add")]
@@ -72,12 +73,61 @@ pub enum Op {
     Brief(NoParams),
     #[serde(rename = "attention")]
     Attention(NoParams),
+    #[serde(rename = "suggest")]
+    Suggest {
+        text: String,
+        /// Each is a moactl action, as typed: `task set 1 --status done`.
+        #[serde(default)]
+        actions: Vec<String>,
+    },
+    #[serde(rename = "suggestion.answer")]
+    SuggestionAnswer {
+        #[serde(default)]
+        id: Option<i64>,
+        answer: Answer,
+    },
+    #[serde(rename = "suggestion.ls")]
+    SuggestionLs(NoParams),
+}
+
+/// How a suggestion is answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Answer {
+    Yes,
+    No,
+    Later,
+}
+
+/// What a suggestion action parses to: an op the core runs, or a verb this build can't run yet.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[allow(clippy::large_enum_variant)] // short-lived, never stored in bulk
+pub enum Action {
+    Op(Op),
+    NotYet(&'static str),
 }
 
 /// The params of an op that takes none. Missing, `null` and `{}` all decode (a unit variant
 /// would reject `{}`); it encodes as `{}`. Anything else is refused.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct NoParams;
+
+/// Derived, the schema would say `null`; the wire is an empty object (or missing, or `null`).
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for NoParams {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NoParams".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": ["object", "null"],
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+}
 
 impl Serialize for NoParams {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -98,6 +148,7 @@ impl<'de> Deserialize<'de> for NoParams {
 
 /// `task add`'s arguments, all the user's raw text.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TaskAdd {
     pub project: String,
     pub title: String,
@@ -122,6 +173,7 @@ pub struct TaskAdd {
 /// `task set`'s arguments. `Some("")` clears `due`, `priority`, `session`, `note` and
 /// `blocked_on`.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TaskSet {
     pub id: i64,
     #[serde(default)]
@@ -164,6 +216,9 @@ impl Op {
         "project.add",
         "brief",
         "attention",
+        "suggest",
+        "suggestion.answer",
+        "suggestion.ls",
     ];
 
     /// This op's method name.
@@ -184,6 +239,9 @@ impl Op {
             Op::ProjectAdd { .. } => "project.add",
             Op::Brief(_) => "brief",
             Op::Attention(_) => "attention",
+            Op::Suggest { .. } => "suggest",
+            Op::SuggestionAnswer { .. } => "suggestion.answer",
+            Op::SuggestionLs(_) => "suggestion.ls",
         }
     }
 }
@@ -191,6 +249,7 @@ impl Op {
 /// A successful reply: the line the CLI prints and the data a script reads. A client decodes
 /// it, so it round-trips.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Done {
     pub text: String,
     pub data: serde_json::Value,

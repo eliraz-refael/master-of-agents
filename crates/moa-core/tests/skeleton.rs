@@ -429,6 +429,15 @@ fn op_methods_match_the_variants() {
         Op::SessionFind { q: "q".into() },
         Op::Brief(NoParams),
         Op::Attention(NoParams),
+        Op::Suggest {
+            text: "t".into(),
+            actions: vec!["note x".into()],
+        },
+        Op::SuggestionAnswer {
+            id: Some(2),
+            answer: moa_core::op::Answer::Later,
+        },
+        Op::SuggestionLs(NoParams),
     ];
     assert_eq!(Op::METHODS.len(), samples.len());
     for op in &samples {
@@ -460,6 +469,7 @@ fn ops_without_params_take_missing_null_or_empty_params() {
     for (method, want) in [
         ("brief", Op::Brief(NoParams)),
         ("attention", Op::Attention(NoParams)),
+        ("suggestion.ls", Op::SuggestionLs(NoParams)),
     ] {
         for text in [
             format!(r#"{{"method":"{method}"}}"#),

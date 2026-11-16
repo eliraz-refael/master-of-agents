@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use jiff::civil::Date;
@@ -14,6 +14,7 @@ use crate::change::Change;
 use crate::config::{BrainName, Config};
 use crate::effect::RefuseWrites;
 use crate::model::*;
+use crate::op::Action;
 use crate::publish::{ACTIVITY_SHOWN, Model};
 
 /// The next id for each integer-id table. SQLite rowids start at 1, so does this.
@@ -89,6 +90,7 @@ pub struct Snapshot {
 
 /// What a caller says about itself (the hook environment).
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CallerInfo {
     pub moa_session: Option<String>,
     pub claude_session: Option<String>,
@@ -133,7 +135,38 @@ fn conv_key(c: &Conversation) -> ConvKey {
     (c.agent_kind.as_str(), c.conversation_id.clone())
 }
 
+/// The moactl grammar for one suggestion action: its op, or why it doesn't parse.
+pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Action, String>;
+
+/// What the core needs from outside to run suggestions and compare paths. The daemon
+/// supplies the real ones; the default has no grammar (so no suggestion can carry actions)
+/// and treats every path as already canonical.
+#[derive(Clone)]
+pub struct Deps {
+    /// Parses one suggestion action with the moactl grammar (`moa_proto::cli::parse_action`),
+    /// given the home directory. `moa-core` doesn't depend on `moa-proto`, so it arrives here.
+    pub parse_action: Option<ParseAction>,
+    /// Resolves a path to its one canonical spelling.
+    pub canonical: fn(&Path) -> PathBuf,
+    pub home: PathBuf,
+}
+
+fn identity(p: &Path) -> PathBuf {
+    p.to_path_buf()
+}
+
+impl Default for Deps {
+    fn default() -> Self {
+        Deps {
+            parse_action: None,
+            canonical: identity,
+            home: PathBuf::new(),
+        }
+    }
+}
+
 pub struct State {
+    deps: Deps,
     brain: BrainName,
     config: Config,
     pub(crate) now: UtcMs,
@@ -161,6 +194,7 @@ impl State {
     /// Empty until a snapshot is loaded.
     pub fn new(brain: BrainName, config: Config) -> State {
         State {
+            deps: Deps::default(),
             brain,
             config,
             now: UtcMs(0),
@@ -183,6 +217,16 @@ impl State {
             next_ids: NextIds::default(),
             unknown: Vec::new(),
         }
+    }
+
+    /// Replaces the outside dependencies; apply before `Startup`.
+    pub fn with_deps(mut self, deps: Deps) -> State {
+        self.deps = deps;
+        self
+    }
+
+    pub fn deps(&self) -> &Deps {
+        &self.deps
     }
 
     pub fn brain(&self) -> &BrainName {
@@ -243,6 +287,13 @@ impl State {
     /// Rows loaded with a default for text this build doesn't know.
     pub fn unknown(&self) -> &[LoadNote] {
         &self.unknown
+    }
+
+    /// Whether the row `key` of `table` was loaded with a value this build doesn't know.
+    pub fn is_unknown(&self, table: &str, key: &str) -> bool {
+        self.unknown
+            .iter()
+            .any(|n| n.table == table && n.key == key)
     }
 
     /// The id the next row of `table` takes.

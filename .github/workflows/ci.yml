@@ -43,6 +43,13 @@ jobs:
             echo "moa-core depends on an IO crate (listed above)"
             exit 1
           fi
+      - name: moa-proto stays free of IO crates
+        run: |
+          out=$(cargo tree -p moa-proto -e normal --prefix none --target all)
+          if grep -E '^(tokio|rusqlite) ' <<<"$out"; then
+            echo "moa-proto depends on an IO crate (listed above)"
+            exit 1
+          fi
       - run: cargo nextest run --workspace
 
   macos:

@@ -60,10 +60,13 @@ Slice 2 items 6–10 and its "done when" and "try it"; P4, P10, P11, P13. Parity
   Decide in Task 4: show the raw text on the console event only (never logged), or carry a
   contents-free cause.
 - `StoreHandle` has no join; decide in Task 6 whether `stop` waits for a running backup.
-- **Pending the owner's decision:** an account that isn't in `[accounts]` routes to the
-  default brain (spec §6.9). From 2b, `moactl` writes make that reachable: a forgotten work
-  account would write into the private brain. The owner chooses before Task 7 whether 2b
-  refuses moactl writes from an unconfigured store when moa.toml configures any account.
+- **Owner decision (2026-11-16):** when moa.toml lists any `[accounts]`, a `moactl` write
+  from an account it doesn't list is refused in one line. Reads still route to `default`.
+  With no accounts listed, nothing changes. `MOA_BRAIN` is an explicit override. The hook
+  path isn't covered. It lands in Task 8 (`Op::writes`, `Config::refuses_unlisted`, and the
+  refusal line `~/.claude-x isn't an account in moa.toml, so moa won't save anything from it;
+  add it under [accounts] or set MOA_BRAIN`). Task 11 tests it with
+  `an_unlisted_account_cannot_write`.
 
 ## PRs (roadmap P4)
 
@@ -85,7 +88,7 @@ untouched".
 | D2 | **Autostart waits for one line, not for the socket.** Under `run/<brain>.start` (an exclusive file lock) the client retries the connect once, then spawns `moa daemon --brain B --notify-ready` through `Spawner`. The daemon's first stdout line is `ready`, `already running` or `error: <one line>`. Then it points stdout at `/dev/null`. The client: `ready` → connect; `already running` or EOF → connect once more; `error:` → `couldn't start moa: <line> (log: <stderr log>)`. The wait is capped at 10 s | Event-driven (no connect loop); two racing clients or a launchd copy start one daemon; the real reason reaches the user; a dropped pipe can't hurt the daemon later |
 | D3 | **The daemon lock is `std::fs::File::try_lock` on `run/<brain>.lock`.** "Already running" exits **0** | flock without `unsafe`. Exit 0 lets launchd's `KeepAlive {SuccessfulExit = false}` leave a second copy alone |
 | D4 | **`subscribe` always answers a full snapshot**; `since` is accepted and ignored until a client reconnects with one (slice 5) | YAGNI; the snapshot is small |
-| D5 | **Hook notifications are accepted before or without `hello`, never answered, and dropped** (debug log) until slice 4 ingests them | Spec §6.7: the hook connects, writes one line and exits within a 200 ms budget, with no round trip |
+| D5 | **Hook notifications are accepted before or without `hello`, never answered, and dropped** (debug log) until slice 4 ingests them | Spec §6.7: the hook connects, writes one line and exits within a 200 ms budget, with no round trip. Slice 4 will send SessionStart as a request with an id, allowed before `hello` and on a mismatched build; don't build `decode_incoming` or `allowed_on_mismatch` to forbid it |
 | D6 | **`cli::Verb` has every verb and flag of R1 §2.13.** Verbs built in later slices parse, and the CLI answers `moactl <verb> isn't in this build yet` without starting a daemon | One grammar from day one (P11), and agents get a clear answer |
 | D7 | **Long flags may be abbreviated** (clap `infer_long_args`), as argparse allowed | Agents' existing `moactl` habits keep working |
 | D8 | **The core gets the grammar and path canonicalisation through `Deps`** (`parse_action`, `canonical`: fn pointers the daemon passes in; the core can't depend on proto or do IO). `close` is a valid action; "yes" reports `close isn't in this build yet` for it | P11's one grammar, with the dependency rule kept, the same way P20 passes the transcript check. A path in a suggestion action is canonicalised the same way as one typed at the CLI |
