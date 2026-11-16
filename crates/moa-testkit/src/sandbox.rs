@@ -8,6 +8,16 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+/// What a test says when it can't find tmux (they fail, never skip).
+pub const TMUX_NOT_FOUND: &str =
+    "tmux not found on PATH (moa needs tmux >= 3.4; or run inside `nix develop`)";
+
+/// The tmux on `PATH`, or the "not found" error.
+pub fn tmux_path() -> io::Result<PathBuf> {
+    moa_platform::which("tmux", std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND))
+}
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Try `f` every 20 ms until it returns `Some` or `limit` passes. Tests only.
@@ -33,23 +43,12 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn start() -> io::Result<Sandbox> {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let name = format!("moa-test-{}-{n}", std::process::id());
-        // One short root for everything: unix socket paths are limited to 104 bytes on
-        // macOS, and later slices put the daemon socket under `home`.
-        let dir = tempfile::Builder::new().prefix("moa").tempdir_in("/tmp")?;
-        let home = dir.path().join("home");
-        std::fs::create_dir(&home)?;
-        let conf = dir.path().join("tmux.conf");
-        std::fs::write(
-            &conf,
-            "set -g default-shell /bin/sh\nset -g @moa-sandbox 1\n",
-        )?;
+        let sb = Sandbox::without_server()?;
+        let conf = sb.dir.path().join("tmux.conf");
         let (conf, home_arg) = (
             conf.to_string_lossy().into_owned(),
-            home.to_string_lossy().into_owned(),
+            sb.home.to_string_lossy().into_owned(),
         );
-        let sb = Sandbox { name, dir, home };
         sb.tmux(&[
             "-f",
             &conf,
@@ -67,6 +66,23 @@ impl Sandbox {
         Ok(sb)
     }
 
+    /// The same directory, home and environment as `start`, with no server running.
+    pub fn without_server() -> io::Result<Sandbox> {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!("moa-test-{}-{n}", std::process::id());
+        // One short root for everything: unix socket paths are limited to 104 bytes on
+        // macOS, and later slices put the daemon socket under `home`.
+        let dir = tempfile::Builder::new().prefix("moa").tempdir_in("/tmp")?;
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home)?;
+        let conf = dir.path().join("tmux.conf");
+        std::fs::write(
+            &conf,
+            "set -g default-shell /bin/sh\nset -g @moa-sandbox 1\n",
+        )?;
+        Ok(Sandbox { name, dir, home })
+    }
+
     /// Run a tmux command against the sandbox server; stdout with trailing newlines
     /// trimmed, or `Err` carrying stderr on a non-zero exit.
     pub fn tmux(&self, args: &[&str]) -> io::Result<String> {
@@ -78,10 +94,7 @@ impl Sandbox {
             .output()
             .map_err(|e| {
                 if e.kind() == io::ErrorKind::NotFound {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "tmux not found on PATH (moa needs tmux >= 3.4; or run inside `nix develop`)",
-                    )
+                    io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND)
                 } else {
                     e
                 }
@@ -94,6 +107,12 @@ impl Sandbox {
         Ok(String::from_utf8_lossy(&out.stdout)
             .trim_end_matches('\n')
             .to_string())
+    }
+
+    /// The tmux arguments that name this server's socket: `["-L", name]`. `env()` already
+    /// carries its `TMUX_TMPDIR`.
+    pub fn socket_args(&self) -> Vec<OsString> {
+        vec!["-L".into(), self.name.clone().into()]
     }
 
     pub fn socket_name(&self) -> &str {

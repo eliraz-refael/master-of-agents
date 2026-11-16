@@ -218,7 +218,8 @@ use these names unchanged.
 | `route(&Config, account, cwd, opener) -> Route` | `moa_core::route` | 2 |
 | `Call`, `Incoming`, `ServerLine`, `RpcError`, `Patch`, `SnapshotMsg`, `Topic` (re-exported from `moa_core::publish`), `cli::{Moactl, Verb, parse_action}` | `moa_proto` | 2 |
 | `Paths` (incl. `check_v1_allowed`), `ensure_private_dir`, `spawn::Spawner` (counting), `WallTimer`, `WallAlarm`, `ZoneWatch`, `build_id()` | `moa_platform` | 2 |
-| `Notification`, `Cmd`, `ControlClient`, `Mailbox` | `moa_tmux` | 3 |
+| `Notification`, `Cmd`, `Mailbox` (in `moa_core::tmux`: the core can't depend on tokio-based `moa_tmux`) | `moa_core::tmux` | 3 |
+| `ControlClient` | `moa_tmux` | 3 |
 | `HookEnvelope`, `HookKind` | `moa_proto::hook` | 4 |
 | `DisplayState`, `display_state(&Session, now) -> (DisplayState, Why)` | `moa_core::live` | 2 (from rows), 4 (quiet, events) |
 | `AgentKindImpl` trait, `claude`, `acp` | `moa_agents` | 1 (`claude::find_transcript`), 4, 6 |
@@ -398,11 +399,11 @@ Spec §6.6; R2.
    - Blocks are matched on `(time, number, flags)`, and flag-0 blocks are skipped.
    - Notifications inside blocks are accepted (pre-3.8).
    - Unknown lines become `Unknown`.
-   - Tests use captures from R2, plus a `cargo-fuzz` target that runs in CI for 60 s.
+   - Tests use captures from R2, plus a `proptest` fuzz of the parser, since cargo-fuzz needs nightly (slice 3, T15).
 2. **Control client actor**:
    - Spawns `tmux -L <sock> -C attach -f no-output,ignore-size,no-detach-on-destroy -t
      '=_moa'` through `Spawner`.
-   - FIFO reply matching to `TmuxReply{token}`, and `a ; b` plus a sentinel for transactions.
+   - FIFO reply matching to `TmuxReply{token}`; no transaction mode (`a ; b` + sentinel) here, slice 5's layouts build it (slice 3, T14).
    - Command escaping.
    - Reconnect with backoff (`DelayQueue`).
    - At connect, reads `#{pid} #{start_time} #{version} #{client_name}` and refuses < 3.4 in
@@ -413,14 +414,15 @@ Spec §6.6; R2.
      name `moa` (C7), so v1 can adopt the live servers.
    - `moa_testkit::Sandbox` gains a constructor with no server (for create-if-missing tests),
      and restarts after `kill-server` pass `-f` again.
-   - Creates the server only if it's missing, with a generated config that runs
-     `source-file -q ~/.tmux.conf` first and sets `terminal-features …:RGB` for terminals
-     known to support it (spec §6.14).
+   - The front door (`moa`) creates the server only if it's missing; the daemon runs tmux
+     with `-N` and never starts one (slice 3, T1).
+   - The generated config runs `source-file -q ~/.tmux.conf` first and sets
+     `terminal-features …:RGB` for terminals known to support it (spec §6.14).
    - Every pane's env is set with `-e`; the server env stays clean.
    - Creates the `_moa` session.
    - Hooks at index 90 (`pane-exited`, `pane-died`, `window-layout-changed`,
-     `client-attached`, `client-active`, `alert-bell`) are installed idempotently and
-     removed on clean shutdown.
+     `client-attached`, `client-detached`) are installed idempotently and removed on clean shutdown;
+     `alert-bell` and `client-active` wait for the slices that consume them (slice 3, T7).
    - Sets `@moa_ctl`.
    - Adopting an existing server = the same steps without creating it.
 4. **Mailbox**:
@@ -449,9 +451,8 @@ Spec §6.6; R2.
 
 **Carried from slice 2b:**
 - Split `crates/moa-daemon/src/core_task.rs` (recover/reload/fatal) before tmux inputs join
-  the loop.
-- Decide the daemon's PATH/environment. Today the autostarted daemon inherits the starting
-  client's PATH (D17), which would reach the tmux server and every pane (spec §6.6).
+  the loop: done (slice 3, Task 1).
+- The daemon's PATH/environment: decided: T1 (slice 3).
 
 **Done when:**
 - In the sandbox, every key and the menu reach the daemon, and the status line updates,
@@ -459,8 +460,8 @@ Spec §6.6; R2.
 - `kill-server` followed by a restart gives a new generation, which is detected.
 
 **Try it:** `moa --sandbox` opens a throwaway brain (`MOA_ROOT` under
-`~/.local/state/moa-sandbox`, tmux socket `moa-sandbox`) with the key table and status
-line.
+`~/.local/state/moa-sandbox`, with a socket inside the sandbox root (slice 3, T2)), with the
+key table and status line.
 
 ## Slice 4: agents and hooks
 
@@ -758,7 +759,7 @@ Spec §9.
    - Remove the flag, re-source the spike config, run the spike launcher.
 7. **The real home opens up**: remove slice 2's `MOA_ROOT` gate (`Paths::check_v1_allowed`
    and `MOA_REAL_HOME`), so `moa daemon`, autostart and `moa service` use the real home. The service file's
-   `MOA_REAL_HOME=1` environment entry (slice 2b) goes with it.
+   `MOA_REAL_HOME=1` environment entry (slice 2b) goes with it, and so does the tmux link's sandbox-only gate (slice 3, T21).
 8. **Rehearsal test**:
    - A sandbox server runs the real spike code from the repo with fake agents and copied
      brains.

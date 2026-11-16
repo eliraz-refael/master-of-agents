@@ -1,0 +1,22 @@
+[package]
+name = "moa-tmux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+moa-core = { path = "../moa-core" }
+moa-platform = { path = "../moa-platform" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "macros", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+moa-testkit = { path = "../moa-testkit" }
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

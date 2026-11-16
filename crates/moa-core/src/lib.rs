@@ -15,6 +15,7 @@ pub mod publish;
 pub mod route;
 pub mod state;
 pub mod time;
+pub mod tmux;
 
 pub use crate::core::handle;
 pub use effect::{Effect, Input};
