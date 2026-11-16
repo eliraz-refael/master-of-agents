@@ -42,6 +42,42 @@ fn write_if_changed_writes_once_and_privately() {
     assert_eq!(names.len(), 1, "a temp file was left: {names:?}");
 }
 
+/// Sources `tmux_conf` on a server whose home holds the user's three possible config files,
+/// each appending its name to `@order`, with `XDG_CONFIG_HOME` as given (a path under the
+/// home, or none).
+fn order_with_xdg(xdg: Option<&str>) -> String {
+    let sb = Sandbox::start().unwrap();
+    let home = sb.home().to_path_buf();
+    for (file, name) in [
+        (".tmux.conf", "home"),
+        (".config/tmux/tmux.conf", "dotconfig"),
+        ("xdg/tmux/tmux.conf", "xdg"),
+    ] {
+        let path = home.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("set -ag @order '{name} '\n")).unwrap();
+    }
+    let moa = home.join("moa.tmux");
+    std::fs::write(&moa, "set -ag @order 'moa '\n").unwrap();
+    let conf = home.join("tmux.conf");
+    std::fs::write(&conf, tmux_conf(&moa)).unwrap();
+    if let Some(x) = xdg {
+        let x = home.join(x).to_string_lossy().into_owned();
+        sb.tmux(&["set-environment", "-g", "XDG_CONFIG_HOME", &x])
+            .unwrap();
+    }
+    sb.tmux(&["source-file", &conf.to_string_lossy()]).unwrap();
+    sb.tmux(&["show-options", "-gqv", "@order"]).unwrap()
+}
+
+#[test]
+fn tmux_conf_loads_the_users_files_as_tmux_would_then_moas() {
+    assert_eq!(order_with_xdg(None).trim(), "home dotconfig moa");
+    assert_eq!(order_with_xdg(Some("xdg")).trim(), "home xdg dotconfig moa");
+    // Named twice, loaded once, as tmux does.
+    assert_eq!(order_with_xdg(Some(".config")).trim(), "home dotconfig moa");
+}
+
 fn write_conf(sb: &Sandbox) -> PathBuf {
     let path = sb.home().join("moa.tmux");
     std::fs::write(&path, moa_tmux("default")).unwrap();
@@ -83,6 +119,15 @@ fn it_sources_cleanly_on_this_tmux() {
             bound.iter().any(|b| b == k),
             "{k} isn't bound in: {bound:?}"
         );
+    }
+    // The prefix table's own bindings.
+    let prefix = sb.tmux(&["list-keys", "-T", "prefix"]).unwrap();
+    for k in ["Space", "m", "C"] {
+        let found = prefix.lines().any(|l| {
+            let mut f = l.split_whitespace();
+            f.by_ref().find(|w| *w == "prefix").is_some() && f.next() == Some(k)
+        });
+        assert!(found, "prefix {k} isn't bound");
     }
 }
 

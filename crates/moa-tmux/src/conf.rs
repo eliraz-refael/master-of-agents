@@ -17,15 +17,6 @@ const HOOK_INDEX: u32 = 90;
 /// What a key says when moa isn't running.
 const NOT_RUNNING: &str = "moa isn't running: run moa";
 
-/// The hooks moa sets, by tmux's name.
-const HOOK_NAMES: [&str; 5] = [
-    "pane-exited",
-    "pane-died",
-    "window-layout-changed",
-    "client-attached",
-    "client-detached",
-];
-
 /// Inside a tmux double-quoted string: `\`, `"`, `$` and `#` are escaped.
 fn in_double_quotes(s: &str) -> String {
     let mut out = String::new();
@@ -55,7 +46,7 @@ fn guarded(action: KeyAction, pane: &str) -> String {
 fn menu() -> String {
     let split = |flag: &str| {
         format!(
-            "if -F '#{{==:#{{window_name}},moa}}' 'display \"split an agent or terminal window; the cockpit is a layout\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
+            "if -F '#{{==:#{{window_name}},moa}}' 'display \"split an agent or terminal tab; the cockpit is a layout\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
         )
     };
     let daemon = |a: KeyAction| (a.label(), a.key(), guarded(a, "-"));
@@ -71,7 +62,7 @@ fn menu() -> String {
         Some(plain("Split: shell beside", "|", &split("h"))),
         Some(plain("Split: shell below", "-", &split("v"))),
         Some(plain("Back to moa", "m", "select-window -t moa:moa")),
-        Some(plain("Zoom this pane", "z", "resize-pane -Z")),
+        Some(plain("Zoom in/out", "z", "resize-pane -Z")),
         None,
         Some(daemon(KeyAction::Layout(1))),
         Some(daemon(KeyAction::Layout(2))),
@@ -80,9 +71,9 @@ fn menu() -> String {
         Some(daemon(KeyAction::Repair)),
         None,
         // A greyed note, not an item.
-        Some(("-Ctrl-a ←↑↓→  move between panes", "", String::new())),
-        Some(plain("Previous window", "[", "previous-window")),
-        Some(plain("Next window", "]", "next-window")),
+        Some(("-Ctrl-a ←↑↓→  move between splits", "", String::new())),
+        Some(plain("Previous tab", "[", "previous-window")),
+        Some(plain("Next tab", "]", "next-window")),
         Some(daemon(KeyAction::Help)),
         Some(plain("Send Ctrl-a to the app", "a", "send-keys C-a")),
     ];
@@ -120,7 +111,7 @@ pub fn moa_tmux(brain: &str) -> String {
         ));
     }
     let menu = menu();
-    // Each use of the menu is its own binding, so its continuation lines are shared text.
+    // The menu text is inlined into each of the three bindings.
     TEMPLATE
         .replace("{{TITLE}}", &title)
         .replace("{{DAEMON_KEYS}}", keys.trim_end())
@@ -128,10 +119,20 @@ pub fn moa_tmux(brain: &str) -> String {
         .replace("{{REPAIR}}", &guarded(KeyAction::Repair, "-"))
 }
 
-/// The `-f` file: the user's own config first, then moa's.
+/// The `-f` file: the user's own config first, then moa's. `-f` replaces tmux's own search,
+/// so this loads what tmux would, in its order and each file quietly: `/etc/tmux.conf`,
+/// `~/.tmux.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf` and `~/.config/tmux/tmux.conf`. tmux
+/// loads all that exist, and a file twice named (`$XDG_CONFIG_HOME` is `~/.config`) once, so
+/// the XDG line is skipped when the variable is empty or is `~/.config`.
 pub fn tmux_conf(moa_tmux: &Path) -> String {
     format!(
-        "source-file -q ~/.tmux.conf\nsource-file {}\n",
+        "source-file -q /etc/tmux.conf\n\
+         source-file -q ~/.tmux.conf\n\
+         %if \"#{{&&:#{{!=:$XDG_CONFIG_HOME,}},#{{!=:$XDG_CONFIG_HOME,$HOME/.config}}}}\"\n\
+         source-file -q \"$XDG_CONFIG_HOME/tmux/tmux.conf\"\n\
+         %endif\n\
+         source-file -q ~/.config/tmux/tmux.conf\n\
+         source-file {}\n",
         quote(&moa_tmux.to_string_lossy())
     )
 }
@@ -170,31 +171,41 @@ fn hook_name(name: &str) -> String {
     format!("{name}[{HOOK_INDEX}]")
 }
 
+/// The hooks moa sets, by tmux's name. Each tells the daemon what happened as
+/// `moa:hook <word> #{<format>}`; `client-detached` is the one that forgets the control
+/// client instead. `hooks` and `unhooks` both come from this table.
+const HOOK_TABLE: [(&str, Option<(&str, &str)>); 5] = [
+    ("pane-exited", Some(("pane-exited", "hook_pane"))),
+    ("pane-died", Some(("pane-died", "hook_pane"))),
+    ("window-layout-changed", Some(("layout", "hook_window"))),
+    ("client-attached", Some(("client-attached", "hook_client"))),
+    ("client-detached", None),
+];
+
 /// The hooks that tell the daemon (through its control client `ctl`) what happened, and the
 /// one that forgets `ctl` when it goes. Set again on every connect.
 pub fn hooks(ctl: &ClientName) -> Vec<Cmd> {
     let ctl = quote(&ctl.0);
-    let tell = |name: &str, what: &str, arg: &str| {
-        let body = format!("display-message -c {ctl} 'moa:hook {what} #{{{arg}}}'");
-        Cmd::new("set-hook").args(["-g".to_string(), hook_name(name), body])
-    };
-    vec![
-        tell("pane-exited", "pane-exited", "hook_pane"),
-        tell("pane-died", "pane-died", "hook_pane"),
-        tell("window-layout-changed", "layout", "hook_window"),
-        tell("client-attached", "client-attached", "hook_client"),
-        Cmd::new("set-hook").args([
-            "-g".to_string(),
-            hook_name("client-detached"),
-            "if -F '#{==:#{hook_client},#{@moa_ctl}}' { set-option -gu @moa_ctl }".to_string(),
-        ]),
-    ]
+    HOOK_TABLE
+        .iter()
+        .map(|(name, tell)| {
+            let body = match tell {
+                Some((what, arg)) => {
+                    format!("display-message -c {ctl} 'moa:hook {what} #{{{arg}}}'")
+                }
+                None => {
+                    "if -F '#{==:#{hook_client},#{@moa_ctl}}' { set-option -gu @moa_ctl }".into()
+                }
+            };
+            Cmd::new("set-hook").args(["-g".to_string(), hook_name(name), body])
+        })
+        .collect()
 }
 
 /// Removes exactly the hooks `hooks` sets; a user's hooks at other indexes stay.
 pub fn unhooks() -> Vec<Cmd> {
-    HOOK_NAMES
+    HOOK_TABLE
         .iter()
-        .map(|n| Cmd::new("set-hook").args(["-gu".to_string(), hook_name(n)]))
+        .map(|(name, _)| Cmd::new("set-hook").args(["-gu".to_string(), hook_name(name)]))
         .collect()
 }

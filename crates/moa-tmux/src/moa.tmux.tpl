@@ -77,9 +77,10 @@ set -g  status-right "#{?#{@moa_status},#[fg=#3b4252]#[bg=#3b4252] #{@moa_status
 # and moa's own panels draw rounded frames inside their panes, lit while focused.
 # Panes without their own frame (agents, the empty agent spot) get a title pill in the
 # gutter above them: @moa_label, or the window's name.
-# tmux 3.4 has no blank borders (`spaces`, and the indicators that go with it, arrived in
-# 3.5), so there the gutters are thin lines.
-if -F '#{m:3.4*,#{version}}' { set -g pane-border-lines single } { set -g pane-border-lines spaces ; set -g pane-border-indicators off }
+# tmux 3.4 has no blank borders (`spaces` arrived after 3.4), so there the gutters are thin
+# lines.
+if -F '#{||:#{m:3.4*,#{version}},#{m:next-3.4*,#{version}}}' { set -g pane-border-lines single } { set -g pane-border-lines spaces }
+set -g  pane-border-indicators off
 set -g  pane-border-status top
 set -g  pane-border-style        "fg=#4c566a"
 set -g  pane-active-border-style "fg=#88c0d0"
@@ -111,8 +112,8 @@ bind -n C-a switch-client -T moa
 {{DAEMON_KEYS}}
 # | and -: split the pane you're on (a shell beside or below an agent, in its folder);
 # its border says it's a shell; `exit` closes it. Not in the cockpit, where panes belong to the layout.
-bind -T moa '|'     if -F "#{==:#{window_name},moa}" "display 'split an agent or terminal window; the cockpit is a layout'" "split-window -h -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
-bind -T moa -       if -F "#{==:#{window_name},moa}" "display 'split an agent or terminal window; the cockpit is a layout'" "split-window -v -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
+bind -T moa '|'     if -F "#{==:#{window_name},moa}" "display 'split an agent or terminal tab; the cockpit is a layout'" "split-window -h -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
+bind -T moa -       if -F "#{==:#{window_name},moa}" "display 'split an agent or terminal tab; the cockpit is a layout'" "split-window -v -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
 bind -T moa m       select-window -t moa:moa
 bind -T moa z       resize-pane -Z
 bind -T moa [       previous-window

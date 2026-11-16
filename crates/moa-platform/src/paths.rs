@@ -227,7 +227,13 @@ impl Paths {
     /// `run/<b>.sock`, or, when that is too long for a unix socket,
     /// `<tmpdir>/moa-<uid>/<hash of the intended path>-<b>.sock`.
     pub fn socket(&self, b: &str) -> Result<PathBuf, PathsError> {
-        let intended = self.run_dir().join(format!("{b}.sock"));
+        self.short_socket(&format!("{b}.sock"))
+    }
+
+    /// `run/<file>` when it fits a unix socket, else
+    /// `<tmpdir>/moa-<uid>/<hash of the intended path>-<file>`.
+    fn short_socket(&self, file: &str) -> Result<PathBuf, PathsError> {
+        let intended = self.run_dir().join(file);
         if intended.as_os_str().len() <= SOCKET_LIMIT {
             return Ok(intended);
         }
@@ -235,7 +241,7 @@ impl Paths {
         let fallback = self
             .tmpdir
             .join(format!("moa-{}", self.uid))
-            .join(format!("{:08x}-{b}.sock", hash & 0xffff_ffff));
+            .join(format!("{:08x}-{file}", hash & 0xffff_ffff));
         if fallback.as_os_str().len() <= SOCKET_LIMIT {
             Ok(fallback)
         } else {
@@ -254,20 +260,8 @@ impl Paths {
                 format!("moa-{b}")
             }));
         }
-        let intended = self.run_dir().join(format!("tmux-{b}"));
-        if intended.as_os_str().len() <= SOCKET_LIMIT {
-            return Ok(TmuxSocket::Path(intended));
-        }
-        let hash = fnv1a64(intended.as_os_str().as_bytes());
-        let fallback = self
-            .tmpdir
-            .join(format!("moa-{}", self.uid))
-            .join(format!("{:08x}-tmux-{b}", hash & 0xffff_ffff));
-        if fallback.as_os_str().len() <= SOCKET_LIMIT {
-            Ok(TmuxSocket::Path(fallback))
-        } else {
-            Err(PathsError::SocketTooLong)
-        }
+        self.short_socket(&format!("tmux-{b}"))
+            .map(TmuxSocket::Path)
     }
 
     /// The `-f` file moa gives tmux.

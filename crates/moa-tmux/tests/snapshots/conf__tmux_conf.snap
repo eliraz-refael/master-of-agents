@@ -2,5 +2,10 @@
 source: crates/moa-tmux/tests/conf.rs
 expression: "tmux_conf(Path::new(\"/r/.local/share/moa/default/moa.tmux\"))"
 ---
+source-file -q /etc/tmux.conf
 source-file -q ~/.tmux.conf
+%if "#{&&:#{!=:$XDG_CONFIG_HOME,},#{!=:$XDG_CONFIG_HOME,$HOME/.config}}"
+source-file -q "$XDG_CONFIG_HOME/tmux/tmux.conf"
+%endif
+source-file -q ~/.config/tmux/tmux.conf
 source-file /r/.local/share/moa/default/moa.tmux
