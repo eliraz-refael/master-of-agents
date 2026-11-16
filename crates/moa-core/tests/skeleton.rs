@@ -438,6 +438,9 @@ fn op_methods_match_the_variants() {
             answer: moa_core::op::Answer::Later,
         },
         Op::SuggestionLs(NoParams),
+        Op::TmuxEnsure {
+            tmux: Some("/usr/bin/tmux".into()),
+        },
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
     // be serialized or parsed.

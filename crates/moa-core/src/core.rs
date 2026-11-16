@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use crate::change::Change;
 use crate::effect::{Effect, Input, LogLevel, LogLine, Publish, TimerKey};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
-use crate::op::OpError;
+use crate::op::{Op, OpError};
 use crate::ops;
 use crate::publish::{CoreEvent, Topic};
 use crate::state::{State, Table};
@@ -57,6 +57,7 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
                 fx.push(Effect::Persist(changes));
             }
             fx.extend(publish_all(state));
+            fx.extend(state.tmux.startup());
             fx
         }
         Input::Reload {
@@ -67,8 +68,10 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
             state.refuse_writes = refuse_writes;
             let mut fx = vec![backup_timer(&now)];
             fx.extend(publish_all(state));
+            fx.extend(state.tmux.reload());
             fx
         }
+        Input::Tmux(t) => state.tmux.input(t),
         Input::Timer(TimerKey::Backup) => {
             vec![Effect::Backup { day: now.local_day }, backup_timer(&now)]
         }
@@ -85,6 +88,12 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
                 }),
             ]
         }
+        Input::Client {
+            conn,
+            req,
+            op: Op::TmuxEnsure { tmux },
+            ..
+        } => state.tmux.ensure(conn, req, tmux),
         Input::Client {
             conn,
             req,

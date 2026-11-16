@@ -19,6 +19,7 @@ use moa_core::effect::{Input, Publish};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
+use moa_core::tmux::cmd::Cmd;
 use moa_store::actor::{Fault, StoreHandle};
 use moa_store::{Store, StoreError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -117,6 +118,11 @@ enum Held {
     },
     /// The answer so far, and the caller, so a reload can compute it again.
     Status(oneshot::Sender<StatusData>, StatusData, CallerInfo),
+    /// A view of saved state for the terminal server.
+    Tmux {
+        conn: u64,
+        cmds: Vec<Cmd>,
+    },
     Barrier(oneshot::Sender<()>),
     Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
@@ -214,6 +220,7 @@ impl CoreHandle {
 
         let conns = Conns::default();
         let core = Core {
+            inbox: inbox.downgrade(),
             state,
             store: store.clone(),
             clock: opts.clock,

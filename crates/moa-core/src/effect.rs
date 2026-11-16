@@ -1,5 +1,6 @@
 //! What goes into the core and what comes out. The core decides; an executor does.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use jiff::civil::Date;
@@ -10,6 +11,9 @@ use crate::change::Change;
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::publish::{CoreEvent, Model};
 use crate::state::{CallerInfo, Snapshot, State};
+use crate::tmux::cmd::Cmd;
+use crate::tmux::ids::{ClientName, Generation};
+use crate::tmux::notify::Notification;
 
 /// The store can't be written to until `until`; the next write after that probes it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -44,6 +48,54 @@ pub enum Input {
         actor: &'static str,
         message: String,
     },
+    Tmux(TmuxIn),
+}
+
+/// What the tmux link reports. `conn` numbers the link's connections; anything from an
+/// older one is dropped.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TmuxIn {
+    Connected {
+        conn: u64,
+        generation: Generation,
+        version: String,
+        ctl: ClientName,
+    },
+    Down(Down),
+    Notification(Notification),
+    /// The answers to one tokened [`Effect::Tmux`], one per command: its output lines, or
+    /// tmux's error text.
+    Replies {
+        conn: u64,
+        token: TmuxToken,
+        results: Vec<Result<Vec<String>, String>>,
+    },
+}
+
+/// Why the link is not up.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Down {
+    /// The control client dropped while the server is still there; the link reconnects.
+    Lost,
+    /// No server is running.
+    NoServer,
+    /// The reconnects ran out.
+    GaveUp,
+    /// The server's tmux is older than moa needs; its version.
+    TooOld(String),
+    /// tmux couldn't be started.
+    NoTmux,
+    /// This daemon has no tmux link.
+    Disabled,
+}
+
+/// Which plumbing request a reply answers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TmuxToken {
+    /// The three lists that rebuild the topology.
+    Refresh,
+    /// Creating the `moa` session.
+    Cockpit,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -85,28 +137,48 @@ pub enum Effect {
         day: Date,
     },
     Log(LogLine),
+    /// Commands for the link's connection `conn`. Untokened, they show saved state (the
+    /// status line, notices) and wait for the commit. Tokened, they are the link's own
+    /// plumbing, and their answers come back as [`TmuxIn::Replies`].
+    Tmux {
+        conn: u64,
+        cmds: Vec<Cmd>,
+        token: Option<TmuxToken>,
+    },
+    /// Connect the link, with this tmux program if one is known.
+    TmuxConnect {
+        tmux: Option<PathBuf>,
+    },
 }
 
 impl Effect {
-    /// Timers and logs don't wait for a commit; everything else does.
+    /// Timers, logs and the link's plumbing don't wait for a commit; everything else does.
+    /// The plumbing reveals nothing about saved state, and held behind a failed commit it
+    /// would be lost while the link waits for its answer.
     pub fn runs_at_once(&self) -> bool {
         matches!(
             self,
-            Effect::SetTimer { .. } | Effect::CancelTimer(_) | Effect::Log(_)
+            Effect::SetTimer { .. }
+                | Effect::CancelTimer(_)
+                | Effect::Log(_)
+                | Effect::TmuxConnect { .. }
+                | Effect::Tmux { token: Some(_), .. }
         )
     }
 }
 
-/// Every `Persist` comes before any `Publish` or `Reply`: nobody hears of a change that
-/// isn't saved.
+/// Every `Persist` comes before any `Publish`, `Reply` or view of saved state (an untokened
+/// `Tmux`): nobody hears of a change that isn't saved.
 pub fn check_order(effects: &[Effect]) -> Result<(), &'static str> {
     let mut heard = false;
     for e in effects {
         match e {
             Effect::Persist(_) if heard => {
-                return Err("a Persist came after a Publish or Reply");
+                return Err("a Persist came after a Publish, Reply or view");
             }
-            Effect::Publish(_) | Effect::Reply { .. } => heard = true,
+            Effect::Publish(_) | Effect::Reply { .. } | Effect::Tmux { token: None, .. } => {
+                heard = true
+            }
             _ => {}
         }
     }

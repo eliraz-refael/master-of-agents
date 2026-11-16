@@ -526,6 +526,32 @@ expression: all
               "params"
             ],
             "type": "object"
+          },
+          {
+            "description": "The front door's handshake: answers `{\"running\": bool}` once moa's terminal server is\nlinked and has its `moa` session, or when there is no server. `tmux` is the\nabsolute path of the tmux program the front door found.",
+            "properties": {
+              "method": {
+                "const": "tmux.ensure",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "tmux": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1032,6 +1058,30 @@ expression: all
     "type": "object"
   },
   "StatusOk": {
+    "$defs": {
+      "TmuxLinkData": {
+        "description": "The terminal server the daemon is linked to: its tmux version and generation.",
+        "properties": {
+          "pid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "start": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "pid",
+          "start"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "brain": {
@@ -1060,6 +1110,24 @@ expression: all
           "type": "integer"
         },
         "type": "object"
+      },
+      "tmux": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TmuxLinkData"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The terminal server, while linked."
+      },
+      "tmux_restarts": {
+        "default": 0,
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
       }
     },
     "required": [

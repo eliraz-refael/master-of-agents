@@ -249,3 +249,23 @@ async fn a_slow_startup_backup_does_not_delay_start() {
     within(core.barrier()).await;
     assert!(backups.join("daily-2026-11-15.db").exists());
 }
+
+/// Until the terminal link is wired, the core task answers every connect itself: an ensure
+/// is told v1 isn't switched over instead of waiting forever.
+#[tokio::test]
+async fn tmux_ensure_says_v1_isnt_switched_over() {
+    let rig = rig().await;
+    let (c, mut rx) = rig.core.open_conn();
+    send(&rig.core, c, 1, Op::TmuxEnsure { tmux: None });
+    assert_eq!(
+        reply(&mut rx).await,
+        Err(OpError(
+            "moa v1 isn't switched over yet; try moa --sandbox".into()
+        ))
+    );
+    let status = within(rig.core.status(CallerInfo::default()))
+        .await
+        .expect("a status");
+    assert_eq!(status.tmux, None);
+    assert_eq!(status.tmux_restarts, 0);
+}

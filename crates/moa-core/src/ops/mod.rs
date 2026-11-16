@@ -51,6 +51,8 @@ pub(crate) fn run(
             suggestions::answer(state, tx, caller, now, id, answer)
         }
         Op::SuggestionLs(_) => suggestions::ls(state),
+        // `handle` answers it from the link; it is never run as an op.
+        Op::TmuxEnsure { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }
