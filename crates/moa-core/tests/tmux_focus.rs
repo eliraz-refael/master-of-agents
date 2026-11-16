@@ -8,11 +8,13 @@ use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
-    Effect, Input, Publish, RefuseWrites, TmuxIn, TmuxToken, check_order, handle_checked,
+    Effect, Input, LogLevel, LogLine, Publish, RefuseWrites, TmuxIn, TmuxToken, check_order,
+    handle_checked,
 };
 use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
 use moa_core::op::{ConnId, Op, ReqId};
+use moa_core::publish::CoreEvent;
 use moa_core::state::{CallerInfo, LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
@@ -296,12 +298,45 @@ fn seen_is_written_once() {
     let mut s = started();
     let fx = up(&mut s, SEEN, USER);
     assert_eq!(persisted(&fx).len(), 1);
-    let fx = feed(&mut s, window_changed(1));
+    // A later clock: only `end > seen` holds it back, not the same instant.
+    let later = Now::at(
+        UtcMs(now().wall.0 + 1_000),
+        Duration::from_secs(2),
+        TimeZone::posix("UTC0").unwrap(),
+    );
+    let fx = handle_checked(&mut s, Input::Tmux(window_changed(1)), later);
     assert!(persisted(&fx).is_empty());
     assert!(
         !fx.iter().any(|e| matches!(e, Effect::Publish(_))),
         "nothing changed, nothing published"
     );
+}
+
+#[test]
+fn seen_is_never_before_the_turn_end() {
+    let mut snap = snapshot(binding(10, 1000));
+    let end = UtcMs(now().wall.0 + 5_000);
+    snap.sessions[0].last_turn_end_at = Some(end);
+    let mut s = started_with(snap);
+    let fx = up(&mut s, SEEN, USER);
+    assert_eq!(persisted(&fx).len(), 1);
+    assert_eq!(s.session(sid()).unwrap().seen_at, Some(end));
+    assert_eq!(state_of(&s), DisplayState::Idle);
+    let fx = feed(&mut s, window_changed(1));
+    assert!(persisted(&fx).is_empty());
+}
+
+/// Nothing warned, logged as an error or published as one.
+fn quiet(fx: &[Effect]) -> bool {
+    !fx.iter().any(|e| {
+        matches!(
+            e,
+            Effect::Log(LogLine {
+                level: LogLevel::Warn | LogLevel::Error,
+                ..
+            }) | Effect::Publish(Publish::Event(CoreEvent::Error { .. }))
+        )
+    })
 }
 
 #[test]
@@ -316,6 +351,7 @@ fn seen_respects_the_write_guards() {
     let mut s = started_with(snap);
     let fx = up(&mut s, SEEN, USER);
     assert!(persisted(&fx).is_empty());
+    assert!(quiet(&fx));
     assert_eq!(state_of(&s), DisplayState::Done);
 
     // While writes are refused nothing is marked, and nothing fails.
@@ -333,6 +369,7 @@ fn seen_respects_the_write_guards() {
     );
     let fx = up(&mut s, SEEN, USER);
     assert!(persisted(&fx).is_empty());
+    assert!(quiet(&fx));
     assert_eq!(state_of(&s), DisplayState::Done);
 }
 

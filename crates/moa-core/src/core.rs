@@ -75,22 +75,7 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
         Input::Tmux(t) => {
             let mut fx = state.tmux.input(t);
             // Whatever moved, a session a user can now see becomes seen.
-            let mut tx = Tx::new(&now);
-            mark_seen(state, &mut tx, &now);
-            if !tx.changes.is_empty() {
-                let topics: BTreeSet<Topic> = tx
-                    .changes
-                    .iter()
-                    .flat_map(|c| c.topics().iter().copied())
-                    .collect();
-                // Saved before anyone hears of it, including this input's own replies.
-                fx.insert(0, Effect::Persist(tx.changes));
-                fx.extend(
-                    state
-                        .publish(&topics)
-                        .map(|m| Effect::Publish(Publish::Model(m))),
-                );
-            }
+            mark_seen_into(state, &now, &mut fx);
             fx
         }
         Input::Timer(TimerKey::Backup) => {
@@ -158,6 +143,27 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
             fx
         }
     }
+}
+
+/// Runs `mark_seen` and adds what it changed to `fx`: the `Persist` first, so it comes
+/// before any reply or view already there, and the `Publish` after.
+pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    let mut tx = Tx::new(now);
+    mark_seen(state, &mut tx, now);
+    if tx.changes.is_empty() {
+        return;
+    }
+    let topics: BTreeSet<Topic> = tx
+        .changes
+        .iter()
+        .flat_map(|c| c.topics().iter().copied())
+        .collect();
+    fx.insert(0, Effect::Persist(tx.changes));
+    fx.extend(
+        state
+            .publish(&topics)
+            .map(|m| Effect::Publish(Publish::Model(m))),
+    );
 }
 
 fn backup_timer(now: &Now) -> Effect {

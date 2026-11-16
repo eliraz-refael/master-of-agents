@@ -18,6 +18,7 @@ pub(crate) fn trusted_panes(state: &State) -> BTreeMap<PaneId, SessionId> {
     let Link::Up { generation, .. } = &tmux.link else {
         return BTreeMap::new();
     };
+    // One session per pane: slice 4's reconcile keeps current-generation bindings unique.
     state
         .pane_bindings()
         .filter(|b| b.server_pid == generation.pid && b.server_start == generation.start)
