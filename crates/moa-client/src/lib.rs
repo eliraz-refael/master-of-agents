@@ -85,9 +85,17 @@ pub enum ClientError {
     #[error("moa closed the connection")]
     Closed,
     /// The connection ended while a reply was awaited: the client can't know whether the
-    /// operation ran.
-    #[error("moa stopped before answering; try again")]
-    Stopped,
+    /// operation ran. `wrote` is set when the request was a write: it may be saved already.
+    #[error("{}", stopped_line(*.wrote))]
+    Stopped { wrote: bool },
+}
+
+fn stopped_line(wrote: bool) -> &'static str {
+    if wrote {
+        "moa stopped before answering; it may have saved that, so check before trying again"
+    } else {
+        "moa stopped before answering; try again"
+    }
 }
 
 /// The first line a daemon started with `--notify-ready` prints.
@@ -182,7 +190,9 @@ impl Wire {
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         match self.framed.send(line.to_string()).await {
             Ok(()) => Ok(id),
-            Err(LinesCodecError::Io(e)) if is_gone(&e) => Err(ClientError::Stopped),
+            Err(LinesCodecError::Io(e)) if is_gone(&e) => {
+                Err(ClientError::Stopped { wrote: false })
+            }
             Err(LinesCodecError::Io(e)) => Err(e.into()),
             Err(e) => Err(invalid(e)),
         }
@@ -210,7 +220,7 @@ impl Wire {
         let id = self.send(method, params).await?;
         loop {
             match self.read().await? {
-                None => return Err(ClientError::Stopped),
+                None => return Err(ClientError::Stopped { wrote: false }),
                 Some(ServerLine::Result { id: got, value }) if got == id => return Ok(value),
                 Some(ServerLine::Error { id: got, error })
                     if got.as_ref().is_none_or(|g| *g == id) =>
@@ -230,7 +240,7 @@ impl Wire {
     /// is the daemon refusing; a connection that stays open is an error too.
     async fn stop(&mut self, method: &str) -> Result<(), ClientError> {
         match self.send(method, json!({})).await {
-            Ok(_) | Err(ClientError::Stopped) => {}
+            Ok(_) | Err(ClientError::Stopped { .. }) => {}
             Err(e) => return Err(e),
         }
         let mut refusal = None;
@@ -334,7 +344,13 @@ impl Client {
         let mut wire = serde_json::to_value(&op).map_err(io::Error::other)?;
         let method = wire["method"].as_str().unwrap_or_default().to_string();
         let params = wire["params"].take();
-        decode(self.wire.request(&method, params).await?)
+        let reply = match self.wire.request(&method, params).await {
+            Err(ClientError::Stopped { .. }) => {
+                return Err(ClientError::Stopped { wrote: op.writes() });
+            }
+            reply => reply?,
+        };
+        decode(reply)
     }
 
     pub async fn status(&mut self) -> Result<StatusOk, ClientError> {
@@ -640,8 +656,26 @@ mod tests {
         let f = fake(1);
         let mut client = Client::connect(f.opts.clone()).await.unwrap();
         let err = client.call(Op::SessionLs { all: false }).await.unwrap_err();
-        assert!(matches!(err, ClientError::Stopped), "{err}");
+        assert!(matches!(err, ClientError::Stopped { .. }), "{err}");
         assert_eq!(err.to_string(), "moa stopped before answering; try again");
+    }
+
+    #[tokio::test]
+    async fn a_write_that_got_no_reply_may_have_been_saved() {
+        let f = fake(1);
+        let mut client = Client::connect(f.opts.clone()).await.unwrap();
+        let op = Op::NoteAdd {
+            text: "n".into(),
+            project: None,
+            kind: None,
+        };
+        assert!(op.writes());
+        let err = client.call(op).await.unwrap_err();
+        assert!(matches!(err, ClientError::Stopped { wrote: true }), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "moa stopped before answering; it may have saved that, so check before trying again"
+        );
     }
 
     #[tokio::test]
@@ -649,11 +683,11 @@ mod tests {
         let f = fake(1);
         let mut client = Client::connect(f.opts.clone()).await.unwrap();
         let err = client.status().await.unwrap_err();
-        assert!(matches!(err, ClientError::Stopped), "{err}");
+        assert!(matches!(err, ClientError::Stopped { .. }), "{err}");
         let f = fake(1);
         let mut client = Client::connect(f.opts.clone()).await.unwrap();
         let err = client.subscribe(&[Topic::Sessions]).await.unwrap_err();
-        assert!(matches!(err, ClientError::Stopped), "{err}");
+        assert!(matches!(err, ClientError::Stopped { .. }), "{err}");
     }
 
     #[tokio::test]
