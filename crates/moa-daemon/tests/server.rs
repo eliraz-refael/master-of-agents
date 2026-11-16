@@ -122,6 +122,7 @@ async fn a_lagging_subscriber_gets_a_fresh_snapshot() {
         server,
         core.clone(),
         BrainName::default_brain(),
+        CancellationToken::new(),
         stop.clone(),
     ));
     let (rd, mut wr) = tokio::io::split(client);
@@ -337,4 +338,42 @@ async fn a_brain_missing_from_the_config_is_refused() {
             paths.config_file().display()
         )
     );
+}
+
+/// An op in flight when another client shuts the daemon down is answered (its result, or
+/// the stopping line), never cut off with EOF: the core still handles it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_op_in_flight_at_shutdown_is_answered_not_cut_off() {
+    for round in 0..5 {
+        let d = boot().await;
+        let mut b = Client::connect(&d.sock);
+        b.hello();
+        let mut sub = Client::connect(&d.sock);
+        sub.hello();
+        sub.call("subscribe", json!({"topics": ["tasks"]}));
+        let mut a = Client::connect(&d.sock);
+        a.hello();
+
+        b.write(&request(
+            90,
+            "group.add",
+            json!({"path": format!("late{round}")}),
+        ));
+        // The requester of the shutdown still gets its reply.
+        assert_eq!(a.call("shutdown", json!({}))["result"], json!({}));
+
+        let first = b.read().expect("a reply or the stopping line, not EOF");
+        assert_eq!(first["id"], json!(90), "{first}");
+        if let Some(e) = first.get("error") {
+            assert_eq!(e["message"], json!("moa is stopping; try again"));
+        }
+        // The subscriber, with nothing in flight, is closed once the core has ended, and
+        // run returns.
+        let ended = timeout(Duration::from_secs(10), d.done)
+            .await
+            .expect("run ends within 10 s")
+            .expect("no panic");
+        assert!(ended.is_ok(), "{ended:?}");
+        while sub.read().is_some() {}
+    }
 }

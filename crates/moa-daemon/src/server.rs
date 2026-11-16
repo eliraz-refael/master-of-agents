@@ -13,12 +13,13 @@ use crate::session::{peer_allowed, serve};
 /// Pause after a failed `accept` (out of descriptors, say), so a persistent error doesn't spin.
 const ACCEPT_RETRY: Duration = Duration::from_millis(200);
 
-/// Accepts until `stop`. A connection from another user is closed and logged.
+/// Accepts until `stop`; sessions get `stop` as their shutdown token and `close` to end on. A connection from another user is closed and logged.
 pub(crate) async fn accept_loop(
     listener: Arc<UnixListener>,
     core: CoreHandle,
     brain: BrainName,
     stop: CancellationToken,
+    close: CancellationToken,
     my_uid: u32,
 ) {
     loop {
@@ -39,7 +40,13 @@ pub(crate) async fn accept_loop(
         };
         match stream.peer_cred() {
             Ok(cred) if peer_allowed(cred.uid(), my_uid) => {
-                tokio::spawn(serve(stream, core.clone(), brain.clone(), stop.clone()));
+                tokio::spawn(serve(
+                    stream,
+                    core.clone(),
+                    brain.clone(),
+                    stop.clone(),
+                    close.clone(),
+                ));
             }
             Ok(cred) => tracing::warn!("closed a connection from user {}", cred.uid()),
             Err(e) => tracing::warn!("closed a connection whose user is unknown: {}", e.kind()),

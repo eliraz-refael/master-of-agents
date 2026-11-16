@@ -31,6 +31,9 @@ const DISCARD_LIMIT: usize = 16 << 20;
 /// How long that may take.
 const DISCARD_TIME: Duration = Duration::from_secs(5);
 
+/// How long a closing session spends writing what it still owes a client.
+const FLUSH_TIME: Duration = Duration::from_secs(1);
+
 const MISMATCH: &str = "this moa is a different build; run the command again to restart it";
 const STOPPING: &str = "moa is stopping; try again";
 
@@ -115,6 +118,13 @@ async fn next_push(sub: &mut Option<Sub>) -> Push {
     }
 }
 
+fn reply_line(id: &Id, result: Result<moa_core::op::Done, OpError>) -> String {
+    match result {
+        Ok(done) => encode_result(id, &done),
+        Err(OpError(message)) => encode_error(Some(id), &rpc(code::FAILED, &message)),
+    }
+}
+
 /// Whether the session goes on.
 #[derive(PartialEq)]
 enum Flow {
@@ -126,7 +136,12 @@ struct Session<S> {
     framed: Framed<S, LinesCodec>,
     core: CoreHandle,
     brain: BrainName,
-    stop: CancellationToken,
+    /// Cancelled by `shutdown`/`upgrade`: the daemon stops accepting and winds down.
+    shutdown: CancellationToken,
+    /// Cancelled once the core has ended: only then may a session cut a write short or
+    /// leave without its reply. Before that a session closes when the core drops its
+    /// reply channel, after the replies already in it.
+    close: CancellationToken,
     conn: ConnId,
     replies: tokio::sync::mpsc::UnboundedReceiver<ConnReply>,
     greeted: Option<Greeted>,
@@ -136,13 +151,15 @@ struct Session<S> {
     next_req: u64,
 }
 
-/// Serves one connection until it closes or `stop` is cancelled. A `shutdown` or `upgrade`
-/// request cancels `stop` once its reply is written.
+/// Serves one connection until it closes, the core ends (its reply channel drops, after
+/// what it holds is delivered) or `close` is cancelled. A `shutdown` or `upgrade` request
+/// cancels `shutdown` once its reply is written.
 pub async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     core: CoreHandle,
     brain: BrainName,
-    stop: CancellationToken,
+    shutdown: CancellationToken,
+    close: CancellationToken,
 ) {
     let (conn, replies) = core.open_conn();
     let _guard = ConnGuard {
@@ -154,7 +171,8 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
         framed: Framed::new(stream, LinesCodec::new_with_max_length(moa_proto::MAX_LINE)),
         core,
         brain,
-        stop,
+        shutdown,
+        close,
         conn,
         replies,
         greeted: None,
@@ -170,7 +188,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
     async fn run(&mut self) {
         loop {
             let flow = tokio::select! {
-                _ = self.stop.cancelled() => Flow::Close,
+                _ = self.close.cancelled() => {
+                    self.flush_replies().await;
+                    Flow::Close
+                }
                 // One op at a time: nothing is read while one is in flight.
                 line = self.framed.next(), if self.pending.is_none() => match line {
                     Some(Ok(line)) => self.on_line(&line).await,
@@ -186,11 +207,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
         }
     }
 
-    /// Writes one line; `false` when the connection is gone or the daemon is stopping.
+    /// Writes one line; `false` when the connection is gone. Once the daemon has closed
+    /// the sessions, a write already under way gets a short time to finish rather than being
+    /// cut off: it may be the reply the client is waiting for.
     async fn send(&mut self, line: String) -> bool {
+        let close = &self.close;
+        let sending = self.framed.send(line);
+        tokio::pin!(sending);
         tokio::select! {
-            r = self.framed.send(line) => r.is_ok(),
-            _ = self.stop.cancelled() => false,
+            r = &mut sending => r.is_ok(),
+            _ = close.cancelled() => matches!(
+                tokio::time::timeout(FLUSH_TIME, &mut sending).await,
+                Ok(Ok(()))
+            ),
         }
     }
 
@@ -239,7 +268,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             Call::Shutdown | Call::Upgrade => {
                 let flow = self.say(encode_result(&id, &json!({}))).await;
                 tracing::info!(conn = self.conn.0, "asked to stop");
-                self.stop.cancel();
+                self.shutdown.cancel();
                 if flow == Flow::Go { Flow::Close } else { flow }
             }
             Call::Subscribe(s) => self.subscribe(&id, s).await,
@@ -320,14 +349,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             return Flow::Close;
         };
         match self.pending.take() {
-            Some((want, id)) if want == req => match result {
-                Ok(done) => self.say(encode_result(&id, &done)).await,
-                Err(OpError(message)) => self.refuse(&id, code::FAILED, &message).await,
-            },
+            Some((want, id)) if want == req => self.say(reply_line(&id, result)).await,
             // Not ours to answer: put back what was there.
             other => {
                 self.pending = other;
                 Flow::Go
+            }
+        }
+    }
+
+    /// When the daemon closes the session: writes the replies already waiting (the core
+    /// answers everything it held before it ends), with a short bound on a stuck client.
+    async fn flush_replies(&mut self) {
+        while let Ok((req, result)) = self.replies.try_recv() {
+            match self.pending.take() {
+                Some((want, id)) if want == req => {
+                    let line = reply_line(&id, result);
+                    let _ = tokio::time::timeout(FLUSH_TIME, self.framed.send(line)).await;
+                }
+                other => self.pending = other,
             }
         }
     }

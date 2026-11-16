@@ -68,6 +68,11 @@ struct Up {
     listener: UnixListener,
     sock: PathBuf,
     core: CoreHandle,
+    sigs: Signals,
+}
+
+/// The signals the daemon answers.
+struct Signals {
     term: Signal,
     int: Signal,
     hup: Signal,
@@ -153,18 +158,16 @@ async fn bring_up(
             events_capacity,
         })
         .await?;
-        Ok::<_, DaemonError>((core, term, int, hup))
+        Ok::<_, DaemonError>((core, Signals { term, int, hup }))
     }
     .await;
     match up {
-        Ok((core, term, int, hup)) => Ok(Up {
+        Ok((core, sigs)) => Ok(Up {
             _lock: lock,
             listener,
             sock,
             core,
-            term,
-            int,
-            hup,
+            sigs,
         }),
         Err(e) => {
             remove_socket(&sock);
@@ -217,7 +220,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         tz,
         clock,
         alarm,
-        mut zone,
+        zone,
         ready,
         events_capacity,
         uid_override,
@@ -232,9 +235,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         listener,
         sock,
         core,
-        mut term,
-        mut int,
-        mut hup,
+        sigs,
     } = match up {
         Ok(up) => up,
         Err(e) => {
@@ -247,19 +248,39 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
     announce_ready(ready, &sock);
     tracing::info!("ready on {}", sock.display());
 
-    let stop = CancellationToken::new();
     let my_uid = uid_override.unwrap_or_else(moa_platform::current_uid);
+    keep_up(core, listener, sock, brain, my_uid, zone, sigs).await
+}
+
+/// Accepts clients and watches for the end, then winds down. `Ok` after a signal or a
+/// `shutdown`; `Err` when the core can't go on.
+async fn keep_up(
+    core: CoreHandle,
+    listener: UnixListener,
+    sock: PathBuf,
+    brain: BrainName,
+    my_uid: u32,
+    mut zone: Option<ZoneWatch>,
+    mut sigs: Signals,
+) -> Result<(), DaemonError> {
+    // `stop` ends the accept loop (and is what `shutdown` cancels); `close` ends the
+    // sessions, and only after the core is done, so each gets its reply or the stopping
+    // line first.
+    let stop = CancellationToken::new();
+    let close = CancellationToken::new();
     let listener = Arc::new(listener);
     let accept = tokio::spawn(supervise(
         "accept loop",
         {
-            let (core, brain, stop) = (core.clone(), brain.clone(), stop.clone());
+            let (core, brain, stop, close) =
+                (core.clone(), brain.clone(), stop.clone(), close.clone());
             move || {
                 accept_loop(
                     listener.clone(),
                     core.clone(),
                     brain.clone(),
                     stop.clone(),
+                    close.clone(),
                     my_uid,
                 )
             }
@@ -269,15 +290,15 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
 
     let outcome = loop {
         tokio::select! {
-            _ = term.recv() => {
+            _ = sigs.term.recv() => {
                 tracing::info!("SIGTERM: stopping");
                 break Ok(());
             }
-            _ = int.recv() => {
+            _ = sigs.int.recv() => {
                 tracing::info!("SIGINT: stopping");
                 break Ok(());
             }
-            _ = hup.recv() => tracing::info!("SIGHUP ignored"),
+            _ = sigs.hup.recv() => tracing::info!("SIGHUP ignored"),
             _ = stop.cancelled() => {
                 tracing::info!("asked to stop");
                 break Ok(());
@@ -317,7 +338,14 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
     if wound_down.is_err() {
         tracing::error!("the core didn't finish within {} s", STOP_WAIT.as_secs());
     }
+    // Sessions that still wait for something are closed now; the rest already closed when
+    // the core dropped their reply channels.
+    close.cancel();
     remove_socket(&sock);
     tracing::info!("stopped");
     outcome
 }
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;
