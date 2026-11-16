@@ -1,0 +1,25 @@
+[package]
+name = "moa-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+moa-core = { path = "../moa-core" }
+moa-platform = { path = "../moa-platform" }
+moa-store = { path = "../moa-store" }
+jiff.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+moa-testkit = { path = "../moa-testkit" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+
+[lints]
+workspace = true

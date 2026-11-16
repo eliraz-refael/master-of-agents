@@ -18,7 +18,7 @@ pub struct RefuseWrites {
     pub reason: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum TimerKey {
     Backup,
 }
