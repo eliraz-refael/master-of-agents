@@ -224,6 +224,7 @@ impl CoreHandle {
             generation_tx,
             sched: sched.clone(),
             backups: TaskTracker::new(),
+            due_backups: Vec::new(),
             db: opts.db,
             backups_dir: opts.backups,
             failures_in_row: 0,
@@ -327,10 +328,14 @@ impl CoreHandle {
     /// event (and logs it). The raw panic message stays with the caller: it may carry
     /// contents.
     pub fn actor_failed(&self, actor: &'static str) {
-        let _ = self.inbox.send(Item::Input(Input::ActorFailed {
+        let sent = self.inbox.send(Item::Input(Input::ActorFailed {
             actor,
             message: String::new(),
         }));
+        if sent.is_err() {
+            // The core is gone and can't log it.
+            tracing::error!("actor {actor} failed and was restarted");
+        }
     }
 
     pub fn model(&self) -> watch::Receiver<Arc<Model>> {
@@ -426,6 +431,9 @@ struct Core {
     generation_tx: watch::Sender<u64>,
     sched: mpsc::UnboundedSender<SchedCmd>,
     backups: TaskTracker,
+    /// Backups the drain asked for: started once its commit has been sent, so the commit is
+    /// ahead of the copy on the store thread.
+    due_backups: Vec<Date>,
     /// Where the store reopens from when its thread dies.
     db: PathBuf,
     backups_dir: PathBuf,
@@ -577,6 +585,9 @@ impl Core {
         {
             return self.fatal(line, held);
         }
+        for day in std::mem::take(&mut self.due_backups) {
+            self.start_backup(day);
+        }
         match self.release(held).await {
             Some(stop) => Flow::Stop(stop),
             None => Flow::Go,
@@ -709,7 +720,7 @@ impl Core {
     /// happened (`fail_held` has turned the replies of a drain that didn't save into errors).
     fn fatal(&mut self, line: String, held: Vec<Held>) -> Flow {
         tracing::error!("the core stops: {line}");
-        // Before anything is dropped: a `start()` woken by a dropped barrier must find it.
+        // Before anything is dropped: a `start()` woken by a dropped `committed()` must find it.
         self.finished_tx.send_replace(Some(Err(line.clone())));
         let _ = self.events.send(CoreEvent::Error {
             message: line.clone(),
@@ -768,7 +779,7 @@ impl Core {
             }
             match effect {
                 Effect::Persist(changes) => batch.extend(changes),
-                Effect::Backup { day } => self.start_backup(day),
+                Effect::Backup { day } => self.due_backups.push(day),
                 Effect::Publish(p) => held.push(Held::Publish(p)),
                 Effect::Reply { conn, req, result } => held.push(Held::Reply { conn, req, result }),
                 // Handled above.

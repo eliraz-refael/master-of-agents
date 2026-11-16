@@ -218,6 +218,11 @@ impl Wire {
     /// meanwhile are kept for `next_notice`.
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         let id = self.send(method, params).await?;
+        self.reply(id).await
+    }
+
+    /// Waits for the reply that carries `id`, keeping the notices that arrive meanwhile.
+    async fn reply(&mut self, id: Id) -> Result<Value, ClientError> {
         loop {
             match self.read().await? {
                 None => return Err(ClientError::Stopped { wrote: false }),
@@ -344,7 +349,10 @@ impl Client {
         let mut wire = serde_json::to_value(&op).map_err(io::Error::other)?;
         let method = wire["method"].as_str().unwrap_or_default().to_string();
         let params = wire["params"].take();
-        let reply = match self.wire.request(&method, params).await {
+        // A send that failed never reached the daemon; only a missing reply leaves a write
+        // in doubt.
+        let id = self.wire.send(&method, params).await?;
+        let reply = match self.wire.reply(id).await {
             Err(ClientError::Stopped { .. }) => {
                 return Err(ClientError::Stopped { wrote: op.writes() });
             }
