@@ -73,6 +73,31 @@ pub enum Op {
     Brief(NoParams),
     #[serde(rename = "attention")]
     Attention(NoParams),
+    #[serde(rename = "suggest")]
+    Suggest {
+        text: String,
+        /// Each is a moactl action, as typed: `task set 1 --status done`.
+        #[serde(default)]
+        actions: Vec<String>,
+    },
+    #[serde(rename = "suggestion.answer")]
+    SuggestionAnswer {
+        #[serde(default)]
+        id: Option<i64>,
+        answer: Answer,
+    },
+    #[serde(rename = "suggestion.ls")]
+    SuggestionLs(NoParams),
+}
+
+/// How a suggestion is answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Answer {
+    Yes,
+    No,
+    Later,
 }
 
 /// What a suggestion action parses to: an op the core runs, or a verb this build can't run yet.
@@ -191,6 +216,9 @@ impl Op {
         "project.add",
         "brief",
         "attention",
+        "suggest",
+        "suggestion.answer",
+        "suggestion.ls",
     ];
 
     /// This op's method name.
@@ -211,6 +239,9 @@ impl Op {
             Op::ProjectAdd { .. } => "project.add",
             Op::Brief(_) => "brief",
             Op::Attention(_) => "attention",
+            Op::Suggest { .. } => "suggest",
+            Op::SuggestionAnswer { .. } => "suggestion.answer",
+            Op::SuggestionLs(_) => "suggestion.ls",
         }
     }
 }

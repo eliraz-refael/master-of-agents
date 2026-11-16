@@ -1,11 +1,19 @@
 ---
 source: crates/moa-proto/tests/schema.rs
-assertion_line: 18
 expression: all
 ---
 {
   "Call": {
     "$defs": {
+      "Answer": {
+        "description": "How a suggestion is answered.",
+        "enum": [
+          "yes",
+          "no",
+          "later"
+        ],
+        "type": "string"
+      },
       "CallerInfo": {
         "description": "What a caller says about itself (the hook environment).",
         "properties": {
@@ -427,6 +435,86 @@ expression: all
             "properties": {
               "method": {
                 "const": "attention",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "suggest",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "actions": {
+                    "default": [],
+                    "description": "Each is a moactl action, as typed: `task set 1 --status done`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "suggestion.answer",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "answer": {
+                    "$ref": "#/$defs/Answer"
+                  },
+                  "id": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "answer"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "method": {
+                "const": "suggestion.ls",
                 "type": "string"
               },
               "params": {

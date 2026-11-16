@@ -1,0 +1,7 @@
+---
+source: crates/moa-core/tests/suggestions.rs
+expression: text
+---
+#1 [open] Mark the board order done  (yes can't run its actions: an action doesn't parse as moactl)
+#2 [open] Rename the working session  (yes runs: set 3f9a1c52 --title 'New name')
+#4 [later] Note the lamp voltage  (yes runs: note --kind fact 'x y')

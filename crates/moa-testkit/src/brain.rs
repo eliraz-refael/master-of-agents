@@ -11,6 +11,7 @@ use moa_agents::claude::find_transcript;
 use moa_core::config::{BrainConfig, BrainName, Config};
 use moa_core::effect::{handle_checked, reply_of};
 use moa_core::op::{Done, Op, OpError};
+use moa_core::state::Deps;
 use moa_core::{Input, Now, State, UtcMs};
 use moa_store::accounts::AccountMap;
 use moa_store::import::{IdSource, ImportEnv, import_spike};
@@ -92,7 +93,15 @@ impl TypicalBrain {
 
     /// The core's state with this brain loaded.
     pub fn state(&self) -> State {
-        let mut state = State::new(BrainName::default_brain(), self.config());
+        self.state_with(Deps::default())
+    }
+
+    /// [`TypicalBrain::state`] with `deps`. The config's folders are canonicalised with
+    /// `deps.canonical` before `Startup`, as the daemon's config loader does.
+    pub fn state_with(&self, deps: Deps) -> State {
+        let mut config = self.config();
+        config.canonicalize_with(deps.canonical);
+        let mut state = State::new(BrainName::default_brain(), config).with_deps(deps);
         let _ = handle_checked(
             &mut state,
             Input::Startup(Box::new(self.snapshot())),

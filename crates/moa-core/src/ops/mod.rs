@@ -5,6 +5,7 @@ pub mod groups;
 pub mod projects;
 pub mod read;
 pub mod sessions;
+pub mod suggestions;
 pub mod tasks;
 
 use crate::Now;
@@ -15,7 +16,7 @@ use crate::state::{Caller, State};
 pub(crate) fn run(
     state: &mut State,
     tx: &mut Tx,
-    _caller: &Caller,
+    caller: &Caller,
     op: Op,
     now: &Now,
 ) -> Result<Done, OpError> {
@@ -45,6 +46,11 @@ pub(crate) fn run(
         } => projects::add(state, tx, now, &name, &path, summary.as_deref()),
         Op::Brief(_) => read::brief(state, now),
         Op::Attention(_) => read::attention(state, now),
+        Op::Suggest { text, actions } => suggestions::suggest(state, tx, now, &text, &actions),
+        Op::SuggestionAnswer { id, answer } => {
+            suggestions::answer(state, tx, caller, now, id, answer)
+        }
+        Op::SuggestionLs(_) => suggestions::ls(state),
     }
 }
 

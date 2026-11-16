@@ -40,6 +40,22 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
                     message,
                 })
             }));
+            // A suggestion whose action no longer parses is flagged and saved, before anyone
+            // is told about the state.
+            let flags = ops::suggestions::startup_flags(state);
+            if !flags.is_empty() {
+                fx.extend(flags.iter().filter_map(|c| match c {
+                    Change::Suggestion(s) => Some(Effect::Log(LogLine {
+                        level: LogLevel::Warn,
+                        message: format!("suggestion #{} has an action that doesn't parse", s.id),
+                    })),
+                    _ => None,
+                }));
+                for c in &flags {
+                    state.apply(c);
+                }
+                fx.push(Effect::Persist(flags));
+            }
             fx.extend(publish_all(state));
             fx
         }
@@ -253,7 +269,7 @@ impl Tx {
 }
 
 /// `<table word> <key> has a value this build doesn't know; update moa`.
-fn unknown_message(state: &State, table: &str, key: &str) -> String {
+pub(crate) fn unknown_message(state: &State, table: &str, key: &str) -> String {
     let word = match table {
         "projects" => "project",
         "tasks" => "task",

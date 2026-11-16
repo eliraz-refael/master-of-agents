@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use moa_core::model::SuggestionAction;
-use moa_core::op::{Action, Op, TaskAdd, TaskSet};
-use moa_proto::cli::{Moactl, VerbCtx, VerbError, parse_action};
+use moa_core::op::{Action, Answer, NoParams, Op, TaskAdd, TaskSet};
+use moa_proto::cli::{Moactl, VERB_NAMES, VerbCtx, parse_action};
 
 fn ctx() -> VerbCtx {
     VerbCtx {
@@ -51,6 +51,20 @@ fn spike_style_invocations_parse() {
             priority: Some("p1".into()),
             ..Default::default()
         })
+    );
+    assert_eq!(
+        op(&[
+            "suggest",
+            "Close it?",
+            "--do",
+            "task set 1 --status done",
+            "--do",
+            "note x"
+        ]),
+        Op::Suggest {
+            text: "Close it?".into(),
+            actions: vec!["task set 1 --status done".into(), "note x".into()]
+        }
     );
     assert_eq!(
         op(&["task", "set", "12", "--stat", "done"]),
@@ -135,25 +149,96 @@ fn spike_style_invocations_parse() {
 }
 
 #[test]
-fn suggest_parses_its_flags_but_is_not_yet() {
-    let m = parse(&[
-        "suggest",
-        "Close it?",
-        "--do",
-        "task set 1 --status done",
-        "--do",
-        "note x",
-    ]);
-    assert_eq!(m.verb.name(), "suggest");
-    assert!(matches!(
-        m.verb.to_op(&ctx()),
-        Err(VerbError::NotYet("suggest"))
-    ));
-    let m = parse(&["suggestion", "yes", "4"]);
-    assert!(matches!(
-        m.verb.to_op(&ctx()),
-        Err(VerbError::NotYet("suggestion"))
-    ));
+fn suggest_and_suggestion_map_to_their_ops() {
+    assert_eq!(
+        op(&[
+            "suggest",
+            "Close it?",
+            "--do",
+            "task set 1 --status done",
+            "--do",
+            "note x",
+        ]),
+        Op::Suggest {
+            text: "Close it?".into(),
+            actions: vec!["task set 1 --status done".into(), "note x".into()]
+        }
+    );
+    assert_eq!(
+        op(&["suggest", "Just text"]),
+        Op::Suggest {
+            text: "Just text".into(),
+            actions: vec![]
+        }
+    );
+    for (word, answer) in [
+        ("yes", Answer::Yes),
+        ("no", Answer::No),
+        ("later", Answer::Later),
+    ] {
+        assert_eq!(
+            op(&["suggestion", word, "4"]),
+            Op::SuggestionAnswer {
+                id: Some(4),
+                answer
+            }
+        );
+        assert_eq!(
+            op(&["suggestion", word]),
+            Op::SuggestionAnswer { id: None, answer }
+        );
+    }
+    assert_eq!(op(&["suggestion", "ls"]), Op::SuggestionLs(NoParams));
+}
+
+/// A minimal valid command line for each verb.
+const EACH_VERB: &[&[&str]] = &[
+    &["ls"],
+    &["find", "q"],
+    &["set", "x"],
+    &["archive", "x"],
+    &["group", "add", "A"],
+    &["note", "x"],
+    &["project", "x"],
+    &["task", "ls"],
+    &["suggest", "x"],
+    &["suggestion", "ls"],
+    &["brief"],
+    &["attention"],
+    &["open", "x"],
+    &["resume", "x"],
+    &["focus", "x"],
+    &["close", "x"],
+    &["sleep"],
+    &["term"],
+    &["adopt", "x"],
+    &["goto", "x"],
+    &["layout", "list"],
+    &["peers"],
+    &["ask", "x", "y"],
+    &["reply", "1"],
+    &["asks"],
+    &["setup"],
+    &["import-herdr"],
+];
+
+#[test]
+fn verb_names_match_clap_and_the_enum() {
+    use clap::CommandFactory;
+    let mut clap_names: Vec<String> = Moactl::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    let mut listed: Vec<String> = VERB_NAMES.iter().map(|s| s.to_string()).collect();
+    clap_names.sort();
+    listed.sort();
+    assert_eq!(listed, clap_names);
+    for argv in EACH_VERB {
+        assert_eq!(parse(argv).verb.name(), argv[0], "{argv:?}");
+    }
+    let mut each: Vec<&str> = EACH_VERB.iter().map(|a| a[0]).collect();
+    each.sort();
+    assert_eq!(each, listed);
 }
 
 #[test]

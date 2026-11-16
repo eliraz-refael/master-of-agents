@@ -125,10 +125,15 @@ pub(crate) fn add(
             state.brain().as_str()
         )));
     }
-    // One spelling per folder: `/a/b/` and `/a/./b` are stored, and compared, as `/a/b`.
-    let path: PathBuf = path.components().collect();
-    let path = path.as_path();
+    // One spelling per folder: `/a/b/` and `/a/./b` are `/a/b`, then the canonical form, the
+    // same step a path in a suggestion's action goes through. Projects imported from the
+    // spike were never canonicalised, so the duplicate check and the session back-link
+    // also take the path as typed.
+    let typed: PathBuf = path.components().collect();
+    let canon = (state.deps().canonical)(&typed);
+    let path = canon.as_path();
     let shown = path.display().to_string();
+    let typed_shown = typed.display().to_string();
     if !is_under_any(path, &folders) {
         return Err(OpError(format!(
             "{shown} isn't in this brain's folders; this brain doesn't track it"
@@ -146,7 +151,9 @@ pub(crate) fn add(
     // The store keeps names unique ignoring case; refuse here so memory never gets ahead of
     // the disk.
     if project_named(state, name).is_some()
-        || state.projects().any(|p| p.path.as_deref() == Some(&shown))
+        || state
+            .projects()
+            .any(|p| p.path.as_deref() == Some(&shown) || p.path.as_deref() == Some(&typed_shown))
     {
         return Err(OpError(format!(
             "there's already a project named '{name}' or for {shown}"
@@ -179,7 +186,7 @@ pub(crate) fn add(
         .filter(|s| {
             s.cwd
                 .as_deref()
-                .is_some_and(|c| is_under(Path::new(c), path))
+                .is_some_and(|c| is_under(Path::new(c), path) || is_under(Path::new(c), &typed))
         })
         .map(|s| s.id)
         .collect();

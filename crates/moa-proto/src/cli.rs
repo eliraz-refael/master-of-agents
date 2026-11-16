@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
-use moa_core::op::{Action, NoParams, Op, TaskAdd, TaskSet};
+use moa_core::op::{Action, Answer, NoParams, Op, TaskAdd, TaskSet};
 
 /// What `moactl` parses: a global `--json` and one verb.
 #[derive(Parser, Debug)]
@@ -458,8 +458,41 @@ impl Verb {
             },
             Verb::Brief => Op::Brief(NoParams),
             Verb::Attention => Op::Attention(NoParams),
-            // Suggest and Suggestion parse fully; their ops arrive with the suggestion store.
-            _ => return Err(VerbError::NotYet(self.name())),
+            Verb::Suggest { text, actions } => Op::Suggest {
+                text: text.clone(),
+                actions: actions.clone(),
+            },
+            Verb::Suggestion { op, id } => match op {
+                SuggestionOp::Yes => Op::SuggestionAnswer {
+                    id: *id,
+                    answer: Answer::Yes,
+                },
+                SuggestionOp::No => Op::SuggestionAnswer {
+                    id: *id,
+                    answer: Answer::No,
+                },
+                SuggestionOp::Later => Op::SuggestionAnswer {
+                    id: *id,
+                    answer: Answer::Later,
+                },
+                SuggestionOp::Ls => Op::SuggestionLs(NoParams),
+            },
+            // Listed one by one, so a new verb can't become "not yet" by default.
+            Verb::Open { .. }
+            | Verb::Resume { .. }
+            | Verb::Focus { .. }
+            | Verb::Close { .. }
+            | Verb::Sleep { .. }
+            | Verb::Term { .. }
+            | Verb::Adopt { .. }
+            | Verb::Goto { .. }
+            | Verb::Layout { .. }
+            | Verb::Peers
+            | Verb::Ask { .. }
+            | Verb::Reply { .. }
+            | Verb::Asks
+            | Verb::Setup { .. }
+            | Verb::ImportHerdr => return Err(VerbError::NotYet(self.name())),
         })
     }
 }
