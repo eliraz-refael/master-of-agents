@@ -1,0 +1,14 @@
+---
+source: crates/moa-platform/tests/service.rs
+expression: unit(&real)
+---
+[Unit]
+Description=moa daemon for the work brain
+
+[Service]
+ExecStart="/opt/moa bin/moa&co" daemon --brain work
+Environment=MOA_REAL_HOME=1
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

@@ -8,6 +8,7 @@ use moa_proto::cli::{Moactl, VERB_NAMES};
 mod adopt;
 mod ctl;
 mod daemon;
+mod service;
 mod sql;
 
 #[derive(Parser)]
@@ -31,6 +32,8 @@ enum Command {
     Shutdown(ctl::BrainArgs),
     /// A read-only SQL shell on a brain: one statement, or one per line on stdin.
     Sql(sql::SqlArgs),
+    /// Start a brain's moa at login: `service install` or `service uninstall`.
+    Service(service::ServiceArgs),
 }
 
 /// Whether this is a `moactl` call: run as `moactl`, or `moa` followed by a verb (the first
@@ -65,6 +68,7 @@ fn main() -> ExitCode {
         Some(Command::Status(args)) => return ctl::status(&args),
         Some(Command::Shutdown(args)) => return ctl::shutdown(&args),
         Some(Command::Sql(args)) => sql::sql(&args),
+        Some(Command::Service(args)) => service::service(&args),
         None => {
             eprintln!("moa v1 is still being built; use the spike's moa for now.");
             return ExitCode::from(2);

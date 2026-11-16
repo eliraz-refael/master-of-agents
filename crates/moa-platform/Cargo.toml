@@ -11,6 +11,7 @@ libc.workspace = true
 tokio = { workspace = true, features = ["net"] }
 
 [dev-dependencies]
+insta.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 

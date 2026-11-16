@@ -4,6 +4,7 @@
 pub mod alarm;
 pub mod build_id;
 pub mod paths;
+pub mod service;
 pub mod spawn;
 #[allow(unsafe_code)]
 mod sys;
