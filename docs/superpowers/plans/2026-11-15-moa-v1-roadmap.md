@@ -414,13 +414,14 @@ Spec §6.6; R2.
      name `moa` (C7), so v1 can adopt the live servers.
    - `moa_testkit::Sandbox` gains a constructor with no server (for create-if-missing tests),
      and restarts after `kill-server` pass `-f` again.
-   - The front door (`moa`) creates the server only if it's missing, and the daemon runs tmux with `-N` and never starts one (slice 3, T1), with a generated config that runs
-     `source-file -q ~/.tmux.conf` first and sets `terminal-features …:RGB` for terminals
-     known to support it (spec §6.14).
+   - The front door (`moa`) creates the server only if it's missing; the daemon runs tmux
+     with `-N` and never starts one (slice 3, T1).
+   - The generated config runs `source-file -q ~/.tmux.conf` first and sets
+     `terminal-features …:RGB` for terminals known to support it (spec §6.14).
    - Every pane's env is set with `-e`; the server env stays clean.
    - Creates the `_moa` session.
    - Hooks at index 90 (`pane-exited`, `pane-died`, `window-layout-changed`,
-     `client-attached`) are installed idempotently and removed on clean shutdown;
+     `client-attached`, `client-detached`) are installed idempotently and removed on clean shutdown;
      `alert-bell` and `client-active` wait for the slices that consume them (slice 3, T7).
    - Sets `@moa_ctl`.
    - Adopting an existing server = the same steps without creating it.
@@ -450,7 +451,7 @@ Spec §6.6; R2.
 
 **Carried from slice 2b:**
 - Split `crates/moa-daemon/src/core_task.rs` (recover/reload/fatal) before tmux inputs join
-  the loop.
+  the loop: done (slice 3, Task 1).
 - The daemon's PATH/environment: decided: T1 (slice 3).
 
 **Done when:**
@@ -459,8 +460,8 @@ Spec §6.6; R2.
 - `kill-server` followed by a restart gives a new generation, which is detected.
 
 **Try it:** `moa --sandbox` opens a throwaway brain (`MOA_ROOT` under
-`~/.local/state/moa-sandbox`, a socket inside the sandbox root (slice 3, T2)) with the key table and status
-line.
+`~/.local/state/moa-sandbox`, with a socket inside the sandbox root (slice 3, T2)), with the
+key table and status line.
 
 ## Slice 4: agents and hooks
 
