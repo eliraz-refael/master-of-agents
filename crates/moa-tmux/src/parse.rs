@@ -64,12 +64,17 @@ fn known(name: &str) -> Option<&'static str> {
     KNOWN.iter().copied().find(|k| *k == name)
 }
 
-/// A block's identity: the `%begin` time, command number and flags.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A block's identity: the raw `%begin` time, command number and flags. The closing
+/// marker must repeat the same text, so `+5` or `05` never closes block `5`.
+#[derive(Clone, PartialEq, Eq)]
 struct Guard {
-    time: u64,
-    number: u64,
-    flags: u32,
+    time: String,
+    number: String,
+    flags: String,
+}
+
+fn digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// `%<word> T N F` with exactly three numeric fields, else `None`.
@@ -78,28 +83,46 @@ fn guard(line: &str, word: &str) -> Option<Guard> {
     if it.next()? != word {
         return None;
     }
-    let time = it.next()?.parse().ok()?;
-    let number = it.next()?.parse().ok()?;
-    let flags = it.next()?.parse().ok()?;
-    if it.next().is_some() {
+    let (time, number, flags) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() || !digits(time) || !digits(number) || !digits(flags) {
         return None;
     }
+    time.parse::<u64>().ok()?;
+    number.parse::<u64>().ok()?;
+    flags.parse::<u32>().ok()?;
     Some(Guard {
-        time,
-        number,
-        flags,
+        time: time.to_string(),
+        number: number.to_string(),
+        flags: flags.to_string(),
     })
 }
 
 struct Block {
     guard: Guard,
+    flags: u32,
     lines: Vec<String>,
     bytes: usize,
 }
 
+/// Turns tmux's control-mode bytes into frames.
+///
+/// Inside a reply block, only the exact closing marker (same time, number and flags as
+/// the `%begin`) ends it. With `set_notifications_in_blocks(true)`, the default, a line
+/// whose first word is a known notification name is also read as a notification, because
+/// before tmux 3.8 a notification can land inside a block. From 3.8 tmux holds them back
+/// until after the block, so the caller switches this off once it sees a 3.8 or newer
+/// version (the version is not known before the first reply).
+///
+/// Caller invariant: while the rule is on, a reply line that begins with `%` and a known
+/// name is read as a notification, so moa must not request output whose lines can start
+/// with `%` from a server older than 3.8 (multi-line `display-message -p` values are the
+/// known case).
 pub struct Parser {
     buf: Vec<u8>,
+    /// How many bytes at the front of `buf` are known to hold no newline.
+    scanned: usize,
     block: Option<Block>,
+    notifications_in_blocks: bool,
 }
 
 impl Default for Parser {
@@ -112,25 +135,40 @@ impl Parser {
     pub fn new() -> Parser {
         Parser {
             buf: Vec::new(),
+            scanned: 0,
             block: None,
+            notifications_in_blocks: true,
         }
     }
 
+    /// Turns the in-block notification rule on or off (see the type docs).
+    pub fn set_notifications_in_blocks(&mut self, on: bool) {
+        self.notifications_in_blocks = on;
+    }
+
     /// Feeds bytes and returns the frames they complete. Chunk boundaries don't matter.
+    /// On an error, frames already parsed in this call are dropped, and the parser must
+    /// not be used again: the client drops the connection.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Frame>, ParseError> {
         self.buf.extend_from_slice(bytes);
         let mut frames = Vec::new();
         let mut start = 0;
-        while let Some(off) = self.buf[start..].iter().position(|b| *b == b'\n') {
-            let end = start + off;
-            if off > MAX_LINE {
+        loop {
+            let from = start.max(self.scanned);
+            let Some(off) = self.buf[from..].iter().position(|b| *b == b'\n') else {
+                break;
+            };
+            let end = from + off;
+            if end - start > MAX_LINE {
                 return Err(ParseError::LineTooLong);
             }
             let line = String::from_utf8_lossy(&self.buf[start..end]).into_owned();
+            let size = end - start + 1;
             start = end + 1;
-            Self::line(&mut self.block, line, off + 1, &mut frames)?;
+            self.line(line, size, &mut frames)?;
         }
         self.buf.drain(..start);
+        self.scanned = self.buf.len();
         if self.buf.len() > MAX_LINE {
             return Err(ParseError::LineTooLong);
         }
@@ -138,14 +176,15 @@ impl Parser {
     }
 
     fn line(
-        block: &mut Option<Block>,
+        &mut self,
         line: String,
         size: usize,
         frames: &mut Vec<Frame>,
     ) -> Result<(), ParseError> {
-        let Some(open) = block else {
+        let Some(open) = &mut self.block else {
             if let Some(g) = guard(&line, "%begin") {
-                *block = Some(Block {
+                self.block = Some(Block {
+                    flags: g.flags.parse().unwrap_or(0),
                     guard: g,
                     lines: Vec::new(),
                     bytes: 0,
@@ -158,18 +197,18 @@ impl Parser {
             return Ok(());
         };
         for (word, error) in [("%end", false), ("%error", true)] {
-            if guard(&line, word) == Some(open.guard) {
-                let done = block.take().expect("block is open");
+            if guard(&line, word).as_ref() == Some(&open.guard) {
+                let done = self.block.take().expect("block is open");
                 frames.push(Frame::Reply {
-                    flags: done.guard.flags,
+                    flags: done.flags,
                     error,
                     lines: done.lines,
                 });
                 return Ok(());
             }
         }
-        // Before tmux 3.8 a notification can land inside a block.
-        if let Some(name) = line.strip_prefix('%')
+        if self.notifications_in_blocks
+            && let Some(name) = line.strip_prefix('%')
             && known(name.split(' ').next().unwrap_or("")).is_some()
         {
             frames.push(Frame::Notification(notification(&line)));

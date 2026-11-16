@@ -293,7 +293,200 @@ fn chunked(data: &[u8], sizes: &[usize]) -> Vec<Frame> {
     out
 }
 
+#[test]
+fn with_the_knob_off_in_block_notifications_are_content() {
+    let mut p = Parser::new();
+    p.set_notifications_in_blocks(false);
+    let input = "%begin 5 7 1\n%message moa:key x %1 $0 c\n%exit\n%end 5 7 1\n";
+    assert_eq!(
+        p.push(input.as_bytes()).unwrap(),
+        vec![reply(1, false, &["%message moa:key x %1 $0 c", "%exit"])]
+    );
+}
+
+#[test]
+fn the_closing_marker_must_match_the_raw_fields() {
+    let input = "%begin 5 7 1\n%end +5 7 1\n%end 05 7 1\n%end 5 7 01\n%end 5 7 1\n";
+    assert_eq!(
+        parse_all(input.as_bytes()),
+        vec![reply(
+            1,
+            false,
+            &["%end +5 7 1", "%end 05 7 1", "%end 5 7 01"]
+        )]
+    );
+}
+
+/// A line inside a block in the model.
+#[derive(Clone, Debug)]
+enum Line {
+    Content(String),
+    /// A `%end` or `%error` with exactly one of time, number, flags changed.
+    Decoy {
+        error: bool,
+        field: u8,
+    },
+    Notif(usize),
+}
+
+#[derive(Clone, Debug)]
+enum Item {
+    Block {
+        time: u32,
+        number: u32,
+        flags: u32,
+        error: bool,
+        lines: Vec<Line>,
+    },
+    Notif(usize),
+}
+
+fn samples() -> Vec<(&'static str, Notification)> {
+    vec![
+        ("%sessions-changed", Notification::SessionsChanged),
+        ("%window-add @4", Notification::WindowAdd { window: win(4) }),
+        ("%exit", Notification::Exit),
+        (
+            "%message hi there",
+            Notification::Message("hi there".into()),
+        ),
+        (
+            "%window-renamed @1 x",
+            Notification::Other("window-renamed"),
+        ),
+        (
+            "%window-pane-changed @0 %3",
+            Notification::WindowPaneChanged {
+                window: win(0),
+                pane: pane(3),
+            },
+        ),
+    ]
+}
+
+fn line_strategy() -> impl Strategy<Value = Line> {
+    prop_oneof![
+        4 => "[a-z][a-z0-9 ]{0,20}".prop_map(Line::Content),
+        2 => (any::<bool>(), 0u8..3).prop_map(|(error, field)| Line::Decoy { error, field }),
+        2 => (0..samples().len()).prop_map(Line::Notif),
+    ]
+}
+
+fn item_strategy() -> impl Strategy<Value = Item> {
+    prop_oneof![
+        3 => (
+            0u32..1000,
+            0u32..1000,
+            0u32..2,
+            any::<bool>(),
+            proptest::collection::vec(line_strategy(), 0..8),
+        )
+            .prop_map(|(time, number, flags, error, lines)| Item::Block {
+                time,
+                number,
+                flags,
+                error,
+                lines,
+            }),
+        1 => (0..samples().len()).prop_map(Item::Notif),
+    ]
+}
+
+/// Renders the items to bytes and the frames a correct parser gives.
+fn model(items: &[Item], knob: bool) -> (Vec<u8>, Vec<Frame>) {
+    let samples = samples();
+    let mut bytes = String::new();
+    let mut frames = vec![];
+    for item in items {
+        match item {
+            Item::Notif(i) => {
+                bytes += &format!("{}\n", samples[*i].0);
+                frames.push(Frame::Notification(samples[*i].1.clone()));
+            }
+            Item::Block {
+                time,
+                number,
+                flags,
+                error,
+                lines,
+            } => {
+                bytes += &format!("%begin {time} {number} {flags}\n");
+                let mut content = vec![];
+                for l in lines {
+                    let text = match l {
+                        Line::Content(s) => s.clone(),
+                        Line::Decoy { error, field } => {
+                            let (t, n, f) = match field {
+                                0 => (time + 1, *number, *flags),
+                                1 => (*time, number + 1, *flags),
+                                _ => (*time, *number, 1 - flags),
+                            };
+                            format!("{} {t} {n} {f}", if *error { "%error" } else { "%end" })
+                        }
+                        Line::Notif(i) => {
+                            let (text, n) = &samples[*i];
+                            if knob {
+                                bytes += &format!("{text}\n");
+                                frames.push(Frame::Notification(n.clone()));
+                                continue;
+                            }
+                            text.to_string()
+                        }
+                    };
+                    bytes += &format!("{text}\n");
+                    content.push(text);
+                }
+                let word = if *error { "%error" } else { "%end" };
+                bytes += &format!("{word} {time} {number} {flags}\n");
+                frames.push(Frame::Reply {
+                    flags: *flags,
+                    error: *error,
+                    lines: content,
+                });
+            }
+        }
+    }
+    (bytes.into_bytes(), frames)
+}
+
+fn chunked_with(data: &[u8], sizes: &[usize], knob: bool) -> Vec<Frame> {
+    let mut p = Parser::new();
+    p.set_notifications_in_blocks(knob);
+    let mut out = vec![];
+    let (mut at, mut i) = (0, 0);
+    while at < data.len() {
+        let n = sizes[i % sizes.len()].max(1).min(data.len() - at);
+        out.extend(p.push(&data[at..at + n]).unwrap());
+        at += n;
+        i += 1;
+    }
+    out
+}
+
 proptest! {
+    #[test]
+    fn well_formed_streams_give_the_model_frames(
+        items in proptest::collection::vec(item_strategy(), 0..12),
+        sizes in proptest::collection::vec(1usize..50, 1..10),
+        knob in any::<bool>(),
+    ) {
+        let (bytes, want) = model(&items, knob);
+        prop_assert_eq!(chunked_with(&bytes, &sizes, knob), want);
+    }
+
+    #[test]
+    fn arbitrary_bytes_chunked_equal_one_shot(
+        data in proptest::collection::vec(
+            prop_oneof![Just(b'%'), Just(b'\n'), Just(b' '), any::<u8>()], 0..300),
+        sizes in proptest::collection::vec(1usize..30, 1..10),
+        knob in any::<bool>(),
+    ) {
+        let mut one = Parser::new();
+        one.set_notifications_in_blocks(knob);
+        let whole = one.push(&data).unwrap();
+        prop_assert_eq!(chunked_with(&data, &sizes, knob), whole);
+    }
+
     #[test]
     fn split_anywhere_gives_the_same_frames(
         sizes in proptest::collection::vec(1usize..40, 1..20),
