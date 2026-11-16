@@ -89,6 +89,7 @@ pub struct Snapshot {
 
 /// What a caller says about itself (the hook environment).
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CallerInfo {
     pub moa_session: Option<String>,
     pub claude_session: Option<String>,

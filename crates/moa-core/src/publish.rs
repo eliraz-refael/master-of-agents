@@ -11,6 +11,7 @@ use crate::state::State;
 
 /// A named set of rows a view can subscribe to.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Topic {
     Sessions,
@@ -45,6 +46,7 @@ pub struct Model {
 
 /// Something the core tells its views that is not a row.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum CoreEvent {
     Error { message: String },
