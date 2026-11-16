@@ -447,6 +447,12 @@ Spec §6.6; R2.
    - `moa [BRAIN]` starts the daemon if needed and execs `tmux attach`.
    - Inside moa's own server it switches the client instead of nesting (spec §7 row 1).
 
+**Carried from slice 2b:**
+- Split `crates/moa-daemon/src/core_task.rs` (recover/reload/fatal) before tmux inputs join
+  the loop.
+- Decide the daemon's PATH/environment. Today the autostarted daemon inherits the starting
+  client's PATH (D17), which would reach the tmux server and every pane (spec §6.6).
+
 **Done when:**
 - In the sandbox, every key and the menu reach the daemon, and the status line updates,
   with **zero `Spawner` launches per key** (counter test).
@@ -575,6 +581,9 @@ Spec §6.13, §6.14; R1 §2.2–2.7.
 6. **Panel supervision**: a dead panel is logged and respawned on Repair. The panel sends
    `ui.here`.
 
+**Carried from slice 2b:** the daemon's upgrade policy and `Patch`'s base rev, both under
+slice 9, before panels subscribe.
+
 **Done when:**
 - Snapshots pass at every width.
 - Sandbox e2e (via `capture-pane`) passes for: layout switch, picker, click to act.
@@ -686,6 +695,10 @@ Spec §6.10, §6.12 (retention), §6.9.
 8. **Retention**: show each account's cleanup age in setup. A wall-clock warning card arms
    before a tracked conversation reaches that age. **Deletion and the protection
    mechanism wait for Q1** (to discuss with the user before this slice's detailed plan).
+9. **Carried from slice 2b** (any slice touching projects): canonicalise stored project
+   paths once, at import or load, instead of `deps.canonical` per stored project inside
+   `project.add` (`crates/moa-core/src/ops/projects.rs` ~155). It also fixes the "third
+   spelling" back-link.
 
 **Done when:** a fresh sandbox `HOME` goes from nothing to a working cockpit using only the
 TUI.
@@ -705,6 +718,13 @@ Spec §6.15.
    constitution.
 4. **Restart notices**: one console line per upgrade, using the four wordings in spec
    §6.15.
+5. **Carried from slice 2b**:
+   - Two builds used against one root restart each other's daemon on every call (D1 upgrades
+     on any build mismatch; the build id hashes the binary's path). Upgrading only a "stale"
+     daemon doesn't work as is: autostart canonicalises the exe to an immutable `/nix/store`
+     path that never goes stale, so a Nix upgrade would then never upgrade. Settle the
+     upgrade policy with re-exec, before console subscribers make every flip visible.
+   - `Patch` carries only its new rev. Add a base rev when `subscribe.since` lands.
 
 **Done when:** a `cargo build` during a sandbox session updates the daemon and every panel
 with no lost state, no refused connection, and no lost hook.
@@ -745,6 +765,16 @@ Spec §9.
    - Run `moa switch`, and assert no pane died and every session is mapped.
    - Run `moa switch back`, and assert the spike works on the exported data.
    - Repeat 3 times.
+9. **Carried from slice 2b**, as one bundle:
+   - The offline tools (`adopt-spike`/`export-spike`) hold the brain lock for the whole run,
+     not just a probe (`crates/moa/src/adopt.rs` ~289).
+   - `moa service install` creates `logs/` (launchd won't open a missing StandardErrorPath).
+   - Make the fallback socket directory independent of `TMPDIR` (e.g. `/tmp/moa-<uid>`), so
+     launchd, the client and the hook agree.
+   - A CLI-level D20 test for `moa service install` without `MOA_ROOT` (PATH set to an empty
+     dir, so a regression can't reach launchctl).
+   - systemd: escape `$` as `$$` in `ExecStart`; `daemon-reload` after uninstall; reinstall
+     with changed content restarts the unit.
 
 **Done when:** the rehearsal passes repeatedly. Then the real switch happens, with the user
 present.
