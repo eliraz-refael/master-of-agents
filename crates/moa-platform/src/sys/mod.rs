@@ -112,3 +112,17 @@ pub(crate) fn register_readable<T: std::os::fd::AsRawFd>(
     }
     .map_err(|e| e.into_parts().1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::signalable;
+
+    #[test]
+    fn only_positive_pids_that_fit_are_signalable() {
+        assert_eq!(signalable(0), None);
+        assert_eq!(signalable(u32::MAX), None);
+        assert_eq!(signalable(i32::MAX as u32 + 1), None);
+        assert_eq!(signalable(1), Some(1));
+        assert_eq!(signalable(i32::MAX as u32), Some(i32::MAX));
+    }
+}

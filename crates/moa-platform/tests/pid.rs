@@ -13,12 +13,11 @@ fn pid_alive_sees_itself_and_not_a_reaped_child() {
 
 #[test]
 fn pid_zero_and_out_of_range_pids_are_not_alive() {
-    // `kill(0, ..)` would address our own process group, and a pid past i32::MAX wraps
-    // negative (a whole group again): neither may reach the system call.
+    // Only signal 0 here. `kill_term` is never called with 0 or a wrapping pid, even in a
+    // test: a regression would signal a whole process group. The guard shared by both is
+    // unit-tested in `sys`.
     assert!(!pid_alive(0));
     assert!(!pid_alive(u32::MAX));
-    kill_term(0);
-    kill_term(u32::MAX);
 }
 
 #[test]

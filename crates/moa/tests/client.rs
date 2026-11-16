@@ -76,6 +76,37 @@ async fn no_autostart_means_not_running() {
     assert_eq!(err.to_string(), "the default brain's moa isn't running");
 }
 
+/// D20: v1 may not touch an unsandboxed home before the switch-over, so autostart refuses
+/// before creating anything or launching anything.
+#[tokio::test]
+async fn autostart_refuses_an_unswitched_real_home() {
+    let home = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let paths = moa_platform::Paths::from_vars(
+        None,
+        Some(home.path().into()),
+        None,
+        moa_platform::current_uid(),
+        false,
+    )
+    .unwrap();
+    let mut o = opts(&TempBrain::new(None), true);
+    o.paths = paths;
+    let before = spawn::launches();
+    let err = Client::connect(o).await.err().expect("refused");
+    assert!(
+        matches!(
+            err,
+            ClientError::Paths(moa_platform::PathsError::NotSwitchedOver)
+        ),
+        "{err}"
+    );
+    assert!(!home.path().join(".local").exists());
+    assert_eq!(spawn::launches(), before);
+}
+
 #[tokio::test]
 async fn temp_brain_stops_its_daemons() {
     let tb = TempBrain::new(None);
