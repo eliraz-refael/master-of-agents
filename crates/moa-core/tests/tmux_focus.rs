@@ -13,9 +13,8 @@ use moa_core::effect::{
 };
 use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
-use moa_core::op::{ConnId, Op, ReqId};
 use moa_core::publish::CoreEvent;
-use moa_core::state::{CallerInfo, LoadNote, Snapshot, State};
+use moa_core::state::{LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
@@ -186,17 +185,6 @@ fn window_changed(window: u32) -> TmuxIn {
 fn a_visible_done_session_becomes_seen() {
     let mut s = started();
     assert_eq!(state_of(&s), DisplayState::Done);
-    // A caller waits for the link, so the refresh's reply is among the effects.
-    handle_checked(
-        &mut s,
-        Input::Client {
-            conn: ConnId(7),
-            req: ReqId(1),
-            caller: CallerInfo::default(),
-            op: Op::TmuxEnsure { tmux: None },
-        },
-        now(),
-    );
     let fx = up(&mut s, SEEN, USER);
     check_order(&fx).unwrap();
     let ps = persisted(&fx);
@@ -210,9 +198,8 @@ fn a_visible_done_session_becomes_seen() {
     }
     let at = |f: fn(&Effect) -> bool| fx.iter().position(f).unwrap();
     let persist = at(|e| matches!(e, Effect::Persist(_)));
-    let reply = at(|e| matches!(e, Effect::Reply { .. }));
     let publish = at(|e| matches!(e, Effect::Publish(Publish::Model(_))));
-    assert!(persist < reply && persist < publish);
+    assert!(persist < publish);
     assert_eq!(state_of(&s), DisplayState::Idle);
 }
 

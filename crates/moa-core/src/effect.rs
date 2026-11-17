@@ -96,8 +96,6 @@ pub enum Down {
 pub enum TmuxToken {
     /// The three lists that rebuild the topology.
     Refresh,
-    /// Creating the `moa` session.
-    Cockpit,
 }
 
 #[derive(Clone, PartialEq, Debug)]

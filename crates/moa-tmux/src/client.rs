@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -14,7 +15,8 @@ use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
 use moa_platform::{Spawner, kill_term};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+use tokio::net::unix::pipe;
+use tokio::process::{ChildStderr, ChildStdin};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::parse::{Frame, Parser};
@@ -239,17 +241,27 @@ impl ControlClient {
     pub async fn connect(
         opts: &ConnectOptions,
     ) -> Result<(ControlClient, Events, ServerInfo), ConnectError> {
+        // The child holds a reader of its own output. tmux never lets go of a control client
+        // whose output it couldn't write: if this process dies with output on its way, a
+        // write to a pipe with no reader fails, and tmux 3.4 then keeps the client attached
+        // for good, and `@moa_ctl` with it. With the child's reader left, late output lands
+        // in the pipe and the client leaves on its input's end.
+        // Limit: only while the late output fits in the pipe (16–64 KiB). With more unread
+        // output when this process dies (a lagging reader, a large reply, a batch in
+        // flight), tmux keeps the client attached anyway: 3.4 for good, 3.8 too with many
+        // unread replies. Reaping such a client on the next connect is for slice 4.
         let mut cmd = Command::new(&opts.tmux);
         cmd.args(ctl_argv(&opts.socket))
             .env_clear()
             .envs(opts.env.iter().cloned())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = Spawner.spawn(&mut cmd).map_err(ConnectError::Spawn)?;
+        let (mut child, out_r) = Spawner
+            .spawn_with_held_stdout(&mut cmd)
+            .map_err(ConnectError::Spawn)?;
         let pid = child.id();
         let stdin = child.stdin.take().map(ChildStdin::from_std).transpose();
-        let stdout = child.stdout.take().map(ChildStdout::from_std).transpose();
+        let stdout = pipe::Receiver::from_owned_fd(OwnedFd::from(out_r)).map(Some);
         let stderr = child.stderr.take().map(ChildStderr::from_std).transpose();
         // The reaper reports the exit, so `close` can wait for it and nothing signals a pid
         // that is gone.
@@ -538,7 +550,7 @@ impl Batch {
 
 /// The one task that reads: it answers slots in order and forwards notifications.
 async fn read_loop(
-    mut stdout: ChildStdout,
+    mut stdout: pipe::Receiver,
     mut parser: Parser,
     leftover: Vec<Frame>,
     shared: Arc<Mutex<Shared>>,

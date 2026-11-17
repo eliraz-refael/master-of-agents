@@ -108,6 +108,10 @@ set -g  popup-border-lines rounded
 # Keys that need moa tell it through its control connection (@moa_ctl names it); without
 # moa running they say so. The rest are plain tmux.
 set -g  repeat-time 700
+# tmux checks its prefix before any other key, so a prefix of Ctrl-a (screen's, set in
+# your own file) would take every moa key: it goes back to Ctrl-b. Any other prefix stays.
+if -F "#{==:#{prefix},C-a}"  "set -g prefix C-b"
+if -F "#{==:#{prefix2},C-a}" "set -g prefix2 None"
 bind -n C-a switch-client -T moa
 {{DAEMON_KEYS}}
 # | and -: split the pane you're on (a shell beside or below an agent, in its folder);

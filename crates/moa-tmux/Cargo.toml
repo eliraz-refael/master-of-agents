@@ -10,7 +10,7 @@ publish = false
 moa-core = { path = "../moa-core" }
 moa-platform = { path = "../moa-platform" }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "macros", "time"] }
+tokio = { workspace = true, features = ["process", "io-util", "net", "sync", "rt", "macros", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]

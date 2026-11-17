@@ -188,6 +188,27 @@ async fn the_daemon_never_starts_a_server() {
     assert!(!socket.exists(), "{} exists", socket.display());
 }
 
+/// The `moa` session is the front door's, made in the user's environment: a server with
+/// only `_moa` is running, and the daemon leaves it that way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_daemon_never_makes_the_users_session() {
+    let rig = start().await;
+    rig.create_server();
+    rig.tmux(&["kill-session", "-t", "=moa"]);
+    let mut c = rig.client();
+    assert_eq!(ensure(&mut c)["result"]["data"], json!({"running": true}));
+    let want = rig.counts_text();
+    within_2s("@moa_status shows the counts", || {
+        rig.option("@moa_status") == want
+    });
+    assert_eq!(ensure(&mut c)["result"]["data"], json!({"running": true}));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        rig.tmux(&["list-sessions", "-F", "#{session_name}"]),
+        "_moa"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_daemon_adopts_a_running_server() {
     let (rig, mut c) = adopted().await;

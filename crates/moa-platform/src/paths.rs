@@ -294,6 +294,12 @@ impl Paths {
     }
 }
 
+/// Where `moa --sandbox` keeps its moa: `<home>/.local/state/moa-sandbox`, used as
+/// `MOA_ROOT`.
+pub fn sandbox_root(home: &Path) -> PathBuf {
+    home.join(".local/state/moa-sandbox")
+}
+
 /// Creates `dir` (and missing parents) with mode 0700, then refuses it unless
 /// it is a real directory of ours that no one else can reach. Never follows a
 /// link: the socket fallback lives in a shared `$TMPDIR`.

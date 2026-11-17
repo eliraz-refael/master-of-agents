@@ -25,16 +25,23 @@ const STOP_WAIT: Duration = Duration::from_secs(3);
 
 pub struct TempBrain {
     pub dir: TempDir,
+    /// `MOA_ROOT`: the temp dir itself, or the sandbox root under it.
+    root: PathBuf,
+}
+
+fn temp_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .expect("a temp dir")
 }
 
 impl TempBrain {
     /// A fresh root; `moa_toml`, when given, is written as `<root>/.config/moa/moa.toml`.
     pub fn new(moa_toml: Option<&str>) -> TempBrain {
-        let dir = tempfile::Builder::new()
-            .prefix("moa")
-            .tempdir_in("/tmp")
-            .expect("a temp dir");
-        let brain = TempBrain { dir };
+        let dir = temp_dir();
+        let root = dir.path().to_path_buf();
+        let brain = TempBrain { dir, root };
         if let Some(text) = moa_toml {
             let paths = brain.paths();
             fs::create_dir_all(paths.config_dir()).expect("the config dir");
@@ -43,8 +50,21 @@ impl TempBrain {
         brain
     }
 
-    pub fn root(&self) -> &Path {
+    /// A fresh home for `moa --sandbox`: the root is `sandbox_root(home)`, which isn't
+    /// created, since `moa --sandbox` makes it. Dropping it cleans up there as usual.
+    pub fn sandbox_home() -> TempBrain {
+        let dir = temp_dir();
+        let root = moa_platform::sandbox_root(dir.path());
+        TempBrain { dir, root }
+    }
+
+    /// The temp dir: `HOME` for a `sandbox_home`, else the same as `root`.
+    pub fn home(&self) -> &Path {
         self.dir.path()
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn paths(&self) -> Paths {
@@ -55,7 +75,8 @@ impl TempBrain {
         self.paths().db(brain)
     }
 
-    /// What to give a `moa` process run against this root.
+    /// What to give a `moa` process run against this root. `SHELL=/bin/sh` for the same
+    /// reason as in [`TempBrain::tmux`]: a `moa` that starts a terminal server passes it on.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
         vec![
             ("MOA_ROOT".into(), self.root().into()),
@@ -63,6 +84,7 @@ impl TempBrain {
             ("TZ".into(), TYPICAL_TZ.into()),
             ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
             ("TERM".into(), "xterm-256color".into()),
+            ("SHELL".into(), "/bin/sh".into()),
         ]
     }
 

@@ -273,14 +273,15 @@ fn the_caller_reaches_the_daemon() {
 }
 
 #[test]
-fn status_prints_three_lines_in_state_order() {
+fn status_prints_four_lines_in_state_order() {
     let r = typical();
     ok(&r.moactl(&["brief"]));
     let o = r.moa(&["status"]);
     ok(&o);
     let text = out(&o);
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 3, "{text}");
+    assert_eq!(lines.len(), 4, "{text}");
+    assert_eq!(lines[3], "terminal: not connected");
     assert!(
         lines[0].starts_with("moa default: running, build ") && lines[0].ends_with(" launches"),
         "{}",

@@ -209,6 +209,16 @@ fn every_action_has_a_word_key_label_and_notice() {
         for word in ["tmux", "pane", "window"] {
             assert!(!a.not_yet().contains(word), "{a:?}: {}", a.not_yet());
         }
+        // Whole words: "Repair panels" is fine.
+        let label = a.label().to_lowercase();
+        for w in label.split(|c: char| !c.is_alphanumeric()) {
+            let w = w.strip_suffix('s').unwrap_or(w);
+            assert!(
+                !["tmux", "pane", "window"].contains(&w),
+                "{a:?}: {}",
+                a.label()
+            );
+        }
     }
     assert_eq!(KeyAction::ALL.len(), 14);
     assert_eq!(KeyAction::from_word("layout-5"), None);

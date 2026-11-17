@@ -86,6 +86,47 @@ name_type!(
     "letters, digits, ., - and _"
 );
 
+/// Words a brain can't be called, since `moa <word>` already means a command: `moa`'s
+/// subcommands (clap's `help` among them) and every `moactl` verb (T18). Tests in `moa` and
+/// `moa-proto` check that each one is here.
+pub const RESERVED_BRAIN_NAMES: &[&str] = &[
+    "adopt-spike",
+    "export-spike",
+    "daemon",
+    "status",
+    "shutdown",
+    "sql",
+    "service",
+    "help",
+    "ls",
+    "find",
+    "set",
+    "archive",
+    "group",
+    "note",
+    "project",
+    "task",
+    "suggest",
+    "suggestion",
+    "brief",
+    "attention",
+    "open",
+    "resume",
+    "focus",
+    "close",
+    "sleep",
+    "term",
+    "adopt",
+    "goto",
+    "layout",
+    "peers",
+    "ask",
+    "reply",
+    "asks",
+    "setup",
+    "import-herdr",
+];
+
 impl BrainName {
     pub fn default_brain() -> Self {
         Self("default".to_string())
@@ -264,6 +305,11 @@ impl Config {
         };
         for (name, b) in &raw.brains {
             let name = BrainName::parse(name)?;
+            if RESERVED_BRAIN_NAMES.contains(&name.as_str()) {
+                return Err(problem(format_args!(
+                    "a brain can't be called {name}; moa uses that word for a command"
+                )));
+            }
             let place = format!("brains.{name}");
             config.brains.insert(
                 name,

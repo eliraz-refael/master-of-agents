@@ -26,14 +26,14 @@ counts, and a killed or restarted tmux server is noticed.
   - it reconnects with a short backoff.
 - The `moa` binary gains the front door, `moa [BRAIN]` and `moa --sandbox`. It creates the
   tmux server itself, from the user's terminal and with the user's environment (T1), then
-  asks the daemon to connect (`tmux.ensure`) and execs `tmux attach`.
+  asks the daemon to connect (`tmux.ensure`) and execs `tmux new-session -A -s moa`.
 
 ```
  user's terminal ── moa --sandbox ──(1) hello + tmux.ensure ──► daemon ── no server ──► {running:false}
         │            (2) tmux -S <root>/…/tmux-default -f tmux.conf new-session _moa ; new-session moa   (user's env)
         │            (3) tmux.ensure ──► daemon: probe ► Spawner(tmux -N … -C new-session -A -s _moa …) ► source moa.tmux,
-        │                                 @moa_ctl, hooks ► Connected ► core: list-* ► Topology ► {running:true}
-        └── exec tmux attach -t =moa
+        │                                 @moa_ctl, hooks ► Connected ► {running:true} ► core: list-* ► Topology
+        └── exec tmux new-session -A -s moa -n moa -c <home>   (attaches, or makes moa when it's gone)
  C-a c ─► tmux key table ─► run -C "display-message -c '#{@moa_ctl}' 'moa:key console %3 $0 /dev/ttys1'"
         ─► %message ─► Parser ─► Event ─► core: Mailbox::Key ─► Effect::Tmux[display-message -c … -d 4000 -l "moa: …"]
  core commit ─► status::sync ─► set-option -g @moa_status …   (status line redraws on its own)
@@ -86,16 +86,16 @@ writing this plan (see the appendix).
 
 | # | Call | Why |
 |---|---|---|
-| T1 | **The front door creates the tmux server. The daemon never does**: every tmux process the daemon runs has `-N` ("don't start a server") **[3.4+3.8]**. The front door runs `tmux <sock> -f <tmux.conf> new-session -d -s _moa -x 10 -y 3 /bin/sh ; new-session -d -s moa -n moa -c <home>`. Its environment is the user's, minus `MOA_*`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`, `TMUX` and `TMUX_PANE`, plus `MOA_ROOT` when sandboxed. `TERM` and `SSH_AUTH_SOCK` pass through. `MOA_ROOT` is the one moa variable in a server's environment, and only in a sandbox: spec §6.6 keeps the server's environment free of moa, but a sandbox shell's `moactl` must reach the sandbox and not the real home. Slice 4's per-pane `-e` sets it for agents. | This answers the roadmap's carried question about the daemon's PATH and environment. Whoever starts a tmux server gives every pane its environment. The daemon may have been started by an agent's `moactl` (D17) or by launchd with a minimal PATH. The user's terminal is the right parent, as in the spike (R1 §2.1). Spec §6.6 says "the daemon starts the server"; this changes who, not what (one exec, with the generated config). It also fits C28: nothing exists on the tmux side until someone opens moa. |
+| T1 | **The front door creates the tmux server. The daemon never does**: every tmux process the daemon runs has `-N` ("don't start a server") **[3.4+3.8]**. The front door runs `tmux <sock> -f <tmux.conf> new-session -d -s _moa -x 10 -y 3 /bin/sh ; new-session -d -s moa -n moa -c <home>`. **Only the front door makes the `moa` session**, here and again when it's gone (its last shell exited): a session takes its first shell's variables and folder from the client that makes it, and the daemon's control client has a cleared environment and no home folder. Its environment is the user's, minus `MOA_*`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`, `TMUX` and `TMUX_PANE`, plus `MOA_ROOT` when sandboxed. `TERM` and `SSH_AUTH_SOCK` pass through. `MOA_ROOT` is the one moa variable in a server's environment, and only in a sandbox: spec §6.6 keeps the server's environment free of moa, but a sandbox shell's `moactl` must reach the sandbox and not the real home. Slice 4's per-pane `-e` sets it for agents. | This answers the roadmap's carried question about the daemon's PATH and environment. Whoever starts a tmux server gives every pane its environment. The daemon may have been started by an agent's `moactl` (D17) or by launchd with a minimal PATH. The user's terminal is the right parent, as in the spike (R1 §2.1). Spec §6.6 says "the daemon starts the server"; this changes who, not what (one exec, with the generated config). It also fits C28: nothing exists on the tmux side until someone opens moa. |
 | T2 | **Sandboxed brains use `-S <run>/tmux-<b>`** (falling back like `Paths::socket`). Real brains keep `-L moa` / `-L moa-<b>`. | P13: `MOA_ROOT` moves every moa path under the root. Tests and the try-it can then never reach the user's live `-L moa`/`-L moa-work` servers, and parallel tests never collide. The roadmap's try-it "socket `moa-sandbox`" becomes a path inside `~/.local/state/moa-sandbox`. |
 | T3 | **The control client is `tmux -u -N <sock> -C new-session -A -s _moa -f no-output,ignore-size,no-detach-on-destroy -x 10 -y 3 /bin/sh`** (`-u` because a daemon started at login may have no `LANG`), launched through `Spawner`. Its environment is cleared, then given `HOME`, `USER`, `LOGNAME`, `PATH`, `LANG`, `LC_*` and `TMUX_TMPDIR` from the daemon's. | `-A` creates `_moa` when it's missing (on a server that never had one) and attaches when it's there; the flags apply either way **[3.4+3.8]**. `/bin/sh` exists everywhere, NixOS included. |
 | T4 | **The daemon finds a server by connecting to its socket in-process**, at start and on `tmux.ensure`. "Not found" or "refused" means there is none, and it then waits for the next `tmux.ensure`. It never retries on its own. When its control client drops but the server is still there, it reconnects after 0.1, 0.2, 0.4, 0.8, 1.6 and 3.2 s, then gives up until the next `tmux.ensure`. The backoff lives in the actor (tokio sleep), not the scheduler. While connected or connecting, the actor answers a `Connect` by reporting its state again, never with a second control client. **Every connection has a number** (`conn`). `Connected`, `Effect::Tmux` and `TmuxIn::Replies` carry it, and both sides drop anything from another connection. | No polling, and launches happen only per connect (spec §6.1). The backoff is bounded and monotonic. |
-| T5 | **`tmux.ensure {tmux?}`** is the front door's handshake (an `Op`, not an agent verb). It answers `{running: bool}` once the daemon is connected and a `moa` session exists, or `running: false` when there's no server. `tmux` is the absolute tmux path the front door found. The core accepts only an absolute path whose file name is `tmux` (else `that isn't a tmux program`). The daemon keeps it for its control client and forgets it after a failed spawn (`Down(NoTmux)`). The front door waits at most 10 s for each answer. It's the first reply the core holds back (`TmuxState`'s waiters). | A launchd daemon has no tmux on its PATH. The front door must not attach before the daemon is listening to the server. |
+| T5 | **`tmux.ensure {tmux?}`** is the front door's handshake (an `Op`, not an agent verb). It answers `{running: bool}` once the daemon is connected, or `running: false` when there's no server. It doesn't wait for the `moa` session: that's the front door's (T1). `tmux` is the absolute tmux path the front door found. The core accepts only an absolute path whose file name is `tmux` (else `that isn't a tmux program`). The daemon keeps it for its control client and forgets it after a failed spawn (`Down(NoTmux)`). The front door waits at most 10 s for each answer. It's the first reply the core holds back (`TmuxState`'s waiters). | A launchd daemon has no tmux on its PATH. The front door must not attach before the daemon is listening to the server. |
 | T6 | **The generated config is two files** in the brain dir:<br>• `tmux.conf`, the `-f` file: tmux's own default search, each `source-file -q` (`/etc/tmux.conf`, `~/.tmux.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf` unless empty or `~/.config`, `~/.config/tmux/tmux.conf`; `-f` replaces that search, and tmux loads every one that exists **[3.4+3.8]**), then `source-file <moa.tmux>`;<br>• `moa.tmux`: moa's options, the status line, the key table and the menu, with no hooks and no waiting commands.<br>The daemon writes both at start when their text changed, and sources `moa.tmux` over the control client on every connect. | Spec §6.15.4: bindings and options are re-applied on every connect. The user's own file may hold `run-shell` (a waiting command, R2 §5.4), so it's never sourced over the control client. The user's settings load first and moa's override them, as in the spike. |
 | T7 | **How the server reaches the daemon.**<br>• **Hooks** name the control client literally (`display-message -c client-123 'moa:hook pane-exited #{hook_pane}'`) and are reinstalled at index 90 on every connect.<br>• **Keys and menu items** are static and go through `run -C "display-message -c '#{@moa_ctl}' '…'"`. A bare `-c '#{@moa_ctl}'` isn't expanded and silently sends nothing **[3.4+3.8]**.<br>• **When the daemon goes:** a `client-detached[90]` hook unsets `@moa_ctl` when the control client goes, even after `kill -9` **[3.4+3.8]**, so keys say "moa isn't running: run moa".<br>• Installed now: `pane-exited`, `pane-died`, `window-layout-changed` (zoom fires it **[3.4+3.8]**), `client-attached`, `client-detached`. `alert-bell` and `client-active` wait for a consumer. | Literal names are the only form a hook expands. The `if -F '#{@moa_ctl}'` guard covers a clean stop, and the hook covers a crash. A hook with no consumer is dead code. |
 | T8 | **Mailbox grammar.** Hooks name the control client literally (T7); keys and menu items name it through `@moa_ctl`.<br>• `moa:key ACTION PANE SESSION CLIENT`:<br>&nbsp;&nbsp;– ACTION is a word (`console`, `layout-2`…);<br>&nbsp;&nbsp;– PANE is `%N`, or `-` from a menu (menus have no pane, **[3.4+3.8]**; the core takes the client's active pane);<br>&nbsp;&nbsp;– CLIENT is the rest of the line.<br>• `moa:hook NAME ARG`.<br>• `moa:prompt TOKEN TEXT`.<br>Prompt templates are `display-message -c CTL -l "moa:prompt T %%%"`, double-quoted, because `%%%` escapes for double quotes. Single quotes lose `'` **[3.4+3.8]**. | One vocabulary for keys and menu items, so slices 4 and 5 replace a notice with an action in one place. |
 | T9 | **The focus model.**<br>• **Seeded and refreshed** with three list commands (`list-sessions`, `list-panes -a`, `list-clients`), each line starting with a letter.<br>• **Updated in place** by focus notifications (`%window-pane-changed`, `%session-window-changed`, `%client-session-changed`, `%client-detached`).<br>• **Structural changes trigger one refresh**: window add or close, `%sessions-changed`, and the layout, pane-exited, pane-died and client-attached hooks. Refreshes are coalesced: one in flight, at most one more after it. | Spec §6.6 keeps focus by notifications. A re-list costs 0.15–1.8 ms (R2 §5.3) and replaces hand-maintaining tmux's tree for the rare structural changes. |
-| T10 | **What waits for the commit and what doesn't.**<br>• **A view of saved state** (an untokened `Effect::Tmux`: status writes, notices) waits for the drain's commit, as replies do. `check_order` treats it as heard, and `fail_held` drops it when the commit fails.<br>• **Link plumbing reveals nothing about saved state**, so it runs at once (`runs_at_once`): `TmuxConnect`, and a tokened `Effect::Tmux` (the refresh lists, the `moa` session create).<br>• **`Reload`**, after a failed commit or a panic, resets the link's bookkeeping: the refresh in flight, the cockpit attempt, and what was written. It then refreshes when `Up`, and asks to connect again when `Connecting`. | The status line is a view and must never show state the DB doesn't have. But plumbing held behind a failed commit would be dropped, leaving the link waiting for a reply that never comes (the waiters hang). A panic mid-`handle` can leave the bookkeeping half-changed. |
+| T10 | **What waits for the commit and what doesn't.**<br>• **A view of saved state** (an untokened `Effect::Tmux`: status writes, notices) waits for the drain's commit, as replies do. `check_order` treats it as heard, and `fail_held` drops it when the commit fails.<br>• **Link plumbing reveals nothing about saved state**, so it runs at once (`runs_at_once`): `TmuxConnect`, and a tokened `Effect::Tmux` (the refresh lists).<br>• **`Reload`**, after a failed commit or a panic, resets the link's bookkeeping: the refresh in flight and what was written. It then refreshes when `Up`, and asks to connect again when `Connecting`. | The status line is a view and must never show state the DB doesn't have. But plumbing held behind a failed commit would be dropped, leaving the link waiting for a reply that never comes (the waiters hang). A panic mid-`handle` can leave the bookkeeping half-changed. |
 | T11 | **Only pane bindings of the current generation, whose pane exists, are trusted** for `@moa_state` and `seen`. Slice 4 creates and reconciles bindings; this slice's tests seed them. | Review Focus 5: no stale binding is ever trusted. |
 | T12 | **Status:**<br>• `@moa_status` is the spike's `counts_text` plus `failed` (`✗`, red) between `question` and `done`.<br>• `@moa_state` is set per window (its most urgent trusted pane) and unset when that pane goes.<br>• Both are written as one batch, only what changed.<br>• `@moa_clock` is the local `HH:MM`. It's written at connect and at every minute boundary (`TimerKey::Clock`, a `WallAlarm` deadline), only while a non-control client is attached.<br>• The date stays `%a %d %b` in the format. Setting an option redraws the status line **[3.4+3.8]**, so the date is fresh at every write. | Spec C18 and the idle rule of §6.8: no wake-ups unless someone is looking. Spec §7 says the status view adds failed. |
 | T13 | **Keys in this slice.**<br>• Every daemon key and menu item answers with a 4 s notice, `moa: <thing> isn't in this build yet`, in the spike's `moamenu` style.<br>• The pure-tmux keys work fully: arrows and `h j k l`, `z`, `[ ]`, `a`, `\|`, `-`, `m`, and prefix `Space`/`m`. | The done-when is "every key reaches the daemon". Slices 4–5 swap each notice for its action. |
@@ -103,7 +103,7 @@ writing this plan (see the appendix).
 | T15 | **The parser is fuzzed with proptest, not cargo-fuzz**: arbitrary bytes, the same stream split at every boundary, and adversarial well-formed streams (fake `%end` lines, notifications inside blocks). | cargo-fuzz needs nightly and libFuzzer, against P12's single toolchain pin and the Nix build. Proptest runs in every CI job. |
 | T16 | **`Cmd` is the only way to send a tmux command, and it carries an allow-list.**<br>• **Allowed names** (canonical only; slices extend the list): `display-message`, `set-option`, `set-hook`, `show-options`, `list-sessions`, `list-panes`, `list-clients`, `new-session`, `source-file`, `command-prompt`.<br>• **Extra rules:** `command-prompt` needs `-b`, and `source-file` only takes a path ending in `moa.tmux`.<br>• **Refused** commands are never written.<br>• **Quoting:**<br>&nbsp;&nbsp;– an argument of only `[A-Za-z0-9_@%:=.,/+-]` goes bare;<br>&nbsp;&nbsp;– otherwise single-quoted pieces, with `'` written `\'` and a newline or CR as a `"\n"`/`"\r"` piece.<br>&nbsp;&nbsp;– Double quotes expand a leading `~` **[3.4+3.8]**.<br>• **`source-file` nests:** over a control client it answers with one flag-1 block per sourced command **[3.4+3.8]** (found in Task 4's review). `Cmd::nests()` marks it, and the client follows it with a `display-message -p 'moa:sentinel <n>'` and gives it every block up to the sentinel's. A file that doesn't parse runs nothing and reports outside any block, so the client fails the in-flight `source-file` on that. | Roadmap item 2's "never sends waiting commands" is enforced at the one choke point, not by grepping a log, because a command log would carry titles (S15). The quoting round-trips every tested string on both versions, except the 3.4 quirk below. |
 | T17 | **tmux 3.4's `$` quirk is documented, not fought**: on 3.4, a `$` followed by an ASCII letter, `_` or `{` is stored and printed as `\$`, whatever the quoting **[3.4]**. Before a non-ASCII character it depends on the C library's `isalpha`: macOS escapes it, glibc doesn't (found by Task 4's proptest and CI). The prompt parser turns `\$` back into `$`. **`%message` text is otherwise taken verbatim**, with no `\ooo` unescaping: 3.4 escapes control characters, while 3.8 turns them into `_` **[3.4+3.8]**, so unescaping on 3.8 would turn a typed `\101` into `A`. moa's own messages never hold control characters. | No encoding avoids the quirk. moa writes no `$` text in this slice (notices are fixed, counts and the clock have none). It's cosmetic in titles later. |
-| T18 | **The front door:**<br>• `moa [BRAIN]` and `moa --sandbox` (root `~/.local/state/moa-sandbox`).<br>• Inside this brain's own server it switches the client (`switch-client -t =moa`).<br>• Inside any other tmux it refuses with the spike's line: `the <b> moa is running; open it from a new terminal tab: moa <b>` (exit 0).<br>• Brain names that are `moactl` verbs or `moa` subcommands are refused in `moa.toml` (`RESERVED_BRAIN_NAMES`; a proto test checks every verb is listed). | Spec §7 row 1. `moa brief` already means `moactl brief`, so a brain can't be called `brief`. |
+| T18 | **The front door:**<br>• `moa [BRAIN]` and `moa --sandbox` (root `~/.local/state/moa-sandbox`).<br>• Outside tmux it runs `tmux -N <sock> new-session -A -s moa -n moa -c <home>`, which attaches, or first makes the `moa` session in the user's environment when its last shell has exited (the daemon never makes a user shell).<br>• Inside this brain's own server it makes `moa` if it's missing, then switches the client (`switch-client -t =moa`).<br>• Inside any other tmux it refuses with the spike's line: `the <b> moa is running; open it from a new terminal tab: moa <b>` (exit 0); with `--sandbox` the command it names is `moa --sandbox [<b>]`.<br>• Brain names that are `moactl` verbs or `moa` subcommands are refused in `moa.toml` (`RESERVED_BRAIN_NAMES`; a proto test checks every verb is listed). | Spec §7 row 1. `moa brief` already means `moactl brief`, so a brain can't be called `brief`. |
 | T19 | **Tests drive a real terminal on a pseudo-terminal** (`moa_testkit::Terminal`, rustix, no `unsafe`), never `send-keys -K`. `tmux attach` works on a pty that isn't the controlling terminal, UTF-8 included **[3.4+3.8]**. | `send-keys -K` was fixed only in 3.8, and CI's Linux job runs 3.4. A real key goes through the root table, the moa table and the binding, as the user's does. |
 | T20 | **D17's allow-list gains `TMUX_TMPDIR`.** | With `-L` names (real brains, slice 10), the daemon and the front door must compute the same socket path. |
 | T22 | **`Notification`, `Mailbox` and `Cmd` live in `moa_core::tmux`, not `moa_tmux`** (roadmap names table, spec §6.2). `moa_tmux` re-exports them. | The core decides every tmux command and reads every notification, and it can't depend on `moa-tmux`, which has tokio (the `cargo tree` check in CI). Task 1 updates the roadmap's table. |
@@ -579,7 +579,7 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
 
 ---
 
-### Task 5: The link in the core: connect, ensure, refresh, the `moa` session, generations
+### Task 5: The link in the core: connect, ensure, refresh, generations
 
 **Files:**
 - Create: `crates/moa-core/src/tmux/link.rs`, `crates/moa-core/tests/tmux_link.rs`
@@ -604,7 +604,7 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
       Replies { conn: u64, token: TmuxToken, results: Vec<Result<Vec<String>, String>> },
   }
   pub enum Down { Lost, NoServer, GaveUp, TooOld(String), NoTmux, Disabled }
-  #[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum TmuxToken { Refresh, Cockpit }
+  #[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum TmuxToken { Refresh }
   pub enum TimerKey { Backup, Clock }
   pub enum Effect { …, Tmux { conn: u64, cmds: Vec<Cmd>, token: Option<TmuxToken> }, TmuxConnect { tmux: Option<PathBuf> } }
   // Effect::runs_at_once is also true for TmuxConnect and a tokened Tmux (T10); check_order counts only an untokened Tmux as heard
@@ -631,29 +631,25 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
     answers `moa can't answer that here`):
     1. a `tmux` that isn't an absolute path ending in `/tmux` → `Err("that isn't a tmux program")`;
     2. remember `tmux` when given;
-    3. if `Up` and `session_named("moa")` → reply `{running: true}`;
-    4. if `Up` without `moa` → record the waiter, clear the cockpit attempt, and refresh;
-    5. if `Connecting` → record the waiter;
-    6. if `Down` → record the waiter, then `Connecting` plus `TmuxConnect { tmux }`.
+    3. if `Up` → reply `{running: true}`, whether or not a `moa` session exists (T1);
+    4. if `Connecting` → record the waiter;
+    5. if `Down` → record the waiter, then `Connecting` plus `TmuxConnect { tmux }`.
   - **`Connected`:**
     - `link = Up` with its `conn`;
     - if a last generation exists and differs, then `restarts += 1` and
       `Log(Info, "the terminal server restarted")`;
     - remember the generation;
     - forget what was written (Task 7);
+    - answer every waiter `{running: true}`;
     - emit `Tmux { refresh_cmds(), Some(Refresh) }`.
   - **`Replies { Refresh, … }`:**
     - with link `Up` and its `conn` only;
     - if any of the three lists failed, the reply is "no information": the topology stays
-      as it was, `Log(Warn, "listing the terminal server failed")`, and nothing is created
-      or answered (the next structural event or ensure refreshes again);
+      as it was, and `Log(Warn, "listing the terminal server failed")` (the next structural
+      event refreshes again);
     - else `topology = from_lists(…)`;
     - another refresh if one was asked meanwhile;
-    - no `moa` session → `Tmux { [new-session -d -s moa -n moa], Some(Cockpit) }`, once
-      per missing spell;
-    - otherwise answer every waiter `{running: true}`.
-  - **`Replies { Cockpit, [Err(e)] }`:** the waiters get
-    `moa couldn't open its window; see the log`, and `Log(Warn, "creating the moa session failed: <e first line>")`.
+    - nothing is created: a missing `moa` session is the front door's to make (T1).
   - **`Notification(n)`:**
     - `Message` is Task 8's;
     - `Exit` is ignored (the actor reports `Down`);
@@ -663,7 +659,7 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
     - Everything else → `link = Down`.
     - Either way:
       - empty the topology;
-      - forget what was written, the refresh in flight and the cockpit attempt;
+      - forget what was written and the refresh in flight;
       - cancel the clock (Task 7).
     - The waiters are answered:
       - `NoServer` → `{running: false}`;
@@ -674,30 +670,27 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
   - **`Reload`:**
     - keeps the link, the topology, the waiters, the generation and the restart count
       (`State::load` doesn't touch them);
-    - resets the refresh in flight, the cockpit attempt and what was written (T10);
+    - resets the refresh in flight and what was written (T10);
     - then refreshes when `Up`, and emits `TmuxConnect` when `Connecting`.
   - **`State::status`** fills `tmux` when `Up`, and `tmux_restarts`.
 
 - [ ] **Step 1: Write the failing tests** (`tests/tmux_link.rs`; build states with the 2a
   helpers and run every input through `handle_checked`)
   - `startup_asks_to_connect`.
-  - `ensure_waits_for_the_link_and_the_moa_session`:
+  - `ensure_waits_for_the_link_only`:
     - ensure while `Connecting` → no reply;
-    - `Connected` → the refresh effect;
-    - `Replies(Refresh)` with `S $0 moa`, `S $1 _moa` → `Reply {running: true}`.
+    - `Connected` → `Reply {running: true}` and the refresh effect;
+    - a later ensure, with no `moa` session listed, → `{running: true}` at once.
   - `ensure_without_a_server_says_not_running`:
     - `Down(NoServer)` → `{running: false}`;
     - a later ensure with a path → `TmuxConnect { tmux: Some(path) }`.
-  - `a_missing_moa_session_is_created_once`:
-    - a refresh reply without `moa` → exactly one `Cockpit` effect;
-    - a second reply before `SessionsChanged` → none;
-    - `SessionsChanged` → a refresh → with `moa` present the waiter gets its reply.
-  - `a_failed_cockpit_create_answers_the_waiters`.
+  - `a_missing_moa_session_is_left_to_the_front_door`: refresh replies without `moa`
+    create nothing, and an ensure is answered `{running: true}`.
   - `refreshes_coalesce`: three structural notifications during one refresh → exactly one
     more refresh after its reply.
   - `too_old_and_missing_tmux_answer_in_one_line`: the exact lines above.
-  - `lost_keeps_the_waiters_and_connects_once`: `Down(Lost)` → `Connecting`; an ensure then
-    records a waiter and emits no `TmuxConnect`.
+  - `lost_keeps_the_waiters_and_connects_once`: `Down(Lost)` → `Connecting`; ensures then
+    record waiters and emit no `TmuxConnect`; `Connected` answers them all.
   - `a_new_generation_is_counted_once`:
     - `Connected g1`, `Down(NoServer)`, `Connected g2` → `restarts == 1`, with the log
       line;
@@ -705,15 +698,14 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
   - `replies_from_an_old_connection_are_dropped`: `Connected{conn 1}`, `Down(Lost)`,
     `Connected{conn 2}`, then a `Replies{conn 1, Refresh, …}` → no change, no effect.
   - `a_failed_list_keeps_the_topology`: a refresh whose `list-panes` failed → topology
-    unchanged, no `Cockpit`, no reply, one warning.
-  - `ensure_after_a_failed_cockpit_create_tries_again`.
+    unchanged, one warning.
   - `a_disabled_link_answers_ensure`: `Down(Disabled)` → the waiter gets the
     not-switched-over line.
   - `a_bad_tmux_path_is_refused`: `tmux: "rm"` and `"/bin/sh"` → `Err`.
   - `reload_keeps_the_link_and_restarts_its_bookkeeping`:
     - a refresh is in flight, and then `Reload`;
     - → a new refresh is emitted;
-    - its reply answers the ensure waiter.
+    - an ensure is answered at once.
   - `effect_ordering`:
     - `check_order([Tmux{token: None, …}, Persist(…)])` is `Err`;
     - `Tmux{token: Some(Refresh)}` and `TmuxConnect` run at once.
@@ -1127,7 +1119,8 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
      exit 1.
   5. `nesting`:
      - `Other` → print `the <b> moa is running; open it from a new terminal tab: moa<space+b>`
-       (no space for `default`), exit 0.
+       (no space for `default`), exit 0. With `--sandbox` the command is
+       `moa --sandbox<space+b>`, since a plain `moa` refuses until the switch-over.
   6. Connect with autostart (`OnMismatch::Restart`), then
      `call(Op::TmuxEnsure { tmux: Some(path) })`. Each call waits at most 10 s, or else
      `moa didn't answer within 10 s; see its log (<log path>)`, exit 1.
@@ -1137,8 +1130,10 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
      - a non-zero exit with no server afterwards →
        `moa couldn't start its terminal server: <first stderr line>`, exit 1;
      - then ensure again, which must say `running: true`.
-  8. `exec` `tmux <socket args> attach -t =moa`, or `switch-client -t =moa` when `Ours`,
-     with `front_env`.
+  8. `exec` `tmux -u <socket args> new-session -A -s moa -n moa -c <home>`, with
+     `front_env`: it attaches, or makes `moa` in the user's environment when it's gone
+     (T1). When `Ours`, first spawn `new-session -d -s moa -n moa -c <home>` (a "duplicate
+     session" exit is fine), then exec `switch-client -t =moa`.
 - **Config:** a brain in `RESERVED_BRAIN_NAMES` →
   `moa.toml: a brain can't be called <name>; moa uses that word for a command`.
 
@@ -1170,10 +1165,14 @@ The roadmap's, 2a's and 2b's Global Constraints apply. Also:
     - `moa_inside_its_own_server_switches_instead_of_nesting`:
       - type `<moa path>\r` into the cockpit shell;
       - → still exactly one user client, and no `tmux` client inside a pane (`list-clients`
-        count unchanged).
+        count unchanged);
+      - with `moa` killed, `moa` there makes it in the home folder and switches to it.
+    - `moa_makes_a_missing_moa_session_in_the_users_environment`: kill `moa` (keeping
+      `_moa`), run `moa` with a new `SSH_AUTH_SOCK`; the first shell has it, and starts in
+      the home folder.
     - `moa_inside_another_tmux_refuses`: `assert_cmd` with
       `TMUX=/tmp/elsewhere/default,1,0` → stdout is the spike's line, exit 0, and no socket
-      created.
+      created; with `--sandbox` the line names `moa --sandbox`.
     - `moa_without_the_sandbox_refuses`: no `MOA_ROOT`, with and without
       `MOA_REAL_HOME=1` → exit 1 with the line, and no socket and no daemon.
     - `moa_names_a_missing_brain`.

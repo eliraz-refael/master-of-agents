@@ -298,3 +298,12 @@ fn actions_parse_with_the_same_grammar() {
         "use a full path in a suggestion"
     );
 }
+
+/// T18: `moa <verb>` means `moactl <verb>`, so no brain may be called like one.
+#[test]
+fn every_verb_and_subcommand_is_reserved() {
+    use moa_core::config::RESERVED_BRAIN_NAMES;
+    for verb in VERB_NAMES {
+        assert!(RESERVED_BRAIN_NAMES.contains(verb), "{verb} isn't reserved");
+    }
+}
