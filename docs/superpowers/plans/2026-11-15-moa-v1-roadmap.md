@@ -636,6 +636,19 @@ reconcile, sleep, adopt). The split table is in `2026-11-17-moa-v1-slice-4a-hook
       be set for `~/.claude`, unset it for that pane explicitly (for example `env -u` before
       the launcher). Never just leave it out: the tmux server's global environment may carry
       the user's own value.
+    - **A relaunch uses `--resume`** (or `--session-id` with a conversation moa knows). Once
+      a session has been heard from, a SessionStart with a new id and source `startup` is
+      read as another agent started inside the tab, and dropped.
+    - **Smaller leftovers from 4a's final review:**
+      - A bind commit that fails replies "nothing was changed", although the tab opened.
+      - If the store stops after an open's commit landed, `moactl open` can wait until the
+        terminal link restarts (the client has no call timeout).
+      - A drain while moa is up that keeps `.draining` after a failed commit (with no
+        refusal) waits for the next spooled line or the next start: late, not lost.
+      - Hooks replayed after a failed commit have no retry limit, so a line that always
+        breaks the store would loop.
+      - `moactl open` makes the folder before picking the brain, so a refusal can follow a
+        "created" note.
 
 **Done when:**
 - Fake agents drive every display state.
