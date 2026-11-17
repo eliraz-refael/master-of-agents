@@ -67,9 +67,14 @@ impl TempBrain {
     }
 
     /// Runs a tmux command against `brain`'s terminal server (`-S <tmux_socket(brain)>`),
-    /// with the environment cleared, then `PATH`, `HOME` (the root), `TERM` and `LANG`.
-    /// Stdout with trailing newlines trimmed, or `Err` carrying stderr on a non-zero exit.
-    /// The only way tests reach a TempBrain's server (T23).
+    /// with the environment cleared, then `PATH`, `HOME` (the root), `SHELL`, `TERM` and
+    /// `LANG`. Stdout with trailing newlines trimmed, or `Err` carrying stderr on a non-zero
+    /// exit. The only way tests reach a TempBrain's server (T23).
+    ///
+    /// `SHELL=/bin/sh`, as in `Sandbox`: a server takes its `default-shell` from it, else
+    /// from the passwd entry, and runs one-string pane commands through that shell. A build
+    /// user's entry can be `/sbin/nologin` (nix on macOS), where every pane would die at
+    /// once and the server with them.
     pub fn tmux(&self, brain: &str, args: &[&str]) -> io::Result<String> {
         let socket = self
             .paths()
@@ -87,6 +92,7 @@ impl TempBrain {
             .envs([
                 ("PATH", std::env::var_os("PATH").unwrap_or_default()),
                 ("HOME", self.root().into()),
+                ("SHELL", "/bin/sh".into()),
                 ("TERM", "xterm-256color".into()),
                 ("LANG", "C.UTF-8".into()),
             ])
