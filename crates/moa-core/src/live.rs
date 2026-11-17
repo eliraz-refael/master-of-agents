@@ -75,13 +75,12 @@ pub type Why = String;
 pub fn cut_middle(text: &str) -> String {
     const HEAD: usize = 600;
     const TAIL: usize = 1800;
-    let total = text.chars().count();
-    if total <= HEAD + TAIL {
+    if text.chars().count() <= HEAD + TAIL {
         return text.to_string();
     }
-    let head: String = text.chars().take(HEAD).collect();
-    let tail: String = text.chars().skip(total - TAIL).collect();
-    format!("{head}\n[…]\n{tail}")
+    let head_end = text.char_indices().nth(HEAD).map_or(text.len(), |(i, _)| i);
+    let tail_start = text.char_indices().nth_back(TAIL - 1).map_or(0, |(i, _)| i);
+    format!("{}\n[…]\n{}", &text[..head_end], &text[tail_start..])
 }
 
 /// Python's `str.strip()` whitespace: Unicode whitespace plus the four separators `\x1c`..`\x1f`.

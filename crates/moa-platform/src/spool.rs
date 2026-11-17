@@ -3,7 +3,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::paths::ensure_private_dir;
@@ -39,17 +39,35 @@ pub fn append(path: &Path, line: &[u8]) -> io::Result<()> {
         ensure_private_dir(parent).map_err(|e| io::Error::other(e.to_string()))?;
     }
     let mut file = OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
         .mode(0o600)
         .open(path)?;
-    let mut buf = Vec::with_capacity(line.len() + 1);
-    buf.extend_from_slice(line);
-    buf.push(b'\n');
     file.lock()?;
-    let written = file.write_all(&buf);
+    let written = ends_open(&file).and_then(|open| {
+        let mut buf = Vec::with_capacity(line.len() + 2);
+        if open {
+            buf.push(b'\n');
+        }
+        buf.extend_from_slice(line);
+        buf.push(b'\n');
+        file.write_all(&buf)
+    });
     file.unlock()?;
     written
+}
+
+/// True when the file's last byte isn't a newline: a writer died mid-line. The next write
+/// then starts with a newline, so the torn line can't swallow a whole one.
+fn ends_open(file: &File) -> io::Result<bool> {
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(false);
+    }
+    let mut last = [0u8; 1];
+    file.read_exact_at(&mut last, len - 1)?;
+    Ok(last[0] != b'\n')
 }
 
 /// Moves the spool's lines into `.draining` and returns every line there, a leftover from a
@@ -92,10 +110,14 @@ fn move_into(spool: &mut File, draining: &Path) -> io::Result<()> {
         return Ok(());
     }
     let mut out = OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
         .mode(0o600)
         .open(draining)?;
+    if ends_open(&out)? {
+        out.write_all(b"\n")?;
+    }
     out.write_all(&bytes)?;
     out.sync_all()?;
     spool.set_len(0)

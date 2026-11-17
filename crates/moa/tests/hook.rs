@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use moa_testkit::TempBrain;
 use serde_json::{Value, json};
 
-const MAX_LINE: usize = 8 << 20;
+use moa_proto::MAX_LINE;
 
 /// A stand-in daemon: accepts connections at `brain`'s socket and hands each first line to
 /// the receiver, answering it with `reply` when there is one. `reply: None` and `hang` leave

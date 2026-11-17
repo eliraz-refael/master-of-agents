@@ -127,3 +127,18 @@ fn a_non_utf8_line_is_kept_lossy_and_not_fatal() {
     // Still drainable again, as after a crash before `done`.
     assert_eq!(take(&path).unwrap().lines.len(), 2);
 }
+
+#[test]
+fn a_torn_line_never_swallows_the_next_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spool/hooks.jsonl");
+    append(&path, b"one").unwrap();
+    // A writer that died mid-line.
+    std::fs::write(&path, "one\ntor").unwrap();
+    append(&path, b"two").unwrap();
+    assert_eq!(take(&path).unwrap().lines, ["one", "tor", "two"]);
+    // The same in `.draining`: a crashed drain's torn tail stays apart from the next lines.
+    std::fs::write(draining(&path), "torn").unwrap();
+    append(&path, b"three").unwrap();
+    assert_eq!(take(&path).unwrap().lines, ["torn", "three"]);
+}

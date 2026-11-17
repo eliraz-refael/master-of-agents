@@ -86,6 +86,7 @@ pub fn normalize(line: &HookLine, tail: &dyn Fn(&Path) -> Option<String>) -> Opt
     }
     let payload = &line.payload;
     let conversation_id = text(payload, "session_id")
+        .filter(|id| !id.is_empty())
         .or(line.env.claude_session_id.as_deref())?
         .to_string();
     let kind = kind_of(payload, text(payload, "hook_event_name")?, tail)?;
@@ -110,10 +111,12 @@ pub fn normalize(line: &HookLine, tail: &dyn Fn(&Path) -> Option<String>) -> Opt
 pub fn last_assistant_text(transcript: &Path) -> Option<String> {
     let mut file = File::open(transcript).ok()?;
     let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL_BYTES);
+    // One byte before the window too: a window that starts exactly on a line then keeps
+    // that line, since the piece skipped below is just the end of the line before.
+    let start = len.saturating_sub(TAIL_BYTES + 1);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    file.take(TAIL_BYTES + 1).read_to_end(&mut bytes).ok()?;
     let window = String::from_utf8_lossy(&bytes);
     let mut lines = window.lines();
     if start > 0 {

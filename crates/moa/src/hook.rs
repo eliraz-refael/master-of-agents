@@ -16,21 +16,33 @@ use moa_core::hook::{HOOK_LINE_V, HookEnv, HookLine};
 use moa_core::model::AgentKind;
 use moa_core::route::{Route, route};
 use moa_platform::{Paths, canonical, net, spool};
+use moa_proto::MAX_LINE;
 use serde::Deserializer;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::{Map, Value};
 
 /// The most of stdin the hook reads: the wire's line limit, and one byte to tell "over".
-pub const HOOK_STDIN_CAP: u64 = (8 << 20) + 1;
+pub const HOOK_STDIN_CAP: u64 = MAX_LINE as u64 + 1;
 /// A payload bigger than this is cut down to its identifying fields (H12).
-pub const HOOK_PAYLOAD_ROOM: usize = (8 << 20) - (64 << 10);
+pub const HOOK_PAYLOAD_ROOM: usize = MAX_LINE - (64 << 10);
 
 const CONNECT: Duration = Duration::from_millis(200);
 const WRITE: Duration = Duration::from_millis(200);
 const SESSION_START_WAIT: Duration = Duration::from_secs(1);
 
-/// The payload fields a cut payload keeps.
-const KEPT: [&str; 4] = ["hook_event_name", "session_id", "cwd", "transcript_path"];
+/// The payload fields a cut payload keeps: the identifying ones, and the short ones the
+/// normalizer reads, so a cut `PermissionRequest` still names its tool.
+const KEPT: [&str; 9] = [
+    "hook_event_name",
+    "session_id",
+    "cwd",
+    "transcript_path",
+    "tool_name",
+    "source",
+    "reason",
+    "notification_type",
+    "new_cwd",
+];
 
 pub fn run(args: &[OsString]) -> ExitCode {
     let at_ns = SystemTime::now()
@@ -88,11 +100,9 @@ fn hook_claude(at_ns: i64) {
     let Ok(hook_json) = serde_json::to_string(&hook) else {
         return;
     };
-    let mut line = format!(r#"{{"jsonrpc":"2.0","method":"hook","params":{hook_json}}}"#);
-    if session_start {
-        line = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"hook","params":{hook_json}}}"#);
-    }
-    line.push('\n');
+    // Only SessionStart is a request: its reply carries the context.
+    let id = if session_start { r#""id":1,"# } else { "" };
+    let line = format!("{{\"jsonrpc\":\"2.0\",{id}\"method\":\"hook\",\"params\":{hook_json}}}\n");
     match send(&socket, line.as_bytes()) {
         Some(stream) if session_start => {
             if let Some(text) = read_context(stream) {
