@@ -28,6 +28,8 @@ pub enum TimerKey {
     Backup,
     /// The status line's minute clock.
     Clock,
+    /// The earliest moment a working session turns quiet.
+    Quiet,
 }
 
 // `Client` carries a whole `Op`; one is built per request, so boxing it buys nothing.

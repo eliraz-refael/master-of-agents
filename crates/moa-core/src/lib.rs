@@ -13,6 +13,7 @@ pub mod model;
 pub mod names;
 pub mod op;
 mod ops;
+mod peers;
 pub mod publish;
 pub mod route;
 pub mod state;

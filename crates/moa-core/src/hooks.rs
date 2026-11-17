@@ -1,18 +1,24 @@
 //! Hook events in the core: which session one is for, whether it is new, what it changes and
-//! what is written down. `core.rs` dispatches here; the lifecycle a start or an end brings is
-//! added on top of [`apply`].
+//! what is written down. `core.rs` dispatches here. A session starting or ending brings its
+//! lifecycle and conversation rotation; a pane that exits ends its session.
 
 use serde_json::json;
 
 use crate::Now;
 use crate::change::Change;
-use crate::core::Tx;
-use crate::effect::{Effect, LogLevel, LogLine, Publish};
+use crate::core::{Tx, post_commit};
+use crate::effect::{Effect, LogLevel, LogLine};
 use crate::hook::{HookEnvelope, HookKind, StartSource};
 use crate::live::cut_middle;
-use crate::model::{Activity, ActivityWho, Event, EventId, EventKind, Session, SessionId};
+use crate::model::{
+    Activity, ActivityWho, Conversation, Event, EventId, EventKind, Lifecycle, Location, Session,
+    SessionId,
+};
 use crate::op::{ConnId, Done, ReqId};
+use crate::peers::peers_note;
 use crate::state::{State, Table};
+use crate::tmux::focus::trusted_panes;
+use crate::tmux::ids::PaneId;
 
 /// What [`apply`] did with an event.
 #[allow(clippy::enum_variant_names)]
@@ -23,7 +29,8 @@ pub(crate) enum Applied {
     Dropped(&'static str),
     /// Already applied once.
     Duplicate,
-    /// Older than the session's last activity: written to history, nothing else.
+    /// Older than the session's last activity, or an end that leaves the session live:
+    /// written to history, nothing else.
     HistoryOnly,
     Applied,
 }
@@ -46,29 +53,21 @@ pub(crate) fn run(
             message: reason.to_string(),
         }));
     }
-    let topics = tx
-        .changes
-        .iter()
-        .flat_map(|c| c.topics().iter().copied())
-        .collect();
-    if !tx.changes.is_empty() {
-        fx.push(Effect::Persist(tx.changes));
-    }
-    if let Some(model) = state.publish(&topics) {
-        fx.push(Effect::Publish(Publish::Model(model)));
-    }
-    fx.extend(
-        tx.events
-            .into_iter()
-            .map(|e| Effect::Publish(Publish::Event(e))),
-    );
+    fx.extend(post_commit(state, tx));
     if let Some((conn, req)) = reply {
+        // Only a start has anything to say; slice 7 fills the note.
+        let note = match env.kind {
+            HookKind::SessionStarted { .. } => resolve(state, env)
+                .ok()
+                .and_then(|id| peers_note(state, id)),
+            _ => None,
+        };
         fx.push(Effect::Reply {
             conn,
             req,
             result: Ok(Done {
                 text: String::new(),
-                data: json!({ "context": null }),
+                data: json!({ "context": note }),
             }),
         });
     }
@@ -114,9 +113,11 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         changes.push(row);
     }
 
-    // An older event keeps its history row and changes nothing else.
+    // An older event keeps its history row and changes nothing else. So does an end that
+    // is only the conversation changing (`/clear`, a resume).
     let older = before.activity_at.is_some_and(|t| env.at < t);
-    if older {
+    let rotating = matches!(&env.kind, HookKind::SessionEnded { reason } if reason == "clear" || reason == "resume");
+    if older || rotating {
         return commit(state, tx, key, changes, Applied::HistoryOnly);
     }
 
@@ -138,6 +139,9 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
             Some(("session", id.to_string())),
         ));
     }
+    if let HookKind::SessionStarted { source } = &env.kind {
+        changes.push(Change::Conversation(rotated(state, id, env, *source)));
+    }
     changes.insert(0, Change::Session(after));
     commit(state, tx, key, changes, Applied::Applied)
 }
@@ -150,7 +154,8 @@ fn commit(
     changes: Vec<Change>,
     applied: Applied,
 ) -> Applied {
-    if tx.commit(state, changes).is_err() {
+    // Nothing to write is nothing that can be refused.
+    if !changes.is_empty() && tx.commit(state, changes).is_err() {
         return Applied::Dropped("a hook event was not saved");
     }
     state.remember_hook(key);
@@ -190,6 +195,63 @@ fn history_row(
     }))
 }
 
+/// The conversation a start belongs to: a new one for an id the session hasn't had, or the
+/// known one with its `last_seen_at` moved.
+fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource) -> Conversation {
+    if let Some(known) = state
+        .conversations_of(id)
+        .find(|c| c.conversation_id == env.conversation_id)
+    {
+        let mut c = known.clone();
+        c.last_seen_at = env.at;
+        return c;
+    }
+    Conversation {
+        agent_kind: env.agent,
+        conversation_id: env.conversation_id.clone(),
+        session_id: id,
+        store_dir: env.store_dir.clone(),
+        spike_account: None,
+        reason: source.reason(),
+        first_seen_at: env.at,
+        last_seen_at: env.at,
+        transcript_path: env.transcript_path.clone(),
+        transcript_present: None,
+        transcript_checked_at: None,
+    }
+}
+
+/// A pane exited: the session bound to it, if the binding can be believed (T11) and the
+/// session is still live, ends and loses the binding. Nothing else checks that a process is
+/// alive. The caller sends what `tx` holds.
+pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) {
+    let Some((_, id)) = trusted_panes(state).get(&pane).copied() else {
+        return;
+    };
+    let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) else {
+        return;
+    };
+    let mut after = session.clone();
+    after.lifecycle = Lifecycle::Ended;
+    let mut changes = vec![Change::DeletePaneBinding(id)];
+    if let Some(text) = activity_text(
+        &after,
+        &HookKind::SessionEnded {
+            reason: String::new(),
+        },
+    ) {
+        changes.push(tx.activity_row(
+            state,
+            ActivityWho::Session,
+            text,
+            Some(("session", id.to_string())),
+        ));
+    }
+    changes.insert(0, Change::Session(after));
+    // A refused write leaves the pane bound and the session live; the next event retries.
+    let _ = tx.commit(state, changes);
+}
+
 fn source_word(source: StartSource) -> &'static str {
     match source {
         StartSource::Startup => "startup",
@@ -209,7 +271,14 @@ fn transition(before: &Session, env: &HookEnvelope) -> Session {
         s.cwd = Some(cwd.clone());
     }
     match &env.kind {
-        HookKind::SessionStarted { .. } | HookKind::SessionEnded { .. } => {}
+        HookKind::SessionStarted { .. } => {
+            s.lifecycle = Lifecycle::Live;
+            s.asleep_at = None;
+            s.location = Location::Here;
+            s.activity = Activity::Idle;
+            s.resume_failed = false;
+        }
+        HookKind::SessionEnded { .. } => s.lifecycle = Lifecycle::Ended,
         HookKind::TurnStarted { prompt } => {
             let prompt = cut_middle(prompt);
             s.activity = Activity::Working;
@@ -255,6 +324,7 @@ fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
             let line: String = prompt.replace('\n', " ").chars().take(90).collect();
             format!("› {line}")
         }
+        HookKind::SessionEnded { .. } => "○ ended".to_string(),
         HookKind::TurnEnded { .. } => "✓ turn done".to_string(),
         HookKind::TurnFailed { .. } => "✗ failed".to_string(),
         HookKind::NeedsPermission { .. } | HookKind::NeedsAnswer { .. } => {

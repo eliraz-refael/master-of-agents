@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use crate::change::Change;
 use crate::effect::{Effect, Input, LogLevel, LogLine, Publish, TimerKey};
 use crate::hooks;
+use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{Op, OpError};
 use crate::ops;
@@ -13,6 +14,7 @@ use crate::publish::{CoreEvent, Topic};
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::focus::mark_seen;
+use crate::tmux::link;
 use crate::tmux::status;
 use crate::{Now, UtcMs};
 
@@ -31,6 +33,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.refuse_writes = None;
             state.load(*snapshot);
             let mut fx = vec![Effect::Backup { day: now.local_day }, backup_timer(now)];
+            fx.push(quiet_timer(state, now.wall));
             // A row's notes sit together, one per reason; the line names no reason, so one
             // line per row.
             let mut rows: Vec<&crate::state::LoadNote> = state.unknown().iter().collect();
@@ -77,18 +80,37 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.load(*snapshot);
             state.forget_hooks();
             state.refuse_writes = refuse_writes;
-            let mut fx = vec![backup_timer(now)];
+            let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
             fx
         }
         Input::Tmux(t) => {
-            let mut fx = state.tmux.input(t);
+            // A pane that exited ends its session, before the link looks at the tree.
+            let mut fx = match link::exited_pane(&t) {
+                Some(pane) => {
+                    let mut tx = Tx::new(now);
+                    hooks::pane_gone(state, &mut tx, pane);
+                    let mut fx = post_commit(state, tx);
+                    if !fx.is_empty() {
+                        fx.push(quiet_timer(state, now.wall));
+                    }
+                    fx
+                }
+                None => Vec::new(),
+            };
+            fx.extend(state.tmux.input(t));
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
             fx
         }
-        Input::Hook { reply, envelope } => hooks::run(state, now, reply, &envelope),
+        Input::Hook { reply, envelope } => {
+            let mut fx = hooks::run(state, now, reply, &envelope);
+            if fx.iter().any(|e| matches!(e, Effect::Persist(_))) {
+                fx.push(quiet_timer(state, now.wall));
+            }
+            fx
+        }
         Input::Timer(TimerKey::Backup) => {
             vec![Effect::Backup { day: now.local_day }, backup_timer(now)]
         }
@@ -96,6 +118,17 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         Input::Timer(TimerKey::Clock) => {
             state.tmux.clock_fired();
             Vec::new()
+        }
+        // Sessions that just went quiet show differently: tell the views.
+        Input::Timer(TimerKey::Quiet) => {
+            let topics = BTreeSet::from([Topic::Sessions, Topic::Status]);
+            let mut fx: Vec<Effect> = state
+                .publish(&topics)
+                .map(|m| Effect::Publish(Publish::Model(m)))
+                .into_iter()
+                .collect();
+            fx.push(quiet_timer(state, now.wall));
+            fx
         }
         Input::ZoneChanged => vec![backup_timer(now)],
         Input::ActorFailed { actor, message: _ } => {
@@ -125,37 +158,42 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let caller = state.caller(&caller);
             let mut tx = Tx::new(now);
             let result = ops::run(state, &mut tx, &caller, op, now);
-            let Tx {
-                changes,
-                mut events,
-                ..
-            } = tx;
             // Handlers commit once, last: a refusal has applied nothing, so there is nothing
             // to persist that the reply would deny.
             debug_assert!(
-                result.is_ok() || changes.is_empty(),
+                result.is_ok() || tx.changes.is_empty(),
                 "an op returned Err after committing"
             );
             if result.is_err() {
-                events.clear();
+                tx.events.clear();
             }
-            let topics = topics_of(&changes);
-            let mut fx = Vec::new();
-            if !changes.is_empty() {
-                fx.push(Effect::Persist(changes));
-            }
-            if let Some(model) = state.publish(&topics) {
-                fx.push(Effect::Publish(Publish::Model(model)));
-            }
-            fx.extend(
-                events
-                    .into_iter()
-                    .map(|e| Effect::Publish(Publish::Event(e))),
-            );
+            let mut fx = post_commit(state, tx);
             fx.push(Effect::Reply { conn, req, result });
             fx
         }
     }
+}
+
+/// What a transaction's commits owe the world, in order: the `Persist`, the model it
+/// changed, then its events. The caller adds any reply after.
+pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
+    let Tx {
+        changes, events, ..
+    } = tx;
+    let topics = topics_of(&changes);
+    let mut fx = Vec::new();
+    if !changes.is_empty() {
+        fx.push(Effect::Persist(changes));
+    }
+    if let Some(model) = state.publish(&topics) {
+        fx.push(Effect::Publish(Publish::Model(model)));
+    }
+    fx.extend(
+        events
+            .into_iter()
+            .map(|e| Effect::Publish(Publish::Event(e))),
+    );
+    fx
 }
 
 /// Runs `mark_seen` and adds what it changed to `fx`: the `Persist` first, so it comes
@@ -187,6 +225,25 @@ fn backup_timer(now: &Now) -> Effect {
     Effect::SetTimer {
         key: TimerKey::Backup,
         at: start_of_next_day(now.local_day, &now.tz),
+    }
+}
+
+/// The one deadline for sessions turning quiet: the earliest `activity_at + QUIET_AFTER`
+/// still ahead among sessions that are working, or no timer when there is none.
+pub(crate) fn quiet_timer(state: &State, now: UtcMs) -> Effect {
+    let next = state
+        .sessions()
+        .filter(|s| quiet_candidate(s))
+        .filter_map(|s| s.activity_at)
+        .map(|t| UtcMs(t.0 + QUIET_AFTER))
+        .filter(|at| *at > now)
+        .min();
+    match next {
+        Some(at) => Effect::SetTimer {
+            key: TimerKey::Quiet,
+            at,
+        },
+        None => Effect::CancelTimer(TimerKey::Quiet),
     }
 }
 

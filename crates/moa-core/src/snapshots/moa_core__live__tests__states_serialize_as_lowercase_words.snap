@@ -8,6 +8,7 @@ expression: "DisplayState::ALL"
   "failed",
   "done",
   "working",
+  "quiet",
   "idle",
   "asleep",
   "ended",

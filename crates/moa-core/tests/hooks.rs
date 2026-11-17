@@ -7,15 +7,20 @@ use jiff::civil::date;
 use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, LogLevel, handle_checked, reply_of};
-use moa_core::hook::{HookEnvelope, HookKind};
+use moa_core::effect::{
+    Effect, Input, LogLevel, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked, reply_of,
+};
+use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{
     Activity, ActivityWho, AgentKind, Conversation, ConversationReason, Lifecycle, Location,
-    Project, ProjectId, ProjectStatus, Session, SessionId,
+    PaneBinding, Project, ProjectId, ProjectStatus, Session, SessionId,
 };
 use moa_core::op::{ConnId, ReqId};
 use moa_core::state::{Snapshot, State};
+use moa_core::tmux::ids::{ClientName, Generation};
+use moa_core::tmux::notify::Notification;
+use moa_core::tmux::status::counts_text;
 use moa_core::{Now, UtcMs};
 use proptest::prelude::*;
 use serde_json::json;
@@ -37,6 +42,10 @@ fn sid() -> SessionId {
 }
 
 fn seeded() -> State {
+    seeded_with(Vec::new())
+}
+
+fn seeded_with(pane_bindings: Vec<PaneBinding>) -> State {
     let session = Session {
         id: sid(),
         agent_kind: AgentKind::Claude,
@@ -91,6 +100,7 @@ fn seeded() -> State {
             sessions: vec![session],
             conversations: vec![conversation],
             projects: vec![project],
+            pane_bindings,
             ..Snapshot::default()
         })),
         now(),
@@ -422,7 +432,7 @@ fn a_session_start_request_is_answered_after_the_commit() {
     let mut st = seeded();
     let fx = feed_replying(
         &mut st,
-        envelope(1, 1000, prompt("x")),
+        started(1, 1000, StartSource::Resume),
         Some((ConnId(3), ReqId(9))),
     );
     let done = reply_of(&fx).unwrap().as_ref().unwrap();
@@ -444,22 +454,327 @@ fn a_dropped_request_is_still_answered() {
     assert_eq!(persists(&fx), 0);
 }
 
-#[test]
-fn start_and_end_get_history_and_times_only() {
-    let mut st = seeded();
-    let fx = feed(
-        &mut st,
-        envelope(
-            1,
-            1000,
-            HookKind::SessionEnded {
-                reason: "logout".into(),
-            },
-        ),
+fn started(seq: u32, plus_ms: i64, source: StartSource) -> HookEnvelope {
+    envelope(seq, plus_ms, HookKind::SessionStarted { source })
+}
+
+fn ends(seq: u32, plus_ms: i64, reason: &str) -> HookEnvelope {
+    envelope(
+        seq,
+        plus_ms,
+        HookKind::SessionEnded {
+            reason: reason.into(),
+        },
+    )
+}
+
+fn conversations(st: &State) -> Vec<Conversation> {
+    let mut cs: Vec<Conversation> = st.conversations_of(sid()).cloned().collect();
+    cs.sort_by_key(|c| c.first_seen_at);
+    cs
+}
+
+/// Reloads the state with the session edited, as if it had been saved that way.
+fn reseed(st: &mut State, refuse_writes: Option<RefuseWrites>, edit: impl FnOnce(&mut Session)) {
+    let mut s = session(st);
+    edit(&mut s);
+    let snapshot = Snapshot {
+        sessions: vec![s],
+        conversations: conversations(st),
+        ..Snapshot::default()
+    };
+    handle_checked(
+        st,
+        Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes,
+        },
+        now(),
     );
-    assert_eq!(event_kinds(&fx), ["session.ended"]);
-    assert_eq!(session(&st).activity_at, Some(UtcMs(T0 + 1000)));
+}
+
+#[test]
+fn start_brings_an_ended_session_back_and_clears_asleep() {
+    let mut st = seeded();
+    reseed(&mut st, None, |s| {
+        s.lifecycle = Lifecycle::Ended;
+        s.asleep_at = Some(UtcMs(T0 + 500));
+        s.resume_failed = true;
+        s.location = Location::Elsewhere;
+        s.activity = Activity::Failed;
+    });
+    assert_eq!(shown(&st).0, DisplayState::Asleep);
+    let fx = feed(&mut st, started(1, 1000, StartSource::Resume));
+    let s = session(&st);
+    assert_eq!(s.lifecycle, Lifecycle::Live);
+    assert_eq!(s.asleep_at, None);
+    assert_eq!(s.location, Location::Here);
+    assert_eq!(s.activity, Activity::Idle);
+    assert!(!s.resume_failed);
+    assert_eq!(event_kinds(&fx), ["session.started"]);
+    assert_eq!(shown(&st).0, DisplayState::Idle);
+}
+
+#[test]
+fn clear_rotates_the_conversation_and_stays_live() {
+    let mut st = seeded();
+    feed(&mut st, ends(1, 1000, "clear"));
     assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    let mut start = started(2, 1500, StartSource::Clear);
+    start.conversation_id = "b2c3d4e5-0000-4000-8000-000000000002".into();
+    start.store_dir = Some("/stores/a".into());
+    start.transcript_path = Some("/stores/a/t.jsonl".into());
+    feed(&mut st, start);
+    let cs = conversations(&st);
+    assert_eq!(cs.len(), 2);
+    assert_eq!(cs[1].reason, ConversationReason::Clear);
+    assert_eq!(cs[1].store_dir.as_deref(), Some("/stores/a"));
+    assert_eq!(cs[1].transcript_path.as_deref(), Some("/stores/a/t.jsonl"));
+    assert_eq!(cs[1].first_seen_at, UtcMs(T0 + 1500));
+    assert_eq!(cs[1].last_seen_at, UtcMs(T0 + 1500));
+    assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    // A conversation already known only moves its last_seen_at.
+    feed(&mut st, started(3, 2500, StartSource::Resume));
+    let again = conversations(&st);
+    assert_eq!(again.len(), 2);
+    assert_eq!(again[0].last_seen_at, UtcMs(T0 + 2500));
+    assert_eq!(again[1].last_seen_at, UtcMs(T0 + 1500));
+}
+
+#[test]
+fn fork_and_compact_reasons() {
+    for (source, reason) in [
+        (StartSource::Fork, ConversationReason::Fork),
+        (StartSource::Compact, ConversationReason::Clear),
+    ] {
+        let mut st = seeded();
+        let mut start = started(1, 1000, source);
+        start.conversation_id = "b2c3d4e5-0000-4000-8000-000000000002".into();
+        feed(&mut st, start);
+        assert_eq!(conversations(&st)[1].reason, reason);
+    }
+}
+
+#[test]
+fn exit_ends_the_session() {
+    let mut st = seeded();
+    let fx = feed(&mut st, ends(1, 1000, "prompt_input_exit"));
+    assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+    assert_eq!(event_kinds(&fx), ["session.ended"]);
+    assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
+    assert_eq!(shown(&st).0, DisplayState::Ended);
+}
+
+#[test]
+fn a_late_session_end_does_not_end_a_restarted_session() {
+    let mut st = seeded();
+    feed(&mut st, started(1, 2000, StartSource::Startup));
+    let fx = feed(&mut st, ends(2, 1000, "logout"));
+    assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    assert_eq!(event_kinds(&fx), ["session.ended"]);
+    assert!(activity_texts(&fx).is_empty());
+}
+
+fn at(plus_ms: i64) -> Now {
+    Now::at(
+        UtcMs(T0 + plus_ms),
+        Duration::from_secs(1),
+        TimeZone::posix("UTC0").unwrap(),
+    )
+}
+
+fn quiet_timers(fx: &[Effect]) -> Vec<&Effect> {
+    fx.iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Effect::SetTimer {
+                    key: TimerKey::Quiet,
+                    ..
+                } | Effect::CancelTimer(TimerKey::Quiet)
+            )
+        })
+        .collect()
+}
+
+fn quiet_at(plus_ms: i64) -> Effect {
+    Effect::SetTimer {
+        key: TimerKey::Quiet,
+        at: UtcMs(T0 + plus_ms),
+    }
+}
+
+const TEN_MIN: i64 = 600_000;
+
+#[test]
+fn quiet_after_ten_minutes_of_silence() {
+    let mut st = seeded();
+    let fx = feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    assert_eq!(quiet_timers(&fx), [&quiet_at(1000 + TEN_MIN)]);
+    let s = session(&st);
+    let shown_at = |plus| display_state(&s, at(plus).wall);
+    assert_eq!(shown_at(1000 + TEN_MIN - 1).0, DisplayState::Working);
+    assert_eq!(
+        shown_at(1000 + TEN_MIN),
+        (DisplayState::Quiet, "quiet 10m".into())
+    );
+    assert_eq!(DisplayState::Quiet.word(), "quiet");
+    assert_eq!(DisplayState::Quiet.glyph(), "◌");
+}
+
+#[test]
+fn the_quiet_timer_firing_publishes_and_has_nothing_left_to_wait_for() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("a")));
+    let fx = handle_checked(&mut st, Input::Timer(TimerKey::Quiet), at(1000 + TEN_MIN));
+    assert_eq!(quiet_timers(&fx), [&Effect::CancelTimer(TimerKey::Quiet)]);
+    assert!(fx.iter().any(|e| matches!(e, Effect::Publish(_))));
+}
+
+#[test]
+fn the_quiet_timer_follows_the_earliest_working_session() {
+    let mut st = seeded();
+    let mut other = session(&st);
+    other.id = "0195f3a2-1111-7000-8000-000000000002".parse().unwrap();
+    other.activity = Activity::Working;
+    other.activity_at = Some(UtcMs(T0 + 5000));
+    let snapshot = Snapshot {
+        sessions: vec![session(&st), other],
+        conversations: conversations(&st),
+        ..Snapshot::default()
+    };
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes: None,
+        },
+        now(),
+    );
+    let fx = feed(&mut st, envelope(1, 9000, prompt("later")));
+    assert_eq!(quiet_timers(&fx), [&quiet_at(5000 + TEN_MIN)]);
+    // Ending the later turn leaves the earlier one waiting.
+    let fx = feed(&mut st, envelope(2, 10_000, ended("done")));
+    assert_eq!(quiet_timers(&fx), [&quiet_at(5000 + TEN_MIN)]);
+}
+
+#[test]
+fn the_quiet_timer_is_cancelled_when_none_is_working() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("a")));
+    let fx = feed(&mut st, envelope(2, 2000, ended("b")));
+    assert_eq!(quiet_timers(&fx), [&Effect::CancelTimer(TimerKey::Quiet)]);
+}
+
+#[test]
+fn quiet_is_not_counted_in_the_status_line() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("a")));
+    let later = at(1000 + TEN_MIN);
+    let data = st.status(&Default::default(), later.wall);
+    for word in ["working", "waiting", "question", "failed", "done"] {
+        assert_eq!(data.sessions[word], 0, "{word}");
+    }
+    assert_eq!(data.sessions["quiet"], 1);
+    handle_checked(&mut st, Input::Timer(TimerKey::Quiet), later);
+    assert_eq!(counts_text(&st), "");
+}
+
+fn pane_binding(pid: i64) -> PaneBinding {
+    PaneBinding {
+        session_id: sid(),
+        server_pid: pid,
+        server_start: 1000,
+        socket: "sock".into(),
+        pane_id: "%5".into(),
+        pane_pid: 99,
+        bound_at: UtcMs(1),
+    }
+}
+
+/// The link up on the server generation `10`/`1000`, with `%5` in a window.
+fn link_up(st: &mut State) {
+    let connected = TmuxIn::Connected {
+        conn: 1,
+        generation: Generation {
+            pid: 10,
+            start: 1000,
+        },
+        version: "3.5a".into(),
+        ctl: ClientName("client-9".into()),
+    };
+    handle_checked(st, Input::Tmux(connected), now());
+    let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
+    let lists = TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Refresh,
+        results: vec![
+            lines(&["S $0 moa", "S $1 _moa"]),
+            lines(&["P %5 @1 $0 1 1 0 "]),
+            lines(&["C 0 $0 /dev/ttys1"]),
+        ],
+    };
+    handle_checked(st, Input::Tmux(lists), now());
+}
+
+fn pane_message(word: &str) -> Input {
+    Input::Tmux(TmuxIn::Notification(Notification::Message(format!(
+        "moa:hook {word} %5"
+    ))))
+}
+
+#[test]
+fn a_pane_exit_ends_its_bound_session() {
+    for word in ["pane-exited", "pane-died"] {
+        let mut st = seeded_with(vec![pane_binding(10)]);
+        link_up(&mut st);
+        let fx = handle_checked(&mut st, pane_message(word), now());
+        assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+        assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
+        assert!(
+            changes(&fx)
+                .iter()
+                .any(|c| matches!(c, Change::DeletePaneBinding(_)))
+        );
+    }
+}
+
+#[test]
+fn a_pane_exit_from_an_old_generation_changes_nothing() {
+    let mut st = seeded_with(vec![pane_binding(9)]);
+    link_up(&mut st);
+    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
+    assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    assert_eq!(persists(&fx), 0);
+}
+
+#[test]
+fn session_start_reply_carries_the_peers_note() {
+    let mut st = seeded();
+    let fx = feed_replying(
+        &mut st,
+        started(1, 1000, StartSource::Startup),
+        Some((ConnId(3), ReqId(9))),
+    );
+    assert_eq!(
+        reply_of(&fx).unwrap().as_ref().unwrap().data,
+        json!({"context": null})
+    );
+}
+
+#[test]
+fn an_event_with_nothing_to_write_is_no_failed_write() {
+    let mut st = seeded();
+    reseed(
+        &mut st,
+        Some(RefuseWrites {
+            until: UtcMs(T0 + 3_600_000),
+            reason: "test".into(),
+        }),
+        |s| s.activity_at = Some(UtcMs(T0 + 5000)),
+    );
+    let fx = feed(&mut st, envelope(2, 1000, HookKind::NeedsCleared));
+    assert_eq!(logs(&fx), 0);
 }
 
 fn kind_strategy() -> impl Strategy<Value = HookKind> {
