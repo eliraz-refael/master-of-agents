@@ -3,9 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
+use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Down, Effect, Input, LogLine, TmuxIn, TmuxToken, handle_checked};
+use moa_core::hook::{HookEnvelope, HookKind};
+use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{
     Activity, AgentKind, ConversationReason, Lifecycle, Location, PaneBinding, ProjectId, SessionId,
 };
@@ -338,6 +341,47 @@ fn open_replies_after_the_pane_is_bound() {
     );
     assert!(replies(&again).is_empty());
     assert!(changes(&again).is_empty());
+}
+
+/// Nothing has happened in a new session that the user hasn't seen, so its first turn's end
+/// shows as done until they look.
+#[test]
+fn an_opened_sessions_first_turn_ends_as_done() {
+    let (b, mut st) = typical();
+    let fx = send(&b, &mut st, 1, open_op(&lantern(&b)));
+    let (id, _) = the_open(&fx);
+    let now = b.now().wall;
+    assert_eq!(st.session(id).unwrap().seen_at, Some(now));
+    let envelope = HookEnvelope {
+        agent: AgentKind::Claude,
+        slot: Some(id.to_string()),
+        brain: Some("default".into()),
+        store_dir: None,
+        conversation_id: nth(&b, 2).to_string(),
+        kind: HookKind::TurnEnded {
+            last_message: "Lit.".into(),
+        },
+        at: UtcMs(now.0 + 1000),
+        at_ns: (now.0 + 1000) * 1_000_000,
+        pid: 100,
+        seq: 0,
+        cwd: None,
+        transcript_path: None,
+    };
+    handle_checked(
+        &mut st,
+        Input::Hook {
+            reply: None,
+            envelope,
+        },
+        b.now(),
+    );
+    let s = st.session(id).unwrap();
+    assert_eq!(s.last_turn_end_at, Some(UtcMs(now.0 + 1000)));
+    assert_eq!(
+        display_state(s, UtcMs(now.0 + 2000)),
+        (DisplayState::Done, "Lit.".to_string())
+    );
 }
 
 #[test]

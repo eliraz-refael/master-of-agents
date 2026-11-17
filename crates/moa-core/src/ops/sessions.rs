@@ -280,7 +280,9 @@ pub(crate) fn open(
         activity_why: None,
         last_prompt: None,
         last_turn_end_at: None,
-        seen_at: None,
+        // Nothing in it is unseen yet. Without a `seen_at` a turn's end would never show
+        // as done (`display_state`'s rule).
+        seen_at: Some(now.wall),
         asleep_at: None,
         archived_at: None,
         location: Location::Here,
