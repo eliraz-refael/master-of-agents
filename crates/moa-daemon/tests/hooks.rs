@@ -4,6 +4,7 @@ mod common;
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::{Client, boot, boot_with, request};
@@ -17,7 +18,8 @@ use moa_core::hook::HookLine;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Session, SessionId,
 };
-use moa_core::op::ReqId;
+use moa_core::op::{Op, ReqId};
+use moa_core::state::CallerInfo;
 use moa_core::state::Deps;
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, CoreOptions};
@@ -425,5 +427,127 @@ async fn a_hook_that_panics_the_core_is_still_answered() {
         .expect("a reply");
     assert_eq!(req, ReqId(1));
     assert!(result.is_err());
+    core.stop().await;
+}
+
+async fn started(brain: &TypicalBrain, live: &Path) -> CoreHandle {
+    timeout(
+        Duration::from_secs(5),
+        CoreHandle::start(options(brain, live)),
+    )
+    .await
+    .expect("not stuck")
+    .expect("the core starts")
+}
+
+fn seen_events(brain: &TypicalBrain) -> i64 {
+    let store = brain.store();
+    store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM events WHERE session_id = ?1",
+            [S],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+}
+
+/// The core refuses writes after three failed commits in a row: `Startup`'s flagging commit
+/// is the first (the grammar rejects every suggestion), two group adds the rest.
+#[tokio::test]
+async fn a_hook_under_refused_writes_is_spooled_and_applied_after_a_restart() {
+    let brain = TypicalBrain::new();
+    seed(&mut brain.store());
+    let live = brain.dir.path().join("spool").join("default.jsonl");
+    let store = brain.store();
+    store.conn().execute_batch("PRAGMA query_only = 1").unwrap();
+    let mut opts = options(&brain, &live);
+    opts.deps = Deps {
+        parse_action: Some(|_, _| Err("no".into())),
+        ..Deps::default()
+    };
+    let core = timeout(
+        Duration::from_secs(5),
+        CoreHandle::start_with_store(opts, store),
+    )
+    .await
+    .expect("not stuck")
+    .expect("the core starts");
+    let (conn, mut replies) = core.open_conn();
+    for req in 1..=2 {
+        let op = Op::GroupAdd {
+            path: format!("G{req}"),
+        };
+        core.send(conn, ReqId(req), CallerInfo::default(), op);
+        let (_, result) = timeout(Duration::from_secs(5), replies.recv())
+            .await
+            .expect("answered")
+            .expect("a reply");
+        assert!(result.is_err());
+    }
+    let commits = core.stats().commits.load(Ordering::SeqCst);
+    let line = hook_line("UserPromptSubmit", ago(1000), 1);
+    let parsed: HookLine = serde_json::from_value(line.clone()).unwrap();
+    let envelope = normalize(&parsed, &last_assistant_text).unwrap();
+    core.hook(Some((conn, ReqId(3))), envelope, Some(parsed));
+    let (req, result) = timeout(Duration::from_secs(5), replies.recv())
+        .await
+        .expect("answered")
+        .expect("a reply");
+    assert_eq!(req, ReqId(3));
+    assert_eq!(result.unwrap().data, json!({"context": null}));
+    // Not applied, not committed: kept.
+    assert_eq!(core.stats().commits.load(Ordering::SeqCst), commits);
+    let kept = fs::read_to_string(&live).unwrap();
+    let kept: HookLine = serde_json::from_str(kept.trim_end()).unwrap();
+    assert_eq!(kept, serde_json::from_value::<HookLine>(line).unwrap());
+    core.stop().await;
+    drop(core);
+
+    let core = started(&brain, &live).await;
+    assert_eq!(seen_events(&brain), 1);
+    assert!(!spool::draining(&live).exists());
+    core.stop().await;
+}
+
+#[tokio::test]
+async fn a_spool_that_panics_the_core_is_set_aside() {
+    let brain = TypicalBrain::new();
+    seed(&mut brain.store());
+    let dir = brain.dir.path().join("spool");
+    let live = dir.join("default.jsonl");
+    put_in_spool(
+        &live,
+        &[
+            hook_line("UserPromptSubmit", ago(30_000), 1),
+            hook_line("Stop", ago(20_000), 2),
+        ],
+    );
+    // The first line makes the core panic; it reloads and goes on with the second.
+    let core = timeout(
+        Duration::from_secs(5),
+        CoreHandle::start_with_drain_panics(options(&brain, &live), brain.store(), 1),
+    )
+    .await
+    .expect("not stuck")
+    .expect("the core starts");
+    assert_eq!(core.stats().panics.load(Ordering::SeqCst), 1);
+    assert!(!spool::draining(&live).exists());
+    let bad: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("default.jsonl.bad-"))
+        .collect();
+    assert_eq!(bad.len(), 1, "{bad:?}");
+    let kept = fs::read_to_string(dir.join(&bad[0])).unwrap();
+    assert_eq!(kept.lines().count(), 2);
+    core.stop().await;
+    drop(core);
+
+    // The next start has nothing to replay.
+    let events = seen_events(&brain);
+    let core = started(&brain, &live).await;
+    assert_eq!(core.stats().panics.load(Ordering::SeqCst), 0);
+    assert_eq!(seen_events(&brain), events);
     core.stop().await;
 }

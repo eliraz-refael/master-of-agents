@@ -14,7 +14,7 @@ use moa_core::change::Change;
 use moa_core::effect::{
     Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, TmuxToken, check_order,
 };
-use moa_core::op::OpError;
+use moa_core::op::{Done, OpError};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::State;
 use moa_core::{Now, handle};
@@ -157,6 +157,23 @@ impl Core {
         while let Some(item) = work.pop_front() {
             let stepped = match item {
                 Item::Input(input) => self.step(input, &mut batch, &mut held),
+                // While writes are refused the core would drop the event: keep its line for
+                // the next start instead, and tell a waiting hook there is nothing to say.
+                Item::Hook {
+                    reply,
+                    line: Some(line),
+                    ..
+                } if self.spool.is_some() && self.state.writes_refused(self.clock.wall()) => {
+                    spool_hooks(self.spool.as_deref(), std::iter::once(&*line));
+                    if let Some((conn, req)) = reply {
+                        let done = Done {
+                            text: String::new(),
+                            data: serde_json::json!({ "context": null }),
+                        };
+                        reply_to(&self.conns, conn, req, Ok(done));
+                    }
+                    Stepped::Done
+                }
                 Item::Hook {
                     reply, envelope, ..
                 } => self.step(Input::Hook { reply, envelope }, &mut batch, &mut held),
@@ -261,6 +278,7 @@ impl Core {
             Err(_) => {
                 // The payload stays out of the log: it may carry contents.
                 tracing::error!("handle panicked");
+                self.stats.panics.fetch_add(1, Ordering::SeqCst);
                 if let Some((conn, req)) = target {
                     held.push(Held::Reply {
                         conn,

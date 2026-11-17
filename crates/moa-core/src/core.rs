@@ -90,8 +90,14 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let mut fx = match link::exited_pane(&t) {
                 Some(pane) => {
                     let mut tx = Tx::new(now);
-                    hooks::pane_gone(state, &mut tx, pane);
+                    let saved = hooks::pane_gone(state, &mut tx, pane);
                     let mut fx = post_commit(state, tx);
+                    if !saved {
+                        fx.push(Effect::Log(LogLine {
+                            level: LogLevel::Warn,
+                            message: "a pane exit was not saved; reconcile will end its session at the next start".into(),
+                        }));
+                    }
                     if !fx.is_empty() {
                         fx.push(quiet_timer(state, now.wall));
                     }

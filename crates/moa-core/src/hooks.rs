@@ -150,7 +150,8 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     commit(state, tx, key, changes, Applied::Applied)
 }
 
-/// Commits, and only then remembers the key: a refused write leaves the event to arrive again.
+/// Commits, and only then remembers the key. A refused write drops the event here; the
+/// daemon spools hooks while writes are refused, so the core is not asked for them then.
 fn commit(
     state: &mut State,
     tx: &mut Tx,
@@ -233,12 +234,14 @@ fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource
 /// A pane exited: the session bound to it, if the binding can be believed (T11) and the
 /// session is still live, ends and loses the binding. Nothing else checks that a process is
 /// alive. The caller sends what `tx` holds.
-pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) {
+///
+/// `false` when the write was refused: the exit is reported once, so nothing retries it.
+pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
     let Some((_, id)) = trusted_panes(state).get(&pane).copied() else {
-        return;
+        return true;
     };
     let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) else {
-        return;
+        return true;
     };
     let mut after = session.clone();
     after.lifecycle = Lifecycle::Ended;
@@ -257,8 +260,8 @@ pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) {
         ));
     }
     changes.insert(0, Change::Session(after));
-    // A refused write leaves the pane bound and the session live; the next event retries.
-    let _ = tx.commit(state, changes);
+    // A refused write leaves the pane bound and the session live; reconcile ends it later.
+    tx.commit(state, changes).is_ok()
 }
 
 fn source_word(source: StartSource) -> &'static str {

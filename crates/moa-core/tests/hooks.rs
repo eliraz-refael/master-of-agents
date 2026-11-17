@@ -800,6 +800,34 @@ fn a_pane_exit_ends_its_bound_session() {
 }
 
 #[test]
+fn a_pane_exit_under_refused_writes_changes_nothing_and_is_logged() {
+    let mut st = seeded_with(vec![pane_binding(10)]);
+    let snapshot = Snapshot {
+        sessions: vec![session(&st)],
+        conversations: conversations(&st),
+        pane_bindings: vec![pane_binding(10)],
+        ..Snapshot::default()
+    };
+    let reload = Input::Reload {
+        snapshot: Box::new(snapshot),
+        refuse_writes: Some(RefuseWrites {
+            until: UtcMs(i64::MAX),
+            reason: "disk".into(),
+        }),
+    };
+    handle_checked(&mut st, reload, now());
+    link_up(&mut st);
+    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
+    assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    assert_eq!(persists(&fx), 0);
+    let warned = fx.iter().any(|e| {
+        matches!(e, Effect::Log(l) if l.level == LogLevel::Warn
+            && l.message == "a pane exit was not saved; reconcile will end its session at the next start")
+    });
+    assert!(warned, "{fx:?}");
+}
+
+#[test]
 fn a_pane_exit_from_an_old_generation_changes_nothing() {
     let mut st = seeded_with(vec![pane_binding(9)]);
     link_up(&mut st);

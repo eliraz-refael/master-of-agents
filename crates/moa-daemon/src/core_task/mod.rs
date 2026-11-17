@@ -90,6 +90,8 @@ pub struct Stats {
     pub timer_fires: AtomicU64,
     pub commit_failures: AtomicU64,
     pub reloads: AtomicU64,
+    /// Inputs whose handling panicked.
+    pub panics: AtomicU64,
     /// Views of saved state for the terminal server that were released after a commit.
     pub views_released: AtomicU64,
 }
@@ -214,7 +216,18 @@ impl CoreHandle {
         store: Store,
         faults: Vec<Fault>,
     ) -> Result<CoreHandle, DaemonError> {
-        Self::start_inner(opts, store, faults, None).await
+        Self::start_inner(opts, store, faults, None, 0).await
+    }
+
+    /// Like `start_with_store`, with the first `panics` inputs after `Startup` (the spool's
+    /// drain) panicking where `handle` is called.
+    #[doc(hidden)]
+    pub async fn start_with_drain_panics(
+        opts: CoreOptions,
+        store: Store,
+        panics: u32,
+    ) -> Result<CoreHandle, DaemonError> {
+        Self::start_inner(opts, store, Vec::new(), None, panics).await
     }
 
     /// `link`, when given, stands in for the terminal link that `opts.tmux` would start
@@ -224,6 +237,7 @@ impl CoreHandle {
         store: Store,
         faults: Vec<Fault>,
         link: Option<mpsc::UnboundedSender<TmuxCmd>>,
+        drain_panics: u32,
     ) -> Result<CoreHandle, DaemonError> {
         let store = StoreHandle::spawn(store, opts.backups.clone());
         for fault in faults {
@@ -328,6 +342,7 @@ impl CoreHandle {
             return Err(DaemonError::Fatal(line));
         }
         if let Some(path) = spool {
+            handle.panic_next.store(drain_panics, Ordering::SeqCst);
             handle.drain_spool(path).await;
         }
         Ok(handle)
@@ -363,16 +378,35 @@ impl CoreHandle {
         envelopes.sort_by_key(|e| (e.at_ns, e.pid, e.seq));
         let drained = envelopes.len();
         let failures = self.stats.commit_failures.load(Ordering::SeqCst);
+        let panics = self.stats.panics.load(Ordering::SeqCst);
         let generation = *self.generation.borrow();
         for envelope in envelopes {
             self.hook(None, envelope, None);
         }
         self.committed().await;
-        // A failed commit reloads the core, which bumps the generation.
-        let intact = self.stats.commit_failures.load(Ordering::SeqCst) == failures
-            && *self.generation.borrow() == generation
-            && self.finished.borrow().is_none();
-        if !intact {
+        // A failed commit, a stopped store or an ended core: the lines are fine, try again at
+        // the next start. Every one of those reloads the core, which bumps the generation.
+        let unsaved = self.stats.commit_failures.load(Ordering::SeqCst) != failures
+            || self.finished.borrow().is_some();
+        if unsaved {
+            return;
+        }
+        // The core panicked on a line: it would again, every start. Set the file aside.
+        if self.stats.panics.load(Ordering::SeqCst) != panics {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            match taken.set_aside(&at.to_string()) {
+                Ok(file) => tracing::warn!(
+                    "set aside {} spooled hook events after the core failed on them; see {}",
+                    drained + unreadable,
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                Err(e) => tracing::warn!("the failing hook spool couldn't be set aside: {e}"),
+            }
+            return;
+        }
+        if *self.generation.borrow() != generation {
             return;
         }
         if let Err(e) = taken.done() {

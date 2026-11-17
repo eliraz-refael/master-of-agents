@@ -277,6 +277,11 @@ impl State {
         self.refuse_writes.as_ref()
     }
 
+    /// Whether a write at `now` is refused: the same test as `Tx::commit`'s.
+    pub fn writes_refused(&self, now: UtcMs) -> bool {
+        self.refuse_writes.as_ref().is_some_and(|r| now < r.until)
+    }
+
     /// The answer to `status`, with sessions' states as of `now`.
     pub fn status(&self, caller: &CallerInfo, now: UtcMs) -> StatusData {
         use crate::live::{DisplayState, display_state};
