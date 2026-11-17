@@ -120,7 +120,8 @@ pub fn read_ready(first_line: Option<&str>) -> ReadyLine {
 /// from `paths`, and so does `TMPDIR`, so both sides compute the same fallback socket;
 /// none is copied from the parent. Of the parent's, only what the daemon needs survives:
 /// `PATH`, `USER`, `LANG`, `LC_*`, `MOA_LOG`, `TMUX_TMPDIR` (so both sides find the same
-/// tmux socket); `TZ` only when sandboxed (a real home has the system zone);
+/// tmux socket), `TZDIR` (where the zone database is, when it isn't in the usual place, as
+/// on NixOS); `TZ` only when sandboxed (a real home has the system zone);
 /// `MOA_REAL_HOME` only when not sandboxed.
 pub fn daemon_env(
     parent: impl Iterator<Item = (OsString, OsString)>,
@@ -135,7 +136,7 @@ pub fn daemon_env(
         env.push(("MOA_ROOT".into(), paths.home().into()));
     }
     env.extend(parent.filter(|(k, _)| match k.to_str() {
-        Some("PATH" | "USER" | "LANG" | "MOA_LOG" | "TMUX_TMPDIR") => true,
+        Some("PATH" | "USER" | "LANG" | "MOA_LOG" | "TMUX_TMPDIR" | "TZDIR") => true,
         Some("TZ") => sandboxed,
         Some("MOA_REAL_HOME") => !sandboxed,
         Some(k) => k.starts_with("LC_"),
@@ -613,6 +614,23 @@ mod tests {
         ] {
             let env = sorted(daemon_env(parent(), &paths));
             assert!(env.contains(&"TMUX_TMPDIR=/run/t".to_string()), "{env:?}");
+        }
+    }
+
+    /// Where the zone database is (NixOS sets it), so the daemon finds zones by name.
+    #[test]
+    fn daemon_env_passes_tzdir() {
+        let parent = || {
+            let mut p = parent();
+            p.push(("TZDIR".into(), "/etc/zoneinfo".into()));
+            p.into_iter()
+        };
+        for paths in [
+            Paths::with_root(Path::new("/r")),
+            Paths::from_vars(None, Some("/home/u".into()), None, 501, true).unwrap(),
+        ] {
+            let env = sorted(daemon_env(parent(), &paths));
+            assert!(env.contains(&"TZDIR=/etc/zoneinfo".to_string()), "{env:?}");
         }
     }
 
