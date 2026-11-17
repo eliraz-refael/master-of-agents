@@ -158,8 +158,9 @@ fn open(args: &FrontArgs) -> Result<Next, String> {
     // the daemon: a session takes its first shell's variables and folder from the client
     // that makes it, and only this one has the user's.
     let home = user_home(&paths);
+    // `-N`: a server that went away since the ensure isn't started again without moa's config.
     let mut cmd = Command::new(&tmux);
-    cmd.arg("-u").args(socket.args());
+    cmd.args(["-u", "-N"]).args(socket.args());
     match inside {
         // Inside its own server a second client would nest; the one there moves instead.
         Nesting::Ours => {
@@ -201,7 +202,8 @@ fn make_moa_session(
     home: &Path,
 ) -> Result<(), String> {
     let mut cmd = Command::new(tmux);
-    cmd.args(socket.args())
+    cmd.arg("-N")
+        .args(socket.args())
         .args(moa_session_argv(true, home))
         .env_clear()
         .envs(front_env(std::env::vars_os(), paths))
