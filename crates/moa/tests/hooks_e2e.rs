@@ -28,14 +28,12 @@ use common::*;
 
 /// Every wait's limit.
 const LIMIT: Duration = Duration::from_secs(10);
-/// The scripts' pause between states.
-const BEAT: u64 = 300;
 /// More than any pipe holds, so a write this big ends only once the reader is reading.
 const PAD: usize = 1 << 20;
 
 /// Every `display_state` the daemon publishes for each session, in order, with repeats
-/// collapsed: a subscription to the sessions topic, read on a thread of its own. A state
-/// that lasts one beat is recorded however slowly the test itself runs.
+/// collapsed: a subscription to the sessions topic, read on a thread of its own, so a
+/// state is recorded however slowly the test itself polls.
 struct Recorder {
     seen: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
 }
@@ -274,8 +272,11 @@ fn hook(event: &str, fields: Value) -> FakeStep {
     }
 }
 
-fn sleep() -> FakeStep {
-    FakeStep::Sleep { ms: BEAT }
+/// Holds the script until the test makes `.gate-<n>` in the session's folder.
+fn gate(n: usize) -> FakeStep {
+    FakeStep::Wait {
+        file: format!(".gate-{n}"),
+    }
 }
 
 /// A Claude payload for session `s`, its conversation `conv`.
@@ -307,30 +308,51 @@ fn fake_agents_drive_every_display_state() {
         "a",
         &[
             hook("UserPromptSubmit", json!({})),
-            sleep(),
+            gate(1),
             hook("PermissionRequest", json!({"tool_name": "Bash"})),
-            sleep(),
+            gate(2),
             hook("PostToolUse", json!({})),
-            sleep(),
+            gate(3),
             hook("Stop", json!({"last_assistant_message": "Done. Ship it?"})),
-            sleep(),
+            gate(4),
             hook("UserPromptSubmit", json!({})),
             hook("StopFailure", json!({"error": "rate_limit"})),
-            sleep(),
+            gate(5),
             hook("UserPromptSubmit", json!({})),
             hook("Stop", json!({"last_assistant_message": "All done."})),
-            sleep(),
+            gate(6),
             FakeStep::Exit,
         ],
     );
+    // Each state holds until the daemon has published it: the agent waits at a gate the
+    // test opens only then, however late the daemon is.
+    let held = [
+        "working", "waiting", "working", "question", "failed", "done",
+    ];
+    for (n, want) in held.into_iter().enumerate() {
+        let shown = wait_for(LIMIT, || {
+            (rec.of(&s.id).last().map(String::as_str) == Some(want)).then_some(())
+        });
+        assert!(
+            shown.is_some(),
+            "never {want}: {:?}; spooled: {:?}",
+            rec.of(&s.id),
+            fs::read_to_string(r.tb.paths().spool(B)).ok()
+        );
+        fs::write(s.dir.join(format!(".gate-{}", n + 1)), "").unwrap();
+    }
     let ended = wait_for(LIMIT, || {
         (rec.of(&s.id).last().map(String::as_str) == Some("ended")).then_some(())
     });
     assert!(ended.is_some(), "{:?}", rec.of(&s.id));
+    // Every line reached the daemon: none was spooled while it was up.
+    assert!(!r.tb.paths().spool(B).exists());
     let all = rec.of(&s.id);
     // The open publishes the new session as idle before its first prompt. The two prompts
     // fired right before a StopFailure or a Stop are working only for as long as one hook
-    // takes, so the daemon may publish that or not.
+    // takes, so the daemon may publish that or not. They have no gate after them, as the
+    // brief's script has none; the assertion doesn't need one, since the gates already make
+    // every state that matters published.
     let flicker = |i: usize| {
         all[i] == "working" && matches!(all.get(i + 1).map(String::as_str), Some("failed" | "done"))
     };

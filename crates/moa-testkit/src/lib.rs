@@ -30,6 +30,11 @@ pub enum FakeStep {
     Sleep {
         ms: u64,
     },
+    /// Wait until `<cwd>/<file>` exists: a test opens the gate once it has seen what the
+    /// steps before it did, so no step races the clock.
+    Wait {
+        file: String,
+    },
     /// `/clear`: end the session, take a new id, start again.
     Clear,
     /// Quit cleanly.

@@ -3,9 +3,10 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
-use moa_testkit::{FakeStep, fake_claude, write_script};
+use moa_testkit::{FakeStep, fake_claude, wait_for, write_script};
 use serde_json::{Map, Value, json};
 
 const ID1: &str = "00000000-0000-4000-8000-000000000001";
@@ -65,18 +66,21 @@ impl Rig {
         work
     }
 
-    fn run(&self, steps: &[FakeStep], args: &[&str]) -> Output {
+    fn command(&self, steps: &[FakeStep], args: &[&str]) -> Command {
         let work = self.work();
         write_script(&work, steps);
-        Command::new(fake_claude())
-            .args(args)
+        let mut cmd = Command::new(fake_claude());
+        cmd.args(args)
             .current_dir(&work)
             .env_remove("FAKE_CLAUDE_SCRIPT")
             .env("CLAUDE_CODE_PLUGIN_DIRS", self.dir.path().join("plugin"))
             .env("CLAUDE_CONFIG_DIR", self.dir.path().join("config"))
-            .env("CALLS", self.dir.path().join("calls"))
-            .output()
-            .unwrap()
+            .env("CALLS", self.dir.path().join("calls"));
+        cmd
+    }
+
+    fn run(&self, steps: &[FakeStep], args: &[&str]) -> Output {
+        self.command(steps, args).output().unwrap()
     }
 
     /// The recorded calls as (tag, payload).
@@ -136,6 +140,45 @@ fn runs_matching_hooks_in_order_with_the_payload() {
     assert_eq!(calls[1].1["last_assistant_message"], "Lantern is lit");
     let context = fs::read_to_string(rig.work().join(".fake-claude.context")).unwrap();
     assert_eq!(context, "peers note\n");
+}
+
+/// `Wait` holds the script until its file exists; the hook after it runs only then.
+#[test]
+fn wait_holds_the_script_until_its_file_exists() {
+    let rig = Rig::new(&[
+        ("UserPromptSubmit", None, "before", true),
+        ("Stop", None, "after", true),
+    ]);
+    let steps = [
+        hook("UserPromptSubmit", json!({})),
+        FakeStep::Wait {
+            file: "gate".into(),
+        },
+        hook("Stop", json!({})),
+        FakeStep::Exit,
+    ];
+    let mut child = rig
+        .command(&steps, &[])
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    // The recorder writes a call in pieces; it is whole once its line ends.
+    let calls = rig.dir.path().join("calls");
+    let before = wait_for(Duration::from_secs(10), || {
+        fs::read_to_string(&calls)
+            .ok()
+            .filter(|t| t.ends_with('\n'))
+    });
+    assert!(before.is_some(), "the first hook never ran");
+    assert_eq!(tags(&rig.calls()), ["before"]);
+    // Held: a while later nothing more has run and it hasn't exited.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(tags(&rig.calls()), ["before"]);
+    assert!(child.try_wait().unwrap().is_none());
+
+    fs::write(rig.work().join("gate"), "").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(tags(&rig.calls()), ["before", "after"]);
 }
 
 /// A start that answers nothing still leaves the context file, empty: the agent got no note.

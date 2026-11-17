@@ -40,6 +40,11 @@ fn main() {
         match step {
             FakeStep::Hook { event, fields } => fake.fire(&event, fields),
             FakeStep::Sleep { ms } => std::thread::sleep(Duration::from_millis(ms)),
+            FakeStep::Wait { file } => {
+                while !fake.cwd.join(&file).exists() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
             FakeStep::Clear => {
                 fake.fire("SessionEnd", one("reason", "clear"));
                 fake.rotations += 1;
