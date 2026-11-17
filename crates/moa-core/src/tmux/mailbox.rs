@@ -89,7 +89,7 @@ impl KeyAction {
             KeyAction::Plan => "Big picture",
             KeyAction::Agent => "Agent spot",
             KeyAction::Find => "Find a session…",
-            KeyAction::FindOther => "Find a session, full window…",
+            KeyAction::FindOther => "Find a session, full tab…",
             KeyAction::New => "New session…",
             KeyAction::Terminal => "Terminal here",
             KeyAction::Layout(1) => "Layout: cockpit",
