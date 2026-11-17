@@ -239,9 +239,10 @@ fn elsewhere(brain: &BrainName, sandbox: bool) -> String {
     )
 }
 
-fn no_answer(within: &str, log: &Path) -> String {
+fn no_answer(within: Duration, log: &Path) -> String {
     format!(
-        "moa didn't answer within {within}; see its log ({})",
+        "moa didn't answer within {} s; see its log ({})",
+        within.as_secs(),
         log.display()
     )
 }
@@ -261,7 +262,7 @@ async fn connect(paths: &Paths, brain: BrainName, log: &Path) -> Result<Client, 
     };
     timeout(CONNECT_WAIT, Client::connect(opts))
         .await
-        .map_err(|_| no_answer("30 s", log))?
+        .map_err(|_| no_answer(CONNECT_WAIT, log))?
         .map_err(|e| e.to_string())
 }
 
@@ -318,7 +319,7 @@ async fn ensure(client: &mut Client, tmux: &Path, log: &Path) -> Result<bool, St
     };
     let done = timeout(ANSWER_WAIT, client.call(op))
         .await
-        .map_err(|_| no_answer("10 s", log))?
+        .map_err(|_| no_answer(ANSWER_WAIT, log))?
         .map_err(|e| e.to_string())?;
     Ok(done.data["running"].as_bool().unwrap_or(false))
 }
