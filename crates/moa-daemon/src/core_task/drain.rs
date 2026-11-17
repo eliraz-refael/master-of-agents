@@ -239,6 +239,8 @@ impl Core {
         let loading = matches!(input, Input::Startup(_) | Input::Reload { .. });
         let target = match &input {
             Input::Client { conn, req, .. } => Some((*conn, *req)),
+            // A hook that waits for its answer gets one even when it panics.
+            Input::Hook { reply, .. } => *reply,
             _ => None,
         };
         let now = Now::at(self.clock.wall(), self.clock.mono(), self.tz.clone());

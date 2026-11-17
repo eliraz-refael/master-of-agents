@@ -196,8 +196,9 @@ pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
     fx
 }
 
-/// Runs `mark_seen` and adds what it changed to `fx`: the `Persist` first, so it comes
-/// before any reply or view already there, and the `Publish` after.
+/// Runs `mark_seen` and adds what it changed to `fx`: the `Persist` after any `Persist`
+/// already there (the store applies them in the order they were made) and before any
+/// reply or view, and the `Publish` after.
 pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
     let mut tx = Tx::new(now);
     mark_seen(state, &mut tx, now);
@@ -205,7 +206,16 @@ pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>)
         return;
     }
     let topics = topics_of(&tx.changes);
-    fx.insert(0, Effect::Persist(tx.changes));
+    let at = fx
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                Effect::Publish(_) | Effect::Reply { .. } | Effect::Tmux { token: None, .. }
+            )
+        })
+        .unwrap_or(fx.len());
+    fx.insert(at, Effect::Persist(tx.changes));
     fx.extend(
         state
             .publish(&topics)

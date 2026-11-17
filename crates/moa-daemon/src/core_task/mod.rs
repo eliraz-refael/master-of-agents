@@ -276,7 +276,6 @@ impl CoreHandle {
         });
 
         let spool = opts.spool.take();
-        let spool_path = spool.clone();
         let conns = Conns::default();
         let core = Core {
             inbox: inbox.downgrade(),
@@ -297,7 +296,7 @@ impl CoreHandle {
             backups_dir: opts.backups,
             failures_in_row: 0,
             carry: VecDeque::new(),
-            spool: spool_path.clone(),
+            spool: spool.clone(),
             panic_next: panic_next.clone(),
             finished_tx,
             _ended: ended_tx,
@@ -318,7 +317,7 @@ impl CoreHandle {
             finished,
             ended,
             panic_next,
-            spool: spool_path,
+            spool: spool.clone(),
         };
         // Startup is the first item, so this answers after its commit, not after its daily
         // backup (the store thread is busy copying; `barrier()` and `stop()` wait for it). If

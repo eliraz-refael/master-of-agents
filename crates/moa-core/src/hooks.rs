@@ -90,7 +90,11 @@ fn resolve(state: &State, env: &HookEnvelope) -> Result<SessionId, &'static str>
         .as_deref()
         .and_then(|s| s.parse::<SessionId>().ok())
         .filter(|id| state.session(*id).is_some())
-        .or_else(|| state.session_of_conversation(&env.conversation_id))
+        .or_else(|| {
+            state
+                .conversation_of_agent(env.agent, &env.conversation_id)
+                .map(|c| c.session_id)
+        })
         .ok_or("a hook event for an unknown session was dropped")
 }
 

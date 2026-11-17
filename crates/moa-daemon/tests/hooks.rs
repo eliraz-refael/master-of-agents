@@ -17,6 +17,7 @@ use moa_core::hook::HookLine;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Session, SessionId,
 };
+use moa_core::op::ReqId;
 use moa_core::state::Deps;
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, CoreOptions};
@@ -397,5 +398,32 @@ async fn a_hook_left_queued_at_stop_is_spooled() {
         .collect();
     assert_eq!(times, vec![t1, t2, t3, t4]);
     assert!(!spool::draining(&live).exists());
+    core.stop().await;
+}
+
+#[tokio::test]
+async fn a_hook_that_panics_the_core_is_still_answered() {
+    let brain = TypicalBrain::new();
+    seed(&mut brain.store());
+    let live = brain.dir.path().join("spool").join("default.jsonl");
+    let core = timeout(
+        Duration::from_secs(5),
+        CoreHandle::start(options(&brain, &live)),
+    )
+    .await
+    .expect("not stuck")
+    .expect("the core starts");
+    let (conn, mut replies) = core.open_conn();
+    core.panic_next_handle();
+    let line: HookLine = serde_json::from_value(hook_line("SessionStart", ago(1000), 1)).unwrap();
+    let envelope = normalize(&line, &last_assistant_text).expect("a known event");
+    core.hook(Some((conn, ReqId(1))), envelope, Some(line));
+    // Unanswered, the session would wait on it, reading nothing, until the daemon stops.
+    let (req, result) = timeout(Duration::from_secs(5), replies.recv())
+        .await
+        .expect("answered")
+        .expect("a reply");
+    assert_eq!(req, ReqId(1));
+    assert!(result.is_err());
     core.stop().await;
 }

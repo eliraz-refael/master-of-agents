@@ -408,16 +408,7 @@ impl State {
         conversation_id: &str,
     ) -> Option<&Conversation> {
         self.conversations
-            .values()
-            .find(|c| c.agent_kind == agent && c.conversation_id == conversation_id)
-    }
-
-    /// The session a conversation belongs to.
-    pub(crate) fn session_of_conversation(&self, conversation_id: &str) -> Option<SessionId> {
-        self.conversations
-            .values()
-            .find(|c| c.conversation_id == conversation_id)
-            .map(|c| c.session_id)
+            .get(&(agent.as_str(), conversation_id.to_string()))
     }
 
     /// Remembers a hook event's key, forgetting the oldest past [`RECENT_HOOKS`].
