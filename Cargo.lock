@@ -628,6 +628,7 @@ name = "moa-agents"
 version = "0.1.0"
 dependencies = [
  "moa-core",
+ "serde_json",
  "tempfile",
 ]
 

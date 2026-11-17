@@ -4,6 +4,7 @@
 //! a line means the same thing at both ends.
 
 pub mod cli;
+pub mod hook;
 mod patch;
 mod wire;
 

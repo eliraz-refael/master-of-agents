@@ -3,6 +3,10 @@
 use std::fs;
 use std::path::Path;
 
+pub mod normalize;
+
+pub use normalize::{last_assistant_text, normalize};
+
 pub use moa_core::model::TranscriptCheck;
 
 /// True for ids that are safe to use as a file name: `^[A-Za-z0-9-]{1,64}$`.
