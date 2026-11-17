@@ -8,18 +8,21 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use jiff::tz::TimeZone;
+use moa_agents::claude;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Input, Publish};
+use moa_core::hook::{HookEnvelope, HookLine};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
 use moa_core::tmux::cmd::Cmd;
+use moa_platform::spool;
 use moa_store::actor::{Fault, StoreHandle};
 use moa_store::{Store, StoreError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -73,6 +76,8 @@ pub struct CoreOptions {
     /// The terminal link. Without one, every connect is answered `Down(Disabled)` and
     /// commands for the server are dropped.
     pub tmux: Option<TmuxLink>,
+    /// The brain's hook spool, drained once at start. `None` only in tests that opt out.
+    pub spool: Option<PathBuf>,
 }
 
 /// Counters for tests and the idle check. Startup counts as an input, a drain and (when it
@@ -85,6 +90,8 @@ pub struct Stats {
     pub timer_fires: AtomicU64,
     pub commit_failures: AtomicU64,
     pub reloads: AtomicU64,
+    /// Inputs whose handling panicked.
+    pub panics: AtomicU64,
     /// Views of saved state for the terminal server that were released after a commit.
     pub views_released: AtomicU64,
 }
@@ -102,6 +109,14 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[allow(clippy::large_enum_variant)]
 enum Item {
     Input(Input),
+    /// A hook event. `line` is the raw line, kept so that an event the core stops before
+    /// applying can be spooled; the drain of the spool itself sends `None`, since the
+    /// lines are still in `.draining`.
+    Hook {
+        reply: Option<(ConnId, ReqId)>,
+        envelope: HookEnvelope,
+        line: Option<Box<HookLine>>,
+    },
     Zone(TimeZone),
     Status {
         caller: CallerInfo,
@@ -112,6 +127,24 @@ enum Item {
     Stop(oneshot::Sender<()>),
     /// Tests only: panics outside `catch_unwind`.
     Crash,
+}
+
+/// Appends hook lines to the spool, as `moa hook` does when the daemon is down. A line that
+/// can't be written is counted, never shown.
+pub(crate) fn spool_hooks<'a>(path: Option<&Path>, lines: impl Iterator<Item = &'a HookLine>) {
+    let Some(path) = path else { return };
+    let mut lost = 0usize;
+    for line in lines {
+        let kept = serde_json::to_vec(line)
+            .map_err(io::Error::other)
+            .and_then(|bytes| spool::append(path, &bytes));
+        if kept.is_err() {
+            lost += 1;
+        }
+    }
+    if lost > 0 {
+        tracing::warn!("{lost} hook events could not be spooled");
+    }
 }
 
 /// What a drain says after its commit, in order.
@@ -150,6 +183,8 @@ pub struct CoreHandle {
     /// Closes when the core task is gone, cleanup included.
     ended: watch::Receiver<()>,
     panic_next: Arc<AtomicU32>,
+    /// Where a hook the core can't take is kept for the next start.
+    spool: Option<PathBuf>,
 }
 
 type SharedStore = Arc<Mutex<StoreHandle>>;
@@ -181,7 +216,18 @@ impl CoreHandle {
         store: Store,
         faults: Vec<Fault>,
     ) -> Result<CoreHandle, DaemonError> {
-        Self::start_inner(opts, store, faults, None).await
+        Self::start_inner(opts, store, faults, None, 0).await
+    }
+
+    /// Like `start_with_store`, with the first `panics` inputs after `Startup` (the spool's
+    /// drain) panicking where `handle` is called.
+    #[doc(hidden)]
+    pub async fn start_with_drain_panics(
+        opts: CoreOptions,
+        store: Store,
+        panics: u32,
+    ) -> Result<CoreHandle, DaemonError> {
+        Self::start_inner(opts, store, Vec::new(), None, panics).await
     }
 
     /// `link`, when given, stands in for the terminal link that `opts.tmux` would start
@@ -191,6 +237,7 @@ impl CoreHandle {
         store: Store,
         faults: Vec<Fault>,
         link: Option<mpsc::UnboundedSender<TmuxCmd>>,
+        drain_panics: u32,
     ) -> Result<CoreHandle, DaemonError> {
         let store = StoreHandle::spawn(store, opts.backups.clone());
         for fault in faults {
@@ -242,6 +289,7 @@ impl CoreHandle {
             })
         });
 
+        let spool = opts.spool.take();
         let conns = Conns::default();
         let core = Core {
             inbox: inbox.downgrade(),
@@ -262,6 +310,7 @@ impl CoreHandle {
             backups_dir: opts.backups,
             failures_in_row: 0,
             carry: VecDeque::new(),
+            spool: spool.clone(),
             panic_next: panic_next.clone(),
             finished_tx,
             _ended: ended_tx,
@@ -282,6 +331,7 @@ impl CoreHandle {
             finished,
             ended,
             panic_next,
+            spool: spool.clone(),
         };
         // Startup is the first item, so this answers after its commit, not after its daily
         // backup (the store thread is busy copying; `barrier()` and `stop()` wait for it). If
@@ -291,7 +341,85 @@ impl CoreHandle {
         if let Some(Err(line)) = ended {
             return Err(DaemonError::Fatal(line));
         }
+        if let Some(path) = spool {
+            handle.panic_next.store(drain_panics, Ordering::SeqCst);
+            handle.drain_spool(path).await;
+        }
         Ok(handle)
+    }
+
+    /// Feeds the events hooks spooled while the daemon was down to the core, oldest first,
+    /// and deletes the spool's `.draining` file once they are committed. A drain whose
+    /// commit failed (or whose core stopped) leaves it for the next start. Nothing here logs
+    /// a line's contents: an unreadable line is counted.
+    async fn drain_spool(&self, path: PathBuf) {
+        let taken = match tokio::task::spawn_blocking(move || spool::take(&path)).await {
+            Ok(Ok(taken)) => taken,
+            Ok(Err(e)) => {
+                tracing::warn!("the hook spool couldn't be read: {e}");
+                return;
+            }
+            Err(_) => return,
+        };
+        let mut unreadable = 0usize;
+        let mut envelopes: Vec<_> = taken
+            .lines
+            .iter()
+            .filter_map(|line| {
+                let envelope = serde_json::from_str::<HookLine>(line)
+                    .ok()
+                    .and_then(|l| claude::normalize(&l, &claude::last_assistant_text));
+                if envelope.is_none() {
+                    unreadable += 1;
+                }
+                envelope
+            })
+            .collect();
+        envelopes.sort_by_key(|e| (e.at_ns, e.pid, e.seq));
+        let drained = envelopes.len();
+        let failures = self.stats.commit_failures.load(Ordering::SeqCst);
+        let panics = self.stats.panics.load(Ordering::SeqCst);
+        let generation = *self.generation.borrow();
+        for envelope in envelopes {
+            self.hook(None, envelope, None);
+        }
+        self.committed().await;
+        // A failed commit, a stopped store or an ended core: the lines are fine, try again at
+        // the next start. Every one of those reloads the core, which bumps the generation.
+        let unsaved = self.stats.commit_failures.load(Ordering::SeqCst) != failures
+            || self.finished.borrow().is_some();
+        if unsaved {
+            return;
+        }
+        // The core panicked on a line: it would again, every start. Set the file aside.
+        if self.stats.panics.load(Ordering::SeqCst) != panics {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            match taken.set_aside(&at.to_string()) {
+                Ok(file) => tracing::warn!(
+                    "set aside {} spooled hook events after the core failed on them; see {}",
+                    drained + unreadable,
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                Err(e) => tracing::warn!("the failing hook spool couldn't be set aside: {e}"),
+            }
+            return;
+        }
+        if *self.generation.borrow() != generation {
+            return;
+        }
+        if let Err(e) = taken.done() {
+            tracing::warn!("the drained hook spool couldn't be removed: {e}");
+        }
+        if drained + unreadable > 0 {
+            let more = if unreadable > 0 {
+                format!(" + {unreadable} unreadable")
+            } else {
+                String::new()
+            };
+            tracing::info!("drained {drained} spooled hook events{more}");
+        }
     }
 
     /// Resolves when the core task has ended: `Ok` after `stop`, `Err(Fatal)` when it can't
@@ -337,6 +465,28 @@ impl CoreHandle {
         };
         if self.inbox.send(Item::Input(input)).is_err() {
             reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+        }
+    }
+
+    /// A hook event. With `reply`, the core answers it once, after the commit. `line` is the
+    /// raw line it came from: when the core has stopped, or stops before applying it, the
+    /// line goes to the spool and the next start applies it.
+    pub fn hook(
+        &self,
+        reply: Option<(ConnId, ReqId)>,
+        envelope: HookEnvelope,
+        line: Option<HookLine>,
+    ) {
+        let item = Item::Hook {
+            reply,
+            envelope,
+            line: line.map(Box::new),
+        };
+        if let Err(mpsc::error::SendError(Item::Hook { line, .. })) = self.inbox.send(item) {
+            spool_hooks(self.spool.as_deref(), line.iter().map(|l| &**l));
+            if let Some((conn, req)) = reply {
+                reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+            }
         }
     }
 

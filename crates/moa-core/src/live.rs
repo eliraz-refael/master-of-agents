@@ -18,6 +18,7 @@ pub enum DisplayState {
     Failed,
     Done,
     Working,
+    Quiet,
     Idle,
     Asleep,
     Ended,
@@ -31,6 +32,7 @@ impl DisplayState {
         DisplayState::Failed,
         DisplayState::Done,
         DisplayState::Working,
+        DisplayState::Quiet,
         DisplayState::Idle,
         DisplayState::Asleep,
         DisplayState::Ended,
@@ -45,6 +47,7 @@ impl DisplayState {
             DisplayState::Failed => "failed",
             DisplayState::Done => "done",
             DisplayState::Working => "working",
+            DisplayState::Quiet => "quiet",
             DisplayState::Idle => "idle",
             DisplayState::Asleep => "asleep",
             DisplayState::Ended => "ended",
@@ -59,6 +62,7 @@ impl DisplayState {
             DisplayState::Failed => "✗",
             DisplayState::Done => "✓",
             DisplayState::Working => "◐",
+            DisplayState::Quiet => "◌",
             DisplayState::Idle => "●",
             DisplayState::Asleep => "💤",
             DisplayState::Ended => "○",
@@ -66,6 +70,9 @@ impl DisplayState {
         }
     }
 }
+
+/// How long a working session may say nothing before it shows as quiet, in milliseconds.
+pub const QUIET_AFTER: i64 = 600_000;
 
 /// One line of context shown beside the state.
 pub type Why = String;
@@ -133,6 +140,14 @@ pub fn asks(text: &str) -> bool {
         .ends_with('?')
 }
 
+/// A live session on this machine that is working: the ones that can turn quiet.
+pub(crate) fn quiet_candidate(s: &Session) -> bool {
+    s.archived_at.is_none()
+        && s.lifecycle == Lifecycle::Live
+        && s.location == Location::Here
+        && s.activity == Activity::Working
+}
+
 /// A session that ended and was put to sleep (resumable), not archived.
 pub fn is_asleep(s: &Session) -> bool {
     s.lifecycle == Lifecycle::Ended && s.asleep_at.is_some() && s.archived_at.is_none()
@@ -150,13 +165,13 @@ fn or_else(s: String, fallback: &str) -> String {
     }
 }
 
-/// Computes how a session shows and the line of context beside it. `now` is unused until
-/// slice 4 adds "quiet".
+/// Computes how a session shows and the line of context beside it. A working session that
+/// has said nothing for [`QUIET_AFTER`] shows as quiet, with the whole minutes in its why.
 ///
 /// A non-archived `elsewhere` session shows as `Ended` with why `elsewhere` (slice 8 owns a
 /// fuller state). Ended and asleep sessions keep their own state, so `Asleep` stays exactly
 /// [`is_asleep`].
-pub fn display_state(s: &Session, _now: UtcMs) -> (DisplayState, Why) {
+pub fn display_state(s: &Session, now: UtcMs) -> (DisplayState, Why) {
     let stored = s.activity_why.as_deref().unwrap_or("");
     let (state, why) = if s.archived_at.is_some() {
         (DisplayState::Archived, String::new())
@@ -179,7 +194,13 @@ pub fn display_state(s: &Session, _now: UtcMs) -> (DisplayState, Why) {
                 or_else(one_line(stored), "asks you"),
             ),
             Activity::Failed => (DisplayState::Failed, one_line(stored)),
-            Activity::Working => (DisplayState::Working, one_line(stored)),
+            Activity::Working => match s.activity_at {
+                Some(at) if now.0 - at.0 >= QUIET_AFTER => (
+                    DisplayState::Quiet,
+                    format!("quiet {}m", (now.0 - at.0) / 60_000),
+                ),
+                _ => (DisplayState::Working, one_line(stored)),
+            },
             Activity::Idle => {
                 if asks(stored) {
                     (
@@ -483,7 +504,7 @@ mod tests {
     #[test]
     fn glyphs_and_order() {
         let glyphs: Vec<_> = DisplayState::ALL.iter().map(|s| s.glyph()).collect();
-        assert_eq!(glyphs, ["⚠", "?", "✗", "✓", "◐", "●", "💤", "○", ""]);
+        assert_eq!(glyphs, ["⚠", "?", "✗", "✓", "◐", "◌", "●", "💤", "○", ""]);
         assert!(DisplayState::ALL.windows(2).all(|w| w[0] < w[1]));
     }
 

@@ -27,7 +27,10 @@ fn colour(s: DisplayState) -> Option<&'static str> {
         DisplayState::Done => "#a3be8c",
         DisplayState::Working => "#88c0d0",
         DisplayState::Idle => "#8c9ab3",
-        DisplayState::Asleep | DisplayState::Ended | DisplayState::Archived => return None,
+        DisplayState::Quiet
+        | DisplayState::Asleep
+        | DisplayState::Ended
+        | DisplayState::Archived => return None,
     })
 }
 

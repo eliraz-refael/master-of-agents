@@ -1,0 +1,4 @@
+# The 15 ms budget test measures wall time per process, so nothing else may compete for CPU.
+[[profile.default.overrides]]
+filter = 'test(hook_costs_under_15_ms)'
+threads-required = "num-cpus"

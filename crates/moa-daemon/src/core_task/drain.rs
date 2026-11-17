@@ -14,7 +14,7 @@ use moa_core::change::Change;
 use moa_core::effect::{
     Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, TmuxToken, check_order,
 };
-use moa_core::op::OpError;
+use moa_core::op::{Done, OpError};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::State;
 use moa_core::{Now, handle};
@@ -54,6 +54,8 @@ pub(super) struct Core {
     pub(super) failures_in_row: u32,
     /// Items a drain left for the next one: what followed a panic.
     pub(super) carry: VecDeque<Item>,
+    /// Where unapplied hooks are kept when the core stops.
+    pub(super) spool: Option<PathBuf>,
     pub(super) panic_next: Arc<AtomicU32>,
     pub(super) finished_tx: watch::Sender<Option<Result<(), String>>>,
     /// Dropped with the core, which is what [`CoreHandle::ended`] waits for.
@@ -113,11 +115,23 @@ impl Core {
             .into_iter()
             .chain(std::iter::from_fn(|| inbox.try_recv().ok()))
             .collect();
+        let mut unapplied = Vec::new();
         for item in rest {
-            if let Item::Input(Input::Client { conn, req, .. }) = item {
-                reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+            match item {
+                Item::Input(Input::Client { conn, req, .. }) => {
+                    reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+                }
+                // A hook the core never applied is kept for the next start.
+                Item::Hook { reply, line, .. } => {
+                    unapplied.extend(line);
+                    if let Some((conn, req)) = reply {
+                        reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+                    }
+                }
+                _ => {}
             }
         }
+        spool_hooks(self.spool.as_deref(), unapplied.iter().map(|l| &**l));
         lock(&self.conns).clear();
         // The alarm would otherwise stay armed into a closed inbox.
         let _ = self.sched.send(SchedCmd::Stop);
@@ -143,6 +157,26 @@ impl Core {
         while let Some(item) = work.pop_front() {
             let stepped = match item {
                 Item::Input(input) => self.step(input, &mut batch, &mut held),
+                // While writes are refused the core would drop the event: keep its line for
+                // the next start instead, and tell a waiting hook there is nothing to say.
+                Item::Hook {
+                    reply,
+                    line: Some(line),
+                    ..
+                } if self.spool.is_some() && self.state.writes_refused(self.clock.wall()) => {
+                    spool_hooks(self.spool.as_deref(), std::iter::once(&*line));
+                    if let Some((conn, req)) = reply {
+                        let done = Done {
+                            text: String::new(),
+                            data: serde_json::json!({ "context": null }),
+                        };
+                        reply_to(&self.conns, conn, req, Ok(done));
+                    }
+                    Stepped::Done
+                }
+                Item::Hook {
+                    reply, envelope, ..
+                } => self.step(Input::Hook { reply, envelope }, &mut batch, &mut held),
                 Item::Zone(tz) => {
                     self.tz = tz;
                     self.step(Input::ZoneChanged, &mut batch, &mut held)
@@ -222,6 +256,8 @@ impl Core {
         let loading = matches!(input, Input::Startup(_) | Input::Reload { .. });
         let target = match &input {
             Input::Client { conn, req, .. } => Some((*conn, *req)),
+            // A hook that waits for its answer gets one even when it panics.
+            Input::Hook { reply, .. } => *reply,
             _ => None,
         };
         let now = Now::at(self.clock.wall(), self.clock.mono(), self.tz.clone());
@@ -242,6 +278,7 @@ impl Core {
             Err(_) => {
                 // The payload stays out of the log: it may carry contents.
                 tracing::error!("handle panicked");
+                self.stats.panics.fetch_add(1, Ordering::SeqCst);
                 if let Some((conn, req)) = target {
                     held.push(Held::Reply {
                         conn,

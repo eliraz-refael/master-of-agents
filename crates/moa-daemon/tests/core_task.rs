@@ -46,6 +46,7 @@ async fn rig() -> Rig {
         backups: brain.dir.path().join("backups"),
         events_capacity: 256,
         tmux: None,
+        spool: None,
     }))
     .await
     .expect("the core starts");
@@ -239,6 +240,7 @@ async fn a_slow_startup_backup_does_not_delay_start() {
             backups: backups.clone(),
             events_capacity: 256,
             tmux: None,
+            spool: None,
         },
         brain.store(),
         vec![Fault::PauseNextBackup(gate)],

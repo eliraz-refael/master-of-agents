@@ -70,6 +70,9 @@ Roadmap: Slice 4 items 1–6 and 10, Review Focus 3 and 4. Research: R3 §2.2 (p
 | **4a (this one): hooks and the live state** | 1–5, 10, and `open` (fresh) from 6 | Fake agents drive every display state. Daemon-down hooks spool and drain with nothing lost. Out-of-order hooks never regress state. |
 | 4b: the link, resume, reconcile, sleep, adopt | 11 (first), the rest of 6, 7, 8, 9 | `kill-server` makes sessions come back 💤, resume follows C11, idle sessions sleep, and untracked panes can be adopted |
 
+**4b note:** reconcile must end Live sessions whose bound pane no longer exists. It covers pane
+exits missed while writes were refused (a pane exit is reported once and is not retried).
+
 **Why `open` is here:** without it, nothing launches a session that carries the injected plugin.
 The try-it would then be fake agents only, and the spec §13 checks (`CLAUDE_CODE_PLUGIN_DIRS`,
 exec-form `async` hooks, `--session-id` with `--name`) would wait a whole plan for a real Claude.

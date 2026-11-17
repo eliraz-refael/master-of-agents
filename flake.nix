@@ -39,6 +39,8 @@
                 (craneLib.fileset.commonCargoSources ./.)
                 (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap" || f.hasExt "tpl" || f.hasExt "json" || f.hasExt "proptest-regressions") ./crates)
                 # read by a DDL check test; removed with the spike
+                # nextest's overrides (the hook budget test runs alone)
+                ./.config/nextest.toml
                 ./spike/master-chat/schema.sql
                 ./spike/moa-proto/picture.py
               ];

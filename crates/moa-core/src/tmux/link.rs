@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::cmd::Cmd;
-use super::ids::{ClientName, Generation, WindowId};
-use super::mailbox::{Mailbox, MailboxError};
+use super::ids::{ClientName, Generation, PaneId, WindowId};
+use super::mailbox::{HookMsg, Mailbox, MailboxError};
 use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
 use crate::UtcMs;
@@ -131,6 +131,17 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
 
 fn log(level: LogLevel, message: String) -> Effect {
     Effect::Log(LogLine { level, message })
+}
+
+/// The pane a `moa:hook pane-exited` or `pane-died` message names, if `input` is one.
+pub(crate) fn exited_pane(input: &TmuxIn) -> Option<PaneId> {
+    let TmuxIn::Notification(Notification::Message(m)) = input else {
+        return None;
+    };
+    match Mailbox::parse(m) {
+        Ok(Mailbox::Hook(HookMsg::PaneExited(p) | HookMsg::PaneDied(p))) => Some(p),
+        _ => None,
+    }
 }
 
 impl TmuxState {

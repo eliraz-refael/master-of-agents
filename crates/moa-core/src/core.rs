@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 
 use crate::change::Change;
 use crate::effect::{Effect, Input, LogLevel, LogLine, Publish, TimerKey};
+use crate::hooks;
+use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{Op, OpError};
 use crate::ops;
@@ -12,6 +14,7 @@ use crate::publish::{CoreEvent, Topic};
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::focus::mark_seen;
+use crate::tmux::link;
 use crate::tmux::status;
 use crate::{Now, UtcMs};
 
@@ -30,6 +33,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.refuse_writes = None;
             state.load(*snapshot);
             let mut fx = vec![Effect::Backup { day: now.local_day }, backup_timer(now)];
+            fx.push(quiet_timer(state, now.wall));
             // A row's notes sit together, one per reason; the line names no reason, so one
             // line per row.
             let mut rows: Vec<&crate::state::LoadNote> = state.unknown().iter().collect();
@@ -74,16 +78,43 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             refuse_writes,
         } => {
             state.load(*snapshot);
+            state.forget_hooks();
             state.refuse_writes = refuse_writes;
-            let mut fx = vec![backup_timer(now)];
+            let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
             fx
         }
         Input::Tmux(t) => {
-            let mut fx = state.tmux.input(t);
+            // A pane that exited ends its session, before the link looks at the tree.
+            let mut fx = match link::exited_pane(&t) {
+                Some(pane) => {
+                    let mut tx = Tx::new(now);
+                    let saved = hooks::pane_gone(state, &mut tx, pane);
+                    let mut fx = post_commit(state, tx);
+                    if !saved {
+                        fx.push(Effect::Log(LogLine {
+                            level: LogLevel::Warn,
+                            message: "a pane exit was not saved; reconcile will end its session at the next start".into(),
+                        }));
+                    }
+                    if !fx.is_empty() {
+                        fx.push(quiet_timer(state, now.wall));
+                    }
+                    fx
+                }
+                None => Vec::new(),
+            };
+            fx.extend(state.tmux.input(t));
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
+            fx
+        }
+        Input::Hook { reply, envelope } => {
+            let mut fx = hooks::run(state, now, reply, &envelope);
+            if fx.iter().any(|e| matches!(e, Effect::Persist(_))) {
+                fx.push(quiet_timer(state, now.wall));
+            }
             fx
         }
         Input::Timer(TimerKey::Backup) => {
@@ -93,6 +124,17 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         Input::Timer(TimerKey::Clock) => {
             state.tmux.clock_fired();
             Vec::new()
+        }
+        // Sessions that just went quiet show differently: tell the views.
+        Input::Timer(TimerKey::Quiet) => {
+            let topics = BTreeSet::from([Topic::Sessions, Topic::Status]);
+            let mut fx: Vec<Effect> = state
+                .publish(&topics)
+                .map(|m| Effect::Publish(Publish::Model(m)))
+                .into_iter()
+                .collect();
+            fx.push(quiet_timer(state, now.wall));
+            fx
         }
         Input::ZoneChanged => vec![backup_timer(now)],
         Input::ActorFailed { actor, message: _ } => {
@@ -122,41 +164,47 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let caller = state.caller(&caller);
             let mut tx = Tx::new(now);
             let result = ops::run(state, &mut tx, &caller, op, now);
-            let Tx {
-                changes,
-                mut events,
-                ..
-            } = tx;
             // Handlers commit once, last: a refusal has applied nothing, so there is nothing
             // to persist that the reply would deny.
             debug_assert!(
-                result.is_ok() || changes.is_empty(),
+                result.is_ok() || tx.changes.is_empty(),
                 "an op returned Err after committing"
             );
             if result.is_err() {
-                events.clear();
+                tx.events.clear();
             }
-            let topics = topics_of(&changes);
-            let mut fx = Vec::new();
-            if !changes.is_empty() {
-                fx.push(Effect::Persist(changes));
-            }
-            if let Some(model) = state.publish(&topics) {
-                fx.push(Effect::Publish(Publish::Model(model)));
-            }
-            fx.extend(
-                events
-                    .into_iter()
-                    .map(|e| Effect::Publish(Publish::Event(e))),
-            );
+            let mut fx = post_commit(state, tx);
             fx.push(Effect::Reply { conn, req, result });
             fx
         }
     }
 }
 
-/// Runs `mark_seen` and adds what it changed to `fx`: the `Persist` first, so it comes
-/// before any reply or view already there, and the `Publish` after.
+/// What a transaction's commits owe the world, in order: the `Persist`, the model it
+/// changed, then its events. The caller adds any reply after.
+pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
+    let Tx {
+        changes, events, ..
+    } = tx;
+    let topics = topics_of(&changes);
+    let mut fx = Vec::new();
+    if !changes.is_empty() {
+        fx.push(Effect::Persist(changes));
+    }
+    if let Some(model) = state.publish(&topics) {
+        fx.push(Effect::Publish(Publish::Model(model)));
+    }
+    fx.extend(
+        events
+            .into_iter()
+            .map(|e| Effect::Publish(Publish::Event(e))),
+    );
+    fx
+}
+
+/// Runs `mark_seen` and adds what it changed to `fx`: the `Persist` after any `Persist`
+/// already there (the store applies them in the order they were made) and before any
+/// reply or view, and the `Publish` after.
 pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
     let mut tx = Tx::new(now);
     mark_seen(state, &mut tx, now);
@@ -164,7 +212,16 @@ pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>)
         return;
     }
     let topics = topics_of(&tx.changes);
-    fx.insert(0, Effect::Persist(tx.changes));
+    let at = fx
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                Effect::Publish(_) | Effect::Reply { .. } | Effect::Tmux { token: None, .. }
+            )
+        })
+        .unwrap_or(fx.len());
+    fx.insert(at, Effect::Persist(tx.changes));
     fx.extend(
         state
             .publish(&topics)
@@ -187,6 +244,25 @@ fn backup_timer(now: &Now) -> Effect {
     }
 }
 
+/// The one deadline for sessions turning quiet: the earliest `activity_at + QUIET_AFTER`
+/// still ahead among sessions that are working, or no timer when there is none.
+pub(crate) fn quiet_timer(state: &State, now: UtcMs) -> Effect {
+    let next = state
+        .sessions()
+        .filter(|s| quiet_candidate(s))
+        .filter_map(|s| s.activity_at)
+        .map(|t| UtcMs(t.0 + QUIET_AFTER))
+        .filter(|at| *at > now)
+        .min();
+    match next {
+        Some(at) => Effect::SetTimer {
+            key: TimerKey::Quiet,
+            at,
+        },
+        None => Effect::CancelTimer(TimerKey::Quiet),
+    }
+}
+
 fn publish_all(state: &mut State) -> Option<Effect> {
     let all: BTreeSet<Topic> = Topic::ALL.iter().copied().collect();
     state
@@ -197,7 +273,9 @@ fn publish_all(state: &mut State) -> Option<Effect> {
 /// One op's edits. Handlers validate, build their changes, then call [`Tx::commit`] once: a
 /// handler that returns `Err` has applied nothing.
 pub(crate) struct Tx {
-    wall: UtcMs,
+    pub(crate) wall: UtcMs,
+    /// The local date of `wall`.
+    pub(crate) today: jiff::civil::Date,
     /// Everything committed so far, in order.
     pub(crate) changes: Vec<Change>,
     pub(crate) events: Vec<CoreEvent>,
@@ -209,6 +287,7 @@ impl Tx {
     pub(crate) fn new(now: &Now) -> Tx {
         Tx {
             wall: now.wall,
+            today: now.local_day,
             changes: Vec::new(),
             events: Vec::new(),
             issued: Vec::new(),
@@ -279,6 +358,29 @@ impl Tx {
         self.ui_each(state, changes, vec![text])
     }
 
+    /// An activity row stamped with this transaction's time, for the caller to commit.
+    /// `of` is the `(ref_kind, ref_id)` the row points at.
+    pub(crate) fn activity_row(
+        &mut self,
+        state: &State,
+        who: ActivityWho,
+        text: String,
+        of: Option<(&str, String)>,
+    ) -> Change {
+        let (ref_kind, ref_id) = match of {
+            Some((kind, id)) => (Some(kind.to_string()), Some(id)),
+            None => (None, None),
+        };
+        Change::Activity(ActivityRow {
+            id: ActivityId(self.next_id(state, Table::Activity)),
+            at: self.wall,
+            who,
+            text,
+            ref_kind,
+            ref_id,
+        })
+    }
+
     /// [`Tx::ui`] with one `ui` event and activity row per text, all in one commit.
     pub(crate) fn ui_each(
         &mut self,
@@ -298,14 +400,7 @@ impl Tx {
                 text: Some(text.clone()),
                 detail: None,
             }));
-            changes.push(Change::Activity(ActivityRow {
-                id: ActivityId(self.next_id(state, Table::Activity)),
-                at: self.wall,
-                who: ActivityWho::You,
-                text: text.clone(),
-                ref_kind: None,
-                ref_id: None,
-            }));
+            changes.push(self.activity_row(state, ActivityWho::You, text.clone(), None));
         }
         self.commit(state, changes)?;
         self.events

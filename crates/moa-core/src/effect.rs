@@ -8,6 +8,7 @@ use jiff::civil::Date;
 use crate::Now;
 use crate::UtcMs;
 use crate::change::Change;
+use crate::hook::HookEnvelope;
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::publish::{CoreEvent, Model};
 use crate::state::{CallerInfo, Snapshot, State};
@@ -27,6 +28,8 @@ pub enum TimerKey {
     Backup,
     /// The status line's minute clock.
     Clock,
+    /// The earliest moment a working session turns quiet.
+    Quiet,
 }
 
 // `Client` carries a whole `Op`; one is built per request, so boxing it buys nothing.
@@ -51,6 +54,12 @@ pub enum Input {
         message: String,
     },
     Tmux(TmuxIn),
+    /// One hook event from an agent. With `reply`, the sender waits for an answer, sent
+    /// after the commit.
+    Hook {
+        reply: Option<(ConnId, ReqId)>,
+        envelope: HookEnvelope,
+    },
 }
 
 /// What the tmux link reports. `conn` numbers the link's connections; anything from an

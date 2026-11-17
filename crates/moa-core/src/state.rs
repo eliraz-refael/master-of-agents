@@ -1,7 +1,7 @@
 //! The core's in-memory copy of the brain: every row the views need, kept in step with the
 //! store by [`Change`]s and published as a [`Model`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +17,9 @@ use crate::model::*;
 use crate::op::Action;
 use crate::publish::{ACTIVITY_SHOWN, Model};
 use crate::tmux::link::{Link, TmuxState};
+
+/// How many hook events' keys are remembered for deduplication.
+pub(crate) const RECENT_HOOKS: usize = 4096;
 
 /// The next id for each integer-id table. SQLite rowids start at 1, so does this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -213,6 +216,10 @@ pub struct State {
     next_ids: NextIds,
     unknown: Vec<LoadNote>,
     pub(crate) tmux: TmuxState,
+    /// The keys of the last [`RECENT_HOOKS`] hook events applied, oldest first, and the same
+    /// keys for lookup: a hook that arrives twice is applied once.
+    pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
+    pub(crate) recent_hook_set: HashSet<(u32, u32, i64)>,
 }
 
 impl State {
@@ -242,6 +249,8 @@ impl State {
             next_ids: NextIds::default(),
             unknown: Vec::new(),
             tmux: TmuxState::default(),
+            recent_hooks: VecDeque::new(),
+            recent_hook_set: HashSet::new(),
         }
     }
 
@@ -266,6 +275,11 @@ impl State {
     /// Set while the store can't be written to; see [`RefuseWrites`].
     pub fn refuse_writes(&self) -> Option<&RefuseWrites> {
         self.refuse_writes.as_ref()
+    }
+
+    /// Whether a write at `now` is refused: the same test as `Tx::commit`'s.
+    pub fn writes_refused(&self, now: UtcMs) -> bool {
+        self.refuse_writes.as_ref().is_some_and(|r| now < r.until)
     }
 
     /// The answer to `status`, with sessions' states as of `now`.
@@ -390,6 +404,33 @@ impl State {
     pub(crate) fn current_conversation(&self, id: SessionId) -> Option<&Conversation> {
         self.conversations_of(id)
             .max_by_key(|c| (c.first_seen_at, c.last_seen_at))
+    }
+
+    /// The conversation row for an agent's conversation id, whichever session owns it.
+    pub(crate) fn conversation_of_agent(
+        &self,
+        agent: crate::model::AgentKind,
+        conversation_id: &str,
+    ) -> Option<&Conversation> {
+        self.conversations
+            .get(&(agent.as_str(), conversation_id.to_string()))
+    }
+
+    /// Remembers a hook event's key, forgetting the oldest past [`RECENT_HOOKS`].
+    pub(crate) fn remember_hook(&mut self, key: (u32, u32, i64)) {
+        if self.recent_hook_set.insert(key) {
+            self.recent_hooks.push_back(key);
+            if self.recent_hooks.len() > RECENT_HOOKS
+                && let Some(old) = self.recent_hooks.pop_front()
+            {
+                self.recent_hook_set.remove(&old);
+            }
+        }
+    }
+
+    pub(crate) fn forget_hooks(&mut self) {
+        self.recent_hooks.clear();
+        self.recent_hook_set.clear();
     }
 
     /// What a session is called to people: its current conversation id's first 8 characters,

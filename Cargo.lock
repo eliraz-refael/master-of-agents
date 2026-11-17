@@ -676,6 +676,7 @@ dependencies = [
  "clap",
  "futures-util",
  "jiff",
+ "moa-agents",
  "moa-client",
  "moa-core",
  "moa-platform",

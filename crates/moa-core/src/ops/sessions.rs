@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::Now;
 use crate::change::Change;
 use crate::core::Tx;
-use crate::live::{is_asleep, spike_state};
+use crate::live::{display_state, is_asleep, spike_state};
 use crate::model::{Group, SessionId, normalize_group_path};
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{Done, OpError};
@@ -38,6 +38,7 @@ pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
         let account = s.account.as_deref().unwrap_or("");
         let cwd = s.cwd.as_deref().unwrap_or("-");
         let last = s.last_seen_at.map(|t| local_text(t, &now.tz));
+        let (display, why) = display_state(s, now.wall);
         lines.push(format!(
             "{handle}  {alive:<9} {account:<12} {group:<22} {title:<34} {cwd}  last {}",
             last.as_deref().unwrap_or("-")
@@ -47,6 +48,8 @@ pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
             "conversation": state.current_conversation(s.id).map(|c| &c.conversation_id),
             "alive": alive,
             "state": spike_state(s),
+            "display": display.word(),
+            "why": why,
             "account": s.account,
             "group": (group != "-").then_some(&group),
             "title": title,

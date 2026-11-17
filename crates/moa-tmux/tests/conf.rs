@@ -157,6 +157,19 @@ fn attach(sb: &Sandbox) -> Terminal {
         list.lines().any(|l| l == tty).then_some(())
     });
     assert!(seen.is_some(), "the terminal never attached");
+    // Listed is not drawn: keys typed before the first draw can be lost. The status line
+    // is moa's when its config is loaded, else tmux's own, which starts with `[sandbox]`.
+    let left = sb.tmux(&["show-options", "-gqv", "status-left"]).unwrap();
+    let drawn = if left.contains("◆ moa") {
+        "◆ moa"
+    } else {
+        "[sandbox]"
+    };
+    assert!(
+        term.wait_for_text(drawn, Duration::from_secs(5)),
+        "the status line never drew; the terminal showed: {}",
+        term.tail(600)
+    );
     term
 }
 
@@ -256,7 +269,8 @@ fn open_menu(term: &Terminal, open: &[u8]) {
     term.press(open);
     assert!(
         term.wait_for_text("Big picture", Duration::from_secs(5)),
-        "the menu never showed"
+        "the menu never showed; the terminal showed: {}",
+        term.tail(600)
     );
 }
 
@@ -314,7 +328,8 @@ fn keys_say_moa_isnt_running_without_a_ctl() {
     term.press(b"\x01c");
     assert!(
         term.wait_for_text("moa isn't running: run moa", Duration::from_secs(5)),
-        "no notice"
+        "no notice; the terminal showed: {}",
+        term.tail(600)
     );
 }
 
@@ -421,7 +436,8 @@ fn menu_items_say_moa_isnt_running_without_a_ctl() {
     term.press(b"c");
     assert!(
         term.wait_for_text("moa isn't running: run moa", Duration::from_secs(5)),
-        "no notice"
+        "no notice; the terminal showed: {}",
+        term.tail(600)
     );
 }
 

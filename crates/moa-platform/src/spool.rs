@@ -26,6 +26,18 @@ impl Taken {
     }
 }
 
+impl Taken {
+    /// The lines could not be handled and would fail again: keep them for a person to look
+    /// at, as `<spool>.bad-<suffix>`, and return that path.
+    pub fn set_aside(self, suffix: &str) -> io::Result<PathBuf> {
+        let name = self.draining.to_string_lossy().into_owned();
+        let base = name.strip_suffix(".draining").unwrap_or(&name);
+        let bad = PathBuf::from(format!("{base}.bad-{suffix}"));
+        std::fs::rename(&self.draining, &bad)?;
+        Ok(bad)
+    }
+}
+
 /// `<path>.draining`: where a drain parks lines until they are handled.
 pub fn draining(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
