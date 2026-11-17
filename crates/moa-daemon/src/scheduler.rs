@@ -1,7 +1,8 @@
 //! The wall-clock scheduler: it keeps the core's deadlines, arms one `WallTimer` at the
-//! earliest, and tells the core when a deadline has come.
+//! earliest, and tells the core when a deadline has come. It keeps one deadline of the
+//! daemon's own too: the end of a refusal of writes, when the hook spool is drained again.
 //!
-//! The core owns *what* the deadlines are (`SetTimer`, `CancelTimer` effects); this only
+//! The core owns *what* its deadlines are (`SetTimer`, `CancelTimer` effects); this only
 //! keeps them and wakes up. After a zone change the core sends fresh `SetTimer`s, which is
 //! how every deadline is re-derived and re-armed: macOS absolute timers don't follow
 //! wall-clock steps.
@@ -21,9 +22,17 @@ use crate::clock::{Clock, system_time};
 use crate::core_task::Stats;
 use crate::supervise::supervise;
 
+/// What a deadline wakes: the core, with one of its timers, or the spool's drainer.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum Wake {
+    Core(TimerKey),
+    /// A refusal of writes ends: the hooks spooled under it are drained.
+    Spool,
+}
+
 pub(crate) enum SchedCmd {
-    Set(TimerKey, UtcMs),
-    Cancel(TimerKey),
+    Set(Wake, UtcMs),
+    Cancel(Wake),
     /// Answers once every command sent before it has been applied. It fires nothing: only
     /// the alarm does, in tests as in production.
     Sync(oneshot::Sender<()>),
@@ -35,12 +44,12 @@ pub(crate) enum SchedCmd {
 const ALARM_RETRY: Duration = Duration::from_secs(1);
 
 struct Scheduler {
-    deadlines: BTreeMap<TimerKey, UtcMs>,
+    deadlines: BTreeMap<Wake, UtcMs>,
     rx: mpsc::UnboundedReceiver<SchedCmd>,
     alarm: Box<dyn WallTimer>,
     clock: Arc<dyn Clock>,
     stats: Arc<Stats>,
-    fire: Box<dyn Fn(TimerKey) + Send + Sync>,
+    fire: Box<dyn Fn(Wake) + Send + Sync>,
 }
 
 impl Scheduler {
@@ -59,7 +68,7 @@ impl Scheduler {
     /// `Timer` with the next `SetTimer`.
     fn fire_due(&mut self) {
         let now = self.clock.wall();
-        let due: Vec<TimerKey> = self
+        let due: Vec<Wake> = self
             .deadlines
             .iter()
             .filter(|(_, at)| **at <= now)
@@ -112,7 +121,7 @@ pub(crate) fn start(
     clock: Arc<dyn Clock>,
     alarm: Box<dyn WallTimer>,
     stats: Arc<Stats>,
-    fire: impl Fn(TimerKey) + Send + Sync + 'static,
+    fire: impl Fn(Wake) + Send + Sync + 'static,
     failed: impl Fn(&'static str, String) + Send + 'static,
 ) -> mpsc::UnboundedSender<SchedCmd> {
     let (tx, rx) = mpsc::unbounded_channel();

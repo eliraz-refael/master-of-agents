@@ -26,7 +26,7 @@ use tokio_util::task::TaskTracker;
 use super::recover::fail_held;
 use super::*;
 use crate::clock::Clock;
-use crate::scheduler::SchedCmd;
+use crate::scheduler::{SchedCmd, Wake};
 
 pub(super) struct Core {
     /// The core's own inbox, for answers it gives itself. Weak, so the loop still ends
@@ -161,14 +161,20 @@ impl Core {
         while let Some(item) = work.pop_front() {
             let stepped = match item {
                 Item::Input(input) => self.step(input, &mut batch, &mut held),
-                // While writes are refused the core would drop the event: keep its line for
-                // the next start instead, and tell a waiting hook there is nothing to say.
-                Item::Hook {
-                    reply,
-                    line: Some(line),
-                    ..
-                } if self.spool.is_some() && self.state.writes_refused(self.clock.wall()) => {
-                    spool_hooks(self.spool.as_deref(), std::iter::once(&*line));
+                // While writes are refused the core would drop the event: keep it for the end
+                // of the refusal instead, and tell a waiting hook there is nothing to say. A
+                // live hook's line goes to the spool; a drained one is still in `.draining`,
+                // which its drain keeps when it sees the count move.
+                Item::Hook { reply, line, .. }
+                    if self.spool.is_some() && self.state.writes_refused(self.clock.wall()) =>
+                {
+                    if let Some(line) = line {
+                        spool_hooks(self.spool.as_deref(), std::iter::once(&*line));
+                    }
+                    self.stats.refused_hooks.fetch_add(1, Ordering::SeqCst);
+                    if let Some(refused) = self.state.refuse_writes() {
+                        let _ = self.sched.send(SchedCmd::Set(Wake::Spool, refused.until));
+                    }
                     if let Some((conn, req)) = reply {
                         let done = Done {
                             text: String::new(),
@@ -343,10 +349,10 @@ impl Core {
     pub(super) fn run_now(&self, effect: Effect) {
         match effect {
             Effect::SetTimer { key, at } => {
-                let _ = self.sched.send(SchedCmd::Set(key, at));
+                let _ = self.sched.send(SchedCmd::Set(Wake::Core(key), at));
             }
             Effect::CancelTimer(key) => {
-                let _ = self.sched.send(SchedCmd::Cancel(key));
+                let _ = self.sched.send(SchedCmd::Cancel(Wake::Core(key)));
             }
             Effect::Log(LogLine { level, message }) => match level {
                 LogLevel::Info => tracing::info!("{message}"),

@@ -29,7 +29,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::task::TaskTracker;
 
 use crate::clock::Clock;
-use crate::scheduler::{self, SchedCmd};
+use crate::scheduler::{self, SchedCmd, Wake};
 use crate::tmux::{self, TmuxCmd, TmuxLink};
 
 mod drain;
@@ -76,7 +76,8 @@ pub struct CoreOptions {
     /// The terminal link. Without one, every connect is answered `Down(Disabled)` and
     /// commands for the server are dropped.
     pub tmux: Option<TmuxLink>,
-    /// The brain's hook spool, drained once at start. `None` only in tests that opt out.
+    /// The brain's hook spool, drained at start and again when hooks may have been spooled
+    /// while the daemon was up. `None` only in tests that opt out.
     pub spool: Option<PathBuf>,
 }
 
@@ -94,6 +95,11 @@ pub struct Stats {
     pub panics: AtomicU64,
     /// Views of saved state for the terminal server that were released after a commit.
     pub views_released: AtomicU64,
+    /// Hook events kept from the core while writes were refused: spooled, or left in the
+    /// spool's `.draining` file.
+    pub refused_hooks: AtomicU64,
+    /// Drains of the hook spool that have run, at start and after.
+    pub spool_drains: AtomicU64,
 }
 
 /// One reply on a connection.
@@ -186,6 +192,8 @@ pub struct CoreHandle {
     panic_next: Arc<AtomicU32>,
     /// Where a hook the core can't take is kept for the next start.
     spool: Option<PathBuf>,
+    /// Asks the spool's drainer for another drain; `None` without a spool.
+    drains: Option<mpsc::UnboundedSender<()>>,
 }
 
 type SharedStore = Arc<Mutex<StoreHandle>>;
@@ -259,16 +267,25 @@ impl CoreHandle {
         let (events, _) = broadcast::channel(opts.events_capacity.max(1));
         let (generation_tx, generation) = watch::channel(0);
 
+        let (drains, asks) = mpsc::unbounded_channel();
         // Weak: the core owns the scheduler, so a strong sender here would be a cycle that
-        // keeps the inbox open after every handle has gone.
+        // keeps the inbox open after every handle has gone. The drainer's likewise.
         let fire_inbox = inbox.downgrade();
+        let fire_drains = drains.downgrade();
         let sched = scheduler::start(
             opts.clock.clone(),
             opts.alarm,
             stats.clone(),
-            move |key| {
-                if let Some(inbox) = fire_inbox.upgrade() {
-                    let _ = inbox.send(Item::Input(Input::Timer(key)));
+            move |wake| match wake {
+                Wake::Core(key) => {
+                    if let Some(inbox) = fire_inbox.upgrade() {
+                        let _ = inbox.send(Item::Input(Input::Timer(key)));
+                    }
+                }
+                Wake::Spool => {
+                    if let Some(drains) = fire_drains.upgrade() {
+                        let _ = drains.send(());
+                    }
                 }
             },
             report_failure(&inbox),
@@ -333,27 +350,107 @@ impl CoreHandle {
             ended,
             panic_next,
             spool: spool.clone(),
+            drains: spool.is_some().then_some(drains),
         };
         // Startup is the first item, so this answers after its commit, not after its daily
         // backup (the store thread is busy copying; `barrier()` and `stop()` wait for it). If
         // Startup brought the core down, the answer is dropped and returns, and the line is here.
         handle.committed().await;
-        let ended = handle.finished.borrow().clone();
-        if let Some(Err(line)) = ended {
-            return Err(DaemonError::Fatal(line));
-        }
+        handle.alive()?;
         if let Some(path) = spool {
+            let drainer = Drainer {
+                inbox: handle.inbox.downgrade(),
+                sched: handle.sched.clone(),
+                stats: handle.stats.clone(),
+                finished: handle.finished.clone(),
+                generation: handle.generation.clone(),
+                path,
+            };
             handle.panic_next.store(drain_panics, Ordering::SeqCst);
-            handle.drain_spool(path).await;
+            drainer.drain().await;
+            // The drain can bring the core down too.
+            handle.alive()?;
+            // Started only now, so the drain at start is never run beside another one.
+            tokio::spawn(drainer.run(asks, handle.ended.clone()));
         }
         Ok(handle)
     }
 
-    /// Feeds the events hooks spooled while the daemon was down to the core, oldest first,
-    /// and deletes the spool's `.draining` file once they are committed. A drain whose
-    /// commit failed (or whose core stopped) leaves it for the next start. Nothing here logs
-    /// a line's contents: an unreadable line is counted.
-    async fn drain_spool(&self, path: PathBuf) {
+    /// `Err` with the core's last line when it has stopped.
+    fn alive(&self) -> Result<(), DaemonError> {
+        match self.finished.borrow().clone() {
+            Some(Err(line)) => Err(DaemonError::Fatal(line)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Asks for another drain of the spool: one runs at a time, and one asked for while
+    /// another runs follows it.
+    pub(crate) fn drain_spool(&self) {
+        if let Some(drains) = &self.drains {
+            let _ = drains.send(());
+        }
+    }
+
+    /// After a live hook: lines in the spool are hooks that gave up on this daemon while it
+    /// was up (a full accept backlog, a line bigger than the socket's buffer during start).
+    /// One `stat` tells.
+    pub(crate) fn drain_spool_if_any(&self) {
+        let waiting = self
+            .spool
+            .as_deref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .is_some_and(|m| m.len() > 0);
+        if waiting {
+            self.drain_spool();
+        }
+    }
+}
+
+/// Drains the hook spool into the core. The one at start runs before the drainer task is
+/// started; after that only the task drains, one drain at a time, so two drains never share
+/// the spool's `.draining` file.
+struct Drainer {
+    /// Weak, so the drainer never keeps the core up.
+    inbox: mpsc::WeakUnboundedSender<Item>,
+    sched: mpsc::UnboundedSender<SchedCmd>,
+    stats: Arc<Stats>,
+    finished: watch::Receiver<Option<Result<(), String>>>,
+    generation: watch::Receiver<u64>,
+    path: PathBuf,
+}
+
+impl Drainer {
+    /// Drains once per ask (asks that come during a drain make one more), until every
+    /// handle has gone or the core has ended.
+    async fn run(self, mut asks: mpsc::UnboundedReceiver<()>, mut ended: watch::Receiver<()>) {
+        loop {
+            tokio::select! {
+                ask = asks.recv() => if ask.is_none() {
+                    return;
+                },
+                _ = ended.changed() => return,
+            }
+            while asks.try_recv().is_ok() {}
+            self.drain().await;
+        }
+    }
+
+    async fn drain(&self) {
+        self.drain_once().await;
+        self.stats.spool_drains.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Feeds the events hooks spooled (while the daemon was down, or couldn't take them) to
+    /// the core, oldest first, and deletes the spool's `.draining` file once they are
+    /// committed. A drain whose commit failed, whose core stopped or whose events a refusal
+    /// held back leaves it for a later drain. Nothing here logs a line's contents: an
+    /// unreadable line is counted.
+    async fn drain_once(&self) {
+        let Some(inbox) = self.inbox.upgrade() else {
+            return;
+        };
+        let path = self.path.clone();
         let taken = match tokio::task::spawn_blocking(move || spool::take(&path)).await {
             Ok(Ok(taken)) => taken,
             Ok(Err(e)) => {
@@ -379,17 +476,33 @@ impl CoreHandle {
         envelopes.sort_by_key(|e| (e.at_ns, e.pid, e.seq));
         let drained = envelopes.len();
         let failures = self.stats.commit_failures.load(Ordering::SeqCst);
+        let refused = self.stats.refused_hooks.load(Ordering::SeqCst);
         let panics = self.stats.panics.load(Ordering::SeqCst);
         let generation = *self.generation.borrow();
         for envelope in envelopes {
-            self.hook(None, envelope, None);
+            // The lines are still in `.draining`: none goes with the event.
+            let _ = inbox.send(Item::Hook {
+                reply: None,
+                envelope,
+                line: None,
+            });
         }
-        self.committed().await;
-        // A failed commit, a stopped store or an ended core: the lines are fine, try again at
-        // the next start. Every one of those reloads the core, which bumps the generation.
+        committed(&inbox, &self.sched).await;
+        drop(inbox);
+        let kept = || {
+            tracing::warn!(
+                "{} spooled hook events were kept for a later drain",
+                drained + unreadable
+            )
+        };
+        // A failed commit, a stopped store, an ended core or refused writes: the lines are
+        // fine, try again later (the end of a refusal drains again). Every failure reloads
+        // the core, which bumps the generation.
         let unsaved = self.stats.commit_failures.load(Ordering::SeqCst) != failures
+            || self.stats.refused_hooks.load(Ordering::SeqCst) != refused
             || self.finished.borrow().is_some();
         if unsaved {
+            kept();
             return;
         }
         // The core panicked on a line: it would again, every start. Set the file aside.
@@ -408,6 +521,7 @@ impl CoreHandle {
             return;
         }
         if *self.generation.borrow() != generation {
+            kept();
             return;
         }
         if let Err(e) = taken.done() {
@@ -422,7 +536,9 @@ impl CoreHandle {
             tracing::info!("drained {drained} spooled hook events{more}");
         }
     }
+}
 
+impl CoreHandle {
     /// Resolves when the core task has ended: `Ok` after `stop`, `Err(Fatal)` when it can't
     /// go on (the store can't be reopened, or a bug while loading). The daemon then stops
     /// accepting and exits.
@@ -559,11 +675,7 @@ impl CoreHandle {
     /// Answers once everything before it has been committed and released, without waiting
     /// for the store's queue or the backups.
     async fn committed(&self) {
-        sync_scheduler(&self.sched).await;
-        let (reply, answer) = oneshot::channel();
-        if self.inbox.send(Item::Committed(reply)).is_ok() {
-            let _ = answer.await;
-        }
+        committed(&self.inbox, &self.sched).await;
     }
 
     /// Ends the loop after the drain it joins has committed and released, and after the
@@ -608,6 +720,15 @@ fn report_failure(
                 message: String::new(),
             }));
         }
+    }
+}
+
+/// Answers once everything sent to `inbox` before it has been committed and released.
+async fn committed(inbox: &mpsc::UnboundedSender<Item>, sched: &mpsc::UnboundedSender<SchedCmd>) {
+    sync_scheduler(sched).await;
+    let (reply, answer) = oneshot::channel();
+    if inbox.send(Item::Committed(reply)).is_ok() {
+        let _ = answer.await;
     }
 }
 

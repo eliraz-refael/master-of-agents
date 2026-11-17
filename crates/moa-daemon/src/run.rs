@@ -379,6 +379,9 @@ async fn keep_up(
             move |name, _message| core.actor_failed(name)
         },
     ));
+    // Hooks that gave up while the daemon started (a line bigger than the socket's buffer,
+    // written before anything accepted it) spooled their lines after the drain at start.
+    core.drain_spool();
 
     let outcome = loop {
         tokio::select! {

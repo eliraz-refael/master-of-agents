@@ -13,6 +13,20 @@ async fn up(
     PathBuf,
     tokio::task::JoinHandle<Result<(), DaemonError>>,
 ) {
+    up_with(brain, None, || {}).await
+}
+
+/// `up`, with the hook spool at `spool`, and `between` run once the core has started and
+/// before the daemon accepts.
+async fn up_with(
+    brain: &TypicalBrain,
+    spool: Option<PathBuf>,
+    between: impl FnOnce(),
+) -> (
+    CoreHandle,
+    PathBuf,
+    tokio::task::JoinHandle<Result<(), DaemonError>>,
+) {
     let time = FakeTime::new(brain.now().wall);
     let core = CoreHandle::start(CoreOptions {
         brain: BrainName::default_brain(),
@@ -25,10 +39,11 @@ async fn up(
         backups: brain.dir.path().join("backups"),
         events_capacity: 16,
         tmux: None,
-        spool: None,
+        spool,
     })
     .await
     .expect("the core starts");
+    between();
     let sock = brain.dir.path().join("t.sock");
     let listener = UnixListener::bind(&sock).unwrap();
     let sigs = Signals {
@@ -144,6 +159,40 @@ async fn an_op_held_by_the_core_at_shutdown_is_answered() {
             .expect("no panic");
         assert!(ended.is_ok(), "{ended:?}");
     }
+}
+
+/// I2: a hook that gave up on the daemon while it was starting (a line bigger than the
+/// socket's buffer, written before the accept loop ran) is spooled after the drain at start.
+/// It is drained once the daemon accepts, not at the next start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_spooled_during_start_is_drained_once_the_daemon_accepts() {
+    let brain = TypicalBrain::new();
+    let live = brain.dir.path().join("spool").join("default.jsonl");
+    let line = r#"{"v":1,"agent":"claude","at_ns":1000000,"pid":1,"seq":1,"env":{},"payload":{"hook_event_name":"Stop","session_id":"a1b2c3d4-0000-4000-8000-000000000001"}}"#;
+    let (core, _sock, daemon) = up_with(&brain, Some(live.clone()), || {
+        moa_platform::spool::append(&live, line.as_bytes()).unwrap();
+    })
+    .await;
+    let draining = moa_platform::spool::draining(&live);
+    let drained = moa_testkit::wait_for(Duration::from_secs(10), || {
+        let empty = std::fs::read_to_string(&live)
+            .unwrap_or_default()
+            .is_empty();
+        (empty && !draining.exists()).then_some(())
+    });
+    assert!(drained.is_some(), "the line waits for the next start");
+    assert!(
+        core.stats()
+            .spool_drains
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 2
+    );
+    core.stop().await;
+    let ended = tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("the daemon ends within 10 s")
+        .expect("no panic");
+    assert!(ended.is_ok(), "{ended:?}");
 }
 
 /// A panic in the accept loop is published like the scheduler's: an error event, with no
