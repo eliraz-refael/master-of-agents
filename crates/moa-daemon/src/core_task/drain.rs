@@ -326,17 +326,14 @@ impl Core {
                 Effect::Backup { day } => self.due_backups.push(day),
                 Effect::Publish(p) => held.push(Held::Publish(p)),
                 Effect::Reply { conn, req, result } => held.push(Held::Reply { conn, req, result }),
-                // A view of saved state waits for the commit, as replies do.
-                Effect::Tmux {
-                    conn,
-                    cmds,
-                    token: None,
-                } => held.push(Held::Tmux { conn, cmds }),
+                // A view of saved state waits for the commit, as replies do; so does an
+                // `open`'s new window, which starts an agent for a session the commit saves.
+                // The link's plumbing ran above.
+                Effect::Tmux { conn, cmds, token } => held.push(Held::Tmux { conn, cmds, token }),
                 // Handled above.
                 Effect::SetTimer { .. }
                 | Effect::CancelTimer(_)
                 | Effect::Log(_)
-                | Effect::Tmux { token: Some(_), .. }
                 | Effect::TmuxConnect { .. } => {}
             }
         }
@@ -452,9 +449,11 @@ impl Core {
                 Held::Status(reply, data, _) => {
                     let _ = reply.send(data);
                 }
-                Held::Tmux { conn, cmds } => {
-                    self.stats.views_released.fetch_add(1, Ordering::SeqCst);
-                    self.to_link(conn, cmds, None);
+                Held::Tmux { conn, cmds, token } => {
+                    if token.is_none() {
+                        self.stats.views_released.fetch_add(1, Ordering::SeqCst);
+                    }
+                    self.to_link(conn, cmds, token);
                 }
                 Held::Barrier(reply) => {
                     self.store().sync().await;

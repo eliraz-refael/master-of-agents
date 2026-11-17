@@ -678,21 +678,34 @@ fn a_new_connection_fails_waiting_opens() {
     assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
 }
 
-/// A reload after the open's commit failed in the store: the session isn't in the brain, so
-/// its tab is not bound.
+/// A reload after the open's commit failed in the store: the session isn't in the brain, and
+/// its new window was never sent (it waits for the commit). The open is answered then, and a
+/// late answer about a tab finds nobody waiting. An open whose session was saved still waits.
 #[test]
-fn a_tab_for_a_session_the_brain_lost_is_not_bound() {
+fn a_reload_that_lost_an_opens_session_answers_it() {
     let (b, mut st) = typical();
     let id = the_open(&send(&b, &mut st, 4, open_op(&lantern(&b)))).0;
-    handle_checked(
+    let kept = the_open(&send(&b, &mut st, 5, open_op(&lantern(&b)))).0;
+    let mut snapshot = b.snapshot();
+    snapshot.sessions.push(st.session(kept).unwrap().clone());
+    let fx = handle_checked(
         &mut st,
         Input::Reload {
-            snapshot: Box::new(b.snapshot()),
+            snapshot: Box::new(snapshot),
             refuse_writes: None,
         },
         b.now(),
     );
     assert!(st.session(id).is_none());
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(4),
+            Err(OpError(
+                "moa couldn't save that session; nothing was opened, try again".into()
+            ))
+        )]
+    );
     let fx = feed(
         &b,
         &mut st,
@@ -703,18 +716,21 @@ fn a_tab_for_a_session_the_brain_lost_is_not_bound() {
         },
     );
     assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(replies(&fx).is_empty(), "{fx:?}");
     assert!(!fx.iter().any(|e| matches!(e, Effect::Tmux { token: None, cmds, .. }
         if cmds.iter().any(|c| c.name() == "set-option" && c.argv().contains(&"@moa_session".to_string())))));
-    assert_eq!(
-        replies(&fx),
-        [(
-            ReqId(4),
-            Err(OpError("couldn't open a tab for it; see moa's log".into()))
-        )]
+
+    let fx = bound(&b, &mut st, kept, "%8");
+    assert!(
+        changes(&fx)
+            .iter()
+            .any(|c| matches!(c, Change::PaneBinding(p) if p.session_id == kept)),
+        "{fx:?}"
     );
-    let logs = log_lines(&fx);
-    assert_eq!(logs.len(), 1, "{logs:?}");
-    assert!(logs[0].message.contains(&id.to_string()), "{logs:?}");
+    assert!(
+        matches!(replies(&fx).as_slice(), [(ReqId(5), Ok(_))]),
+        "{fx:?}"
+    );
 }
 
 #[test]

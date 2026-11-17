@@ -11,6 +11,7 @@ use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
     Down, Effect, Input, LogLevel, LogLine, TmuxIn, TmuxToken, check_order, handle_checked,
 };
+use moa_core::model::SessionId;
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{CallerInfo, State, TmuxLinkData};
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, WindowId};
@@ -438,6 +439,15 @@ fn effect_ordering() {
     assert!(Effect::TmuxConnect { tmux: None }.runs_at_once());
     // Plumbing isn't heard: a Persist may follow it.
     assert!(check_order(&[refresh_effect(1), Effect::Persist(vec![])]).is_ok());
+    // An `open`'s new window starts an agent that reports on its session: it waits for the
+    // session's commit, like a view.
+    let open = Effect::Tmux {
+        conn: 1,
+        cmds: vec![],
+        token: Some(TmuxToken::Open(SessionId(uuid::Uuid::nil()))),
+    };
+    assert!(!open.runs_at_once());
+    assert!(check_order(&[open, Effect::Persist(vec![])]).is_err());
 }
 
 #[test]

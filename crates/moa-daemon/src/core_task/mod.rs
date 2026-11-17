@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use jiff::tz::TimeZone;
 use moa_agents::claude;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Input, Publish};
+use moa_core::effect::{Input, Publish, TmuxToken};
 use moa_core::hook::{HookEnvelope, HookLine};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
@@ -157,10 +157,11 @@ enum Held {
     },
     /// The answer so far, and the caller, so a reload can compute it again.
     Status(oneshot::Sender<StatusData>, StatusData, CallerInfo),
-    /// A view of saved state for the terminal server.
+    /// A view of saved state for the terminal server, or (tokened) an `open`'s new window.
     Tmux {
         conn: u64,
         cmds: Vec<Cmd>,
+        token: Option<TmuxToken>,
     },
     Barrier(oneshot::Sender<()>),
     Committed(oneshot::Sender<()>),

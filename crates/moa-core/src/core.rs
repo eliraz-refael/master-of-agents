@@ -83,6 +83,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
+            fx.extend(ops::sessions::lost_opens(state));
             fx
         }
         Input::Tmux(t) => {
@@ -257,15 +258,7 @@ pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>)
         return;
     }
     let topics = topics_of(&tx.changes);
-    let at = fx
-        .iter()
-        .position(|e| {
-            matches!(
-                e,
-                Effect::Publish(_) | Effect::Reply { .. } | Effect::Tmux { token: None, .. }
-            )
-        })
-        .unwrap_or(fx.len());
+    let at = fx.iter().position(Effect::is_heard).unwrap_or(fx.len());
     fx.insert(at, Effect::Persist(tx.changes));
     fx.extend(
         state

@@ -323,6 +323,16 @@ impl TmuxState {
         self.opens.insert(id, (conn, req));
     }
 
+    /// The sessions whose `open` is waiting.
+    pub(crate) fn waiting_opens(&self) -> impl Iterator<Item = SessionId> + '_ {
+        self.opens.keys().copied()
+    }
+
+    /// Stops waiting for `id`'s tab, and says whom to answer.
+    pub(crate) fn forget_open(&mut self, id: SessionId) -> Option<(ConnId, ReqId)> {
+        self.opens.remove(&id)
+    }
+
     /// The `open`s this input answers: the one whose tab tmux reports on, or every one
     /// when the link goes down or a new connection replaces the one they were asked on.
     /// Run before [`TmuxState::input`], while the link is still as they knew it.

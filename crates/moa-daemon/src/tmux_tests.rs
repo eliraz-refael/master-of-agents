@@ -496,3 +496,160 @@ async fn a_view_held_by_a_failed_commit_never_reaches_the_link() {
     );
     assert_eq!(stats.commit_failures.load(Ordering::SeqCst), 1);
 }
+
+/// The typical brain opening with `acct-a`, whose launcher is never run: the link is a
+/// channel.
+const OPEN_TOML: &str = r#"
+[brains.default]
+folders = ["~/work"]
+open_account = "acct-a"
+
+[accounts.acct-a]
+kind = "claude"
+store = "~/.claude-a"
+launcher = "/opt/claude"
+"#;
+
+/// A core that can open sessions, on a link played by a channel that is up on connection 1.
+async fn opening_core(
+    brain: &TypicalBrain,
+    time: &Arc<FakeTime>,
+) -> (CoreHandle, mpsc::UnboundedReceiver<TmuxCmd>) {
+    let mut opts = core_options(brain, time);
+    opts.config = moa_core::config::Config::parse(OPEN_TOML, &brain.home).unwrap();
+    opts.deps = Deps {
+        session_plugin: "/opt/moa/plugin/session".into(),
+        ..Deps::default()
+    };
+    let (link, mut rx) = mpsc::unbounded_channel();
+    let core = CoreHandle::start_inner(opts, brain.store(), vec![], Some(link), 0)
+        .await
+        .expect("the core starts");
+    core.tmux_input(TmuxIn::Connected {
+        conn: 1,
+        generation: moa_core::tmux::ids::Generation { pid: 1, start: 1 },
+        version: "3.8".into(),
+        ctl: moa_core::tmux::ids::ClientName("client-1".into()),
+        socket: "moa".into(),
+    });
+    core.barrier().await;
+    sent(&mut rx);
+    (core, rx)
+}
+
+fn open_lantern(brain: &TypicalBrain) -> moa_core::op::Op {
+    moa_core::op::Op::SessionOpen {
+        path: brain.home.join("private/lantern"),
+        account: None,
+        title: None,
+        group: None,
+        prompt: None,
+        bg: false,
+    }
+}
+
+/// The session an `Open` send is for.
+fn opened_id(cmd: &TmuxCmd) -> Option<moa_core::model::SessionId> {
+    match cmd {
+        TmuxCmd::Send {
+            token: Some(TmuxToken::Open(id)),
+            ..
+        } => Some(*id),
+        _ => None,
+    }
+}
+
+/// I4: an `open`'s new window starts an agent, so it is sent only once its session is
+/// saved; then tmux's answer binds the pane and answers the open.
+#[tokio::test]
+async fn an_opens_new_window_waits_for_its_commit() {
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let (core, mut rx) = opening_core(&brain, &time).await;
+    let stats = core.stats();
+    let (c, mut replies) = core.open_conn();
+    let (release, gate) = std::sync::mpsc::channel();
+    core.store_fault(Fault::PauseNextCommit(gate));
+    let commits = stats.commits.load(Ordering::SeqCst);
+    core.send(
+        c,
+        moa_core::op::ReqId(1),
+        CallerInfo::default(),
+        open_lantern(&brain),
+    );
+    timeout(PATIENCE, async {
+        while stats.commits.load(Ordering::SeqCst) == commits {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the open's commit started");
+    assert!(
+        !sent(&mut rx).iter().any(|c| opened_id(c).is_some()),
+        "the new window went out before its session was saved"
+    );
+    release.send(()).unwrap();
+    let id = timeout(PATIENCE, async {
+        loop {
+            if let Some(id) = opened_id(&rx.recv().await.expect("the link is held")) {
+                return id;
+            }
+        }
+    })
+    .await
+    .expect("the new window is sent after the commit");
+
+    core.tmux_input(TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Open(id),
+        results: vec![Ok(vec!["P %7 4242".into()])],
+    });
+    let (req, result) = timeout(PATIENCE, replies.recv()).await.unwrap().unwrap();
+    assert_eq!(req, moa_core::op::ReqId(1));
+    let done = result.expect("opened");
+    assert!(
+        done.text.starts_with("opened lantern with acct-a in "),
+        "{}",
+        done.text
+    );
+    core.barrier().await;
+    assert!(
+        sent(&mut rx).iter().any(|c| says(c, "@moa_session")),
+        "the pane is tagged"
+    );
+    // The link is a channel, which never answers its stop: closing it skips the wait.
+    drop(rx);
+    core.stop().await;
+}
+
+/// I4: when the commit that saves an `open`'s session fails, its new window is dropped with
+/// the drain, and the reload answers the open: nothing was opened.
+#[tokio::test]
+async fn an_open_whose_commit_fails_starts_no_tab() {
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let (core, mut rx) = opening_core(&brain, &time).await;
+    let (c, mut replies) = core.open_conn();
+    core.store_fault(Fault::FailNextCommit);
+    core.send(
+        c,
+        moa_core::op::ReqId(1),
+        CallerInfo::default(),
+        open_lantern(&brain),
+    );
+    let (req, result) = timeout(PATIENCE, replies.recv()).await.unwrap().unwrap();
+    assert_eq!(req, moa_core::op::ReqId(1));
+    assert_eq!(
+        result.unwrap_err().0,
+        "moa couldn't save that session; nothing was opened, try again"
+    );
+    core.barrier().await;
+    assert!(
+        !sent(&mut rx).iter().any(|c| opened_id(c).is_some()),
+        "a tab was opened for a session that wasn't saved"
+    );
+    assert_eq!(core.stats().commit_failures.load(Ordering::SeqCst), 1);
+    // The link is a channel, which never answers its stop: closing it skips the wait.
+    drop(rx);
+    core.stop().await;
+}
