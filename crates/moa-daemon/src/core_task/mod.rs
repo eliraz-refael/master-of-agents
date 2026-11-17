@@ -490,10 +490,12 @@ impl Drainer {
         committed(&inbox, &self.sched).await;
         drop(inbox);
         let kept = || {
-            tracing::warn!(
-                "{} spooled hook events were kept for a later drain",
-                drained + unreadable
-            )
+            if drained + unreadable > 0 {
+                tracing::warn!(
+                    "{} spooled hook events were kept for a later drain",
+                    drained + unreadable
+                );
+            }
         };
         // A failed commit, a stopped store, an ended core or refused writes: the lines are
         // fine, try again later (the end of a refusal drains again). Every failure reloads
