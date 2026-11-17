@@ -1,0 +1,259 @@
+//! The front door against real tmux: `moa` creates a sandbox's terminal server, links its
+//! daemon and attaches; a second `moa` joins it; inside its own server `moa` switches
+//! instead of nesting. Every tmux query goes through `TempBrain::tmux` (T23), and `moa`
+//! runs on a `Terminal`, as a user's terminal would run it.
+
+use std::ffi::OsString;
+use std::path::Path;
+use std::process::Output;
+use std::time::Duration;
+
+use assert_cmd::Command;
+use moa_testkit::{TempBrain, Terminal, wait_for};
+use serde_json::Value;
+
+const MOA: &str = env!("CARGO_BIN_EXE_moa");
+const B: &str = "default";
+/// What the status line shows once moa's config is in.
+const STATUS_LINE: &str = "^a keys";
+const SHOWS: Duration = Duration::from_secs(5);
+
+/// `moa args…` on a terminal, with the root's environment plus `extra`.
+fn open(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Terminal {
+    let mut env = tb.env();
+    env.extend(
+        extra
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+    );
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    Terminal::spawn(Path::new(MOA), &args, &env, 120, 30).unwrap()
+}
+
+/// `moa args…` to the end, with the root's environment plus `extra`.
+fn run(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Output {
+    Command::new(MOA)
+        .args(args)
+        .env_clear()
+        .envs(tb.env())
+        .envs(extra.iter().copied())
+        .current_dir(tb.root())
+        .timeout(Duration::from_secs(30))
+        .output()
+        .unwrap()
+}
+
+fn out(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn err(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+fn tmux(tb: &TempBrain, args: &[&str]) -> String {
+    tb.tmux(B, args)
+        .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+}
+
+/// The session each user's terminal (not a control client) is on.
+fn user_clients(tb: &TempBrain) -> Vec<String> {
+    let list = tmux(
+        tb,
+        &[
+            "list-clients",
+            "-F",
+            "#{client_control_mode} #{session_name}",
+        ],
+    );
+    list.lines()
+        .filter_map(|l| l.strip_prefix("0 "))
+        .map(str::to_string)
+        .collect()
+}
+
+fn server_pid(tb: &TempBrain) -> String {
+    tmux(tb, &["display-message", "-p", "#{pid}"])
+}
+
+fn status_json(tb: &TempBrain) -> Value {
+    let o = run(tb, &["status", "--json"], &[]);
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    serde_json::from_str(&out(&o)).unwrap()
+}
+
+fn tmux_socket(tb: &TempBrain) -> std::path::PathBuf {
+    tb.paths().tmux_socket(B).unwrap().path(None, 0)
+}
+
+/// Waits until the user clients are `want`.
+fn clients_become(tb: &TempBrain, want: &[&str]) {
+    let seen = wait_for(SHOWS, || {
+        let c = user_clients(tb);
+        (c == want).then_some(())
+    });
+    assert!(seen.is_some(), "clients: {:?}", user_clients(tb));
+}
+
+#[test]
+fn moa_starts_the_server_and_attaches() {
+    let tb = TempBrain::new(None);
+    // Variables the server must not keep, so the check below can fail.
+    let term = open(
+        &tb,
+        &[],
+        &[
+            ("MOA_SESSION", "x"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CONFIG_DIR", "/x"),
+        ],
+    );
+    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    clients_become(&tb, &["moa"]);
+    let env = tmux(&tb, &["show-environment", "-g"]);
+    let root = tb.root().display().to_string();
+    assert!(
+        env.lines().any(|l| l == format!("MOA_ROOT={root}")),
+        "{env}"
+    );
+    for gone in ["MOA_SESSION=", "CLAUDECODE=", "CLAUDE_CONFIG_DIR=", "TMUX="] {
+        assert!(!env.lines().any(|l| l.starts_with(gone)), "{gone} in {env}");
+    }
+    assert!(
+        env.lines().any(|l| l == "SHELL=/bin/sh"),
+        "the shell reaches the server: {env}"
+    );
+    let status = status_json(&tb);
+    assert!(status["tmux"].is_object(), "{status}");
+}
+
+#[test]
+fn a_second_moa_attaches_to_the_same_server() {
+    let tb = TempBrain::new(None);
+    let first = open(&tb, &[], &[]);
+    assert!(first.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    clients_become(&tb, &["moa"]);
+    let pid = server_pid(&tb);
+    let second = open(&tb, &[], &[]);
+    assert!(second.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    clients_become(&tb, &["moa", "moa"]);
+    assert_eq!(server_pid(&tb), pid);
+    assert_eq!(
+        status_json(&tb)["tmux"]["pid"].to_string(),
+        pid,
+        "the daemon is linked to that server"
+    );
+}
+
+#[test]
+fn moa_inside_its_own_server_switches_instead_of_nesting() {
+    let tb = TempBrain::new(None);
+    let term = open(&tb, &[], &[]);
+    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    clients_become(&tb, &["moa"]);
+    // Move the terminal to a shell in another session, so the switch back can be seen.
+    let root = tb.root().display().to_string();
+    tmux(&tb, &["new-session", "-d", "-s", "other", "-c", &root]);
+    tmux(&tb, &["switch-client", "-c", &term.tty(), "-t", "=other"]);
+    clients_become(&tb, &["other"]);
+    term.press(format!("'{MOA}'\r").as_bytes());
+    clients_become(&tb, &["moa"]);
+    // Still one terminal: no client was started inside a shell.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(user_clients(&tb), ["moa"]);
+}
+
+#[test]
+fn moa_inside_another_tmux_refuses() {
+    let tb = TempBrain::new(None);
+    let o = run(&tb, &[], &[("TMUX", "/tmp/elsewhere/default,1,0")]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(
+        out(&o),
+        "the default moa is running; open it from a new terminal tab: moa\n"
+    );
+    assert!(!tmux_socket(&tb).exists());
+    assert!(!tb.paths().socket(B).unwrap().exists());
+
+    // A brain other than the default is named in the line.
+    let tb = TempBrain::new(Some("[brains.work]\n"));
+    let o = run(&tb, &["work"], &[("TMUX", "/tmp/elsewhere/default,1,0")]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(
+        out(&o),
+        "the work moa is running; open it from a new terminal tab: moa work\n"
+    );
+}
+
+#[test]
+fn moa_sandbox_keeps_its_own_root_under_home() {
+    let tb = TempBrain::new(None);
+    let home = tb.root().display().to_string();
+    let o = Command::new(MOA)
+        .arg("--sandbox")
+        .env_clear()
+        .envs([
+            ("HOME", home.as_str()),
+            ("PATH", &std::env::var("PATH").unwrap()),
+            ("SHELL", "/bin/sh"),
+            ("TMUX", "/tmp/elsewhere/default,1,0"),
+        ])
+        .timeout(Duration::from_secs(30))
+        .output()
+        .unwrap();
+    // Sandboxed, it gets as far as the nesting check.
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let root = tb.root().join(".local/state/moa-sandbox");
+    let meta = std::fs::metadata(&root).unwrap();
+    assert!(meta.is_dir());
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+}
+
+#[test]
+fn moa_names_a_missing_brain() {
+    let tb = TempBrain::new(None);
+    let o = run(&tb, &["ghost"], &[]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        err(&o),
+        format!(
+            "there's no brain named ghost in {}\n",
+            tb.paths().config_file().display()
+        )
+    );
+    let o = run(&tb, &["Bad"], &[]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        err(&o).starts_with("\"Bad\" isn't a brain name (use "),
+        "{}",
+        err(&o)
+    );
+    assert!(!tmux_socket(&tb).exists());
+    assert!(!tb.paths().socket(B).unwrap().exists());
+}
+
+#[test]
+fn status_says_whether_the_terminal_is_connected() {
+    let tb = TempBrain::new(None);
+    // A verb starts the daemon without a terminal server.
+    let o = run(&tb, &["ls"], &[]);
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    let o = run(&tb, &["status"], &[]);
+    assert!(
+        out(&o).contains("\nterminal: not connected\n"),
+        "{}",
+        out(&o)
+    );
+    assert!(status_json(&tb)["tmux"].is_null());
+
+    let term = open(&tb, &[], &[]);
+    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    let o = run(&tb, &["status"], &[]);
+    assert!(out(&o).contains("\nterminal: connected\n"), "{}", out(&o));
+    let tmux = &status_json(&tb)["tmux"];
+    assert_eq!(tmux["pid"].to_string(), server_pid(&tb));
+    assert!(tmux["version"].as_str().is_some_and(|v| !v.is_empty()));
+    // The plain line names no tmux version or pid.
+    assert!(!out(&o).contains("tmux"), "{}", out(&o));
+}

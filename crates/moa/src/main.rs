@@ -8,12 +8,18 @@ use moa_proto::cli::{Moactl, VERB_NAMES};
 mod adopt;
 mod ctl;
 mod daemon;
+mod front;
 mod service;
 mod sql;
 
 #[derive(Parser)]
-#[command(name = "moa", version)]
+#[command(name = "moa", version, args_conflicts_with_subcommands = true)]
 struct Cli {
+    /// The brain to open; the default is `default`.
+    brain: Option<String>,
+    /// Open a moa of its own under ~/.local/state/moa-sandbox, apart from your real one.
+    #[arg(long)]
+    sandbox: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -27,7 +33,7 @@ enum Command {
     /// Run the daemon for a brain (started by the other commands, or by launchd/systemd).
     Daemon(daemon::DaemonArgs),
     /// Say whether the brain's moa is running, and who you are to it.
-    Status(ctl::BrainArgs),
+    Status(ctl::StatusArgs),
     /// Stop the brain's moa.
     Shutdown(ctl::BrainArgs),
     /// A read-only SQL shell on a brain: one statement, or one per line on stdin.
@@ -70,8 +76,10 @@ fn main() -> ExitCode {
         Some(Command::Sql(args)) => sql::sql(&args),
         Some(Command::Service(args)) => service::service(&args),
         None => {
-            eprintln!("moa v1 is still being built; use the spike's moa for now.");
-            return ExitCode::from(2);
+            return front::front(&front::FrontArgs {
+                brain: cli.brain,
+                sandbox: cli.sandbox,
+            });
         }
     };
     match result {
@@ -80,5 +88,45 @@ fn main() -> ExitCode {
             eprintln!("{message}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+    use moa_core::config::RESERVED_BRAIN_NAMES;
+
+    use super::*;
+
+    /// T18: `moa <subcommand>` can't also open a brain of that name.
+    #[test]
+    fn every_verb_and_subcommand_is_reserved() {
+        let mut cli = Cli::command();
+        cli.build();
+        let names: Vec<&str> = cli.get_subcommands().map(|c| c.get_name()).collect();
+        assert!(names.contains(&"help"), "{names:?}");
+        for name in names {
+            assert!(
+                RESERVED_BRAIN_NAMES.contains(&name),
+                "{name} isn't reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn a_brain_or_a_subcommand_but_not_both() {
+        let cli = Cli::try_parse_from(["moa", "work"]).unwrap();
+        assert_eq!(cli.brain.as_deref(), Some("work"));
+        assert!(cli.command.is_none() && !cli.sandbox);
+        let cli = Cli::try_parse_from(["moa", "--sandbox"]).unwrap();
+        assert!(cli.sandbox && cli.brain.is_none());
+        let cli = Cli::try_parse_from(["moa", "status"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Status(_))));
+        assert!(cli.brain.is_none());
+        assert!(Cli::try_parse_from(["moa", "work", "status"]).is_err());
+        // After a flag only a brain can follow; `moa.toml` can't name one `status`.
+        let cli = Cli::try_parse_from(["moa", "--sandbox", "status"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.brain.as_deref(), Some("status"));
     }
 }

@@ -1,0 +1,425 @@
+//! `moa [BRAIN]` and `moa --sandbox`: the front door. It starts or finds the brain's
+//! daemon, creates the terminal server when there is none (T1), and attaches the user.
+
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
+
+use moa_client::{Client, ClientOptions, OnMismatch, own_exe};
+use moa_core::config::BrainName;
+use moa_core::op::Op;
+use moa_core::state::CallerInfo;
+use moa_daemon::{DaemonError, load_config};
+use moa_platform::{
+    Paths, PathsError, Spawner, TmuxSocket, build_id, current_uid, ensure_private_dir,
+    sandbox_root, which,
+};
+use tokio::time::timeout;
+
+use crate::ctl::runtime;
+
+/// How long each answer from the daemon may take (T5).
+const ANSWER_WAIT: Duration = Duration::from_secs(10);
+const NOT_SWITCHED_OVER: &str = "moa v1 isn't switched over yet; try moa --sandbox";
+const NO_TMUX: &str = "moa needs tmux 3.4 or newer; install it and run moa again";
+
+pub struct FrontArgs {
+    pub brain: Option<String>,
+    pub sandbox: bool,
+}
+
+/// Whether this `moa` runs inside a terminal server, and whose.
+#[derive(PartialEq, Eq, Debug)]
+pub enum Nesting {
+    Outside,
+    /// This brain's own server.
+    Ours,
+    /// Any other server.
+    Other,
+}
+
+/// How the front door ends: a line to print, or the client to become.
+enum Next {
+    Say(String),
+    Become(Command),
+}
+
+pub fn front(args: &FrontArgs) -> ExitCode {
+    match open(args) {
+        Ok(Next::Say(line)) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Ok(Next::Become(mut cmd)) => {
+            // `exec` returns only when it failed.
+            let e = cmd.exec();
+            eprintln!("moa couldn't open its terminal: {e}");
+            ExitCode::from(1)
+        }
+        Err(line) => {
+            eprintln!("{line}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The paths `moa` works in: the sandbox's root for `--sandbox`, else the environment's.
+fn paths(sandbox: bool) -> Result<Paths, String> {
+    if !sandbox {
+        return Paths::from_env().map_err(|e| e.to_string());
+    }
+    // A relative HOME would put the sandbox under the current folder.
+    let home = std::env::var_os("HOME")
+        .filter(|h| Path::new(h).is_absolute())
+        .ok_or_else(|| PathsError::NoHome.to_string())?;
+    let root = sandbox_root(Path::new(&home));
+    ensure_private_dir(&root).map_err(|e| e.to_string())?;
+    Paths::from_vars(
+        Some(root.into()),
+        Some(home),
+        std::env::var_os("TMPDIR"),
+        current_uid(),
+        false,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The brain to open, which must be in `moa.toml`.
+fn pick_brain(paths: &Paths, name: Option<&str>) -> Result<BrainName, String> {
+    let brain = BrainName::parse(name.unwrap_or("default")).map_err(|e| {
+        let line = e.to_string();
+        line.strip_prefix("moa.toml: ").unwrap_or(&line).to_string()
+    })?;
+    let config = load_config(paths).map_err(|e| e.to_string())?;
+    if config.brain(&brain).is_none() {
+        return Err(DaemonError::NoSuchBrain(brain, paths.config_file()).to_string());
+    }
+    Ok(brain)
+}
+
+fn open(args: &FrontArgs) -> Result<Next, String> {
+    let paths = paths(args.sandbox)?;
+    // T21: until the switch-over only a sandbox's server is ever touched.
+    if !paths.is_sandboxed() {
+        return Err(NOT_SWITCHED_OVER.into());
+    }
+    let brain = pick_brain(&paths, args.brain.as_deref())?;
+    let b = brain.as_str();
+    let tmux = which("tmux", std::env::var_os("PATH").as_deref()).ok_or(NO_TMUX)?;
+    let socket = paths.tmux_socket(b).map_err(|e| e.to_string())?;
+    let tmux_tmpdir = std::env::var_os("TMUX_TMPDIR").filter(|v| !v.is_empty());
+    let socket_path = socket.path(tmux_tmpdir.as_deref().map(Path::new), current_uid());
+    let inside = nesting(std::env::var_os("TMUX").as_deref(), &socket_path);
+    if inside == Nesting::Other {
+        let open_it = if brain == BrainName::default_brain() {
+            "moa".to_string()
+        } else {
+            format!("moa {b}")
+        };
+        return Ok(Next::Say(format!(
+            "the {b} moa is running; open it from a new terminal tab: {open_it}"
+        )));
+    }
+
+    let rt = runtime()?;
+    let log = paths.log(b);
+    let mut client = rt.block_on(connect(&paths, brain.clone()))?;
+    if !rt.block_on(ensure(&mut client, &tmux, &log))? {
+        create(&paths, b, &tmux, &socket, &socket_path)?;
+        if !rt.block_on(ensure(&mut client, &tmux, &log))? {
+            return Err(format!(
+                "moa couldn't start its terminal server; see its log ({})",
+                log.display()
+            ));
+        }
+    }
+    drop(client);
+    drop(rt);
+
+    let mut cmd = Command::new(&tmux);
+    cmd.arg("-u").args(socket.args());
+    match inside {
+        // Inside its own server a second client would nest; the one there moves instead.
+        Nesting::Ours => cmd.args(["switch-client", "-t", "=moa"]),
+        _ => cmd.args(["attach", "-t", "=moa"]),
+    };
+    cmd.env_clear().envs(front_env(std::env::vars_os(), &paths));
+    Ok(Next::Become(cmd))
+}
+
+async fn connect(paths: &Paths, brain: BrainName) -> Result<Client, String> {
+    let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
+    let opts = ClientOptions {
+        paths: paths.clone(),
+        brain,
+        client: "moa",
+        caller: CallerInfo::default(),
+        autostart: Some(exe),
+        on_mismatch: OnMismatch::Restart,
+        build: build_id().into(),
+    };
+    Client::connect(opts).await.map_err(|e| e.to_string())
+}
+
+/// `tmux.ensure`: whether the server is there, with the daemon linked to it.
+async fn ensure(client: &mut Client, tmux: &Path, log: &Path) -> Result<bool, String> {
+    let op = Op::TmuxEnsure {
+        tmux: Some(tmux.to_path_buf()),
+    };
+    let done = timeout(ANSWER_WAIT, client.call(op))
+        .await
+        .map_err(|_| {
+            format!(
+                "moa didn't answer within 10 s; see its log ({})",
+                log.display()
+            )
+        })?
+        .map_err(|e| e.to_string())?;
+    Ok(done.data["running"].as_bool().unwrap_or(false))
+}
+
+/// Starts the brain's terminal server with T1's command, in the user's environment. A
+/// failure is fine when a server is there afterwards: another `moa` started it meanwhile.
+fn create(
+    paths: &Paths,
+    b: &str,
+    tmux: &Path,
+    socket: &TmuxSocket,
+    socket_path: &Path,
+) -> Result<(), String> {
+    if let Some(dir) = socket_path.parent() {
+        ensure_private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    let home = std::env::var_os("HOME")
+        .filter(|h| Path::new(h).is_absolute())
+        .map_or_else(|| paths.home().to_path_buf(), PathBuf::from);
+    let mut cmd = Command::new(tmux);
+    cmd.args(create_argv(socket, &paths.tmux_conf(b), &home))
+        .env_clear()
+        .envs(front_env(std::env::vars_os(), paths))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let failed = |why: &str| format!("moa couldn't start its terminal server: {why}");
+    let child = Spawner
+        .spawn(&mut cmd)
+        .map_err(|e| failed(&e.to_string()))?;
+    // The server it forks puts its stdio on /dev/null, so this returns once the client
+    // exits.
+    let out = child
+        .wait_with_output()
+        .map_err(|e| failed(&e.to_string()))?;
+    if out.status.success() || UnixStream::connect(socket_path).is_ok() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stderr.lines().next().unwrap_or("it stopped at once").trim();
+    Err(failed(first))
+}
+
+/// The environment a terminal server and its client get (T1): the user's, minus moa's and
+/// the agents' variables and `TMUX`/`TMUX_PANE`, plus `MOA_ROOT` when sandboxed. `SHELL`
+/// stays: a server without it takes the passwd entry's shell for every pane.
+pub fn front_env(
+    parent: impl Iterator<Item = (OsString, OsString)>,
+    paths: &Paths,
+) -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = parent
+        .filter(|(k, _)| {
+            let k = k.as_bytes();
+            !(k.starts_with(b"MOA_")
+                || k.starts_with(b"CLAUDE_CODE_")
+                || matches!(
+                    k,
+                    b"CLAUDECODE" | b"CLAUDE_CONFIG_DIR" | b"TMUX" | b"TMUX_PANE"
+                ))
+        })
+        .collect();
+    if paths.is_sandboxed() {
+        env.push(("MOA_ROOT".into(), paths.home().into()));
+    }
+    env
+}
+
+/// A socket path with its folder made canonical: the socket itself may not exist yet.
+fn canonical_socket(p: &Path) -> PathBuf {
+    match (p.parent(), p.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .join(name),
+        _ => p.to_path_buf(),
+    }
+}
+
+/// `$TMUX`'s socket (before its first `,`) against `ours`.
+pub fn nesting(tmux_var: Option<&OsStr>, ours: &Path) -> Nesting {
+    let Some(var) = tmux_var.filter(|v| !v.is_empty()) else {
+        return Nesting::Outside;
+    };
+    let bytes = var.as_bytes();
+    let theirs = bytes.split(|c| *c == b',').next().unwrap_or(bytes);
+    let theirs = Path::new(OsStr::from_bytes(theirs));
+    if canonical_socket(theirs) == canonical_socket(ours) {
+        Nesting::Ours
+    } else {
+        Nesting::Other
+    }
+}
+
+/// T1's command: the server with its config, the `_moa` session the daemon's link
+/// attaches to, and the `moa` session the user does, in `home`.
+pub fn create_argv(socket: &TmuxSocket, conf: &Path, home: &Path) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = socket.args().into();
+    argv.push("-f".into());
+    argv.push(conf.into());
+    argv.extend(
+        [
+            "new-session",
+            "-d",
+            "-s",
+            "_moa",
+            "-x",
+            "10",
+            "-y",
+            "3",
+            "/bin/sh",
+            ";",
+            "new-session",
+            "-d",
+            "-s",
+            "moa",
+            "-n",
+            "moa",
+            "-c",
+        ]
+        .map(OsString::from),
+    );
+    argv.push(home.into());
+    argv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sorted(env: Vec<(OsString, OsString)>) -> Vec<String> {
+        let mut v: Vec<String> = env
+            .into_iter()
+            .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn parent() -> impl Iterator<Item = (OsString, OsString)> {
+        [
+            ("MOA_SESSION", "7"),
+            ("MOA_BRAIN", "work"),
+            ("MOA_ROOT", "/elsewhere"),
+            ("MOA_REAL_HOME", "1"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+            ("CLAUDE_CONFIG_DIR", "/x"),
+            ("TMUX", "/t,1,0"),
+            ("TMUX_PANE", "%1"),
+            ("PATH", "/bin"),
+            ("HOME", "/home/u"),
+            ("SHELL", "/bin/zsh"),
+            ("TERM", "xterm-ghostty"),
+            ("SSH_AUTH_SOCK", "/a.sock"),
+            ("TMUX_TMPDIR", "/run/t"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+    }
+
+    #[test]
+    fn front_env_drops_agent_and_moa_variables() {
+        let kept = [
+            "HOME=/home/u",
+            "PATH=/bin",
+            "SHELL=/bin/zsh",
+            "SSH_AUTH_SOCK=/a.sock",
+            "TERM=xterm-ghostty",
+            "TMUX_TMPDIR=/run/t",
+        ];
+        let sandboxed = Paths::with_root(Path::new("/r"));
+        let mut want: Vec<&str> = kept.to_vec();
+        want.push("MOA_ROOT=/r");
+        want.sort();
+        assert_eq!(sorted(front_env(parent(), &sandboxed)), want);
+
+        let real = Paths::from_vars(None, Some("/home/u".into()), None, 501, true).unwrap();
+        assert_eq!(sorted(front_env(parent(), &real)), kept);
+    }
+
+    #[test]
+    fn nesting_compares_socket_paths() {
+        let dir = tempfile::Builder::new()
+            .prefix("moa")
+            .tempdir_in("/tmp")
+            .unwrap();
+        // The socket needn't exist yet: only its folder is made canonical.
+        let ours = dir.path().join("tmux-default");
+        let var = |p: &Path| {
+            let mut v = p.as_os_str().to_owned();
+            v.push(",123,0");
+            v
+        };
+        assert_eq!(nesting(Some(&var(&ours)), &ours), Nesting::Ours);
+        let other = dir.path().join("tmux-work");
+        assert_eq!(nesting(Some(&var(&other)), &ours), Nesting::Other);
+        assert_eq!(
+            nesting(Some(OsStr::new("/tmp/elsewhere/default,1,0")), &ours),
+            Nesting::Other
+        );
+        // A path with a `..` in it is the same socket.
+        let around = dir.path().join("x/../tmux-default");
+        std::fs::create_dir(dir.path().join("x")).unwrap();
+        assert_eq!(nesting(Some(&var(&around)), &ours), Nesting::Ours);
+        assert_eq!(nesting(None, &ours), Nesting::Outside);
+        assert_eq!(nesting(Some(OsStr::new("")), &ours), Nesting::Outside);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nesting_sees_through_the_tmp_link() {
+        assert_eq!(
+            nesting(Some(OsStr::new("/tmp/x,1,0")), Path::new("/private/tmp/x")),
+            Nesting::Ours
+        );
+        assert_eq!(
+            nesting(Some(OsStr::new("/private/tmp/x,1,0")), Path::new("/tmp/x")),
+            Nesting::Ours
+        );
+    }
+
+    #[test]
+    fn create_argv_is_t1s_command() {
+        let argv = create_argv(
+            &TmuxSocket::Path("/r/run/tmux-default".into()),
+            Path::new("/r/default/tmux.conf"),
+            Path::new("/home/u"),
+        );
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv.join(" "),
+            "-S /r/run/tmux-default -f /r/default/tmux.conf \
+             new-session -d -s _moa -x 10 -y 3 /bin/sh ; \
+             new-session -d -s moa -n moa -c /home/u"
+        );
+        let named = create_argv(
+            &TmuxSocket::Name("moa".into()),
+            Path::new("/c"),
+            Path::new("/h"),
+        );
+        assert_eq!(named[..2], [OsString::from("-L"), OsString::from("moa")]);
+    }
+}

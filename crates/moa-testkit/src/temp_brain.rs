@@ -55,7 +55,8 @@ impl TempBrain {
         self.paths().db(brain)
     }
 
-    /// What to give a `moa` process run against this root.
+    /// What to give a `moa` process run against this root. `SHELL=/bin/sh` for the same
+    /// reason as in [`TempBrain::tmux`]: a `moa` that starts a terminal server passes it on.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
         vec![
             ("MOA_ROOT".into(), self.root().into()),
@@ -63,6 +64,7 @@ impl TempBrain {
             ("TZ".into(), TYPICAL_TZ.into()),
             ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
             ("TERM".into(), "xterm-256color".into()),
+            ("SHELL".into(), "/bin/sh".into()),
         ]
     }
 

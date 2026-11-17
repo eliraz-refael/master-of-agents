@@ -454,3 +454,15 @@ fn the_most_specific_folder_owns_a_path() {
     );
     assert_eq!(Config::default().brain_for_folder(Path::new("/h")), None);
 }
+
+#[test]
+fn a_brain_named_like_a_verb_is_refused() {
+    for name in ["brief", "ls", "status", "daemon", "adopt-spike", "help"] {
+        assert_eq!(
+            err(&format!("[brains.{name}]\n")),
+            format!("moa.toml: a brain can't be called {name}; moa uses that word for a command"),
+        );
+    }
+    // A word that only looks like one is fine.
+    Config::parse("[brains.briefs]\n", home()).unwrap();
+}

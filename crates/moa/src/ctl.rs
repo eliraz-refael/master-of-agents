@@ -22,6 +22,15 @@ pub struct BrainArgs {
     brain: Option<String>,
 }
 
+#[derive(Args)]
+pub struct StatusArgs {
+    #[command(flatten)]
+    brain: BrainArgs,
+    /// Print the daemon's whole status as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
 /// Where this command was typed, as the environment and the folder say.
 pub(crate) struct Here {
     pub(crate) paths: Paths,
@@ -124,7 +133,7 @@ pub(crate) fn pick_brain(
     Ok(brain)
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -171,11 +180,17 @@ fn verb(m: &Moactl) -> Result<(), String> {
     })
 }
 
-/// `moa status`.
-pub fn status(args: &BrainArgs) -> ExitCode {
-    finish(running(args, false, |brain, client| async move {
+/// `moa status`. The terminal server's version and pid are in `--json` only.
+pub fn status(args: &StatusArgs) -> ExitCode {
+    let json = args.json;
+    finish(running(&args.brain, false, |brain, client| async move {
         let mut client = client;
         let s = client.status().await.map_err(|e| e.to_string())?;
+        if json {
+            let text = serde_json::to_string(&s).map_err(|e| e.to_string())?;
+            println!("{text}");
+            return Ok(());
+        }
         println!(
             "moa {brain}: running, build {}, pid {}, {} launches",
             s.build, s.pid, s.launches
@@ -194,6 +209,12 @@ pub fn status(args: &BrainArgs) -> ExitCode {
         } else {
             println!("sessions: {}", live.join(", "));
         }
+        let terminal = if s.tmux.is_some() {
+            "connected"
+        } else {
+            "not connected"
+        };
+        println!("terminal: {terminal}");
         Ok(())
     }))
 }

@@ -21,8 +21,9 @@ moa-platform = { path = "../moa-platform" }
 moa-proto = { path = "../moa-proto" }
 moa-store = { path = "../moa-store" }
 rusqlite.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio ={ workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]

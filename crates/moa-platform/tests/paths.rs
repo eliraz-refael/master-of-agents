@@ -1,7 +1,7 @@
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use moa_platform::{Paths, PathsError, TmuxSocket, ensure_private_dir};
+use moa_platform::{Paths, PathsError, TmuxSocket, ensure_private_dir, sandbox_root};
 
 fn p(root: &str) -> Paths {
     Paths::with_root(Path::new(root))
@@ -390,5 +390,13 @@ fn io_errors_name_the_path() {
     assert!(
         err.to_string().contains(&under.display().to_string()),
         "{err}"
+    );
+}
+
+#[test]
+fn the_sandbox_lives_under_local_state() {
+    assert_eq!(
+        sandbox_root(Path::new("/home/u")),
+        Path::new("/home/u/.local/state/moa-sandbox")
     );
 }
