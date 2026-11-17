@@ -127,6 +127,15 @@ impl Terminal {
         .is_some()
     }
 
+    /// The last `n` bytes of output since the last `mark`, escaped for a failure message.
+    pub fn tail(&self, n: usize) -> String {
+        let from = *lock(&self.mark);
+        let out = lock(&self.out);
+        let seen = &out[from.min(out.len())..];
+        let seen = &seen[seen.len().saturating_sub(n)..];
+        format!("{:?}", String::from_utf8_lossy(seen))
+    }
+
     /// The pty's path: what tmux calls this client.
     pub fn tty(&self) -> String {
         self.tty.clone()
