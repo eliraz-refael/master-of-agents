@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
-use moa_testkit::{TempBrain, Terminal};
+use moa_testkit::{TempBrain, Terminal, wait_for};
 
 use common::*;
 
@@ -84,6 +84,68 @@ fn moa_inside_its_own_server_switches_instead_of_nesting() {
     // Still one terminal: no client was started inside a shell.
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(user_clients(&tb), ["moa"]);
+
+    // With the `moa` session gone, `moa` there makes it, then switches to it.
+    tmux(&tb, &["switch-client", "-c", &term.tty(), "-t", "=other"]);
+    clients_become(&tb, &["other"]);
+    tmux(&tb, &["kill-session", "-t", "=moa"]);
+    term.press(format!("'{MOA}'\r").as_bytes());
+    clients_become(&tb, &["moa"]);
+    let home = std::fs::canonicalize(tb.root()).unwrap();
+    let path = tmux(
+        &tb,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            "=moa:",
+            "#{pane_current_path}",
+        ],
+    );
+    assert_eq!(Path::new(&path), home);
+}
+
+/// The `moa` session gone (its last shell exited) while `_moa` keeps the server: the next
+/// `moa` makes it again, from the user's terminal, so its first shell has the user's
+/// variables and starts in the home folder.
+#[test]
+fn moa_makes_a_missing_moa_session_in_the_users_environment() {
+    let tb = TempBrain::new(None);
+    let first = open(&tb, &[], &[("SSH_AUTH_SOCK", "/tmp/first.sock")]);
+    assert!(first.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    clients_become(&tb, &["moa"]);
+    tmux(&tb, &["kill-session", "-t", "=moa"]);
+    clients_become(&tb, &[]);
+
+    let term = open(&tb, &[], &[("SSH_AUTH_SOCK", "/tmp/second.sock")]);
+    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    clients_become(&tb, &["moa"]);
+    let env = tmux(&tb, &["show-environment", "-t", "=moa"]);
+    assert!(
+        env.lines().any(|l| l == "SSH_AUTH_SOCK=/tmp/second.sock"),
+        "{env}"
+    );
+    // The first shell itself has it, not only the sessions made after an attach.
+    let seen = tb.root().join("seen");
+    term.press(format!("echo \"$SSH_AUTH_SOCK\" > '{}'\r", seen.display()).as_bytes());
+    let said = wait_for(SHOWS, || {
+        std::fs::read_to_string(&seen)
+            .ok()
+            .filter(|t| t.ends_with('\n'))
+    });
+    assert_eq!(said.as_deref(), Some("/tmp/second.sock\n"));
+    let home = std::fs::canonicalize(tb.root()).unwrap();
+    let path = tmux(
+        &tb,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            "=moa:",
+            "#{pane_current_path}",
+        ],
+    );
+    assert_eq!(Path::new(&path), home);
 }
 
 #[test]

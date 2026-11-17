@@ -154,15 +154,70 @@ fn open(args: &FrontArgs) -> Result<Next, String> {
     drop(client);
     drop(rt);
 
+    // The `moa` session is made here when it's missing (its last shell exited), never by
+    // the daemon: a session takes its first shell's variables and folder from the client
+    // that makes it, and only this one has the user's.
+    let home = user_home(&paths);
     let mut cmd = Command::new(&tmux);
     cmd.arg("-u").args(socket.args());
     match inside {
         // Inside its own server a second client would nest; the one there moves instead.
-        Nesting::Ours => cmd.args(["switch-client", "-t", "=moa"]),
-        _ => cmd.args(["attach", "-t", "=moa"]),
+        Nesting::Ours => {
+            make_moa_session(&paths, &tmux, &socket, &home)?;
+            cmd.args(["switch-client", "-t", "=moa"]);
+        }
+        _ => {
+            cmd.args(moa_session_argv(false, &home));
+        }
     };
     cmd.env_clear().envs(front_env(std::env::vars_os(), &paths));
     Ok(Next::Become(cmd))
+}
+
+/// The user's home folder, where the `moa` session starts: `HOME`, else the paths' home.
+fn user_home(paths: &Paths) -> PathBuf {
+    std::env::var_os("HOME")
+        .filter(|h| Path::new(h).is_absolute())
+        .map_or_else(|| paths.home().to_path_buf(), PathBuf::from)
+}
+
+/// The `moa` session in `home`: made in the background (`detached`), or attached, and made
+/// first when it's missing.
+pub fn moa_session_argv(detached: bool, home: &Path) -> Vec<OsString> {
+    let how = if detached { "-d" } else { "-A" };
+    let mut argv: Vec<OsString> = ["new-session", how, "-s", "moa", "-n", "moa", "-c"]
+        .map(OsString::from)
+        .into();
+    argv.push(home.into());
+    argv
+}
+
+/// Makes the `moa` session in the background when it's missing, in the user's environment.
+/// One that's there already is fine.
+fn make_moa_session(
+    paths: &Paths,
+    tmux: &Path,
+    socket: &TmuxSocket,
+    home: &Path,
+) -> Result<(), String> {
+    let mut cmd = Command::new(tmux);
+    cmd.args(socket.args())
+        .args(moa_session_argv(true, home))
+        .env_clear()
+        .envs(front_env(std::env::vars_os(), paths))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let failed = |why: &str| format!("moa couldn't open its terminal: {why}");
+    let out = Spawner
+        .spawn(&mut cmd)
+        .and_then(|c| c.wait_with_output())
+        .map_err(|e| failed(&e.to_string()))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || stderr.starts_with("duplicate session") {
+        return Ok(());
+    }
+    Err(failed(stderr.lines().next().unwrap_or("").trim()))
 }
 
 /// The line for a `moa` run inside another terminal server: the command that opens this
@@ -279,11 +334,8 @@ fn create(
     if let Some(dir) = socket_path.parent() {
         ensure_private_dir(dir).map_err(|e| e.to_string())?;
     }
-    let home = std::env::var_os("HOME")
-        .filter(|h| Path::new(h).is_absolute())
-        .map_or_else(|| paths.home().to_path_buf(), PathBuf::from);
     let mut cmd = Command::new(tmux);
-    cmd.args(create_argv(socket, &paths.tmux_conf(b), &home))
+    cmd.args(create_argv(socket, &paths.tmux_conf(b), &user_home(paths)))
         .env_clear()
         .envs(front_env(std::env::vars_os(), paths))
         .stdin(Stdio::null())
@@ -376,17 +428,10 @@ pub fn create_argv(socket: &TmuxSocket, conf: &Path, home: &Path) -> Vec<OsStrin
             "3",
             "/bin/sh",
             ";",
-            "new-session",
-            "-d",
-            "-s",
-            "moa",
-            "-n",
-            "moa",
-            "-c",
         ]
         .map(OsString::from),
     );
-    argv.push(home.into());
+    argv.extend(moa_session_argv(true, home));
     argv
 }
 
@@ -510,6 +555,19 @@ mod tests {
         assert_eq!(line(&work, false), "moa work");
         assert_eq!(line(&default, true), "moa --sandbox");
         assert_eq!(line(&work, true), "moa --sandbox work");
+    }
+
+    #[test]
+    fn the_moa_session_is_attached_or_made_in_home() {
+        let text = |detached| {
+            moa_session_argv(detached, Path::new("/home/u"))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(text(false), "new-session -A -s moa -n moa -c /home/u");
+        assert_eq!(text(true), "new-session -d -s moa -n moa -c /home/u");
     }
 
     #[test]

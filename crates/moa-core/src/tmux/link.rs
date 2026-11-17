@@ -16,11 +16,7 @@ use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::op::{ConnId, Done, OpError, ReqId};
 
-/// The session moa's front door attaches to.
-const MOA_SESSION: &str = "moa";
-
 const NOT_TMUX: &str = "that isn't a tmux program";
-const NO_WINDOW: &str = "moa couldn't open its window; see the log";
 const GAVE_UP: &str = "moa lost its terminal server and couldn't reconnect; see the log";
 const NO_TMUX: &str = "moa can't find tmux; install tmux 3.4 or newer";
 const DISABLED: &str = "moa v1 isn't switched over yet; try moa --sandbox";
@@ -82,11 +78,9 @@ pub struct TmuxState {
     pub topology: Topology,
     /// How many times the server was seen to restart (a new generation).
     pub restarts: u32,
-    /// `tmux.ensure` callers waiting for the link and the `moa` session.
+    /// `tmux.ensure` callers waiting for the link.
     waiters: Vec<(ConnId, ReqId)>,
     refresh: Refresh,
-    /// The `moa` session was asked for since it was last seen missing.
-    cockpit: bool,
     /// The last server generation the link connected to.
     generation: Option<Generation>,
     /// The tmux program the front door found.
@@ -106,7 +100,6 @@ impl Default for TmuxState {
             restarts: 0,
             waiters: Vec::new(),
             refresh: Refresh::Idle,
-            cockpit: false,
             generation: None,
             tmux: None,
             written: Written::default(),
@@ -147,7 +140,8 @@ impl TmuxState {
         vec![self.connect()]
     }
 
-    /// `tmux.ensure`: answered now, or once the link knows.
+    /// `tmux.ensure`: answered now, or once the link knows. Linked is running: the `moa`
+    /// session is the front door's to make, in the user's environment (T1).
     pub(crate) fn ensure(
         &mut self,
         conn: ConnId,
@@ -165,19 +159,11 @@ impl TmuxState {
             self.tmux = Some(t);
         }
         match self.link {
-            Link::Up { .. } if self.topology.session_named(MOA_SESSION).is_some() => {
-                vec![Effect::Reply {
-                    conn,
-                    req,
-                    result: running(true),
-                }]
-            }
-            Link::Up { .. } => {
-                self.waiters.push((conn, req));
-                // Asked again: the `moa` session may be created again.
-                self.cockpit = false;
-                self.refresh()
-            }
+            Link::Up { .. } => vec![Effect::Reply {
+                conn,
+                req,
+                result: running(true),
+            }],
             Link::Connecting => {
                 self.waiters.push((conn, req));
                 Vec::new()
@@ -210,7 +196,6 @@ impl TmuxState {
                 }
                 match token {
                     TmuxToken::Refresh => self.listed(&results),
-                    TmuxToken::Cockpit => self.created(&results),
                 }
             }
         }
@@ -220,7 +205,6 @@ impl TmuxState {
     /// failed commit or a panic may have left it half-changed.
     pub(crate) fn reload(&mut self) -> Vec<Effect> {
         self.refresh = Refresh::Idle;
-        self.cockpit = false;
         self.written.reset();
         match self.link {
             Link::Up { .. } => self.refresh(),
@@ -279,7 +263,6 @@ impl TmuxState {
         if self.conn() != Some(conn) {
             // A new connection: nothing asked on another one will be answered.
             self.refresh = Refresh::Idle;
-            self.cockpit = false;
         }
         if self.generation.is_some_and(|g| g != generation) {
             self.restarts += 1;
@@ -293,6 +276,7 @@ impl TmuxState {
             ctl,
         };
         self.written.reset();
+        fx.extend(self.answer(&running(true)));
         fx.extend(self.refresh());
         fx
     }
@@ -306,7 +290,6 @@ impl TmuxState {
         self.topology = Topology::default();
         self.written.reset();
         self.refresh = Refresh::Idle;
-        self.cockpit = false;
         // Nobody is known to be attached any more: the status clock stops.
         let mut fx = Vec::new();
         if self.clock_at.take().is_some() {
@@ -370,60 +353,19 @@ impl TmuxState {
         let again = self.refresh == Refresh::Again;
         self.refresh = Refresh::Idle;
         let mut fx = Vec::new();
-        let listed = match results {
+        match results {
             [Ok(sessions), Ok(panes), Ok(clients)] => {
                 self.topology = Topology::from_lists(sessions, panes, clients);
-                true
             }
-            _ => {
-                fx.push(log(
-                    LogLevel::Warn,
-                    "listing the terminal server failed".into(),
-                ));
-                false
-            }
-        };
+            // No information: what was known stays.
+            _ => fx.push(log(
+                LogLevel::Warn,
+                "listing the terminal server failed".into(),
+            )),
+        }
         if again {
             fx.extend(self.refresh());
         }
-        // No information: what was known stays, and nothing is decided on it.
-        if !listed {
-            return fx;
-        }
-        if self.topology.session_named(MOA_SESSION).is_some() {
-            self.cockpit = false;
-            fx.extend(self.answer(&running(true)));
-        } else if !self.cockpit
-            && let Some(conn) = self.conn()
-        {
-            self.cockpit = true;
-            fx.push(Effect::Tmux {
-                conn,
-                cmds: vec![Cmd::new("new-session").args([
-                    "-d",
-                    "-s",
-                    MOA_SESSION,
-                    "-n",
-                    MOA_SESSION,
-                ])],
-                token: Some(TmuxToken::Cockpit),
-            });
-        }
-        fx
-    }
-
-    /// The `moa` session create came back. On success the server says its sessions changed,
-    /// and the refresh that follows answers the waiters.
-    fn created(&mut self, results: &[Result<Vec<String>, String>]) -> Vec<Effect> {
-        let Some(e) = results.iter().find_map(|r| r.as_ref().err()) else {
-            return Vec::new();
-        };
-        let first = e.lines().next().unwrap_or("");
-        let mut fx = vec![log(
-            LogLevel::Warn,
-            format!("creating the moa session failed: {first}"),
-        )];
-        fx.extend(self.answer(&Err(OpError(NO_WINDOW.into()))));
         fx
     }
 

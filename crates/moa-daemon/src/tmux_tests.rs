@@ -157,12 +157,13 @@ async fn a_second_connect_reports_the_same_client_and_launches_nothing() {
     assert_eq!(heard.next_state().await, first);
     assert_eq!(spawn::launches(), before + 1);
 
-    // Plumbing on this connection is answered with its token; on another, it is dropped.
+    // Plumbing on this connection is answered with its token; on another, it is dropped
+    // (its list, which would come first, says `X`).
     actor
         .send(TmuxCmd::Send {
             conn: conn + 1,
-            cmds: sessions(),
-            token: Some(TmuxToken::Cockpit),
+            cmds: vec![Cmd::new("list-sessions").args(["-F", "X #{session_name}"])],
+            token: Some(TmuxToken::Refresh),
         })
         .unwrap();
     actor

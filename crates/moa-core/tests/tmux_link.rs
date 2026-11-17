@@ -1,5 +1,6 @@
-//! The tmux link in the core: connect, `tmux.ensure`, refresh, the `moa` session and
-//! server generations, every input through `handle_checked`.
+//! The tmux link in the core: connect, `tmux.ensure`, refresh and server generations,
+//! every input through `handle_checked`. The `moa` session is the front door's: the core
+//! never creates it.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -12,7 +13,6 @@ use moa_core::effect::{
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{CallerInfo, State, TmuxLinkData};
-use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, WindowId};
 use moa_core::tmux::link::Link;
 use moa_core::tmux::notify::Notification;
@@ -114,14 +114,6 @@ fn refresh_effect(conn: u64) -> Effect {
     }
 }
 
-fn cockpit_effect(conn: u64) -> Effect {
-    Effect::Tmux {
-        conn,
-        cmds: vec![Cmd::new("new-session").args(["-d", "-s", "moa", "-n", "moa"])],
-        token: Some(TmuxToken::Cockpit),
-    }
-}
-
 /// The link's own plumbing; the status line's writes are tested in `tmux_status`.
 fn tmux_effects(fx: &[Effect]) -> Vec<&Effect> {
     fx.iter()
@@ -183,19 +175,21 @@ fn startup_asks_to_connect() {
 }
 
 #[test]
-fn ensure_waits_for_the_link_and_the_moa_session() {
+fn ensure_waits_for_the_link_only() {
     let mut s = started();
     let fx = ensure(&mut s);
     assert!(replies(&fx).is_empty());
     assert!(connects(&fx).is_empty(), "already connecting");
+    // Linked is running: the `moa` session isn't waited for.
     let fx = connected(&mut s, 1, generation(10));
-    assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
-    let fx = reply_lists(&mut s, 1, WITH_MOA);
     assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
-    assert!(tmux_effects(&fx).is_empty());
-    // Now it answers at once.
+    assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
+    let fx = reply_lists(&mut s, 1, WITHOUT_MOA);
+    assert!(replies(&fx).is_empty());
+    // Now it answers at once, and asks the server nothing.
     let fx = ensure_as(&mut s, 2, None);
     assert_eq!(replies(&fx), vec![(ReqId(2), running(true))]);
+    assert!(tmux_effects(&fx).is_empty());
 }
 
 #[test]
@@ -217,71 +211,18 @@ fn ensure_without_a_server_says_not_running() {
 }
 
 #[test]
-fn a_missing_moa_session_is_created_once() {
+fn a_missing_moa_session_is_left_to_the_front_door() {
     let mut s = started();
-    ensure(&mut s);
     connected(&mut s, 1, generation(10));
     let fx = reply_lists(&mut s, 1, WITHOUT_MOA);
-    assert_eq!(tmux_effects(&fx), vec![&cockpit_effect(1)]);
-    assert!(replies(&fx).is_empty());
-    let fx = reply_lists(&mut s, 1, WITHOUT_MOA);
-    assert!(tmux_effects(&fx).is_empty());
+    assert!(tmux_effects(&fx).is_empty(), "nothing is created");
     let fx = feed(&mut s, TmuxIn::Notification(Notification::SessionsChanged));
     assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
-    let fx = reply_lists(&mut s, 1, WITH_MOA);
+    let fx = reply_lists(&mut s, 1, WITHOUT_MOA);
+    assert!(tmux_effects(&fx).is_empty(), "nothing is created");
+    let fx = ensure(&mut s);
     assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
     assert!(tmux_effects(&fx).is_empty());
-}
-
-#[test]
-fn a_failed_cockpit_create_answers_the_waiters() {
-    let mut s = started();
-    ensure(&mut s);
-    connected(&mut s, 1, generation(10));
-    reply_lists(&mut s, 1, WITHOUT_MOA);
-    let fx = feed(
-        &mut s,
-        TmuxIn::Replies {
-            conn: 1,
-            token: TmuxToken::Cockpit,
-            results: vec![Err("duplicate session: moa\nsecond line".into())],
-        },
-    );
-    assert_eq!(
-        replies(&fx),
-        vec![(
-            ReqId(1),
-            refused("moa couldn't open its window; see the log")
-        )]
-    );
-    assert_eq!(
-        logs(&fx, LogLevel::Warn),
-        vec!["creating the moa session failed: duplicate session: moa".to_string()]
-    );
-    // The waiters were answered once.
-    let fx = reply_lists(&mut s, 1, WITH_MOA);
-    assert!(replies(&fx).is_empty());
-}
-
-#[test]
-fn ensure_after_a_failed_cockpit_create_tries_again() {
-    let mut s = started();
-    ensure(&mut s);
-    connected(&mut s, 1, generation(10));
-    reply_lists(&mut s, 1, WITHOUT_MOA);
-    feed(
-        &mut s,
-        TmuxIn::Replies {
-            conn: 1,
-            token: TmuxToken::Cockpit,
-            results: vec![Err("no".into())],
-        },
-    );
-    let fx = ensure_as(&mut s, 2, None);
-    assert!(replies(&fx).is_empty());
-    assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
-    let fx = reply_lists(&mut s, 1, WITHOUT_MOA);
-    assert_eq!(tmux_effects(&fx), vec![&cockpit_effect(1)]);
 }
 
 #[test]
@@ -341,17 +282,18 @@ fn too_old_and_missing_tmux_answer_in_one_line() {
 #[test]
 fn lost_keeps_the_waiters_and_connects_once() {
     let mut s = started();
-    ensure(&mut s);
     connected(&mut s, 1, generation(10));
     let fx = feed(&mut s, TmuxIn::Down(Down::Lost));
-    assert!(replies(&fx).is_empty());
     assert_eq!(s.tmux().link, Link::Connecting);
-    let fx = ensure_as(&mut s, 2, None);
-    assert!(replies(&fx).is_empty());
-    assert!(connects(&fx).is_empty());
+    assert!(connects(&fx).is_empty(), "the link reconnects itself");
+    // While it reconnects, every ensure waits, and none asks to connect.
+    for req in [1, 2] {
+        let fx = ensure_as(&mut s, req, None);
+        assert!(replies(&fx).is_empty());
+        assert!(connects(&fx).is_empty());
+    }
     let fx = connected(&mut s, 2, generation(10));
     assert_eq!(tmux_effects(&fx), vec![&refresh_effect(2)]);
-    let fx = reply_lists(&mut s, 2, WITH_MOA);
     assert_eq!(
         replies(&fx),
         vec![(ReqId(1), running(true)), (ReqId(2), running(true))]
@@ -396,18 +338,9 @@ fn replies_from_an_old_connection_are_dropped() {
 fn a_failed_list_keeps_the_topology() {
     let mut s = started();
     connected(&mut s, 1, generation(10));
-    // No moa yet: one create is sent, and it worked.
     reply_lists(&mut s, 1, WITHOUT_MOA);
-    feed(
-        &mut s,
-        TmuxIn::Replies {
-            conn: 1,
-            token: TmuxToken::Cockpit,
-            results: vec![Ok(vec![])],
-        },
-    );
-    // An ensure clears the attempt and lists again; the panes list fails.
-    ensure(&mut s);
+    // The sessions changed, so it lists again; the panes list fails.
+    feed(&mut s, TmuxIn::Notification(Notification::SessionsChanged));
     let mut results = lists(WITHOUT_MOA);
     results[1] = Err("server exited unexpectedly".into());
     let fx = feed(
@@ -418,8 +351,7 @@ fn a_failed_list_keeps_the_topology() {
             results,
         },
     );
-    assert!(tmux_effects(&fx).is_empty(), "no create on no information");
-    assert!(replies(&fx).is_empty());
+    assert!(tmux_effects(&fx).is_empty());
     assert_eq!(
         logs(&fx, LogLevel::Warn),
         vec!["listing the terminal server failed".to_string()]
@@ -463,7 +395,6 @@ fn a_bad_tmux_path_is_refused() {
 #[test]
 fn reload_keeps_the_link_and_restarts_its_bookkeeping() {
     let mut s = started();
-    ensure(&mut s);
     connected(&mut s, 1, generation(10));
     // The refresh is in flight; a reload forgets it and asks again.
     let fx = handle_checked(
@@ -476,7 +407,7 @@ fn reload_keeps_the_link_and_restarts_its_bookkeeping() {
     );
     assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
     assert!(matches!(s.tmux().link, Link::Up { conn: 1, .. }));
-    let fx = reply_lists(&mut s, 1, WITH_MOA);
+    let fx = ensure(&mut s);
     assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
 
     // While connecting, a reload asks to connect again.
@@ -503,7 +434,6 @@ fn effect_ordering() {
     assert!(check_order(&[view.clone(), Effect::Persist(vec![])]).is_err());
     assert!(!view.runs_at_once());
     assert!(refresh_effect(1).runs_at_once());
-    assert!(cockpit_effect(1).runs_at_once());
     assert!(Effect::TmuxConnect { tmux: None }.runs_at_once());
     // Plumbing isn't heard: a Persist may follow it.
     assert!(check_order(&[refresh_effect(1), Effect::Persist(vec![])]).is_ok());

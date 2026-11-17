@@ -80,14 +80,12 @@ pub(crate) enum TmuxCmd {
 fn tag_of(token: TmuxToken) -> u64 {
     match token {
         TmuxToken::Refresh => 1,
-        TmuxToken::Cockpit => 2,
     }
 }
 
 fn token_of(tag: u64) -> Option<TmuxToken> {
     match tag {
         1 => Some(TmuxToken::Refresh),
-        2 => Some(TmuxToken::Cockpit),
         _ => None,
     }
 }
