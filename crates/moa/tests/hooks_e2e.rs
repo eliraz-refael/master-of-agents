@@ -8,13 +8,19 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use moa_platform::spool;
+use moa_client::{Client, ClientOptions, OnMismatch};
+use moa_core::config::BrainName;
+use moa_core::publish::Topic;
+use moa_core::state::CallerInfo;
+use moa_platform::{build_id_of, spool};
 use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
 use serde_json::{Map, Value, json};
 
@@ -26,6 +32,88 @@ const LIMIT: Duration = Duration::from_secs(10);
 const BEAT: u64 = 300;
 /// More than any pipe holds, so a write this big ends only once the reader is reading.
 const PAD: usize = 1 << 20;
+
+/// Every `display_state` the daemon publishes for each session, in order, with repeats
+/// collapsed: a subscription to the sessions topic, read on a thread of its own. A state
+/// that lasts one beat is recorded however slowly the test itself runs.
+struct Recorder {
+    seen: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
+}
+
+impl Recorder {
+    /// Subscribed once this returns, so nothing published after it is missed.
+    fn start(tb: &TempBrain) -> Recorder {
+        let seen: Arc<Mutex<BTreeMap<String, Vec<String>>>> = Arc::default();
+        let opts = ClientOptions {
+            paths: tb.paths(),
+            brain: BrainName::default_brain(),
+            client: "hooks-e2e",
+            caller: CallerInfo::default(),
+            autostart: None,
+            on_mismatch: OnMismatch::Accept,
+            build: build_id_of(Path::new(MOA)).unwrap(),
+        };
+        let (ready, subscribed) = mpsc::channel();
+        let rows = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let mut client = match Client::connect(opts).await {
+                    Ok(c) => c,
+                    Err(e) => return drop(ready.send(Err(e.to_string()))),
+                };
+                match client.subscribe(&[Topic::Sessions]).await {
+                    Ok(snapshot) => {
+                        let now = snapshot.topics.get(&Topic::Sessions);
+                        record(&rows, now.map(Vec::as_slice).unwrap_or_default());
+                        let _ = ready.send(Ok(()));
+                    }
+                    Err(e) => return drop(ready.send(Err(e.to_string()))),
+                }
+                // Until the daemon goes, when the TempBrain drops.
+                while let Ok((method, params)) = client.next_notice().await {
+                    let at = match method.as_str() {
+                        "patch" => "/upsert/sessions",
+                        "snapshot" => "/topics/sessions",
+                        _ => continue,
+                    };
+                    if let Some(Value::Array(changed)) = params.pointer(at) {
+                        record(&rows, changed);
+                    }
+                }
+            });
+        });
+        let started = subscribed.recv_timeout(LIMIT).expect("no subscription");
+        started.unwrap_or_else(|e| panic!("subscribe: {e}"));
+        Recorder { seen }
+    }
+
+    /// What session `id` has shown so far.
+    fn of(&self, id: &str) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+fn record(seen: &Mutex<BTreeMap<String, Vec<String>>>, rows: &[Value]) {
+    let mut seen = seen.lock().unwrap();
+    for row in rows {
+        let (Some(id), Some(state)) = (row["key"].as_str(), row["display_state"].as_str()) else {
+            continue;
+        };
+        let states = seen.entry(id.to_string()).or_default();
+        if states.last().map(String::as_str) != Some(state) {
+            states.push(state.to_string());
+        }
+    }
+}
 
 /// A root with the fake account, and `moa` on a terminal, linked to its daemon.
 struct Rig {
@@ -128,9 +216,9 @@ impl Rig {
 
     /// A hook that has stamped its time and waits for the last byte of `payload`.
     fn held_hook(&self, s: &Opened, payload: &Value) -> Held {
-        let mut padded = payload.clone();
-        padded["pad"] = json!("x".repeat(PAD));
-        let bytes = padded.to_string().into_bytes();
+        // The pad is leading whitespace, not a field: the hook parses the payload and sends
+        // it re-serialized, so the line on the wire stays small.
+        let bytes = (" ".repeat(PAD) + &payload.to_string()).into_bytes();
         let (head, last) = bytes.split_at(bytes.len() - 1);
         let mut child = self.hook(s).spawn().unwrap();
         // The hook stamps its time first thing, then reads. A write bigger than the pipe
@@ -214,6 +302,7 @@ fn conversation(tb: &TempBrain, id: &str) -> String {
 #[test]
 fn fake_agents_drive_every_display_state() {
     let r = rig();
+    let rec = Recorder::start(&r.tb);
     let s = r.open(
         "a",
         &[
@@ -234,11 +323,28 @@ fn fake_agents_drive_every_display_state() {
             FakeStep::Exit,
         ],
     );
-    for want in [
-        "working", "waiting", "working", "question", "failed", "done", "ended",
-    ] {
-        r.shows(&s.id, want);
-    }
+    let ended = wait_for(LIMIT, || {
+        (rec.of(&s.id).last().map(String::as_str) == Some("ended")).then_some(())
+    });
+    assert!(ended.is_some(), "{:?}", rec.of(&s.id));
+    let all = rec.of(&s.id);
+    // The open publishes the new session as idle before its first prompt. The two prompts
+    // fired right before a StopFailure or a Stop are working only for as long as one hook
+    // takes, so the daemon may publish that or not.
+    let flicker = |i: usize| {
+        all[i] == "working" && matches!(all.get(i + 1).map(String::as_str), Some("failed" | "done"))
+    };
+    let shown: Vec<&str> = (0..all.len())
+        .filter(|&i| !(i == 0 && all[i] == "idle") && !flicker(i))
+        .map(|i| all[i].as_str())
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "working", "waiting", "working", "question", "failed", "done", "ended"
+        ],
+        "{all:?}"
+    );
 }
 
 /// No SessionEnd: the pane's exit ends it (H18).
