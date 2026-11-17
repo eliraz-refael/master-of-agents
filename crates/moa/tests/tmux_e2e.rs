@@ -288,12 +288,14 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
     moa_key(&tb, &term, "c", NOT_RUNNING);
 }
 
+/// The user's own file, with screen's prefix (Ctrl-a), a waiting command and a hook.
 #[test]
 fn a_user_tmux_conf_with_run_shell_and_hooks() {
     let tb = typical();
     std::fs::write(
         tb.root().join(".tmux.conf"),
-        "set -g @user_opt 1\n\
+        "set -g prefix C-a\n\
+         set -g @user_opt 1\n\
          run-shell 'sleep 1'\n\
          set-hook -g pane-exited[5] 'set -g @user_hook 1'\n",
     )
