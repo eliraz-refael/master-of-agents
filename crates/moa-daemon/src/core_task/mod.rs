@@ -27,6 +27,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::clock::Clock;
 use crate::scheduler::{self, SchedCmd};
+use crate::tmux::{self, TmuxCmd, TmuxLink};
 
 mod drain;
 mod recover;
@@ -69,6 +70,9 @@ pub struct CoreOptions {
     pub backups: PathBuf,
     /// How many events a slow subscriber may fall behind by (256).
     pub events_capacity: usize,
+    /// The terminal link. Without one, every connect is answered `Down(Disabled)` and
+    /// commands for the server are dropped.
+    pub tmux: Option<TmuxLink>,
 }
 
 /// Counters for tests and the idle check. Startup counts as an input, a drain and (when it
@@ -177,6 +181,17 @@ impl CoreHandle {
         store: Store,
         faults: Vec<Fault>,
     ) -> Result<CoreHandle, DaemonError> {
+        Self::start_inner(opts, store, faults, None).await
+    }
+
+    /// `link`, when given, stands in for the terminal link that `opts.tmux` would start
+    /// (tests that watch what the core sends it).
+    pub(crate) async fn start_inner(
+        mut opts: CoreOptions,
+        store: Store,
+        faults: Vec<Fault>,
+        link: Option<mpsc::UnboundedSender<TmuxCmd>>,
+    ) -> Result<CoreHandle, DaemonError> {
         let store = StoreHandle::spawn(store, opts.backups.clone());
         for fault in faults {
             store.fault(fault);
@@ -220,9 +235,34 @@ impl CoreHandle {
             },
         );
 
+        // Weak for the same reason: the core owns the link.
+        let link = link.or_else(|| {
+            let (heard, failed) = (inbox.downgrade(), inbox.downgrade());
+            opts.tmux.take().map(|l| {
+                tmux::start(
+                    l,
+                    move |input| {
+                        if let Some(inbox) = heard.upgrade() {
+                            let _ = inbox.send(Item::Input(Input::Tmux(input)));
+                        }
+                    },
+                    // The panic's message stays here: it may carry contents.
+                    move |actor, _message| {
+                        if let Some(inbox) = failed.upgrade() {
+                            let _ = inbox.send(Item::Input(Input::ActorFailed {
+                                actor,
+                                message: String::new(),
+                            }));
+                        }
+                    },
+                )
+            })
+        });
+
         let conns = Conns::default();
         let core = Core {
             inbox: inbox.downgrade(),
+            link,
             state,
             store: store.clone(),
             clock: opts.clock,
@@ -330,9 +370,9 @@ impl CoreHandle {
         let _ = self.inbox.send(Item::Crash);
     }
 
-    /// Tests only: the link reports `input`, as the terminal link will once it exists.
+    /// What the terminal link reports. The link has its own way in; tests play it here.
     #[doc(hidden)]
-    pub fn tmux_in(&self, input: moa_core::effect::TmuxIn) {
+    pub fn tmux_input(&self, input: moa_core::effect::TmuxIn) {
         let _ = self.inbox.send(Item::Input(Input::Tmux(input)));
     }
 

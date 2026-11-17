@@ -6,11 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use moa_core::change::Change;
-use moa_core::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, check_order};
+use moa_core::effect::{
+    Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, TmuxToken, check_order,
+};
 use moa_core::op::OpError;
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::State;
@@ -28,6 +31,8 @@ pub(super) struct Core {
     /// The core's own inbox, for answers it gives itself. Weak, so the loop still ends
     /// when every handle has gone.
     pub(super) inbox: mpsc::WeakUnboundedSender<Item>,
+    /// The terminal link, when the daemon has one.
+    pub(super) link: Option<mpsc::UnboundedSender<TmuxCmd>>,
     pub(super) state: State,
     pub(super) store: SharedStore,
     pub(super) clock: Arc<dyn Clock>,
@@ -74,6 +79,8 @@ pub(super) enum Stepped {
 }
 
 const BUG_REPLY: &str = "moa hit a bug answering that; it reloaded";
+/// How long the end of the loop waits for the terminal link to take its hooks down.
+const LINK_STOP_WAIT: Duration = Duration::from_secs(2);
 pub(super) const UNEXPECTED: &str = "the core stopped unexpectedly; see the log";
 pub(super) const BUG_LOADING: &str = "moa hit a bug loading the brain; see the log";
 
@@ -98,6 +105,7 @@ impl Core {
             }
         };
         self.wait_for_backups().await;
+        self.stop_link().await;
         // Nobody waits for the process to exit: what is left is told to try again, and the
         // connections' senders drop.
         inbox.close();
@@ -285,21 +293,52 @@ impl Core {
                 LogLevel::Warn => tracing::warn!("{message}"),
                 LogLevel::Error => tracing::error!("{message}"),
             },
-            // There is no terminal link yet: the core hears so through its inbox, never
-            // inside the `handle` that asked.
-            Effect::TmuxConnect { .. } => {
-                if let Some(inbox) = self.inbox.upgrade() {
-                    let down = Input::Tmux(TmuxIn::Down(Down::Disabled));
-                    let _ = inbox.send(Item::Input(down));
+            Effect::TmuxConnect { tmux } => match &self.link {
+                Some(link) => {
+                    let _ = link.send(TmuxCmd::Connect { tmux });
                 }
-            }
-            // The commands stay out of the log.
+                // No terminal link: the core hears so through its inbox, never inside the
+                // `handle` that asked.
+                None => {
+                    if let Some(inbox) = self.inbox.upgrade() {
+                        let down = Input::Tmux(TmuxIn::Down(Down::Disabled));
+                        let _ = inbox.send(Item::Input(down));
+                    }
+                }
+            },
             Effect::Tmux {
                 conn,
                 cmds,
                 token: Some(token),
-            } => tracing::debug!(conn, cmds = cmds.len(), ?token, "no terminal link: dropped"),
+            } => self.to_link(conn, cmds, Some(token)),
             _ => {}
+        }
+    }
+
+    /// Commands for the server, to the link if there is one.
+    fn to_link(&self, conn: u64, cmds: Vec<Cmd>, token: Option<TmuxToken>) {
+        match &self.link {
+            Some(link) => {
+                let _ = link.send(TmuxCmd::Send { conn, cmds, token });
+            }
+            // The commands stay out of the log.
+            None => tracing::debug!(conn, cmds = cmds.len(), ?token, "no terminal link: dropped"),
+        }
+    }
+
+    /// Asks the link to take its hooks down and close, and waits for it a short while.
+    async fn stop_link(&mut self) {
+        let Some(link) = self.link.take() else {
+            return;
+        };
+        let (done, stopped) = oneshot::channel();
+        if link.send(TmuxCmd::Stop(done)).is_ok()
+            && tokio::time::timeout(LINK_STOP_WAIT, stopped).await.is_err()
+        {
+            tracing::warn!(
+                "the terminal link didn't stop within {} s",
+                LINK_STOP_WAIT.as_secs()
+            );
         }
     }
 
@@ -342,10 +381,9 @@ impl Core {
                 Held::Status(reply, data, _) => {
                     let _ = reply.send(data);
                 }
-                // The commands stay out of the log.
                 Held::Tmux { conn, cmds } => {
                     self.stats.views_released.fetch_add(1, Ordering::SeqCst);
-                    tracing::debug!(conn, cmds = cmds.len(), "no terminal link: dropped");
+                    self.to_link(conn, cmds, None);
                 }
                 Held::Barrier(reply) => {
                     self.store().sync().await;

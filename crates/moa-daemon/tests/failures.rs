@@ -53,6 +53,7 @@ async fn rig() -> Rig {
         db: brain.db.clone(),
         backups: brain.dir.path().join("backups"),
         events_capacity: 256,
+        tmux: None,
     };
     let core = within(CoreHandle::start(opts))
         .await
@@ -82,6 +83,7 @@ async fn rig_read_only() -> Rig {
             db: brain.db.clone(),
             backups: brain.dir.path().join("backups"),
             events_capacity: 256,
+            tmux: None,
         },
         store,
     ))
@@ -430,6 +432,7 @@ async fn a_panic_in_startup_fails_start() {
         db: brain.db.clone(),
         backups: brain.dir.path().join("backups"),
         events_capacity: 256,
+        tmux: None,
     }))
     .await;
     match started {
@@ -517,8 +520,9 @@ fn lists_with_a_user() -> TmuxIn {
     }
 }
 
-// There is no terminal link in the daemon yet, so a released view has no observable but
-// the counter: it counts views let go after a commit, dropped or not.
+// This core has no terminal link, so a released view has no observable but the counter: it
+// counts views let go after a commit, sent or not. What the link is sent is watched by
+// `a_view_held_by_a_failed_commit_never_reaches_the_link`, in the crate.
 #[tokio::test]
 async fn a_status_write_waits_for_the_commit_and_is_dropped_when_it_fails() {
     let rig = rig().await;
@@ -534,7 +538,7 @@ async fn a_status_write_waits_for_the_commit_and_is_dropped_when_it_fails() {
     // Queued behind the primer: a write that fails, and the link coming up (a status
     // write that shows state the failed commit never saved).
     send(&rig.core, c, 2, group_add("Doomed"));
-    rig.core.tmux_in(link_up());
+    rig.core.tmux_input(link_up());
     release.send(()).unwrap();
     reply(&mut rx).await.expect("Primer is ok");
     assert!(
@@ -548,7 +552,7 @@ async fn a_status_write_waits_for_the_commit_and_is_dropped_when_it_fails() {
     assert_eq!(stats.views_released.load(Ordering::SeqCst), 1);
 
     // A write after a good commit is released.
-    rig.core.tmux_in(lists_with_a_user());
+    rig.core.tmux_input(lists_with_a_user());
     rig.core.barrier().await;
     assert_eq!(stats.views_released.load(Ordering::SeqCst), 2);
 }

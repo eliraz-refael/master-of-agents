@@ -45,6 +45,7 @@ async fn rig() -> Rig {
         db: brain.db.clone(),
         backups: brain.dir.path().join("backups"),
         events_capacity: 256,
+        tmux: None,
     }))
     .await
     .expect("the core starts");
@@ -237,6 +238,7 @@ async fn a_slow_startup_backup_does_not_delay_start() {
             db: brain.db.clone(),
             backups: backups.clone(),
             events_capacity: 256,
+            tmux: None,
         },
         brain.store(),
         vec![Fault::PauseNextBackup(gate)],
@@ -250,8 +252,8 @@ async fn a_slow_startup_backup_does_not_delay_start() {
     assert!(backups.join("daily-2026-11-15.db").exists());
 }
 
-/// Until the terminal link is wired, the core task answers every connect itself: an ensure
-/// is told v1 isn't switched over instead of waiting forever.
+/// With no terminal link (a real brain before the switch-over, T21), the core task answers
+/// every connect itself: an ensure is told v1 isn't switched over instead of waiting forever.
 #[tokio::test]
 async fn tmux_ensure_says_v1_isnt_switched_over() {
     let rig = rig().await;

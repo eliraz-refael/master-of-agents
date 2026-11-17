@@ -1,22 +1,24 @@
 //! A throwaway `MOA_ROOT` on a short `/tmp` path, for tests that run a real daemon. Dropping
-//! it stops the daemons it started.
+//! it stops the daemons it started, then the terminal servers under it.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use moa_agents::claude::find_transcript;
-use moa_platform::{Paths, kill_term};
+use moa_platform::{Paths, ensure_private_dir, kill_term, pid_alive};
 use moa_store::Store;
 use moa_store::accounts::AccountMap;
 use moa_store::import::{IdSource, ImportEnv, import_spike};
 use tempfile::TempDir;
 
 use crate::brain::{TYPICAL_TZ, typical_now_ms, tz};
-use crate::{Scenario, SpikeFixture, wait_for};
+use crate::{Scenario, SpikeFixture, TMUX_NOT_FOUND, wait_for};
 
 /// How long a daemon has to let go of its lock after `shutdown`.
 const STOP_WAIT: Duration = Duration::from_secs(3);
@@ -60,7 +62,69 @@ impl TempBrain {
             ("HOME".into(), self.root().into()),
             ("TZ".into(), TYPICAL_TZ.into()),
             ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+            ("TERM".into(), "xterm-256color".into()),
         ]
+    }
+
+    /// Runs a tmux command against `brain`'s terminal server (`-S <tmux_socket(brain)>`),
+    /// with the environment cleared, then `PATH`, `HOME` (the root), `TERM` and `LANG`.
+    /// Stdout with trailing newlines trimmed, or `Err` carrying stderr on a non-zero exit.
+    /// The only way tests reach a TempBrain's server (T23).
+    pub fn tmux(&self, brain: &str, args: &[&str]) -> io::Result<String> {
+        let socket = self
+            .paths()
+            .tmux_socket(brain)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        // A server started before any daemon still needs the socket's folder.
+        if let Some(dir) = socket.path(None, 0).parent() {
+            ensure_private_dir(dir).map_err(|e| io::Error::other(e.to_string()))?;
+        }
+        let out = Command::new("tmux")
+            .arg("-u")
+            .args(socket.args())
+            .args(args)
+            .env_clear()
+            .envs([
+                ("PATH", std::env::var_os("PATH").unwrap_or_default()),
+                ("HOME", self.root().into()),
+                ("TERM", "xterm-256color".into()),
+                ("LANG", "C.UTF-8".into()),
+            ])
+            .output()
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND)
+                } else {
+                    e
+                }
+            })?;
+        if !out.status.success() {
+            return Err(io::Error::other(
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .to_string())
+    }
+
+    /// Kills `brain`'s terminal server when its socket is there, and waits for it to exit.
+    fn kill_tmux(&self, brain: &str) {
+        let Ok(socket) = self.paths().tmux_socket(brain) else {
+            return;
+        };
+        if !socket.path(None, 0).exists() {
+            return;
+        }
+        let pid = self.tmux(brain, &["display-message", "-p", "#{pid}"]).ok();
+        let _ = self.tmux(brain, &["kill-server"]);
+        let Some(pid) = pid.and_then(|p| p.parse::<u32>().ok()) else {
+            return;
+        };
+        if wait_for(STOP_WAIT, || (!pid_alive(pid)).then_some(())).is_none() {
+            // Never leave a server running once its socket's folder is deleted.
+            kill_term(pid);
+        }
     }
 
     /// The Typical spike fixture under `<root>/spike-home`, imported into `db(brain)` with
@@ -122,18 +186,27 @@ fn lock_is_free(lock: &Path) -> bool {
 
 impl Drop for TempBrain {
     /// Stops every daemon with a lock under this root: asks it to `shutdown`, waits for the
-    /// lock to be free, and sends SIGTERM to the pid it reported if it still holds it.
-    /// Errors are ignored.
+    /// lock to be free, and sends SIGTERM to the pid it reported if it still holds it. Then
+    /// kills the terminal server of every brain it found (by its lock or its `tmux-<b>`
+    /// socket), once the daemons have taken their hooks down. Errors are ignored.
     fn drop(&mut self) {
         let paths = self.paths();
         let Ok(entries) = fs::read_dir(paths.run_dir()) else {
             return;
         };
+        let mut brains = BTreeSet::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let Some(brain) = name.to_str().and_then(|n| n.strip_suffix(".lock")) else {
+            let Some(name) = name.to_str() else {
                 continue;
             };
+            if let Some(brain) = name.strip_prefix("tmux-") {
+                brains.insert(brain.to_string());
+            }
+            let Some(brain) = name.strip_suffix(".lock") else {
+                continue;
+            };
+            brains.insert(brain.to_string());
             let pid = paths.socket(brain).ok().and_then(|s| ask_to_stop(&s));
             let free = wait_for(STOP_WAIT, || lock_is_free(&entry.path()).then_some(()));
             if free.is_none()
@@ -142,6 +215,9 @@ impl Drop for TempBrain {
                 kill_term(pid);
                 let _ = wait_for(STOP_WAIT, || lock_is_free(&entry.path()).then_some(()));
             }
+        }
+        for brain in brains {
+            self.kill_tmux(&brain);
         }
     }
 }
