@@ -3,12 +3,13 @@
 #![allow(dead_code)]
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::os::unix::fs::symlink;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use moa_testkit::{TempBrain, Terminal, wait_for};
+use moa_testkit::{TempBrain, Terminal, fake_claude, wait_for};
 use serde_json::Value;
 
 pub const MOA: &str = env!("CARGO_BIN_EXE_moa");
@@ -84,6 +85,63 @@ pub fn status_json(tb: &TempBrain) -> Value {
     let o = run(tb, &["status", "--json"], &[]);
     assert!(o.status.success(), "{}{}", out(&o), err(&o));
     serde_json::from_str(&out(&o)).unwrap()
+}
+
+pub fn shutdown(tb: &TempBrain) {
+    let o = run(tb, &["shutdown"], &[]);
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+}
+
+/// `moactl`, linked to `moa` as an install would.
+pub fn moactl(tb: &TempBrain) -> PathBuf {
+    let bin = tb.root().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("moactl");
+    if !path.exists() {
+        symlink(MOA, &path).unwrap();
+    }
+    path
+}
+
+/// Waits until `term` shows the status line and the daemon reports its terminal link.
+pub fn came_up(tb: &TempBrain, term: &Terminal) {
+    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    let linked = wait_for(SHOWS, || status_json(tb)["tmux"].is_object().then_some(()));
+    assert!(linked.is_some(), "not linked: {}", status_json(tb));
+}
+
+/// The root's `moa.toml`: brain `default` on `<root>/work`, opening sessions with `acct-a`,
+/// a Claude account whose store is `<root>/.claude-a` and whose launcher is fake-claude, so
+/// the real `claude` is never looked for. Both folders are made.
+pub fn moa_toml_with_fake_account(tb: &TempBrain) {
+    let work = tb.root().join("work");
+    let store = tb.root().join(".claude-a");
+    for dir in [&work, &store] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let toml = format!(
+        "[brains.default]\nfolders = [\"{}\"]\nopen_account = \"acct-a\"\n\n\
+         [accounts.acct-a]\nkind = \"claude\"\nstore = \"{}\"\nlauncher = \"{}\"\n",
+        work.display(),
+        store.display(),
+        fake_claude().display()
+    );
+    let paths = tb.paths();
+    std::fs::create_dir_all(paths.config_dir()).unwrap();
+    std::fs::write(paths.config_file(), toml).unwrap();
+}
+
+/// Session `id`'s row in `moa ls --json`, or `None` while it isn't listed.
+pub fn ls_row(tb: &TempBrain, id: &str) -> Option<Value> {
+    let o = run(tb, &["--json", "ls"], &[]);
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    let rows: Value = serde_json::from_str(&out(&o)).unwrap();
+    rows.as_array()?.iter().find(|r| r["id"] == id).cloned()
+}
+
+/// Session `id`'s `display` in `moa ls --json`, or `None` while it isn't listed.
+pub fn ls_display(tb: &TempBrain, id: &str) -> Option<String> {
+    ls_row(tb, id)?["display"].as_str().map(str::to_string)
 }
 
 /// Waits until the user clients are `want`.

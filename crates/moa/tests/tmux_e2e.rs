@@ -7,8 +7,6 @@
 
 mod common;
 
-use std::os::unix::fs::symlink;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use moa_core::live::{DisplayState, display_state};
@@ -30,13 +28,6 @@ fn typical() -> TempBrain {
     let tb = TempBrain::new(None);
     tb.adopt_typical(B);
     tb
-}
-
-/// Waits until `term` shows the status line and the daemon reports its terminal link.
-fn came_up(tb: &TempBrain, term: &Terminal) {
-    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
-    let linked = wait_for(SHOWS, || status_json(tb)["tmux"].is_object().then_some(()));
-    assert!(linked.is_some(), "not linked: {}", status_json(tb));
 }
 
 fn option(tb: &TempBrain, name: &str) -> String {
@@ -133,22 +124,6 @@ fn terminal_says(tb: &TempBrain, line: &str) {
 /// Session hooks and window hooks, which tmux lists apart.
 fn hooks(tb: &TempBrain) -> String {
     tmux(tb, &["show-hooks", "-g"]) + "\n" + &tmux(tb, &["show-hooks", "-gw"])
-}
-
-fn shutdown(tb: &TempBrain) {
-    let o = run(tb, &["shutdown"], &[]);
-    assert!(o.status.success(), "{}{}", out(&o), err(&o));
-}
-
-/// `moactl`, linked to `moa` as an install would.
-fn moactl(tb: &TempBrain) -> PathBuf {
-    let bin = tb.root().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let path = bin.join("moactl");
-    if !path.exists() {
-        symlink(MOA, &path).unwrap();
-    }
-    path
 }
 
 #[test]
