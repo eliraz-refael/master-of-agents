@@ -21,3 +21,12 @@ fn a_peer_that_already_left_still_has_a_user() {
     let (accepted, _) = listener.accept().unwrap();
     assert_eq!(peer_uid(accepted.as_fd()).unwrap(), current_uid());
 }
+
+/// Anything but a Unix socket fails closed: there is no peer user, so the daemon turns the
+/// connection away.
+#[test]
+fn a_pipe_has_no_peer_user() {
+    let (read, write) = std::io::pipe().unwrap();
+    assert!(peer_uid(read.as_fd()).is_err());
+    assert!(peer_uid(write.as_fd()).is_err());
+}

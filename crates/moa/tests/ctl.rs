@@ -539,3 +539,49 @@ fn cli_flow_launches_nothing_after_start() {
     ok(&o);
     assert!(out(&o).contains(" 0 launches"), "{}", out(&o));
 }
+
+/// M7: `moactl open <path>` goes to the brain the folder it opens belongs to, not the one of
+/// the folder it was typed in. `acct-b` writes to `work` except in `~/private`: typed in
+/// `~/private/lantern`, opening `~/work/beacon` goes to `work`. With `MOA_BRAIN` set, that
+/// says where it goes, as before.
+#[test]
+fn open_goes_to_the_brain_of_the_folder_it_opens() {
+    let r = rig(Some(
+        r#"
+[brains.default]
+folders = ["~/private"]
+
+[brains.work]
+folders = ["~/work"]
+
+[accounts.acct-b]
+kind = "claude"
+store = "~/.claude-b"
+brain = "work"
+except = ["~/private"]
+"#,
+    ));
+    let store = r.tb.root().join(".claude-b");
+    fs::create_dir_all(&store).unwrap();
+    let store = store.to_str().unwrap();
+    let target = r.tb.root().join("work/beacon");
+    fs::create_dir_all(&target).unwrap();
+    let target = target.to_str().unwrap();
+    let o = r.run_as(
+        &r.moactl_path(),
+        &["open", target],
+        &[("CLAUDE_CONFIG_DIR", store)],
+    );
+    assert_eq!(err(&o), "moa isn't open in a terminal yet; run moa first\n");
+    assert_eq!(r.sockets(), ["work.sock"]);
+
+    let o = r.run_as(
+        &r.moactl_path(),
+        &["open", target],
+        &[("CLAUDE_CONFIG_DIR", store), ("MOA_BRAIN", "default")],
+    );
+    assert_eq!(err(&o), "moa isn't open in a terminal yet; run moa first\n");
+    let mut sockets = r.sockets();
+    sockets.sort();
+    assert_eq!(sockets, ["default.sock", "work.sock"]);
+}

@@ -865,6 +865,51 @@ fn a_pane_exit_ends_its_bound_session() {
     }
 }
 
+/// A clean exit: the agent's `SessionEnd` comes first and ends the session; the pane's exit
+/// after it still takes the binding away, and writes no second "ended" row.
+#[test]
+fn a_pane_exit_after_the_session_ended_still_unbinds_it() {
+    let mut st = seeded_with(vec![pane_binding(10)]);
+    link_up(&mut st);
+    let fx = feed(&mut st, ends(1, 1000, "prompt_input_exit"));
+    assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
+    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
+    assert_eq!(
+        changes(&fx)
+            .iter()
+            .filter(|c| matches!(c, Change::DeletePaneBinding(s) if *s == sid()))
+            .count(),
+        1,
+        "{fx:?}"
+    );
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+    assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+}
+
+/// The other order: the pane's exit is seen first and ends the session; the agent's
+/// `SessionEnd`, sent just before it exited, arrives after. It is older than the exit, so it
+/// is history only: no second "ended" row.
+#[test]
+fn a_session_end_after_the_pane_exit_is_history_only() {
+    let mut st = seeded_with(vec![pane_binding(10)]);
+    link_up(&mut st);
+    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
+    assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
+    let fx = feed(&mut st, ends(1, 59_000, "prompt_input_exit"));
+    assert_eq!(event_kinds(&fx), ["session.ended"]);
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+    assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+}
+
+/// M8: a session with no folder has no folder in its feed line, and no space before it.
+#[test]
+fn a_feed_line_without_a_folder_has_no_leading_space() {
+    let mut st = seeded();
+    reseed(&mut st, None, |s| s.cwd = None);
+    let fx = feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    assert_eq!(activity_texts(&fx), ["› Fix the lamp"]);
+}
+
 #[test]
 fn a_pane_exit_under_refused_writes_changes_nothing_and_is_logged() {
     let mut st = seeded_with(vec![pane_binding(10)]);

@@ -32,7 +32,9 @@ fn kind_of(
             prompt: cut_middle(text(payload, "prompt").unwrap_or("")),
         },
         "Stop" => {
+            // A blank message is no message.
             let last = text(payload, "last_assistant_message")
+                .filter(|m| !m.trim().is_empty())
                 .map(str::to_string)
                 .or_else(|| tail(Path::new(text(payload, "transcript_path")?)))
                 .unwrap_or_default();
@@ -107,8 +109,12 @@ pub fn normalize(line: &HookLine, tail: &dyn Fn(&Path) -> Option<String>) -> Opt
 }
 
 /// The last `text` item of the last assistant line, from the final 256 KiB of a transcript.
-/// It never fails loudly: anything unreadable is `None`.
+/// It never fails loudly: anything unreadable is `None`. Only a regular file is opened: the
+/// path comes from a payload, and opening a FIFO would block the caller's thread.
 pub fn last_assistant_text(transcript: &Path) -> Option<String> {
+    if !std::fs::metadata(transcript).ok()?.is_file() {
+        return None;
+    }
     let mut file = File::open(transcript).ok()?;
     let len = file.metadata().ok()?.len();
     // One byte before the window too: a window that starts exactly on a line then keeps

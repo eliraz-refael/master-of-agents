@@ -284,3 +284,103 @@ fn last_assistant_text_reads_only_the_tail_and_survives_junk() {
     drop(f);
     assert_eq!(last_assistant_text(&path), None);
 }
+
+/// The positive case of the window: an assistant line inside the last 256 KiB, behind more
+/// than 256 KiB of other lines, is found, even with a line cut by the window's start.
+#[test]
+fn last_assistant_text_finds_a_line_inside_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.jsonl");
+    let mut f = std::fs::File::create(&path).unwrap();
+    for _ in 0..3000 {
+        writeln!(f, "{}", json!({"type":"user","pad":"x".repeat(100)})).unwrap();
+    }
+    writeln!(
+        f,
+        "{}",
+        json!({"type":"assistant","message":{"content":[{"type":"text","text":"in the window"}]}})
+    )
+    .unwrap();
+    for _ in 0..100 {
+        writeln!(f, "{}", json!({"type":"user","pad":"y".repeat(100)})).unwrap();
+    }
+    drop(f);
+    assert!(std::fs::metadata(&path).unwrap().len() > 256 * 1024);
+    assert_eq!(last_assistant_text(&path).as_deref(), Some("in the window"));
+}
+
+/// M2: an empty or blank message is no message: the transcript's tail stands in.
+#[test]
+fn a_stop_with_a_blank_message_reads_the_transcript_tail() {
+    for blank in ["", "  \n"] {
+        let mut payload = fixture("stop");
+        payload["last_assistant_message"] = json!(blank);
+        let tail = |_: &Path| Some("from the tail".to_string());
+        let env = normalize(&line(payload), &tail).unwrap();
+        assert_eq!(
+            env.kind,
+            HookKind::TurnEnded {
+                last_message: "from the tail".into()
+            },
+            "{blank:?}"
+        );
+    }
+}
+
+/// M4: a transcript path that names a folder or a FIFO is not read: opening a FIFO would
+/// block the daemon's thread until something writes to it.
+#[test]
+fn last_assistant_text_reads_only_a_regular_file() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(last_assistant_text(dir.path()), None);
+    let fifo = dir.path().join("pipe.jsonl");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(last_assistant_text(&fifo));
+    });
+    let read = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("reading a FIFO blocked");
+    assert_eq!(read, None);
+}
+
+/// The seam between the plugin and the normalizer: every event the plugin subscribes to
+/// (each subject its matcher names, too) normalizes to an event for the core, from a
+/// minimal synthetic payload.
+#[test]
+fn every_subscribed_event_normalizes_to_something() {
+    let files = moa_agents::claude::session_plugin(Path::new("/opt/moa"));
+    let (_, text) = files
+        .iter()
+        .find(|(rel, _)| *rel == "hooks/hooks.json")
+        .expect("the plugin's hooks");
+    let hooks: Value = serde_json::from_str(text).unwrap();
+    let events = hooks["hooks"].as_object().expect("hooks by event");
+    assert!(!events.is_empty());
+    for (event, entries) in events {
+        for entry in entries.as_array().unwrap() {
+            let subjects: Vec<Option<&str>> = match entry["matcher"].as_str() {
+                Some(m) => m.split('|').map(Some).collect(),
+                None => vec![None],
+            };
+            for subject in subjects {
+                let mut payload = json!({"hook_event_name": event, "session_id": "conv-1"});
+                match event.as_str() {
+                    "PreToolUse" => payload["tool_name"] = json!(subject.unwrap()),
+                    "Notification" => payload["notification_type"] = json!(subject.unwrap()),
+                    "CwdChanged" => payload["new_cwd"] = json!("/work/Lantern"),
+                    _ => {}
+                }
+                assert!(
+                    normalize(&line(payload), &no_tail).is_some(),
+                    "{event} {subject:?}"
+                );
+            }
+        }
+    }
+}

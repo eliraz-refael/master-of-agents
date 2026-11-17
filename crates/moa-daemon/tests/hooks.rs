@@ -390,7 +390,7 @@ async fn a_drain_whose_commit_fails_keeps_the_draining_file() {
     put_in_spool(&live, &[hook_line("Stop", ago(10_000), 1)]);
     // Startup writes nothing here, so the fault meets the drain's commit.
     let core = timeout(
-        Duration::from_secs(5),
+        WAIT,
         CoreHandle::start_with_faults(
             options(&brain, &live),
             brain.store(),
@@ -406,13 +406,10 @@ async fn a_drain_whose_commit_fails_keeps_the_draining_file() {
     core.stop().await;
 
     // The next start drains them.
-    let core = timeout(
-        Duration::from_secs(5),
-        CoreHandle::start(options(&brain, &live)),
-    )
-    .await
-    .expect("not stuck")
-    .expect("the core starts");
+    let core = timeout(WAIT, CoreHandle::start(options(&brain, &live)))
+        .await
+        .expect("not stuck")
+        .expect("the core starts");
     assert!(!draining.exists());
     core.stop().await;
 }
@@ -428,13 +425,10 @@ async fn a_hook_left_queued_at_stop_is_spooled() {
     let brain = TypicalBrain::new();
     seed(&mut brain.store());
     let live = brain.dir.path().join("spool").join("default.jsonl");
-    let core = timeout(
-        Duration::from_secs(5),
-        CoreHandle::start(options(&brain, &live)),
-    )
-    .await
-    .expect("not stuck")
-    .expect("the core starts");
+    let core = timeout(WAIT, CoreHandle::start(options(&brain, &live)))
+        .await
+        .expect("not stuck")
+        .expect("the core starts");
     // The first hook's commit is held; `stop` joins the inbox behind it, and the hooks
     // after that are still waiting when the core stops.
     let (release, held) = std::sync::mpsc::channel();
@@ -442,7 +436,7 @@ async fn a_hook_left_queued_at_stop_is_spooled() {
     let (t1, t2, t3, t4) = (ago(30_000), ago(20_000), ago(10_000), ago(5_000));
     core_hook(&core, &hook_line("UserPromptSubmit", t1, 1));
     let stats = core.stats();
-    timeout(Duration::from_secs(5), async {
+    timeout(WAIT, async {
         while stats.commits.load(std::sync::atomic::Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
@@ -455,9 +449,7 @@ async fn a_hook_left_queued_at_stop_is_spooled() {
     core_hook(&core, &hook_line("Stop", t2, 2));
     core_hook(&core, &hook_line("UserPromptSubmit", t3, 3));
     release.send(()).unwrap();
-    timeout(Duration::from_secs(5), stopping)
-        .await
-        .expect("the core stops");
+    timeout(WAIT, stopping).await.expect("the core stops");
     core.ended().await;
     // The core is gone: a hook now is spooled at once, the failed-enqueue path.
     core_hook(&core, &hook_line("Stop", t4, 4));
@@ -466,13 +458,10 @@ async fn a_hook_left_queued_at_stop_is_spooled() {
     drop(core);
 
     // The next start applies them after the one that was committed.
-    let core = timeout(
-        Duration::from_secs(5),
-        CoreHandle::start(options(&brain, &live)),
-    )
-    .await
-    .expect("not stuck")
-    .expect("the core starts");
+    let core = timeout(WAIT, CoreHandle::start(options(&brain, &live)))
+        .await
+        .expect("not stuck")
+        .expect("the core starts");
     let store = brain.store();
     let mut stmt = store
         .conn()
@@ -557,20 +546,17 @@ async fn a_hook_that_panics_the_core_is_still_answered() {
     let brain = TypicalBrain::new();
     seed(&mut brain.store());
     let live = brain.dir.path().join("spool").join("default.jsonl");
-    let core = timeout(
-        Duration::from_secs(5),
-        CoreHandle::start(options(&brain, &live)),
-    )
-    .await
-    .expect("not stuck")
-    .expect("the core starts");
+    let core = timeout(WAIT, CoreHandle::start(options(&brain, &live)))
+        .await
+        .expect("not stuck")
+        .expect("the core starts");
     let (conn, mut replies) = core.open_conn();
     core.panic_next_handle();
     let line: HookLine = serde_json::from_value(hook_line("SessionStart", ago(1000), 1)).unwrap();
     let envelope = normalize(&line, &last_assistant_text).expect("a known event");
     core.hook(Some((conn, ReqId(1))), envelope, Some(line));
     // Unanswered, the session would wait on it, reading nothing, until the daemon stops.
-    let (req, result) = timeout(Duration::from_secs(5), replies.recv())
+    let (req, result) = timeout(WAIT, replies.recv())
         .await
         .expect("answered")
         .expect("a reply");
@@ -580,13 +566,10 @@ async fn a_hook_that_panics_the_core_is_still_answered() {
 }
 
 async fn started(brain: &TypicalBrain, live: &Path) -> CoreHandle {
-    timeout(
-        Duration::from_secs(5),
-        CoreHandle::start(options(brain, live)),
-    )
-    .await
-    .expect("not stuck")
-    .expect("the core starts")
+    timeout(WAIT, CoreHandle::start(options(brain, live)))
+        .await
+        .expect("not stuck")
+        .expect("the core starts")
 }
 
 fn seen_events(brain: &TypicalBrain) -> i64 {
@@ -615,20 +598,17 @@ async fn a_hook_under_refused_writes_is_spooled_and_applied_after_a_restart() {
         parse_action: Some(|_, _| Err("no".into())),
         ..Deps::default()
     };
-    let core = timeout(
-        Duration::from_secs(5),
-        CoreHandle::start_with_store(opts, store),
-    )
-    .await
-    .expect("not stuck")
-    .expect("the core starts");
+    let core = timeout(WAIT, CoreHandle::start_with_store(opts, store))
+        .await
+        .expect("not stuck")
+        .expect("the core starts");
     let (conn, mut replies) = core.open_conn();
     for req in 1..=2 {
         let op = Op::GroupAdd {
             path: format!("G{req}"),
         };
         core.send(conn, ReqId(req), CallerInfo::default(), op);
-        let (_, result) = timeout(Duration::from_secs(5), replies.recv())
+        let (_, result) = timeout(WAIT, replies.recv())
             .await
             .expect("answered")
             .expect("a reply");
@@ -639,7 +619,7 @@ async fn a_hook_under_refused_writes_is_spooled_and_applied_after_a_restart() {
     let parsed: HookLine = serde_json::from_value(line.clone()).unwrap();
     let envelope = normalize(&parsed, &last_assistant_text).unwrap();
     core.hook(Some((conn, ReqId(3))), envelope, Some(parsed));
-    let (req, result) = timeout(Duration::from_secs(5), replies.recv())
+    let (req, result) = timeout(WAIT, replies.recv())
         .await
         .expect("answered")
         .expect("a reply");
@@ -725,7 +705,7 @@ async fn a_spool_that_panics_the_core_is_set_aside() {
     );
     // The first line makes the core panic; it reloads and goes on with the second.
     let core = timeout(
-        Duration::from_secs(5),
+        WAIT,
         CoreHandle::start_with_drain_panics(options(&brain, &live), brain.store(), 1),
     )
     .await
@@ -792,10 +772,11 @@ async fn the_daemon_writes_the_plugin_once() {
         assert_eq!(mode(f.parent().unwrap()), 0o700, "{f:?}");
     }
     assert_eq!(mode(&dir), 0o700);
-    let before: Vec<_> = files
-        .iter()
-        .map(|f| fs::metadata(f).unwrap().modified().unwrap())
-        .collect();
+    // `write_if_changed` writes a new file and renames it into place: the same inode is the
+    // same file, never rewritten.
+    let inode =
+        |f: &std::path::PathBuf| std::os::unix::fs::MetadataExt::ino(&fs::metadata(f).unwrap());
+    let before: Vec<_> = files.iter().map(inode).collect();
     // Stop it, and start another on the same root with the same exe: the files are left alone.
     let mut c = Client::connect(&d.sock);
     c.hello();
@@ -805,7 +786,6 @@ async fn the_daemon_writes_the_plugin_once() {
         .expect("run ends")
         .expect("no panic")
         .expect("a clean stop");
-    std::thread::sleep(Duration::from_millis(20));
     let (tx, rx) = tokio::sync::oneshot::channel();
     let opts = common::options(&d.paths, &d.brain, &d.time, moa_daemon::Ready::Channel(tx));
     let again = tokio::spawn(moa_daemon::run(opts));
@@ -813,10 +793,33 @@ async fn the_daemon_writes_the_plugin_once() {
         .await
         .expect("ready")
         .expect("run didn't end");
-    let after: Vec<_> = files
-        .iter()
-        .map(|f| fs::metadata(f).unwrap().modified().unwrap())
-        .collect();
+    let after: Vec<_> = files.iter().map(inode).collect();
     assert_eq!(before, after);
     again.abort();
+}
+
+/// M9: the plugin's folders are checked like the daemon's other private folders: its
+/// `hooks.json` names a command Claude runs, so a folder others can reach is refused, not
+/// used.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_folder_others_can_reach_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = common::short_root();
+    let paths = Paths::with_root(root.path());
+    let brain = TypicalBrain::new();
+    common::place_db(&paths, &brain);
+    let hooks = paths.session_plugin().join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    for dir in [paths.session_plugin(), hooks.clone()] {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::set_permissions(&hooks, fs::Permissions::from_mode(0o755)).unwrap();
+    let time = FakeTime::new(brain.now().wall);
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let opts = common::options(&paths, &brain, &time, moa_daemon::Ready::Channel(tx));
+    let ended = timeout(WAIT, moa_daemon::run(opts))
+        .await
+        .expect("run ends");
+    let e = ended.expect_err("the daemon refuses the folder");
+    assert!(e.to_string().contains("is open to other users"), "{e}");
 }

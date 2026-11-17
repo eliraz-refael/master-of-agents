@@ -263,10 +263,10 @@ fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource
     }
 }
 
-/// A pane exited: the session bound to it on this server (T11), if still live, ends and
-/// loses the binding. Nothing else checks that a process is alive. A pane nobody is bound
-/// to is remembered, since an `open`'s answer naming it may still be on its way. The caller
-/// sends what `tx` holds.
+/// A pane exited: the session bound to it on this server (T11) loses the binding, and ends
+/// if still live (after a clean exit its `SessionEnd` has already ended it). Nothing else
+/// checks that a process is alive. A pane nobody is bound to is remembered, since an
+/// `open`'s answer naming it may still be on its way. The caller sends what `tx` holds.
 ///
 /// `false` when the write was refused: the exit is reported once, so nothing retries it.
 pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
@@ -277,31 +277,34 @@ pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
     end_exited(state, tx, id, vec![Change::DeletePaneBinding(id)])
 }
 
-/// Ends a live session whose agent's pane is gone: the session, `also`, and the activity
-/// row. `false` when the write was refused.
+/// `also`, and when the session is still live, its end: the session and the activity row.
+/// Its `activity_at` moves to now, so the `SessionEnd` the agent sent on its way out, which
+/// often arrives after the exit, is older: history only, with no second "ended" row.
+/// `false` when the write was refused. Then nothing changes: a bound pane stays bound, and
+/// a session whose pane exited before its `open` was answered stays live with no binding.
+/// Reconcile (4b) ends both.
 pub(crate) fn end_exited(state: &mut State, tx: &mut Tx, id: SessionId, also: Vec<Change>) -> bool {
-    let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) else {
-        return true;
-    };
-    let mut after = session.clone();
-    after.lifecycle = Lifecycle::Ended;
     let mut changes = also;
-    if let Some(text) = activity_text(
-        &after,
-        &HookKind::SessionEnded {
-            reason: String::new(),
-        },
-    ) {
-        changes.push(tx.activity_row(
-            state,
-            ActivityWho::Session,
-            text,
-            Some(("session", id.to_string())),
-        ));
+    if let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) {
+        let mut after = session.clone();
+        after.lifecycle = Lifecycle::Ended;
+        after.activity_at = Some(tx.wall);
+        if let Some(text) = activity_text(
+            &after,
+            &HookKind::SessionEnded {
+                reason: String::new(),
+            },
+        ) {
+            changes.push(tx.activity_row(
+                state,
+                ActivityWho::Session,
+                text,
+                Some(("session", id.to_string())),
+            ));
+        }
+        changes.insert(0, Change::Session(after));
     }
-    changes.insert(0, Change::Session(after));
-    // A refused write leaves the pane bound and the session live; reconcile ends it later.
-    tx.commit(state, changes).is_ok()
+    changes.is_empty() || tx.commit(state, changes).is_ok()
 }
 
 fn source_word(source: StartSource) -> &'static str {
@@ -379,7 +382,8 @@ fn transition(before: &Session, env: &HookEnvelope) -> Session {
 }
 
 /// The activity feed's line for an event, as the spike's `a_event` trigger wrote it:
-/// `<folder> <what>`, the folder being the last part of the session's cwd.
+/// `<folder> <what>`, the folder being the last part of the session's cwd; just `<what>`
+/// when it has none.
 fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
     let what = match kind {
         HookKind::TurnStarted { prompt } => {
@@ -398,6 +402,9 @@ fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
         .cwd
         .as_deref()
         .and_then(|c| c.rsplit('/').next())
-        .unwrap_or("");
-    Some(format!("{folder} {what}"))
+        .filter(|f| !f.is_empty());
+    Some(match folder {
+        Some(folder) => format!("{folder} {what}"),
+        None => what,
+    })
 }

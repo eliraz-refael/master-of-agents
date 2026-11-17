@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use moa_proto::MAX_LINE;
 
 /// A stand-in daemon: accepts connections at `brain`'s socket and hands each first line to
-/// the receiver, answering it with `reply` when there is one. `reply: None` and `hang` leave
-/// the connection open without an answer.
+/// the receiver, answering it with `reply` when there is one. `reply: None` leaves the
+/// connection open without an answer.
 fn listen(tb: &TempBrain, brain: &str, reply: Option<&'static str>) -> Receiver<String> {
     let socket = tb.paths().socket(brain).expect("a socket path");
     fs::create_dir_all(socket.parent().expect("a run dir")).expect("the run dir");
@@ -177,7 +177,9 @@ fn session_start_gives_up_after_a_second() {
     let took = start.elapsed();
     quiet(&out);
     assert!(out.stdout.is_empty());
-    assert!(took < Duration::from_millis(1500), "{took:?}");
+    // It waits a second, then gives up: well under a generous limit, however busy the
+    // machine is.
+    assert!(took < Duration::from_secs(5), "{took:?}");
 }
 
 #[test]

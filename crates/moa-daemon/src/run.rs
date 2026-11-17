@@ -136,17 +136,16 @@ fn session_plugin_dir(paths: &Paths) -> io::Result<PathBuf> {
 }
 
 /// Writes the Claude Code plugin that sessions are started with, when its text changed, and
-/// says where it is.
+/// says where it is. Its `hooks.json` names a command Claude runs, so its folders are checked
+/// like the other private folders: ours, real, and closed to other users.
 fn write_session_plugin(paths: &Paths) -> Result<PathBuf, DaemonError> {
     let exe = std::env::current_exe()?;
     let dir = session_plugin_dir(paths)?;
+    ensure_private_dir(&dir)?;
     for (rel, text) in moa_agents::claude::session_plugin(&exe) {
         let file = dir.join(rel);
         if let Some(parent) = file.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)?;
+            ensure_private_dir(parent)?;
         }
         write_if_changed(&file, &text)?;
     }
