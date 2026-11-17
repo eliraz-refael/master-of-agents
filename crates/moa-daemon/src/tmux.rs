@@ -22,6 +22,7 @@ use moa_tmux::conf::{hooks, unhooks};
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 use tokio::time::Instant;
 
+use crate::core_task::lock;
 use crate::supervise::supervise;
 
 /// The waits before each reconnect, once the control client has dropped while the server
@@ -93,10 +94,6 @@ fn token_of(tag: u64) -> Option<TmuxToken> {
 
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// How long a connection must stay up before a loss starts the backoff afresh: the longest
@@ -222,7 +219,13 @@ impl Actor {
                         let _ = done.send(());
                         return;
                     }
-                    Ok(cmd) => pending.push_back(cmd),
+                    Ok(cmd) => {
+                        // The reconnect below uses the program a queued connect names.
+                        if let TmuxCmd::Connect { tmux: Some(t) } = &cmd {
+                            *lock(&self.sh.tmux) = Some(t.clone());
+                        }
+                        pending.push_back(cmd);
+                    }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => return,
                 }
@@ -234,7 +237,7 @@ impl Actor {
             }
             // After a give-up or no server the link was idle, and stays so until asked.
             if doing != Doing::Idle {
-                self.connect().await;
+                self.connect(None).await;
             }
         }
         loop {
@@ -341,7 +344,7 @@ impl Actor {
         match &self.state {
             State::Up(up) => self.tell(up.connected()),
             State::Backoff { .. } => {}
-            State::Idle => self.connect().await,
+            State::Idle => self.connect(None).await,
         }
     }
 
@@ -373,7 +376,9 @@ impl Actor {
         }
     }
 
-    async fn connect(&mut self) {
+    /// Finds the program and the server, then connects. `tried` is the backoff step this
+    /// is, if it is one.
+    async fn connect(&mut self, tried: Option<usize>) {
         self.mark(Doing::Connecting);
         let Some(tmux) = self.find_tmux() else {
             return self.down(Down::NoTmux);
@@ -381,7 +386,7 @@ impl Actor {
         if !self.probe().await {
             return self.down(Down::NoServer);
         }
-        self.attempt(tmux, None).await;
+        self.attempt(tmux, tried).await;
     }
 
     /// One connect. `tried` is the backoff step this is, if it is one.
@@ -473,15 +478,8 @@ impl Actor {
     }
 
     async fn retry(&mut self, next: usize) {
-        self.set(State::Idle);
-        self.mark(Doing::Connecting);
-        if !self.probe().await {
-            return self.down(Down::NoServer);
-        }
-        let Some(tmux) = self.find_tmux() else {
-            return self.down(Down::NoTmux);
-        };
-        self.attempt(tmux, Some(next)).await;
+        self.state = State::Idle;
+        self.connect(Some(next)).await;
     }
 
     fn send(&self, conn: u64, cmds: Vec<Cmd>, token: Option<TmuxToken>) {

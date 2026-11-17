@@ -94,7 +94,7 @@ pub type ConnReply = (ReqId, Result<Done, OpError>);
 type ConnTx = mpsc::UnboundedSender<ConnReply>;
 type Conns = Arc<Mutex<HashMap<ConnId, ConnTx>>>;
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
