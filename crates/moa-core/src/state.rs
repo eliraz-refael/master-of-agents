@@ -401,6 +401,17 @@ impl State {
             .max_by_key(|c| (c.first_seen_at, c.last_seen_at))
     }
 
+    /// The conversation row for an agent's conversation id, whichever session owns it.
+    pub(crate) fn conversation_of_agent(
+        &self,
+        agent: crate::model::AgentKind,
+        conversation_id: &str,
+    ) -> Option<&Conversation> {
+        self.conversations
+            .values()
+            .find(|c| c.agent_kind == agent && c.conversation_id == conversation_id)
+    }
+
     /// The session a conversation belongs to.
     pub(crate) fn session_of_conversation(&self, conversation_id: &str) -> Option<SessionId> {
         self.conversations

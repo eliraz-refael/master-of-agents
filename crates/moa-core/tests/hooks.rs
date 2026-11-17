@@ -575,6 +575,66 @@ fn a_late_session_end_does_not_end_a_restarted_session() {
     assert!(activity_texts(&fx).is_empty());
 }
 
+#[test]
+fn a_compaction_mid_turn_keeps_it_working() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    let fx = feed(&mut st, started(2, 2000, StartSource::Compact));
+    assert_eq!(shown(&st), (DisplayState::Working, "Fix the lamp".into()));
+    assert_eq!(session(&st).activity_at, Some(UtcMs(T0 + 2000)));
+    assert_eq!(quiet_timers(&fx), [&quiet_at(2000 + TEN_MIN)]);
+}
+
+#[test]
+fn a_resume_does_not_read_the_old_prompt_as_a_reply() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("Shall we?")));
+    feed(&mut st, started(2, 2000, StartSource::Resume));
+    assert_eq!(shown(&st).0, DisplayState::Idle);
+}
+
+#[test]
+fn a_start_on_another_sessions_conversation_moves_it_without_resetting_it() {
+    let mut st = seeded();
+    let mut other = session(&st);
+    other.id = "0195f3a2-1111-7000-8000-000000000002".parse().unwrap();
+    let mut k = conversations(&st)[0].clone();
+    k.conversation_id = "k-1".into();
+    k.session_id = other.id;
+    k.first_seen_at = UtcMs(77);
+    k.transcript_path = Some("/stores/b/k.jsonl".into());
+    let snapshot = Snapshot {
+        sessions: vec![session(&st), other],
+        conversations: vec![conversations(&st)[0].clone(), k],
+        ..Snapshot::default()
+    };
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes: None,
+        },
+        now(),
+    );
+    let mut start = started(1, 1000, StartSource::Resume);
+    start.conversation_id = "k-1".into();
+    feed(&mut st, start);
+    let moved: Vec<Conversation> = st
+        .conversations_of(sid())
+        .filter(|c| c.conversation_id == "k-1")
+        .cloned()
+        .collect();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].first_seen_at, UtcMs(77));
+    assert_eq!(
+        moved[0].transcript_path.as_deref(),
+        Some("/stores/b/k.jsonl")
+    );
+    assert_eq!(moved[0].last_seen_at, UtcMs(T0 + 1000));
+    let other_id = "0195f3a2-1111-7000-8000-000000000002".parse().unwrap();
+    assert_eq!(st.conversations_of(other_id).count(), 0);
+}
+
 fn at(plus_ms: i64) -> Now {
     Now::at(
         UtcMs(T0 + plus_ms),

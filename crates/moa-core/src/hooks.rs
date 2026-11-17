@@ -195,15 +195,20 @@ fn history_row(
     }))
 }
 
-/// The conversation a start belongs to: a new one for an id the session hasn't had, or the
-/// known one with its `last_seen_at` moved.
+/// The conversation a start belongs to: a new one for an id nobody has had, or the known one
+/// with its `last_seen_at` moved. One another session had is running here now: it moves to
+/// this session and keeps what it knows, unless the envelope says better.
 fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource) -> Conversation {
-    if let Some(known) = state
-        .conversations_of(id)
-        .find(|c| c.conversation_id == env.conversation_id)
-    {
+    if let Some(known) = state.conversation_of_agent(env.agent, &env.conversation_id) {
         let mut c = known.clone();
+        c.session_id = id;
         c.last_seen_at = env.at;
+        if env.store_dir.is_some() {
+            c.store_dir = env.store_dir.clone();
+        }
+        if env.transcript_path.is_some() {
+            c.transcript_path = env.transcript_path.clone();
+        }
         return c;
     }
     Conversation {
@@ -275,8 +280,18 @@ fn transition(before: &Session, env: &HookEnvelope) -> Session {
             s.lifecycle = Lifecycle::Live;
             s.asleep_at = None;
             s.location = Location::Here;
-            s.activity = Activity::Idle;
             s.resume_failed = false;
+            // A compaction can come mid-turn, and the turn carries on. Any other start is a
+            // fresh conversation: nothing said before it is a reply.
+            if !matches!(
+                &env.kind,
+                HookKind::SessionStarted {
+                    source: StartSource::Compact
+                }
+            ) {
+                s.activity = Activity::Idle;
+                s.activity_why = None;
+            }
         }
         HookKind::SessionEnded { .. } => s.lifecycle = Lifecycle::Ended,
         HookKind::TurnStarted { prompt } => {
