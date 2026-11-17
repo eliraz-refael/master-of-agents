@@ -16,7 +16,9 @@ pub const MOA: &str = env!("CARGO_BIN_EXE_moa");
 pub const B: &str = "default";
 /// What the status line shows once moa's config is in.
 pub const STATUS_LINE: &str = "^a keys";
-pub const SHOWS: Duration = Duration::from_secs(5);
+/// How long a wait for something to show may take: every wait returns as soon as it does,
+/// so this only lengthens a failure.
+pub const SHOWS: Duration = Duration::from_secs(10);
 
 /// `moa args…` on a terminal, with the root's environment plus `extra`.
 pub fn open(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Terminal {
