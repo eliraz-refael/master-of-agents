@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use crate::change::Change;
 use crate::effect::{Effect, Input, LogLevel, LogLine, Publish, TimerKey};
+use crate::hooks;
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{Op, OpError};
 use crate::ops;
@@ -74,6 +75,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             refuse_writes,
         } => {
             state.load(*snapshot);
+            state.forget_hooks();
             state.refuse_writes = refuse_writes;
             let mut fx = vec![backup_timer(now)];
             fx.extend(publish_all(state));
@@ -86,6 +88,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             mark_seen_into(state, now, &mut fx);
             fx
         }
+        Input::Hook { reply, envelope } => hooks::run(state, now, reply, &envelope),
         Input::Timer(TimerKey::Backup) => {
             vec![Effect::Backup { day: now.local_day }, backup_timer(now)]
         }
@@ -197,7 +200,9 @@ fn publish_all(state: &mut State) -> Option<Effect> {
 /// One op's edits. Handlers validate, build their changes, then call [`Tx::commit`] once: a
 /// handler that returns `Err` has applied nothing.
 pub(crate) struct Tx {
-    wall: UtcMs,
+    pub(crate) wall: UtcMs,
+    /// The local date of `wall`.
+    pub(crate) today: jiff::civil::Date,
     /// Everything committed so far, in order.
     pub(crate) changes: Vec<Change>,
     pub(crate) events: Vec<CoreEvent>,
@@ -209,6 +214,7 @@ impl Tx {
     pub(crate) fn new(now: &Now) -> Tx {
         Tx {
             wall: now.wall,
+            today: now.local_day,
             changes: Vec::new(),
             events: Vec::new(),
             issued: Vec::new(),
@@ -279,6 +285,29 @@ impl Tx {
         self.ui_each(state, changes, vec![text])
     }
 
+    /// An activity row stamped with this transaction's time, for the caller to commit.
+    /// `of` is the `(ref_kind, ref_id)` the row points at.
+    pub(crate) fn activity_row(
+        &mut self,
+        state: &State,
+        who: ActivityWho,
+        text: String,
+        of: Option<(&str, String)>,
+    ) -> Change {
+        let (ref_kind, ref_id) = match of {
+            Some((kind, id)) => (Some(kind.to_string()), Some(id)),
+            None => (None, None),
+        };
+        Change::Activity(ActivityRow {
+            id: ActivityId(self.next_id(state, Table::Activity)),
+            at: self.wall,
+            who,
+            text,
+            ref_kind,
+            ref_id,
+        })
+    }
+
     /// [`Tx::ui`] with one `ui` event and activity row per text, all in one commit.
     pub(crate) fn ui_each(
         &mut self,
@@ -298,14 +327,7 @@ impl Tx {
                 text: Some(text.clone()),
                 detail: None,
             }));
-            changes.push(Change::Activity(ActivityRow {
-                id: ActivityId(self.next_id(state, Table::Activity)),
-                at: self.wall,
-                who: ActivityWho::You,
-                text: text.clone(),
-                ref_kind: None,
-                ref_id: None,
-            }));
+            changes.push(self.activity_row(state, ActivityWho::You, text.clone(), None));
         }
         self.commit(state, changes)?;
         self.events
