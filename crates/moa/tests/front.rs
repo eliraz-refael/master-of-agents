@@ -9,6 +9,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+use moa_testkit::brain::TYPICAL_TZ;
 use moa_testkit::{TempBrain, Terminal, wait_for};
 
 use common::*;
@@ -193,10 +194,13 @@ fn moa_inside_another_tmux_refuses() {
 fn moa_sandbox_opens_a_moa_under_home() {
     // The root is `<home>/.local/state/moa-sandbox`; dropping `tb` stops what runs there.
     let tb = TempBrain::sandbox_home();
+    // TZ as `TempBrain::env` gives it: the daemon needs a zone, and a build sandbox has no
+    // /etc/localtime.
     let env: Vec<(OsString, OsString)> = vec![
         ("HOME".into(), tb.home().into()),
         ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
         ("SHELL".into(), "/bin/sh".into()),
+        ("TZ".into(), TYPICAL_TZ.into()),
     ];
     let args = [OsString::from("--sandbox")];
     let term = Terminal::spawn(Path::new(MOA), &args, &env, 120, 30).unwrap();

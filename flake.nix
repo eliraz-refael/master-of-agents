@@ -82,11 +82,13 @@
             cargoClippyExtraArgs = "--all-targets -- -D warnings";
           });
           fmt = b.craneLib.cargoFmt { inherit (b.withArtifacts) pname version src; };
-          # The Linux sandbox has no time zone database, which every real system has; jiff
-          # reads TZDIR. --no-fail-fast reports every failure of a run, not just the first.
+          # The Linux sandbox has no time zone database and no /etc/localtime, which every
+          # real system has; jiff reads TZDIR and TZ. --no-fail-fast reports every failure of
+          # a run, not just the first.
           nextest = b.craneLib.cargoNextest (b.withArtifacts // {
             nativeBuildInputs = [ b.pkgs.tmux ];
             TZDIR = "${b.pkgs.tzdata}/share/zoneinfo";
+            TZ = "UTC";
             cargoNextestExtraArgs = "--no-fail-fast";
           });
         });
