@@ -121,17 +121,30 @@ fn moa_verb_equals_moactl() {
 fn racing_clients_start_one_daemon() {
     let r = rig(None);
     let moactl = r.moactl_path();
+    // Output goes to files, not pipes: on macOS std sets CLOEXEC on a pipe after creating it, so a
+    // racing spawn can leak a pipe end into another child (the daemon) and `.output()` never ends.
     let handles: Vec<_> = (0..4)
-        .map(|_| {
+        .map(|i| {
             let (exe, cwd, env) = (moactl.clone(), r.cwd.clone(), r.tb.env());
+            let (so, se) = (
+                r.tb.root().join(format!("race{i}.out")),
+                r.tb.root().join(format!("race{i}.err")),
+            );
             std::thread::spawn(move || {
-                Command::new(exe)
+                let status = Command::new(exe)
                     .arg("brief")
                     .env_clear()
                     .envs(env)
                     .current_dir(cwd)
-                    .output()
-                    .unwrap()
+                    .stdout(fs::File::create(&so).unwrap())
+                    .stderr(fs::File::create(&se).unwrap())
+                    .status()
+                    .unwrap();
+                Output {
+                    status,
+                    stdout: fs::read(&so).unwrap(),
+                    stderr: fs::read(&se).unwrap(),
+                }
             })
         })
         .collect();
