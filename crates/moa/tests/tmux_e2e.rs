@@ -285,6 +285,13 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
         .status()
         .unwrap();
     assert!(killed.success());
+    // The server clears `@moa_ctl` once it sees the client go, a moment after the kill.
+    let cleared = wait_for(SHOWS, || option(&tb, "@moa_ctl").is_empty().then_some(()));
+    assert!(
+        cleared.is_some(),
+        "@moa_ctl is {:?}",
+        option(&tb, "@moa_ctl")
+    );
     moa_key(&tb, &term, "c", NOT_RUNNING);
 }
 
