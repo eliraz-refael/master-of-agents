@@ -3,6 +3,7 @@
 
 pub mod alarm;
 pub mod build_id;
+pub mod fs;
 pub mod net;
 pub mod paths;
 pub mod service;

@@ -10,8 +10,9 @@ use std::time::Duration;
 use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
 use moa_core::state::Deps;
+use moa_platform::fs::write_if_changed;
 use moa_platform::{Paths, WallTimer, ZoneWatch, ensure_private_dir};
-use moa_tmux::conf::{self, write_if_changed};
+use moa_tmux::conf;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::oneshot;
@@ -112,6 +113,23 @@ fn tmux_link(paths: &Paths, b: &str) -> Result<TmuxLink, DaemonError> {
     })
 }
 
+/// Writes the Claude Code plugin that sessions are started with, when its text changed.
+fn write_session_plugin(paths: &Paths) -> Result<(), DaemonError> {
+    let exe = std::env::current_exe()?;
+    let dir = paths.session_plugin();
+    for (rel, text) in moa_agents::claude::session_plugin(&exe) {
+        let file = dir.join(rel);
+        if let Some(parent) = file.parent() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+        write_if_changed(&file, &text)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn bring_up(
     paths: &Paths,
@@ -174,6 +192,7 @@ async fn bring_up(
             tracing::info!("the terminal link waits for the switch-over");
             None
         };
+        write_session_plugin(paths)?;
         let deps = Deps {
             parse_action: Some(moa_proto::cli::parse_action),
             canonical: moa_platform::canonical,

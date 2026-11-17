@@ -628,6 +628,7 @@ dependencies = [
 name = "moa-agents"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "moa-core",
  "serde_json",
  "tempfile",

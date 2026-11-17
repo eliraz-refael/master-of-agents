@@ -551,3 +551,47 @@ async fn a_spool_that_panics_the_core_is_set_aside() {
     assert_eq!(seen_events(&brain), events);
     core.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_daemon_writes_the_plugin_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let d = boot().await;
+    let dir = d.paths.session_plugin();
+    let files = [
+        dir.join(".claude-plugin/plugin.json"),
+        dir.join("hooks/hooks.json"),
+    ];
+    for f in &files {
+        assert_eq!(mode(f), 0o600, "{f:?}");
+        assert_eq!(mode(f.parent().unwrap()), 0o700, "{f:?}");
+    }
+    assert_eq!(mode(&dir), 0o700);
+    let before: Vec<_> = files
+        .iter()
+        .map(|f| fs::metadata(f).unwrap().modified().unwrap())
+        .collect();
+    // Stop it, and start another on the same root with the same exe: the files are left alone.
+    let mut c = Client::connect(&d.sock);
+    c.hello();
+    assert_eq!(c.call("shutdown", json!({}))["result"], json!({}));
+    timeout(Duration::from_secs(10), d.done)
+        .await
+        .expect("run ends")
+        .expect("no panic")
+        .expect("a clean stop");
+    std::thread::sleep(Duration::from_millis(20));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let opts = common::options(&d.paths, &d.brain, &d.time, moa_daemon::Ready::Channel(tx));
+    let again = tokio::spawn(moa_daemon::run(opts));
+    timeout(Duration::from_secs(10), rx)
+        .await
+        .expect("ready")
+        .expect("run didn't end");
+    let after: Vec<_> = files
+        .iter()
+        .map(|f| fs::metadata(f).unwrap().modified().unwrap())
+        .collect();
+    assert_eq!(before, after);
+    again.abort();
+}

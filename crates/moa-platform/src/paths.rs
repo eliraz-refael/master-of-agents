@@ -274,6 +274,11 @@ impl Paths {
         self.brain_dir(b).join("moa.tmux")
     }
 
+    /// The Claude Code plugin the daemon writes, which sessions are started with.
+    pub fn session_plugin(&self) -> PathBuf {
+        self.data_dir().join("plugin").join("session")
+    }
+
     pub fn spool(&self, b: &str) -> PathBuf {
         self.state_dir().join("spool").join(format!("{b}.jsonl"))
     }

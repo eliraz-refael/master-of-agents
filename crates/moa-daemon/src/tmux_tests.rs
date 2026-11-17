@@ -8,11 +8,12 @@ use jiff::tz::TimeZone;
 use moa_core::config::BrainName;
 use moa_core::state::{CallerInfo, Deps};
 use moa_core::tmux::notify::Notification;
+use moa_platform::fs::write_if_changed;
 use moa_platform::spawn;
 use moa_store::actor::Fault;
 use moa_testkit::TempBrain;
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
-use moa_tmux::conf::{self, write_if_changed};
+use moa_tmux::conf;
 use tokio::time::timeout;
 
 use super::*;
