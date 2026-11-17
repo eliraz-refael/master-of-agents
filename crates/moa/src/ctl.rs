@@ -166,7 +166,7 @@ fn verb(m: &Moactl) -> Result<(), String> {
     let config = here.config()?;
     let brain = pick_brain(&here, &config, None, op.writes())?;
     if let Op::SessionOpen { path, .. } = &mut op {
-        *path = open_folder(path)?;
+        *path = open_folder(path, m.json)?;
     }
     let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let mut opts = here.options(brain);
@@ -185,10 +185,16 @@ fn verb(m: &Moactl) -> Result<(), String> {
 }
 
 /// `open`'s folder: made when it's missing, as the spike did, then in its canonical form.
-fn open_folder(path: &Path) -> Result<PathBuf, String> {
+/// With `--json`, stdout holds only the reply's JSON, so the note goes to stderr.
+fn open_folder(path: &Path, json: bool) -> Result<PathBuf, String> {
     if !path.is_dir() {
         std::fs::create_dir_all(path).map_err(|e| format!("can't make {}: {e}", path.display()))?;
-        println!("created {}", path.display());
+        let note = format!("created {}", path.display());
+        if json {
+            eprintln!("{note}");
+        } else {
+            println!("{note}");
+        }
     }
     Ok(canonical(path))
 }
