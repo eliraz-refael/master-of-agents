@@ -3,96 +3,18 @@
 //! instead of nesting. Every tmux query goes through `TempBrain::tmux` (T23), and `moa`
 //! runs on a `Terminal`, as a user's terminal would run it.
 
+mod common;
+
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::Output;
 use std::time::Duration;
 
-use assert_cmd::Command;
-use moa_testkit::{TempBrain, Terminal, wait_for};
-use serde_json::Value;
+use moa_testkit::{TempBrain, Terminal};
 
-const MOA: &str = env!("CARGO_BIN_EXE_moa");
-const B: &str = "default";
-/// What the status line shows once moa's config is in.
-const STATUS_LINE: &str = "^a keys";
-const SHOWS: Duration = Duration::from_secs(5);
-
-/// `moa args…` on a terminal, with the root's environment plus `extra`.
-fn open(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Terminal {
-    let mut env = tb.env();
-    env.extend(
-        extra
-            .iter()
-            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
-    );
-    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    Terminal::spawn(Path::new(MOA), &args, &env, 120, 30).unwrap()
-}
-
-/// `moa args…` to the end, with the root's environment plus `extra`.
-fn run(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Output {
-    Command::new(MOA)
-        .args(args)
-        .env_clear()
-        .envs(tb.env())
-        .envs(extra.iter().copied())
-        .current_dir(tb.root())
-        .timeout(Duration::from_secs(30))
-        .output()
-        .unwrap()
-}
-
-fn out(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stdout).into_owned()
-}
-
-fn err(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).into_owned()
-}
-
-fn tmux(tb: &TempBrain, args: &[&str]) -> String {
-    tb.tmux(B, args)
-        .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
-}
-
-/// The session each user's terminal (not a control client) is on.
-fn user_clients(tb: &TempBrain) -> Vec<String> {
-    let list = tmux(
-        tb,
-        &[
-            "list-clients",
-            "-F",
-            "#{client_control_mode} #{session_name}",
-        ],
-    );
-    list.lines()
-        .filter_map(|l| l.strip_prefix("0 "))
-        .map(str::to_string)
-        .collect()
-}
-
-fn server_pid(tb: &TempBrain) -> String {
-    tmux(tb, &["display-message", "-p", "#{pid}"])
-}
-
-fn status_json(tb: &TempBrain) -> Value {
-    let o = run(tb, &["status", "--json"], &[]);
-    assert!(o.status.success(), "{}{}", out(&o), err(&o));
-    serde_json::from_str(&out(&o)).unwrap()
-}
+use common::*;
 
 fn tmux_socket(tb: &TempBrain) -> std::path::PathBuf {
     tb.paths().tmux_socket(B).unwrap().path(None, 0)
-}
-
-/// Waits until the user clients are `want`.
-fn clients_become(tb: &TempBrain, want: &[&str]) {
-    let seen = wait_for(SHOWS, || {
-        let c = user_clients(tb);
-        (c == want).then_some(())
-    });
-    assert!(seen.is_some(), "clients: {:?}", user_clients(tb));
 }
 
 #[test]
