@@ -220,7 +220,7 @@ use these names unchanged.
 | `Paths` (incl. `check_v1_allowed`), `ensure_private_dir`, `spawn::Spawner` (counting), `WallTimer`, `WallAlarm`, `ZoneWatch`, `build_id()` | `moa_platform` | 2 |
 | `Notification`, `Cmd`, `Mailbox` (in `moa_core::tmux`: the core can't depend on tokio-based `moa_tmux`) | `moa_core::tmux` | 3 |
 | `ControlClient` | `moa_tmux` | 3 |
-| `HookEnvelope`, `HookKind` | `moa_proto::hook` | 4 |
+| `HookLine`, `HookEnvelope`, `HookKind` (defined in `moa_core::hook`, re-exported by `moa_proto::hook`) | `moa_core::hook` | 4a |
 | `DisplayState`, `display_state(&Session, now) -> (DisplayState, Why)` | `moa_core::live` | 2 (from rows), 4 (quiet, events) |
 | `AgentKindImpl` trait, `claude`, `acp` | `moa_agents` | 1 (`claude::find_transcript`), 4, 6 |
 | `Layout`, `LayoutFile` | `moa_core::layout` | 5 |
@@ -485,6 +485,10 @@ key table and status line.
 ## Slice 4: agents and hooks
 
 Spec §6.7, §6.13 (sleep, reboot), §6.12 (peers-note plumbing only).
+
+Slice 4 is split into two plans, 4a (hooks and the live state) and 4b (the link, resume,
+reconcile, sleep, adopt). The split table is in `2026-11-17-moa-v1-slice-4a-hooks.md`, under
+"Slice 4 is two plans".
 
 1. **`HookEnvelope`** (spec §6.7 fields).
    - `moa hook claude` is a std-only path:

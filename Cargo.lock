@@ -616,6 +616,7 @@ dependencies = [
  "moa-tmux",
  "predicates",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -628,6 +629,7 @@ name = "moa-agents"
 version = "0.1.0"
 dependencies = [
  "moa-core",
+ "serde_json",
  "tempfile",
 ]
 

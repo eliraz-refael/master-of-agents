@@ -9,6 +9,7 @@ mod adopt;
 mod ctl;
 mod daemon;
 mod front;
+mod hook;
 mod service;
 mod sql;
 
@@ -59,6 +60,10 @@ fn is_moactl(args: &[OsString]) -> bool {
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
+    // The agent's hook: no clap, no runtime, nothing that can fail the agent.
+    if args.get(1).is_some_and(|a| a == "hook") {
+        return hook::run(&args);
+    }
     if is_moactl(&args) {
         // `moa ls` is `moactl ls`: clap sees the name `moactl` either way.
         let rest = args.iter().skip(1).cloned();
@@ -105,7 +110,8 @@ mod tests {
         cli.build();
         let names: Vec<&str> = cli.get_subcommands().map(|c| c.get_name()).collect();
         assert!(names.contains(&"help"), "{names:?}");
-        for name in names {
+        // `hook` is handled before clap sees the arguments, so clap doesn't list it.
+        for name in names.into_iter().chain(["hook"]) {
             assert!(
                 RESERVED_BRAIN_NAMES.contains(&name),
                 "{name} isn't reserved"

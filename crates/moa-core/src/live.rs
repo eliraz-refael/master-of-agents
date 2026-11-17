@@ -70,6 +70,19 @@ impl DisplayState {
 /// One line of context shown beside the state.
 pub type Why = String;
 
+/// Keeps long text readable: over 2400 characters, the first 600, a `[…]` line and the last
+/// 1800. It counts characters, not bytes.
+pub fn cut_middle(text: &str) -> String {
+    const HEAD: usize = 600;
+    const TAIL: usize = 1800;
+    if text.chars().count() <= HEAD + TAIL {
+        return text.to_string();
+    }
+    let head_end = text.char_indices().nth(HEAD).map_or(text.len(), |(i, _)| i);
+    let tail_start = text.char_indices().nth_back(TAIL - 1).map_or(0, |(i, _)| i);
+    format!("{}\n[…]\n{}", &text[..head_end], &text[tail_start..])
+}
+
 /// Python's `str.strip()` whitespace: Unicode whitespace plus the four separators `\x1c`..`\x1f`.
 fn is_space(c: char) -> bool {
     c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
@@ -224,6 +237,16 @@ mod tests {
     use super::*;
     use crate::model::{AgentKind, SessionId};
     use proptest::prelude::*;
+
+    #[test]
+    fn cut_middle_keeps_head_and_tail_by_characters() {
+        let at_limit = "é".repeat(2400);
+        assert_eq!(cut_middle(&at_limit), at_limit);
+        assert_eq!(
+            cut_middle(&"é".repeat(2401)),
+            format!("{}\n[…]\n{}", "é".repeat(600), "é".repeat(1800))
+        );
+    }
 
     fn session() -> Session {
         Session {

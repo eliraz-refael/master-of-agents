@@ -6,6 +6,7 @@ pub mod config;
 mod core;
 pub mod due;
 pub mod effect;
+pub mod hook;
 pub mod live;
 pub mod model;
 pub mod names;
