@@ -14,12 +14,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use jiff::tz::TimeZone;
+use moa_agents::claude;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Input, Publish};
+use moa_core::hook::{HookEnvelope, HookLine};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
 use moa_core::tmux::cmd::Cmd;
+use moa_platform::spool;
 use moa_store::actor::{Fault, StoreHandle};
 use moa_store::{Store, StoreError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -73,6 +76,8 @@ pub struct CoreOptions {
     /// The terminal link. Without one, every connect is answered `Down(Disabled)` and
     /// commands for the server are dropped.
     pub tmux: Option<TmuxLink>,
+    /// The brain's hook spool, drained once at start. `None` only in tests that opt out.
+    pub spool: Option<PathBuf>,
 }
 
 /// Counters for tests and the idle check. Startup counts as an input, a drain and (when it
@@ -242,6 +247,7 @@ impl CoreHandle {
             })
         });
 
+        let spool = opts.spool.take();
         let conns = Conns::default();
         let core = Core {
             inbox: inbox.downgrade(),
@@ -291,7 +297,65 @@ impl CoreHandle {
         if let Some(Err(line)) = ended {
             return Err(DaemonError::Fatal(line));
         }
+        if let Some(path) = spool {
+            handle.drain_spool(path).await;
+        }
         Ok(handle)
+    }
+
+    /// Feeds the events hooks spooled while the daemon was down to the core, oldest first,
+    /// and deletes the spool's `.draining` file once they are committed. A drain whose
+    /// commit failed (or whose core stopped) leaves it for the next start. Nothing here logs
+    /// a line's contents: an unreadable line is counted.
+    async fn drain_spool(&self, path: PathBuf) {
+        let taken = match tokio::task::spawn_blocking(move || spool::take(&path)).await {
+            Ok(Ok(taken)) => taken,
+            Ok(Err(e)) => {
+                tracing::warn!("the hook spool couldn't be read: {e}");
+                return;
+            }
+            Err(_) => return,
+        };
+        let mut unreadable = 0usize;
+        let mut envelopes: Vec<_> = taken
+            .lines
+            .iter()
+            .filter_map(|line| {
+                let envelope = serde_json::from_str::<HookLine>(line)
+                    .ok()
+                    .and_then(|l| claude::normalize(&l, &claude::last_assistant_text));
+                if envelope.is_none() {
+                    unreadable += 1;
+                }
+                envelope
+            })
+            .collect();
+        envelopes.sort_by_key(|e| (e.at_ns, e.pid, e.seq));
+        let drained = envelopes.len();
+        let failures = self.stats.commit_failures.load(Ordering::SeqCst);
+        let generation = *self.generation.borrow();
+        for envelope in envelopes {
+            self.hook(None, envelope);
+        }
+        self.committed().await;
+        // A failed commit reloads the core, which bumps the generation.
+        let intact = self.stats.commit_failures.load(Ordering::SeqCst) == failures
+            && *self.generation.borrow() == generation
+            && self.finished.borrow().is_none();
+        if !intact {
+            return;
+        }
+        if let Err(e) = taken.done() {
+            tracing::warn!("the drained hook spool couldn't be removed: {e}");
+        }
+        if drained + unreadable > 0 {
+            let more = if unreadable > 0 {
+                format!(" + {unreadable} unreadable")
+            } else {
+                String::new()
+            };
+            tracing::info!("drained {drained} spooled hook events{more}");
+        }
     }
 
     /// Resolves when the core task has ended: `Ok` after `stop`, `Err(Fatal)` when it can't
@@ -336,6 +400,16 @@ impl CoreHandle {
             op,
         };
         if self.inbox.send(Item::Input(input)).is_err() {
+            reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+        }
+    }
+
+    /// A hook event. With `reply`, the core answers it once, after the commit.
+    pub fn hook(&self, reply: Option<(ConnId, ReqId)>, envelope: HookEnvelope) {
+        let input = Input::Hook { reply, envelope };
+        if self.inbox.send(Item::Input(input)).is_err()
+            && let Some((conn, req)) = reply
+        {
             reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
         }
     }

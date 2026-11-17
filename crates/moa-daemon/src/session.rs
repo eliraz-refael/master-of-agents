@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use moa_agents::claude;
 use moa_core::config::BrainName;
+use moa_core::hook::HookLine;
 use moa_core::op::{ConnId, OpError, ReqId};
 use moa_core::state::CallerInfo;
 use moa_proto::{
@@ -120,8 +122,10 @@ async fn next_push(sub: &mut Option<Sub>) -> Push {
     }
 }
 
-fn reply_line(id: &Id, result: Result<moa_core::op::Done, OpError>) -> String {
+/// `bare`: a hook's reply is its data alone (`{"context": …}`), not the op reply's text and data.
+fn reply_line(id: &Id, result: Result<moa_core::op::Done, OpError>, bare: bool) -> String {
     match result {
+        Ok(done) if bare => encode_result(id, &done.data),
         Ok(done) => encode_result(id, &done),
         Err(OpError(message)) => encode_error(Some(id), &rpc(code::FAILED, &message)),
     }
@@ -150,6 +154,8 @@ struct Session<S> {
     sub: Option<Sub>,
     /// The op in flight: the core's id for it and the client's.
     pending: Option<(ReqId, Id)>,
+    /// The request in flight when it is a hook's.
+    hook: Option<ReqId>,
     next_req: u64,
 }
 
@@ -180,6 +186,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
         greeted: None,
         sub: None,
         pending: None,
+        hook: None,
         next_req: 0,
     };
     session.run().await;
@@ -246,13 +253,45 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
         match decode_incoming(line) {
             Err((id, e)) => self.say(encode_error(id.as_ref(), &e)).await,
             Ok(Incoming::Ignored) => Flow::Go,
-            // A hook is never answered, with an id or without (slice 2b).
-            Ok(Incoming::Hook { id, .. }) => {
-                tracing::debug!(conn = self.conn.0, with_id = id.is_some(), "hook dropped");
-                Flow::Go
-            }
+            Ok(Incoming::Hook { id, params }) => self.on_hook(id, params).await,
             Ok(Incoming::Request { id, call }) => self.on_call(id, call).await,
         }
+    }
+
+    /// A hook needs no `hello` and has no caller. With an id it is answered once, after the
+    /// core's commit: a start with `{"context": …}`, an event the agent can't read with
+    /// `{"context": null}`, a line that isn't a hook line with `INVALID_PARAMS`.
+    async fn on_hook(&mut self, id: Option<Id>, params: serde_json::Value) -> Flow {
+        let Ok(line) = serde_json::from_value::<HookLine>(params) else {
+            tracing::debug!(conn = self.conn.0, "a hook line was not readable");
+            return match id {
+                Some(id) => {
+                    self.refuse(&id, code::INVALID_PARAMS, "not a hook line")
+                        .await
+                }
+                None => Flow::Go,
+            };
+        };
+        let Some(envelope) = claude::normalize(&line, &claude::last_assistant_text) else {
+            return match id {
+                Some(id) => {
+                    self.say(encode_result(&id, &json!({"context": null})))
+                        .await
+                }
+                None => Flow::Go,
+            };
+        };
+        match id {
+            None => self.core.hook(None, envelope),
+            Some(id) => {
+                self.next_req += 1;
+                let req = ReqId(self.next_req);
+                self.pending = Some((req, id));
+                self.hook = Some(req);
+                self.core.hook(Some((self.conn, req)), envelope);
+            }
+        }
+        Flow::Go
     }
 
     async fn on_call(&mut self, id: Id, call: Call) -> Flow {
@@ -357,7 +396,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             return Flow::Close;
         };
         match self.pending.take() {
-            Some((want, id)) if want == req => self.say(reply_line(&id, result)).await,
+            Some((want, id)) if want == req => {
+                let bare = self.hook.take() == Some(req);
+                self.say(reply_line(&id, result, bare)).await
+            }
             // Not ours to answer: put back what was there.
             other => {
                 self.pending = other;
@@ -372,7 +414,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
         while let Ok((req, result)) = self.replies.try_recv() {
             match self.pending.take() {
                 Some((want, id)) if want == req => {
-                    let line = reply_line(&id, result);
+                    let line = reply_line(&id, result, self.hook.take() == Some(req));
                     let _ = tokio::time::timeout(FLUSH_TIME, self.framed.send(line)).await;
                 }
                 other => self.pending = other,
@@ -481,6 +523,7 @@ mod tests {
             backups: brain.dir.path().join("backups"),
             events_capacity: 4,
             tmux: None,
+            spool: None,
         })
         .await
         .unwrap();
@@ -497,6 +540,7 @@ mod tests {
             greeted: None,
             sub: None,
             pending: Some((ReqId(1), Id::Num(7))),
+            hook: None,
             next_req: 1,
         };
         session.close.cancel();

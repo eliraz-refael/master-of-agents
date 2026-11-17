@@ -29,6 +29,7 @@ async fn an_idle_brain_wakes_only_for_the_backup() {
             backups: backups.clone(),
             events_capacity: 256,
             tmux: None,
+            spool: None,
         }),
     )
     .await

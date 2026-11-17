@@ -190,6 +190,7 @@ async fn bring_up(
             backups: paths.backups(b),
             events_capacity,
             tmux,
+            spool: Some(paths.spool(b)),
         })
         .await?;
         Ok::<_, DaemonError>((core, Signals { term, int, hup }))

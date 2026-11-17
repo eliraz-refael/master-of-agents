@@ -54,6 +54,7 @@ async fn rig() -> Rig {
         backups: brain.dir.path().join("backups"),
         events_capacity: 256,
         tmux: None,
+        spool: None,
     };
     let core = within(CoreHandle::start(opts))
         .await
@@ -84,6 +85,7 @@ async fn rig_read_only() -> Rig {
             backups: brain.dir.path().join("backups"),
             events_capacity: 256,
             tmux: None,
+            spool: None,
         },
         store,
     ))
@@ -433,6 +435,7 @@ async fn a_panic_in_startup_fails_start() {
         backups: brain.dir.path().join("backups"),
         events_capacity: 256,
         tmux: None,
+        spool: None,
     }))
     .await;
     match started {

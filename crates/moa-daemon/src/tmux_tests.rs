@@ -396,6 +396,7 @@ fn core_options(brain: &TypicalBrain, time: &Arc<FakeTime>) -> CoreOptions {
         backups: brain.dir.path().join("backups"),
         events_capacity: 16,
         tmux: None,
+        spool: None,
     }
 }
 

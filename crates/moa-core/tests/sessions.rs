@@ -7,6 +7,7 @@ use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Effect, Input, Publish, handle_checked, reply_of};
+use moa_core::live::display_state;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Session, SessionId,
 };
@@ -377,12 +378,29 @@ fn ls_matches_the_spike_layout() {
     );
     let rows = all.data.as_array().unwrap();
     assert_eq!(rows.len(), 9);
-    assert!(rows.iter().all(|r| r.as_object().unwrap().len() == 9));
+    assert!(rows.iter().all(|r| r.as_object().unwrap().len() == 11));
     let first = &rows[0];
     assert_eq!(first["id"], sid(&st, S1_WORKING).to_string());
     assert_eq!(first["conversation"], S1_WORKING);
     assert_eq!(first["alive"], "working");
     assert_eq!(first["group"], "Private/Lantern");
+}
+
+#[test]
+fn ls_shows_the_display_state() {
+    let (b, mut st) = typical();
+    let now = b.now();
+    let all = ok(&mut st, Op::SessionLs { all: true }, &now);
+    for row in all.data.as_array().unwrap() {
+        let id: SessionId = row["id"].as_str().unwrap().parse().unwrap();
+        let (state, why) = display_state(st.session(id).unwrap(), now.wall);
+        assert_eq!(row["display"], state.word());
+        assert_eq!(row["why"], why);
+    }
+    let first = &all.data[0];
+    // The spike says working, but nothing has been heard for a while.
+    assert_eq!(first["alive"], "working");
+    assert_eq!(first["display"], "quiet");
 }
 
 #[test]

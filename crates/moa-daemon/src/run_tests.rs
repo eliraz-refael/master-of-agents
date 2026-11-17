@@ -25,6 +25,7 @@ async fn up(
         backups: brain.dir.path().join("backups"),
         events_capacity: 16,
         tmux: None,
+        spool: None,
     })
     .await
     .expect("the core starts");

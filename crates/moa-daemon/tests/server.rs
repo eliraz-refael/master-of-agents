@@ -120,6 +120,7 @@ async fn a_lagging_subscriber_gets_a_fresh_snapshot() {
         // One event of slack: with a stalled reader, ten calls overflow it for certain.
         events_capacity: 1,
         tmux: None,
+        spool: None,
     })
     .await
     .expect("the core starts");
