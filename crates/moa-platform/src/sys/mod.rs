@@ -44,6 +44,18 @@ pub fn stdout_to_null() -> std::io::Result<()> {
     Ok(())
 }
 
+/// A copy of `fd` that a child process inherits: `dup` leaves close-on-exec off on the copy.
+pub(crate) fn dup_inheritable(
+    fd: std::os::fd::BorrowedFd<'_>,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    // SAFETY: `dup` of a descriptor the borrow keeps open.
+    let raw = check(unsafe { libc::dup(fd.as_raw_fd()) })?;
+    // SAFETY: `raw` is a new open descriptor that nothing else owns, so the `OwnedFd`
+    // closes it exactly once.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) })
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

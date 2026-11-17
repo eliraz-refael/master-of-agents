@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -14,7 +15,8 @@ use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
 use moa_platform::{Spawner, kill_term};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+use tokio::net::unix::pipe;
+use tokio::process::{ChildStderr, ChildStdin};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::parse::{Frame, Parser};
@@ -239,17 +241,27 @@ impl ControlClient {
     pub async fn connect(
         opts: &ConnectOptions,
     ) -> Result<(ControlClient, Events, ServerInfo), ConnectError> {
+        // The child keeps a reader of its own output. tmux 3.4 never lets go of a control
+        // client whose output it failed to write: if this process dies with a notification
+        // on its way, the client would stay attached for good, and `@moa_ctl` with it. With a
+        // reader left, the late lines land in the pipe and the client leaves on its input's
+        // end, as on later versions.
+        let (out_r, out_w) = std::io::pipe().map_err(ConnectError::Spawn)?;
         let mut cmd = Command::new(&opts.tmux);
         cmd.args(ctl_argv(&opts.socket))
             .env_clear()
             .envs(opts.env.iter().cloned())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::from(out_w))
             .stderr(Stdio::piped());
-        let mut child = Spawner.spawn(&mut cmd).map_err(ConnectError::Spawn)?;
+        let spawned = Spawner.spawn_keeping(&mut cmd, out_r.as_fd());
+        // `cmd` holds a copy of the output's write end; the end of the output is seen only
+        // once no copy is left but the child's.
+        drop(cmd);
+        let mut child = spawned.map_err(ConnectError::Spawn)?;
         let pid = child.id();
         let stdin = child.stdin.take().map(ChildStdin::from_std).transpose();
-        let stdout = child.stdout.take().map(ChildStdout::from_std).transpose();
+        let stdout = pipe::Receiver::from_owned_fd(OwnedFd::from(out_r)).map(Some);
         let stderr = child.stderr.take().map(ChildStderr::from_std).transpose();
         // The reaper reports the exit, so `close` can wait for it and nothing signals a pid
         // that is gone.
@@ -538,7 +550,7 @@ impl Batch {
 
 /// The one task that reads: it answers slots in order and forwards notifications.
 async fn read_loop(
-    mut stdout: ChildStdout,
+    mut stdout: pipe::Receiver,
     mut parser: Parser,
     leftover: Vec<Frame>,
     shared: Arc<Mutex<Shared>>,
