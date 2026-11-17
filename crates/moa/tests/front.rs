@@ -106,6 +106,25 @@ fn moa_inside_another_tmux_refuses() {
         out(&o),
         "the work moa is running; open it from a new terminal tab: moa work\n"
     );
+
+    // `--sandbox` points to the sandbox, not to a plain `moa` that refuses.
+    let tb = TempBrain::sandbox_home();
+    let o = assert_cmd::Command::new(MOA)
+        .arg("--sandbox")
+        .env_clear()
+        .env("HOME", tb.home())
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TMUX", "/tmp/elsewhere/default,1,0")
+        .current_dir(tb.home())
+        .timeout(Duration::from_secs(30))
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(
+        out(&o),
+        "the default moa is running; open it from a new terminal tab: moa --sandbox\n"
+    );
+    assert!(!tmux_socket(&tb).exists());
 }
 
 #[test]

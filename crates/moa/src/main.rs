@@ -120,6 +120,10 @@ mod tests {
         assert!(cli.command.is_none() && !cli.sandbox);
         let cli = Cli::try_parse_from(["moa", "--sandbox"]).unwrap();
         assert!(cli.sandbox && cli.brain.is_none());
+        // The order the front door's line inside another tmux gives.
+        let cli = Cli::try_parse_from(["moa", "--sandbox", "work"]).unwrap();
+        assert!(cli.sandbox && cli.command.is_none());
+        assert_eq!(cli.brain.as_deref(), Some("work"));
         let cli = Cli::try_parse_from(["moa", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Status(_))));
         assert!(cli.brain.is_none());

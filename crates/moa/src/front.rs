@@ -125,14 +125,7 @@ fn open(args: &FrontArgs) -> Result<Next, String> {
     let socket_path = socket.path(tmux_tmpdir.as_deref().map(Path::new), current_uid());
     let inside = nesting(std::env::var_os("TMUX").as_deref(), &socket_path);
     if inside == Nesting::Other {
-        let open_it = if brain == BrainName::default_brain() {
-            "moa".to_string()
-        } else {
-            format!("moa {b}")
-        };
-        return Ok(Next::Say(format!(
-            "the {b} moa is running; open it from a new terminal tab: {open_it}"
-        )));
+        return Ok(Next::Say(elsewhere(&brain, args.sandbox)));
     }
 
     let rt = runtime()?;
@@ -170,6 +163,23 @@ fn open(args: &FrontArgs) -> Result<Next, String> {
     };
     cmd.env_clear().envs(front_env(std::env::vars_os(), &paths));
     Ok(Next::Become(cmd))
+}
+
+/// The line for a `moa` run inside another terminal server: the command that opens this
+/// brain from a terminal of its own, `--sandbox` included when it was given.
+fn elsewhere(brain: &BrainName, sandbox: bool) -> String {
+    let mut open_it = String::from("moa");
+    if sandbox {
+        open_it.push_str(" --sandbox");
+    }
+    if *brain != BrainName::default_brain() {
+        open_it.push(' ');
+        open_it.push_str(brain.as_str());
+    }
+    format!(
+        "the {} moa is running; open it from a new terminal tab: {open_it}",
+        brain.as_str()
+    )
 }
 
 fn no_answer(within: &str, log: &Path) -> String {
@@ -483,6 +493,23 @@ mod tests {
             pick_brain(&paths, Some("status")).unwrap_err(),
             "moa --sandbox opens a brain; run moa status from a moa terminal"
         );
+    }
+
+    #[test]
+    fn the_line_elsewhere_names_the_command_that_opens_this_brain() {
+        let work = BrainName::parse("work").unwrap();
+        let default = BrainName::default_brain();
+        let line = |b: &BrainName, sandbox| {
+            elsewhere(b, sandbox)
+                .rsplit_once(": ")
+                .unwrap()
+                .1
+                .to_string()
+        };
+        assert_eq!(line(&default, false), "moa");
+        assert_eq!(line(&work, false), "moa work");
+        assert_eq!(line(&default, true), "moa --sandbox");
+        assert_eq!(line(&work, true), "moa --sandbox work");
     }
 
     #[test]
