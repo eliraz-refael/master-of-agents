@@ -2,12 +2,34 @@
 
 use std::ffi::{CString, OsStr};
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use super::{check, since_epoch};
+
+/// `SO_PEERCRED`: the credentials saved when the peer connected.
+pub(super) fn peer_uid_of(fd: RawFd) -> io::Result<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `getsockopt` writes at most `len` bytes into `cred`, which is owned here and
+    // that big, on a descriptor the caller keeps open.
+    check(unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &mut len,
+        )
+    })?;
+    Ok(cred.uid)
+}
 
 /// A disarmed timerfd on the wall clock, non-blocking and close-on-exec.
 pub fn alarm_create() -> io::Result<OwnedFd> {

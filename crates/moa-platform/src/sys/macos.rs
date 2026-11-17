@@ -12,6 +12,17 @@ use super::{check, set_cloexec, set_cloexec_nonblock, since_epoch};
 const NOTE_MACH_CONTINUOUS_TIME: u32 = 0x80;
 const TIMER_IDENT: libc::uintptr_t = 1;
 
+/// `getpeereid`: the uid saved when the peer connected. (tokio's `peer_cred` also asks for
+/// the peer's pid, `LOCAL_PEEREPID`, which fails once the peer has closed its end.)
+pub(super) fn peer_uid_of(fd: RawFd) -> io::Result<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: `getpeereid` on a descriptor the caller keeps open, writing two integers
+    // owned here.
+    check(unsafe { libc::getpeereid(fd, &mut uid, &mut gid) })?;
+    Ok(uid)
+}
+
 fn kevent_zeroed() -> libc::kevent {
     // SAFETY: `kevent` is a plain C struct of integers and a pointer; all-zero is valid.
     unsafe { std::mem::zeroed() }

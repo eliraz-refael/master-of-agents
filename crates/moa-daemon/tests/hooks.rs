@@ -3,6 +3,7 @@
 mod common;
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -162,6 +163,31 @@ async fn a_hook_line_updates_the_session() {
     // The hook needs no hello. `session.ls` does, and it is read after the hook.
     c.hello();
     assert_eq!(display(&mut c), "working");
+}
+
+/// A hook writes its line and exits at once, often before the daemon has accepted the
+/// connection: none of those lines is lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lines_from_hooks_that_already_left_all_arrive() {
+    const N: usize = 20;
+    let d = boot_with(seed_db, |_| {}).await;
+    for i in 0..N {
+        let at = ago(60_000 - 100 * i as i64);
+        let mut s = std::os::unix::net::UnixStream::connect(&d.sock).unwrap();
+        writeln!(
+            s,
+            "{}",
+            notice(&hook_line("UserPromptSubmit", at, i as u32))
+        )
+        .unwrap();
+    }
+    let arrived = timeout(Duration::from_secs(10), async {
+        while event_times(&d.paths).len() < N {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(arrived.is_ok(), "{} of {N}", event_times(&d.paths).len());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

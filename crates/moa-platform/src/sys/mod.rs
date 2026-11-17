@@ -6,6 +6,12 @@ pub fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// The user id of the process at the other end of a Unix stream socket. It still answers
+/// once that process has closed its end and gone, as a hook does right after its line.
+pub fn peer_uid(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<u32> {
+    peer_uid_of(std::os::fd::AsRawFd::as_raw_fd(&fd))
+}
+
 /// A pid `kill` may be given. Zero and negative pids address whole process groups, so a
 /// `u32` that wraps there is refused rather than passed on.
 fn signalable(pid: u32) -> Option<libc::pid_t> {
