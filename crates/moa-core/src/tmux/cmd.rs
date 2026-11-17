@@ -136,6 +136,13 @@ fn is_own_config(p: &str) -> bool {
         && path.file_name().is_some_and(|f| f == "moa.tmux")
 }
 
+/// A value tmux expands as a format after parsing (a `new-window` `-n` name or `-c`
+/// folder), kept literal: every `#` doubled, so `#S`, `#{…}` and `#(…)` are just text.
+/// [`quote`] guards only the command parser. moa-tmux's `conf.rs` doubles `#` the same way.
+pub fn literal_format(s: &str) -> String {
+    s.replace('#', "##")
+}
+
 fn is_bare(c: char) -> bool {
     c.is_ascii_alphanumeric() || "_@%:=.,/+-".contains(c)
 }
@@ -188,6 +195,12 @@ mod tests {
             .args(flags.iter().copied())
             .args(["-n", "x", "-c", "/w", "-t", "=moa:"])
             .args(["/opt/claude", "--name", "-d", "-P"])
+    }
+
+    #[test]
+    fn literal_format_doubles_every_hash() {
+        assert_eq!(literal_format("plain"), "plain");
+        assert_eq!(literal_format("#S #(x) #{a} ##"), "##S ##(x) ##{a} ####");
     }
 
     #[test]

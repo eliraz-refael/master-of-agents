@@ -637,6 +637,43 @@ fn the_window_name_is_cut_to_24_chars() {
     assert!(!cmds[0].line().contains('\n'));
 }
 
+/// tmux expands `-n` and `-c` as formats, so their `#` is doubled: `#S` would show the
+/// session's name and `#(…)` would run a command. The name is cut first, so a doubled `#`
+/// at the cut stays whole. What Claude gets and what the brain records stay as typed.
+#[test]
+fn the_tab_name_and_folder_keep_their_hashes_literal() {
+    let (b, mut st) = typical();
+    // The 24th character is a `#`.
+    let title = "fix #S #(x) aaaaaaaaaaa#b";
+    let path = b.home.join("work/d#x#{s}");
+    let op = Op::SessionOpen {
+        path: path.clone(),
+        account: None,
+        title: Some(title.into()),
+        group: None,
+        prompt: None,
+        bg: false,
+    };
+    let fx = send(&b, &mut st, 1, op);
+    let (id, cmds) = the_open(&fx);
+    let conv = nth(&b, 2);
+    let home = b.home.display();
+    assert_eq!(
+        cmds[0].line(),
+        format!(
+            "new-window -d -P -F 'P #{{pane_id}} #{{pane_pid}}' -n 'fix ##S ##(x) aaaaaaaaaaa##' \
+             -c '{home}/work/d##x##{{s}}' -t =moa: -e CLAUDE_CONFIG_DIR={home}/.claude-a \
+             -e MOA_SESSION={id} -e MOA_BRAIN=default -e CLAUDE_CODE_PLUGIN_DIRS={PLUGIN} \
+             /opt/claude --session-id {conv} --name 'fix #S #(x) aaaaaaaaaaa#b'"
+        )
+    );
+    assert_eq!(cmds[0].check(), Ok(()));
+    let s = st.session(id).unwrap();
+    assert_eq!(s.title.as_deref(), Some(title));
+    assert_eq!(s.cwd.as_deref(), path.to_str());
+    assert_eq!(s.start_cwd.as_deref(), path.to_str());
+}
+
 #[test]
 fn a_folder_with_no_name_opens_as_agent() {
     let (b, mut st) = typical();

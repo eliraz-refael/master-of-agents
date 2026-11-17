@@ -21,7 +21,7 @@ use crate::op::{Done, OpError};
 use crate::route::{Route, route};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
-use crate::tmux::cmd::Cmd;
+use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Link, OPENED_FORMAT, OpenEnd, Settled};
 
@@ -313,11 +313,13 @@ pub(crate) fn open(
 
     let env = |k: &str, v: &str| ["-e".to_string(), format!("{k}={v}")];
     let plugin = state.deps().session_plugin.display().to_string();
+    // tmux expands `-n` and `-c` as formats: cut first, so a doubled `#` isn't split and
+    // the name shows at most 24 characters. `-e` values and the argv stay as they are.
     let mut cmd = Cmd::new("new-window")
         .args(["-d", "-P", "-F", OPENED_FORMAT, "-n"])
-        .arg(cut(&title, WINDOW_NAME_CUT))
+        .arg(literal_format(&cut(&title, WINDOW_NAME_CUT)))
         .arg("-c")
-        .arg(path)
+        .arg(literal_format(&path))
         .args(["-t", "=moa:"])
         .args(env("CLAUDE_CONFIG_DIR", &store))
         .args(env("MOA_SESSION", &id.to_string()))
