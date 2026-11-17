@@ -97,6 +97,7 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "shutdown",
     "sql",
     "service",
+    "hook",
     "help",
     "ls",
     "find",
