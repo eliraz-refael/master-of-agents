@@ -3,6 +3,7 @@
 //! events between the core and the server, reconnects when the client drops, and takes
 //! moa's hooks down on a clean stop.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
@@ -98,8 +99,23 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// What outlives a restart: the inbox, the connection numbers and the tmux program the
-/// front door named.
+/// How long a connection must stay up before a loss starts the backoff afresh: the longest
+/// wait. A client dropped sooner continues the backoff, so a server that keeps dropping
+/// it still costs at most 1 + 6 launches before the link gives up.
+const STEADY: Duration = BACKOFF[BACKOFF.len() - 1];
+
+/// What the link was doing, kept across a restart so the next run knows whether to
+/// reconnect.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Doing {
+    Idle,
+    Connecting,
+    Up,
+    BackingOff,
+}
+
+/// What outlives a restart: the inbox, the connection numbers, the tmux program the front
+/// door named, and what the link was doing.
 struct Shared {
     link: TmuxLink,
     to_core: Box<dyn Fn(TmuxIn) + Send + Sync>,
@@ -107,6 +123,7 @@ struct Shared {
     /// The last connection's number: every connect takes the next, restarts included.
     conns: AtomicU64,
     tmux: Mutex<Option<PathBuf>>,
+    doing: Mutex<Doing>,
 }
 
 /// Starts the link under `supervise` as "the terminal link". It does nothing until it is
@@ -123,6 +140,7 @@ pub(crate) fn start(
         inbox: Arc::new(tokio::sync::Mutex::new(rx)),
         conns: AtomicU64::new(0),
         tmux: Mutex::new(None),
+        doing: Mutex::new(Doing::Idle),
     });
     let mut started = false;
     tokio::spawn(supervise(
@@ -151,6 +169,10 @@ struct Up {
     client: ControlClient,
     events: Events,
     info: ServerInfo,
+    since: Instant,
+    /// The backoff step that connected it, if one did; a loss before `STEADY` goes on from
+    /// there.
+    tried: Option<usize>,
 }
 
 impl Up {
@@ -191,13 +213,36 @@ impl Actor {
         mut inbox: OwnedMutexGuard<mpsc::UnboundedReceiver<TmuxCmd>>,
         restarted: bool,
     ) {
+        let mut pending = VecDeque::new();
         if restarted {
-            // The core may still think a client is up: it hears of the loss first.
-            self.tell(TmuxIn::Down(Down::Lost));
-            self.connect().await;
+            // A stop, or a core that has gone, comes before any reconnect.
+            loop {
+                match inbox.try_recv() {
+                    Ok(TmuxCmd::Stop(done)) => {
+                        let _ = done.send(());
+                        return;
+                    }
+                    Ok(cmd) => pending.push_back(cmd),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => return,
+                }
+            }
+            let doing = *lock(&self.sh.doing);
+            if doing == Doing::Up {
+                // The core still thinks a client is up: it hears of the loss first.
+                self.tell(TmuxIn::Down(Down::Lost));
+            }
+            // After a give-up or no server the link was idle, and stays so until asked.
+            if doing != Doing::Idle {
+                self.connect().await;
+            }
         }
         loop {
-            match self.next(&mut inbox).await {
+            let step = match pending.pop_front() {
+                Some(cmd) => Step::Cmd(Some(cmd)),
+                None => self.next(&mut inbox).await,
+            };
+            match step {
                 // The core has gone without a stop.
                 Step::Cmd(None) => {
                     self.clean_up().await;
@@ -215,7 +260,13 @@ impl Actor {
                 #[cfg(test)]
                 Step::Cmd(Some(TmuxCmd::Crash)) => panic!("a test crashed the terminal link"),
                 Step::Event(Some(ev)) => self.event(ev),
-                Step::Event(None) => self.lost().await,
+                Step::Event(None) => {
+                    let after = match &self.state {
+                        State::Up(up) if up.since.elapsed() < STEADY => up.tried,
+                        _ => None,
+                    };
+                    self.lost(after).await;
+                }
                 Step::Retry(next) => self.retry(next).await,
             }
         }
@@ -242,9 +293,44 @@ impl Actor {
         (self.sh.to_core)(input);
     }
 
+    fn mark(&self, doing: Doing) {
+        *lock(&self.sh.doing) = doing;
+    }
+
+    /// Moves to `state`, noting it for a restart; returns the old one.
+    fn set(&mut self, state: State) -> State {
+        self.mark(match state {
+            State::Idle => Doing::Idle,
+            State::Up(_) => Doing::Up,
+            State::Backoff { .. } => Doing::BackingOff,
+        });
+        std::mem::replace(&mut self.state, state)
+    }
+
     fn down(&mut self, why: Down) {
-        self.state = State::Idle;
+        self.set(State::Idle);
         self.tell(TmuxIn::Down(why));
+    }
+
+    /// Waits for the step after `tried` (the first, after a first try), or gives up when
+    /// the steps have run out.
+    fn back_off(&mut self, tried: Option<usize>) {
+        let next = tried.map_or(0, |k| k + 1);
+        match BACKOFF.get(next) {
+            Some(wait) => {
+                self.set(State::Backoff {
+                    next,
+                    at: Instant::now() + *wait,
+                });
+            }
+            None => {
+                tracing::warn!(
+                    "the terminal link gave up after {} reconnects",
+                    BACKOFF.len()
+                );
+                self.down(Down::GaveUp);
+            }
+        }
     }
 
     /// One client at most: connected, it says so again; backing off, it says nothing yet.
@@ -288,6 +374,7 @@ impl Actor {
     }
 
     async fn connect(&mut self) {
+        self.mark(Doing::Connecting);
         let Some(tmux) = self.find_tmux() else {
             return self.down(Down::NoTmux);
         };
@@ -305,7 +392,7 @@ impl Actor {
             env: self.sh.link.env.clone(),
         };
         match ControlClient::connect(&opts).await {
-            Ok((client, events, info)) => self.bootstrap(client, events, info).await,
+            Ok((client, events, info)) => self.bootstrap(client, events, info, tried).await,
             Err(ConnectError::TooOld(v)) => self.down(Down::TooOld(v)),
             Err(ConnectError::Spawn(e)) => {
                 tracing::warn!("tmux couldn't be started: {}", e.kind());
@@ -314,27 +401,11 @@ impl Actor {
                 self.down(Down::NoTmux);
             }
             Err(ConnectError::Exited(line)) => {
-                let next = tried.map_or(0, |k| k + 1);
-                match BACKOFF.get(next) {
-                    Some(wait) => {
-                        tracing::info!(
-                            "the terminal server turned the link away: {}",
-                            first_line(&line)
-                        );
-                        self.state = State::Backoff {
-                            next,
-                            at: Instant::now() + *wait,
-                        };
-                    }
-                    None => {
-                        tracing::warn!(
-                            "the terminal link gave up after {} reconnects: {}",
-                            BACKOFF.len(),
-                            first_line(&line)
-                        );
-                        self.down(Down::GaveUp);
-                    }
-                }
+                tracing::info!(
+                    "the terminal server turned the link away: {}",
+                    first_line(&line)
+                );
+                self.back_off(tried);
             }
             Err(e @ ConnectError::Protocol(_)) => {
                 tracing::warn!("the terminal link couldn't connect: {e}");
@@ -344,8 +415,14 @@ impl Actor {
     }
 
     /// Sources moa's config, names the client in `@moa_ctl` and sets the hooks, then tells
-    /// the core it is up.
-    async fn bootstrap(&mut self, client: ControlClient, events: Events, info: ServerInfo) {
+    /// the core it is up. `tried` is the backoff step that connected it, if one did.
+    async fn bootstrap(
+        &mut self,
+        client: ControlClient,
+        events: Events,
+        info: ServerInfo,
+        tried: Option<usize>,
+    ) {
         let conn = self.sh.conns.fetch_add(1, Ordering::SeqCst) + 1;
         let moa_tmux = self.sh.link.moa_tmux.to_string_lossy().into_owned();
         let steps = [
@@ -357,7 +434,7 @@ impl Actor {
                 Ok(_) => {}
                 Err(CmdError::Gone) => {
                     client.close().await;
-                    return self.lost().await;
+                    return self.lost(tried).await;
                 }
                 Err(e) => tracing::warn!(
                     "{} failed while linking: {}",
@@ -372,15 +449,19 @@ impl Actor {
             client,
             events,
             info,
+            since: Instant::now(),
+            tried,
         };
         self.tell(up.connected());
-        self.state = State::Up(up);
+        self.set(State::Up(up));
     }
 
     /// The client dropped. The core hears so before anything else, then the link finds out
-    /// whether the server is still there and, if it is, reconnects after a wait.
-    async fn lost(&mut self) {
-        if let State::Up(up) = std::mem::replace(&mut self.state, State::Idle) {
+    /// whether the server is still there and, if it is, reconnects after the wait for the
+    /// step after `after` (the first step when the client had stayed up, or none was
+    /// counted).
+    async fn lost(&mut self, after: Option<usize>) {
+        if let State::Up(up) = self.set(State::Idle) {
             up.client.close().await;
         }
         tracing::info!("the terminal link lost its client");
@@ -388,14 +469,12 @@ impl Actor {
         if !self.probe().await {
             return self.down(Down::NoServer);
         }
-        self.state = State::Backoff {
-            next: 0,
-            at: Instant::now() + BACKOFF[0],
-        };
+        self.back_off(after);
     }
 
     async fn retry(&mut self, next: usize) {
-        self.state = State::Idle;
+        self.set(State::Idle);
+        self.mark(Doing::Connecting);
         if !self.probe().await {
             return self.down(Down::NoServer);
         }
@@ -438,7 +517,7 @@ impl Actor {
     /// Takes down what the link put up, so keys say moa isn't running, and closes the
     /// client.
     async fn clean_up(&mut self) {
-        let State::Up(up) = std::mem::replace(&mut self.state, State::Idle) else {
+        let State::Up(up) = self.set(State::Idle) else {
             return;
         };
         let unset = Cmd::new("set-option").args(["-gu", "@moa_ctl"]);

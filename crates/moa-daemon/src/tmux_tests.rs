@@ -22,6 +22,9 @@ use crate::testing::FakeTime;
 const B: &str = "default";
 const PATIENCE: Duration = Duration::from_secs(10);
 
+// The launch counts read the process-wide `spawn::launches()`; they are exact only because
+// nextest runs each test in a process of its own.
+
 /// What the link told the core.
 struct Heard(mpsc::UnboundedReceiver<TmuxIn>);
 
@@ -280,6 +283,103 @@ async fn connects_while_backing_off_start_nothing_and_it_gives_up_after_six() {
     let said = heard.quiet_for(Duration::from_secs(20)).await;
     assert_eq!(said, Some(TmuxIn::Down(Down::GaveUp)));
     assert_eq!(spawn::launches() - before, 1 + BACKOFF.len() as u64);
+}
+
+/// A server whose user hook detaches every client once it has attached: the link keeps
+/// counting its backoff through each drop and gives up after 1 + 6 launches, saying `Lost`
+/// before every reconnect. Returns how many times it was up.
+async fn dropped_after_each_attach(hook: impl FnOnce(&TempBrain) -> String) -> usize {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let hook = hook(&tb);
+    tb.tmux(B, &["set-hook", "-g", "client-attached", &hook])
+        .unwrap();
+    let before = spawn::launches();
+    let (actor, mut heard) = started(link);
+    actor.send(connect()).unwrap();
+    let mut ups = 0;
+    let mut lost_since_up = true;
+    // The backoff's waits add up to 6.3 s, plus a drop per connect.
+    let gave_up = timeout(Duration::from_secs(30), async {
+        loop {
+            match heard.next_state().await {
+                TmuxIn::Connected { .. } => {
+                    assert!(lost_since_up, "a reconnect came before Lost");
+                    ups += 1;
+                    assert!(ups <= 1 + BACKOFF.len(), "more than 1 + 6 connects");
+                    lost_since_up = false;
+                }
+                TmuxIn::Down(Down::Lost) => lost_since_up = true,
+                TmuxIn::Down(Down::GaveUp) => break,
+                other => panic!("{other:?}"),
+            }
+        }
+    })
+    .await;
+    assert!(gave_up.is_ok(), "the link never gave up");
+    assert_eq!(spawn::launches() - before, 1 + BACKOFF.len() as u64);
+    // It stays given up: nothing more is launched.
+    assert_eq!(heard.quiet_for(Duration::from_millis(500)).await, None);
+    assert_eq!(spawn::launches() - before, 1 + BACKOFF.len() as u64);
+    ups
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_detaches_the_client_on_attach_is_given_up_on() {
+    dropped_after_each_attach(|_| "detach-client".to_string()).await;
+}
+
+/// The drop comes after the link is up, so every loss is one after a `Connected`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_drops_the_client_soon_after_attach_is_given_up_on() {
+    let ups = dropped_after_each_attach(|tb| {
+        let sock = tb.paths().tmux_socket(B).unwrap().path(None, 0);
+        format!(
+            "run-shell -b \"sleep 0.3; tmux -S '{}' detach-client -t '#{{hook_client}}'\"",
+            sock.display()
+        )
+    })
+    .await;
+    assert_eq!(
+        ups,
+        1 + BACKOFF.len(),
+        "every connect came up before its drop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_after_no_server_stays_idle() {
+    let tb = TempBrain::new(None);
+    let paths = tb.paths();
+    let link = TmuxLink {
+        socket: paths.tmux_socket(B).unwrap(),
+        moa_tmux: paths.moa_tmux(B),
+        env: env(&tb),
+    };
+    let (actor, mut heard) = started(link);
+    actor.send(connect()).unwrap();
+    assert_eq!(heard.next_state().await, TmuxIn::Down(Down::NoServer));
+    actor.send(TmuxCmd::Crash).unwrap();
+    // The restart comes after supervise's 1 s; it says nothing and connects to nothing.
+    assert_eq!(heard.quiet_for(Duration::from_secs(2)).await, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_queued_before_a_restart_is_answered_without_a_reconnect() {
+    let tb = TempBrain::new(None);
+    let (actor, mut heard) = started(server(&tb));
+    actor.send(connect()).unwrap();
+    conn_of(&heard.next_state().await);
+    let before = spawn::launches();
+    actor.send(TmuxCmd::Crash).unwrap();
+    let (done, stopped) = oneshot::channel();
+    actor.send(TmuxCmd::Stop(done)).unwrap();
+    timeout(PATIENCE, stopped)
+        .await
+        .expect("the stop is answered in time")
+        .expect("the stop is answered");
+    assert_eq!(spawn::launches(), before, "a restart reconnected");
+    assert_eq!(heard.quiet_for(Duration::from_millis(300)).await, None);
 }
 
 // --- The core's handover to the link ---

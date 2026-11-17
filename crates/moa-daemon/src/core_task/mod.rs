@@ -214,7 +214,6 @@ impl CoreHandle {
         // Weak: the core owns the scheduler, so a strong sender here would be a cycle that
         // keeps the inbox open after every handle has gone.
         let fire_inbox = inbox.downgrade();
-        let failed_inbox = inbox.downgrade();
         let sched = scheduler::start(
             opts.clock.clone(),
             opts.alarm,
@@ -224,20 +223,12 @@ impl CoreHandle {
                     let _ = inbox.send(Item::Input(Input::Timer(key)));
                 }
             },
-            // The raw message stays here: it may carry contents (2a's no-contents rule).
-            move |actor, _message| {
-                if let Some(inbox) = failed_inbox.upgrade() {
-                    let _ = inbox.send(Item::Input(Input::ActorFailed {
-                        actor,
-                        message: String::new(),
-                    }));
-                }
-            },
+            report_failure(&inbox),
         );
 
         // Weak for the same reason: the core owns the link.
         let link = link.or_else(|| {
-            let (heard, failed) = (inbox.downgrade(), inbox.downgrade());
+            let heard = inbox.downgrade();
             opts.tmux.take().map(|l| {
                 tmux::start(
                     l,
@@ -246,15 +237,7 @@ impl CoreHandle {
                             let _ = inbox.send(Item::Input(Input::Tmux(input)));
                         }
                     },
-                    // The panic's message stays here: it may carry contents.
-                    move |actor, _message| {
-                        if let Some(inbox) = failed.upgrade() {
-                            let _ = inbox.send(Item::Input(Input::ActorFailed {
-                                actor,
-                                message: String::new(),
-                            }));
-                        }
-                    },
+                    report_failure(&inbox),
                 )
             })
         });
@@ -458,6 +441,22 @@ impl CoreHandle {
     pub fn store_fault(&self, f: Fault) {
         let store = lock(&self.store).clone();
         store.fault(f);
+    }
+}
+
+/// What a supervised actor calls when it panicked: the core hears `ActorFailed` through a
+/// weak sender. The raw message stays here: it may carry contents (2a's no-contents rule).
+fn report_failure(
+    inbox: &mpsc::UnboundedSender<Item>,
+) -> impl Fn(&'static str, String) + Send + 'static {
+    let inbox = inbox.downgrade();
+    move |actor, _message| {
+        if let Some(inbox) = inbox.upgrade() {
+            let _ = inbox.send(Item::Input(Input::ActorFailed {
+                actor,
+                message: String::new(),
+            }));
+        }
     }
 }
 

@@ -293,18 +293,17 @@ impl Core {
                 LogLevel::Warn => tracing::warn!("{message}"),
                 LogLevel::Error => tracing::error!("{message}"),
             },
+            // The answers the core gives itself go through its inbox, never inside the
+            // `handle` that asked.
             Effect::TmuxConnect { tmux } => match &self.link {
                 Some(link) => {
-                    let _ = link.send(TmuxCmd::Connect { tmux });
-                }
-                // No terminal link: the core hears so through its inbox, never inside the
-                // `handle` that asked.
-                None => {
-                    if let Some(inbox) = self.inbox.upgrade() {
-                        let down = Input::Tmux(TmuxIn::Down(Down::Disabled));
-                        let _ = inbox.send(Item::Input(down));
+                    if link.send(TmuxCmd::Connect { tmux }).is_err() {
+                        // The link has ended: nobody else will answer the waiters.
+                        tracing::warn!("the terminal link has ended");
+                        self.tell_self(TmuxIn::Down(Down::GaveUp));
                     }
                 }
+                None => self.tell_self(TmuxIn::Down(Down::Disabled)),
             },
             Effect::Tmux {
                 conn,
@@ -315,11 +314,20 @@ impl Core {
         }
     }
 
+    /// What the link would say, said by the core to itself.
+    fn tell_self(&self, input: TmuxIn) {
+        if let Some(inbox) = self.inbox.upgrade() {
+            let _ = inbox.send(Item::Input(Input::Tmux(input)));
+        }
+    }
+
     /// Commands for the server, to the link if there is one.
     fn to_link(&self, conn: u64, cmds: Vec<Cmd>, token: Option<TmuxToken>) {
         match &self.link {
             Some(link) => {
-                let _ = link.send(TmuxCmd::Send { conn, cmds, token });
+                if link.send(TmuxCmd::Send { conn, cmds, token }).is_err() {
+                    tracing::debug!("the terminal link has ended: dropped");
+                }
             }
             // The commands stay out of the log.
             None => tracing::debug!(conn, cmds = cmds.len(), ?token, "no terminal link: dropped"),
