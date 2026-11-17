@@ -10,7 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use moa_client::{Client, ClientOptions, OnMismatch, own_exe};
-use moa_core::config::BrainName;
+use moa_core::config::{BrainName, RESERVED_BRAIN_NAMES};
 use moa_core::op::Op;
 use moa_core::state::CallerInfo;
 use moa_daemon::{DaemonError, load_config};
@@ -18,12 +18,15 @@ use moa_platform::{
     Paths, PathsError, Spawner, TmuxSocket, build_id, current_uid, ensure_private_dir,
     sandbox_root, which,
 };
+use moa_tmux::client::version_ok;
 use tokio::time::timeout;
 
 use crate::ctl::runtime;
 
 /// How long each answer from the daemon may take (T5).
 const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// How long connecting may take in all, a start or a restart included.
+const CONNECT_WAIT: Duration = Duration::from_secs(30);
 const NOT_SWITCHED_OVER: &str = "moa v1 isn't switched over yet; try moa --sandbox";
 const NO_TMUX: &str = "moa needs tmux 3.4 or newer; install it and run moa again";
 
@@ -88,9 +91,16 @@ fn paths(sandbox: bool) -> Result<Paths, String> {
     .map_err(|e| e.to_string())
 }
 
-/// The brain to open, which must be in `moa.toml`.
+/// The brain to open, which must be in `moa.toml`. A command's word (`moa --sandbox
+/// status`: after a flag clap takes it as a brain) gets a pointer to the command instead.
 fn pick_brain(paths: &Paths, name: Option<&str>) -> Result<BrainName, String> {
-    let brain = BrainName::parse(name.unwrap_or("default")).map_err(|e| {
+    let name = name.unwrap_or("default");
+    if RESERVED_BRAIN_NAMES.contains(&name) {
+        return Err(format!(
+            "moa --sandbox opens a brain; run moa {name} from a moa terminal"
+        ));
+    }
+    let brain = BrainName::parse(name).map_err(|e| {
         let line = e.to_string();
         line.strip_prefix("moa.toml: ").unwrap_or(&line).to_string()
     })?;
@@ -127,14 +137,25 @@ fn open(args: &FrontArgs) -> Result<Next, String> {
 
     let rt = runtime()?;
     let log = paths.log(b);
-    let mut client = rt.block_on(connect(&paths, brain.clone()))?;
+    let mut client = rt.block_on(connect(&paths, brain.clone(), &log))?;
     if !rt.block_on(ensure(&mut client, &tmux, &log))? {
-        create(&paths, b, &tmux, &socket, &socket_path)?;
-        if !rt.block_on(ensure(&mut client, &tmux, &log))? {
-            return Err(format!(
-                "moa couldn't start its terminal server; see its log ({})",
-                log.display()
-            ));
+        // The daemon checks the running server's version; a server from an old tmux would
+        // outlive an upgrade, so none is made.
+        check_version(&tmux)?;
+        let created = create(&paths, b, &tmux, &socket, &socket_path)?;
+        match rt.block_on(ensure(&mut client, &tmux, &log)) {
+            Ok(true) => {}
+            result => {
+                // Don't leave a server the daemon won't use for the next `moa` to find.
+                if created {
+                    kill_server(&paths, &tmux, &socket);
+                }
+                result?;
+                return Err(format!(
+                    "moa couldn't start its terminal server; see its log ({})",
+                    log.display()
+                ));
+            }
         }
     }
     drop(client);
@@ -151,7 +172,16 @@ fn open(args: &FrontArgs) -> Result<Next, String> {
     Ok(Next::Become(cmd))
 }
 
-async fn connect(paths: &Paths, brain: BrainName) -> Result<Client, String> {
+fn no_answer(within: &str, log: &Path) -> String {
+    format!(
+        "moa didn't answer within {within}; see its log ({})",
+        log.display()
+    )
+}
+
+/// Connects, starting the daemon when none answers. The client bounds a start and a
+/// restart itself; this bounds a daemon that takes the connection and never says hello.
+async fn connect(paths: &Paths, brain: BrainName, log: &Path) -> Result<Client, String> {
     let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let opts = ClientOptions {
         paths: paths.clone(),
@@ -162,7 +192,56 @@ async fn connect(paths: &Paths, brain: BrainName) -> Result<Client, String> {
         on_mismatch: OnMismatch::Restart,
         build: build_id().into(),
     };
-    Client::connect(opts).await.map_err(|e| e.to_string())
+    timeout(CONNECT_WAIT, Client::connect(opts))
+        .await
+        .map_err(|_| no_answer("30 s", log))?
+        .map_err(|e| e.to_string())
+}
+
+/// `tmux -V`, which must say 3.4 or newer, in the daemon's words when it doesn't.
+fn check_version(tmux: &Path) -> Result<(), String> {
+    let mut cmd = Command::new(tmux);
+    cmd.arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // A tmux that can't say its version is as good as unknown.
+    let out = Spawner
+        .spawn(&mut cmd)
+        .and_then(|c| c.wait_with_output())
+        .ok()
+        .filter(|o| o.status.success());
+    let text = out.map_or(String::new(), |o| {
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    });
+    let version = text.trim().strip_prefix("tmux ").unwrap_or(text.trim());
+    if version_ok(version) {
+        return Ok(());
+    }
+    let version = if version.is_empty() {
+        "unknown"
+    } else {
+        version
+    };
+    Err(format!(
+        "moa needs tmux 3.4 or newer; this one is {version}"
+    ))
+}
+
+/// Stops the server this `moa` just created. Best effort: the error being reported matters
+/// more.
+fn kill_server(paths: &Paths, tmux: &Path, socket: &TmuxSocket) {
+    let mut cmd = Command::new(tmux);
+    cmd.args(socket.args())
+        .arg("kill-server")
+        .env_clear()
+        .envs(front_env(std::env::vars_os(), paths))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Ok(mut child) = Spawner.spawn(&mut cmd) {
+        let _ = child.wait();
+    }
 }
 
 /// `tmux.ensure`: whether the server is there, with the daemon linked to it.
@@ -172,25 +251,21 @@ async fn ensure(client: &mut Client, tmux: &Path, log: &Path) -> Result<bool, St
     };
     let done = timeout(ANSWER_WAIT, client.call(op))
         .await
-        .map_err(|_| {
-            format!(
-                "moa didn't answer within 10 s; see its log ({})",
-                log.display()
-            )
-        })?
+        .map_err(|_| no_answer("10 s", log))?
         .map_err(|e| e.to_string())?;
     Ok(done.data["running"].as_bool().unwrap_or(false))
 }
 
 /// Starts the brain's terminal server with T1's command, in the user's environment. A
 /// failure is fine when a server is there afterwards: another `moa` started it meanwhile.
+/// Whether this call is the one that started it.
 fn create(
     paths: &Paths,
     b: &str,
     tmux: &Path,
     socket: &TmuxSocket,
     socket_path: &Path,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if let Some(dir) = socket_path.parent() {
         ensure_private_dir(dir).map_err(|e| e.to_string())?;
     }
@@ -213,8 +288,11 @@ fn create(
     let out = child
         .wait_with_output()
         .map_err(|e| failed(&e.to_string()))?;
-    if out.status.success() || UnixStream::connect(socket_path).is_ok() {
-        return Ok(());
+    if out.status.success() {
+        return Ok(true);
+    }
+    if UnixStream::connect(socket_path).is_ok() {
+        return Ok(false);
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     let first = stderr.lines().next().unwrap_or("it stopped at once").trim();
@@ -395,6 +473,15 @@ mod tests {
         assert_eq!(
             nesting(Some(OsStr::new("/private/tmp/x,1,0")), Path::new("/tmp/x")),
             Nesting::Ours
+        );
+    }
+
+    #[test]
+    fn a_command_word_as_the_brain_points_to_the_command() {
+        let paths = Paths::with_root(Path::new("/nonexistent"));
+        assert_eq!(
+            pick_brain(&paths, Some("status")).unwrap_err(),
+            "moa --sandbox opens a brain; run moa status from a moa terminal"
         );
     }
 

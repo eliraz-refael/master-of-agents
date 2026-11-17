@@ -116,7 +116,8 @@ fn moa_starts_the_server_and_attaches() {
         env.lines().any(|l| l == format!("MOA_ROOT={root}")),
         "{env}"
     );
-    for gone in ["MOA_SESSION=", "CLAUDECODE=", "CLAUDE_CONFIG_DIR=", "TMUX="] {
+    // (`TMUX` can't be in the terminal's env here; `front_env`'s unit test covers it.)
+    for gone in ["MOA_SESSION=", "CLAUDECODE=", "CLAUDE_CONFIG_DIR="] {
         assert!(!env.lines().any(|l| l.starts_with(gone)), "{gone} in {env}");
     }
     assert!(
@@ -186,28 +187,57 @@ fn moa_inside_another_tmux_refuses() {
 }
 
 #[test]
-fn moa_sandbox_keeps_its_own_root_under_home() {
-    let tb = TempBrain::new(None);
-    let home = tb.root().display().to_string();
-    let o = Command::new(MOA)
-        .arg("--sandbox")
-        .env_clear()
-        .envs([
-            ("HOME", home.as_str()),
-            ("PATH", &std::env::var("PATH").unwrap()),
-            ("SHELL", "/bin/sh"),
-            ("TMUX", "/tmp/elsewhere/default,1,0"),
-        ])
-        .timeout(Duration::from_secs(30))
-        .output()
-        .unwrap();
-    // Sandboxed, it gets as far as the nesting check.
-    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
-    let root = tb.root().join(".local/state/moa-sandbox");
+fn moa_sandbox_opens_a_moa_under_home() {
+    // The root is `<home>/.local/state/moa-sandbox`; dropping `tb` stops what runs there.
+    let tb = TempBrain::sandbox_home();
+    let env: Vec<(OsString, OsString)> = vec![
+        ("HOME".into(), tb.home().into()),
+        ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+        ("SHELL".into(), "/bin/sh".into()),
+    ];
+    let args = [OsString::from("--sandbox")];
+    let term = Terminal::spawn(Path::new(MOA), &args, &env, 120, 30).unwrap();
+    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    clients_become(&tb, &["moa"]);
+
+    let root = tb.home().join(".local/state/moa-sandbox");
+    assert_eq!(tb.root(), root);
     let meta = std::fs::metadata(&root).unwrap();
-    assert!(meta.is_dir());
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    // The daemon and the server are the sandbox's, and its shells reach it.
+    assert!(tb.paths().socket(B).unwrap().exists());
+    let env = tmux(&tb, &["show-environment", "-g"]);
+    let want = format!("MOA_ROOT={}", root.display());
+    assert!(env.lines().any(|l| l == want), "{env}");
+    let home = format!("HOME={}", tb.home().display());
+    assert!(env.lines().any(|l| l == home), "{env}");
+    assert!(status_json(&tb)["tmux"].is_object());
+}
+
+#[test]
+fn an_old_tmux_is_refused_before_a_server_is_made() {
+    let tb = TempBrain::new(None);
+    // Not tmux: a script that says it's 3.2a and fails anything else.
+    let bin = tb.root().join("old-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let fake = bin.join("tmux");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$1\" = -V ] && { echo 'tmux 3.2a'; exit 0; }\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let o = run(&tb, &[], &[("PATH", &path)]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert_eq!(err(&o), "moa needs tmux 3.4 or newer; this one is 3.2a\n");
+    assert!(!tmux_socket(&tb).exists());
 }
 
 #[test]

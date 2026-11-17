@@ -124,7 +124,7 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Status(_))));
         assert!(cli.brain.is_none());
         assert!(Cli::try_parse_from(["moa", "work", "status"]).is_err());
-        // After a flag only a brain can follow; `moa.toml` can't name one `status`.
+        // After a flag only a brain can follow; the front door points to the command.
         let cli = Cli::try_parse_from(["moa", "--sandbox", "status"]).unwrap();
         assert!(cli.command.is_none());
         assert_eq!(cli.brain.as_deref(), Some("status"));

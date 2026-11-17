@@ -613,6 +613,7 @@ dependencies = [
  "moa-proto",
  "moa-store",
  "moa-testkit",
+ "moa-tmux",
  "predicates",
  "rusqlite",
  "serde_json",
