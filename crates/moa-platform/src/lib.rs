@@ -3,9 +3,11 @@
 
 pub mod alarm;
 pub mod build_id;
+pub mod net;
 pub mod paths;
 pub mod service;
 pub mod spawn;
+pub mod spool;
 #[allow(unsafe_code)]
 mod sys;
 pub mod zone;
