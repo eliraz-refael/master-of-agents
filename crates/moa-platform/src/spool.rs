@@ -16,9 +16,13 @@ pub struct Taken {
 }
 
 impl Taken {
-    /// The lines were handled: forget them.
+    /// The lines were handled: forget them. Nothing to forget (an empty drain never made
+    /// the file) is fine.
     pub fn done(self) -> io::Result<()> {
-        std::fs::remove_file(&self.draining)
+        match std::fs::remove_file(&self.draining) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -63,13 +67,19 @@ pub fn take(path: &Path) -> io::Result<Taken> {
         spool.unlock()?;
         moved?;
     }
-    let text = match std::fs::read_to_string(&draining) {
-        Ok(t) => t,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+    let bytes = match std::fs::read(&draining) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };
+    // Lossy on purpose: a garbled line must not wedge every later drain. It fails to parse
+    // downstream and is counted there.
     Ok(Taken {
-        lines: text.lines().map(str::to_owned).collect(),
+        lines: bytes
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| String::from_utf8_lossy(l).into_owned())
+            .collect(),
         draining,
     })
 }

@@ -103,3 +103,27 @@ fn done_deletes_draining() {
     taken.done().unwrap();
     assert!(!draining(&path).exists());
 }
+
+#[test]
+fn done_is_fine_when_nothing_was_drained() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spool/hooks.jsonl");
+    moa_platform::ensure_private_dir(&dir.path().join("spool")).unwrap();
+    take(&path).unwrap().done().unwrap();
+    std::fs::write(&path, "").unwrap();
+    take(&path).unwrap().done().unwrap();
+}
+
+#[test]
+fn a_non_utf8_line_is_kept_lossy_and_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spool/hooks.jsonl");
+    append(&path, b"bad \xff\xfe line").unwrap();
+    append(&path, b"good").unwrap();
+    let taken = take(&path).unwrap();
+    assert_eq!(taken.lines.len(), 2);
+    assert!(taken.lines[0].starts_with("bad "));
+    assert_eq!(taken.lines[1], "good");
+    // Still drainable again, as after a crash before `done`.
+    assert_eq!(take(&path).unwrap().lines.len(), 2);
+}
