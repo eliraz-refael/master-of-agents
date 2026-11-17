@@ -179,8 +179,10 @@ fn verb(m: &Moactl) -> Result<(), String> {
     // `open` goes where the folder it opens belongs, unless MOA_BRAIN says otherwise.
     let brain = match &mut op {
         Op::SessionOpen { path, .. } => {
+            // Routed before the folder is made: a refused `open` leaves nothing behind.
+            let brain = pick_brain_for(&here, &config, None, true, &canonical(path))?;
             *path = open_folder(path, m.json)?;
-            pick_brain_for(&here, &config, None, true, path)?
+            brain
         }
         op => pick_brain(&here, &config, None, op.writes())?,
     };

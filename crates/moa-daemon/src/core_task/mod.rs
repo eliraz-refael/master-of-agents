@@ -394,13 +394,13 @@ impl CoreHandle {
 
     /// After a live hook: lines in the spool are hooks that gave up on this daemon while it
     /// was up (a full accept backlog, a line bigger than the socket's buffer during start).
-    /// One `stat` tells.
+    /// A `.draining` file is a drain that was kept (its commit failed, or the core reloaded
+    /// under it): nothing else asks for it again, so it is retried here too. A `stat` or
+    /// two tells.
     pub(crate) fn drain_spool_if_any(&self) {
-        let waiting = self
-            .spool
-            .as_deref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .is_some_and(|m| m.len() > 0);
+        let waiting = self.spool.as_deref().is_some_and(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.len() > 0) || spool::draining(p).exists()
+        });
         if waiting {
             self.drain_spool();
         }

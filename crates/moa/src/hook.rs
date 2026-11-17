@@ -50,6 +50,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
         .ok()
         .and_then(|d| i64::try_from(d.as_nanos()).ok())
         .unwrap_or(0);
+    // Process-wide, so it is set here and not in `quietly`: a test calling `quietly` must
+    // not silence every other test's panic.
+    std::panic::set_hook(Box::new(|_| {}));
     quietly(|| {
         if args.get(2).is_some_and(|a| a == "claude") {
             hook_claude(at_ns);
@@ -58,10 +61,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Runs `f` so that a panic in it says nothing and goes no further: whatever happens, the
-/// hook exits 0 with nothing on stderr.
+/// Runs `f` so that a panic in it goes no further; with `run`'s silent panic hook, the hook
+/// exits 0 with nothing on stderr whatever happens.
 fn quietly(f: impl FnOnce()) {
-    std::panic::set_hook(Box::new(|_| {}));
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
 }
 
