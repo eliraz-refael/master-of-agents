@@ -152,8 +152,10 @@ pub enum Effect {
     },
     Log(LogLine),
     /// Commands for the link's connection `conn`. Untokened, they show saved state (the
-    /// status line, notices) and wait for the commit. Tokened, they are the link's own
-    /// plumbing, and their answers come back as [`TmuxIn::Replies`].
+    /// status line, notices) and wait for the commit. Tokened, their answers come back as
+    /// [`TmuxIn::Replies`]: a `Refresh` is the link's own plumbing, and runs at once; an
+    /// `Open` starts an agent that reports on its session, and waits for the commit that
+    /// saves it.
     Tmux {
         conn: u64,
         cmds: Vec<Cmd>,
@@ -168,7 +170,9 @@ pub enum Effect {
 impl Effect {
     /// Timers, logs and the link's plumbing don't wait for a commit; everything else does.
     /// The plumbing reveals nothing about saved state, and held behind a failed commit it
-    /// would be lost while the link waits for its answer.
+    /// would be lost while the link waits for its answer. An `open`'s new window is not
+    /// plumbing: the agent it starts sends events for a session that must be saved first.
+    /// Held behind a failed commit it is dropped, and the reload answers the open.
     pub fn runs_at_once(&self) -> bool {
         matches!(
             self,
@@ -176,13 +180,30 @@ impl Effect {
                 | Effect::CancelTimer(_)
                 | Effect::Log(_)
                 | Effect::TmuxConnect { .. }
-                | Effect::Tmux { token: Some(_), .. }
+                | Effect::Tmux {
+                    token: Some(TmuxToken::Refresh),
+                    ..
+                }
+        )
+    }
+
+    /// Whether this tells the world about saved state, or starts something that will: a
+    /// `Publish`, a `Reply`, a view (an untokened `Tmux`), or an `open`'s new window.
+    pub fn is_heard(&self) -> bool {
+        matches!(
+            self,
+            Effect::Publish(_)
+                | Effect::Reply { .. }
+                | Effect::Tmux {
+                    token: None | Some(TmuxToken::Open(_)),
+                    ..
+                }
         )
     }
 }
 
-/// Every `Persist` comes before any `Publish`, `Reply` or view of saved state (an untokened
-/// `Tmux`): nobody hears of a change that isn't saved.
+/// Every `Persist` comes before anything heard ([`Effect::is_heard`]): nobody hears of a
+/// change that isn't saved.
 pub fn check_order(effects: &[Effect]) -> Result<(), &'static str> {
     let mut heard = false;
     for e in effects {
@@ -190,9 +211,7 @@ pub fn check_order(effects: &[Effect]) -> Result<(), &'static str> {
             Effect::Persist(_) if heard => {
                 return Err("a Persist came after a Publish, Reply or view");
             }
-            Effect::Publish(_) | Effect::Reply { .. } | Effect::Tmux { token: None, .. } => {
-                heard = true
-            }
+            e if e.is_heard() => heard = true,
             _ => {}
         }
     }

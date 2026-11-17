@@ -635,6 +635,71 @@ fn a_start_on_another_sessions_conversation_moves_it_without_resetting_it() {
     assert_eq!(st.conversations_of(other_id).count(), 0);
 }
 
+const NESTED: &str = "c0ffee00-0000-4000-8000-000000000009";
+const FOREIGN: &str = "a hook event from another agent in a session's tab was dropped";
+
+/// An event from a second `claude` started inside the session's tab (a `claude -p` in its
+/// Bash tool): it has the tab's `MOA_SESSION`, and a conversation of its own.
+fn nested(seq: u32, plus_ms: i64, kind: HookKind) -> HookEnvelope {
+    let mut e = envelope(seq, plus_ms, kind);
+    e.conversation_id = NESTED.into();
+    e
+}
+
+fn dropped_as_foreign(fx: &[Effect]) -> bool {
+    fx.iter()
+        .any(|e| matches!(e, Effect::Log(l) if l.level == LogLevel::Info && l.message == FOREIGN))
+}
+
+#[test]
+fn another_agent_in_a_sessions_tab_changes_nothing() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    let before = session(&st);
+    let convs = conversations(&st);
+    let kinds = [
+        HookKind::SessionStarted {
+            source: StartSource::Startup,
+        },
+        prompt("list the files"),
+        ended("Three files."),
+        HookKind::SessionEnded {
+            reason: "other".into(),
+        },
+    ];
+    for (seq, kind) in (2..).zip(kinds) {
+        let fx = feed(&mut st, nested(seq, 1000 + 100 * i64::from(seq), kind));
+        assert_eq!(persists(&fx), 0, "{fx:?}");
+        assert!(dropped_as_foreign(&fx), "{fx:?}");
+    }
+    assert_eq!(session(&st), before);
+    assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    assert_eq!(conversations(&st), convs);
+    // The tab's own agent goes on as before.
+    feed(&mut st, envelope(6, 2000, ended("Lit.")));
+    assert_eq!(shown(&st), (DisplayState::Done, "Lit.".into()));
+}
+
+#[test]
+fn a_rotation_into_a_new_conversation_is_the_tabs_own() {
+    for source in [
+        StartSource::Clear,
+        StartSource::Resume,
+        StartSource::Fork,
+        StartSource::Compact,
+    ] {
+        let mut st = seeded();
+        let fx = feed(
+            &mut st,
+            nested(1, 1000, HookKind::SessionStarted { source }),
+        );
+        assert!(!dropped_as_foreign(&fx), "{source:?}: {fx:?}");
+        assert_eq!(conversations(&st).len(), 2, "{source:?}");
+        let fx = feed(&mut st, nested(2, 2000, prompt("go on")));
+        assert_eq!(event_kinds(&fx), ["turn.started"], "{source:?}");
+    }
+}
+
 fn at(plus_ms: i64) -> Now {
     Now::at(
         UtcMs(T0 + plus_ms),
@@ -798,6 +863,51 @@ fn a_pane_exit_ends_its_bound_session() {
                 .any(|c| matches!(c, Change::DeletePaneBinding(_)))
         );
     }
+}
+
+/// A clean exit: the agent's `SessionEnd` comes first and ends the session; the pane's exit
+/// after it still takes the binding away, and writes no second "ended" row.
+#[test]
+fn a_pane_exit_after_the_session_ended_still_unbinds_it() {
+    let mut st = seeded_with(vec![pane_binding(10)]);
+    link_up(&mut st);
+    let fx = feed(&mut st, ends(1, 1000, "prompt_input_exit"));
+    assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
+    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
+    assert_eq!(
+        changes(&fx)
+            .iter()
+            .filter(|c| matches!(c, Change::DeletePaneBinding(s) if *s == sid()))
+            .count(),
+        1,
+        "{fx:?}"
+    );
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+    assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+}
+
+/// The other order: the pane's exit is seen first and ends the session; the agent's
+/// `SessionEnd`, sent just before it exited, arrives after. It is older than the exit, so it
+/// is history only: no second "ended" row.
+#[test]
+fn a_session_end_after_the_pane_exit_is_history_only() {
+    let mut st = seeded_with(vec![pane_binding(10)]);
+    link_up(&mut st);
+    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
+    assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
+    let fx = feed(&mut st, ends(1, 59_000, "prompt_input_exit"));
+    assert_eq!(event_kinds(&fx), ["session.ended"]);
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+    assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+}
+
+/// M8: a session with no folder has no folder in its feed line, and no space before it.
+#[test]
+fn a_feed_line_without_a_folder_has_no_leading_space() {
+    let mut st = seeded();
+    reseed(&mut st, None, |s| s.cwd = None);
+    let fx = feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    assert_eq!(activity_texts(&fx), ["› Fix the lamp"]);
 }
 
 #[test]

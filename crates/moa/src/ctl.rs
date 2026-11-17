@@ -106,6 +106,18 @@ pub(crate) fn pick_brain(
     flag: Option<&str>,
     writes: bool,
 ) -> Result<BrainName, String> {
+    pick_brain_for(here, config, flag, writes, &canonical(&here.cwd))
+}
+
+/// [`pick_brain`], routing by `folder` (canonical) instead of the one the command was typed
+/// in.
+fn pick_brain_for(
+    here: &Here,
+    config: &Config,
+    flag: Option<&str>,
+    writes: bool,
+    folder: &Path,
+) -> Result<BrainName, String> {
     let env = std::env::var("MOA_BRAIN").ok().filter(|v| !v.is_empty());
     let brain = match (flag, env) {
         (Some(v), _) => named("--brain", v)?,
@@ -122,7 +134,7 @@ pub(crate) fn pick_brain(
                     with_tilde(&store, home)
                 ));
             }
-            match route(config, account, &canonical(&here.cwd), None) {
+            match route(config, account, folder, None) {
                 Route::Brain(b) => b,
                 Route::NotAvailable => return Err("moa isn't available here".into()),
             }
@@ -164,10 +176,16 @@ fn verb(m: &Moactl) -> Result<(), String> {
     };
     let mut op = m.verb.to_op(&ctx).map_err(|e: VerbError| e.to_string())?;
     let config = here.config()?;
-    let brain = pick_brain(&here, &config, None, op.writes())?;
-    if let Op::SessionOpen { path, .. } = &mut op {
-        *path = open_folder(path, m.json)?;
-    }
+    // `open` goes where the folder it opens belongs, unless MOA_BRAIN says otherwise.
+    let brain = match &mut op {
+        Op::SessionOpen { path, .. } => {
+            // Routed before the folder is made: a refused `open` leaves nothing behind.
+            let brain = pick_brain_for(&here, &config, None, true, &canonical(path))?;
+            *path = open_folder(path, m.json)?;
+            brain
+        }
+        op => pick_brain(&here, &config, None, op.writes())?,
+    };
     let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let mut opts = here.options(brain);
     opts.autostart = Some(exe);

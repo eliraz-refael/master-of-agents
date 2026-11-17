@@ -142,6 +142,17 @@ fn runs_matching_hooks_in_order_with_the_payload() {
     assert_eq!(context, "peers note\n");
 }
 
+/// A child that is killed when dropped: a failed assertion doesn't leave fake-claude polling
+/// for its gate forever.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// `Wait` holds the script until its file exists; the hook after it runs only then.
 #[test]
 fn wait_holds_the_script_until_its_file_exists() {
@@ -157,11 +168,12 @@ fn wait_holds_the_script_until_its_file_exists() {
         hook("Stop", json!({})),
         FakeStep::Exit,
     ];
-    let mut child = rig
-        .command(&steps, &[])
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = KillOnDrop(
+        rig.command(&steps, &[])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     // The recorder writes a call in pieces; it is whole once its line ends.
     let calls = rig.dir.path().join("calls");
     let before = wait_for(Duration::from_secs(10), || {
@@ -174,10 +186,10 @@ fn wait_holds_the_script_until_its_file_exists() {
     // Held: a while later nothing more has run and it hasn't exited.
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(tags(&rig.calls()), ["before"]);
-    assert!(child.try_wait().unwrap().is_none());
+    assert!(child.0.try_wait().unwrap().is_none());
 
     fs::write(rig.work().join("gate"), "").unwrap();
-    assert!(child.wait().unwrap().success());
+    assert!(child.0.wait().unwrap().success());
     assert_eq!(tags(&rig.calls()), ["before", "after"]);
 }
 

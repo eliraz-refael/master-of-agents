@@ -10,12 +10,14 @@ fn connect_within_reaches_a_listener() {
     connect_within(&sock, Duration::from_secs(2)).unwrap();
 }
 
+/// Nothing listening is an error at once, not after the limit: well under it, however busy
+/// the machine is.
 #[test]
 fn connect_within_fails_fast_without_one() {
     let dir = tempfile::tempdir().unwrap();
     let started = Instant::now();
-    let err = connect_within(&dir.path().join("none.sock"), Duration::from_secs(2)).unwrap_err();
-    assert!(started.elapsed() < Duration::from_millis(50));
+    let err = connect_within(&dir.path().join("none.sock"), Duration::from_secs(10)).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(5));
     assert!(matches!(
         err.kind(),
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused

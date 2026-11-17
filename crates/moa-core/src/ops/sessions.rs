@@ -37,6 +37,8 @@ const NO_ACCOUNT: &str = "no account to open with: set open_account in moa.toml"
 const ONLY_CLAUDE: &str = "only Claude accounts can open sessions for now";
 const NO_TAB: &str = "couldn't open a tab for it; see moa's log";
 const WENT_AWAY: &str = "moa's terminal went away before it opened";
+const NOT_SAVED: &str = "moa couldn't save that session; nothing was opened, try again";
+const LOST: &str = "moa lost that session; a tab may have opened for it, see moa's log";
 
 pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
     let recent = days_ago(now, 2);
@@ -198,8 +200,9 @@ pub(crate) struct OpenArgs<'a> {
 }
 
 /// `open`: checks the request, commits the new session, and gives the tokened `new-window`
-/// that starts it in a tab of moa's terminal. The caller holds the reply until tmux says
-/// how the tab turned out ([`opened`]).
+/// that starts it in a tab of moa's terminal, sent once the session is saved. The caller
+/// holds the reply until tmux says how the tab turned out ([`opened`]), or a reload finds
+/// the session wasn't saved ([`lost_opens`]).
 pub(crate) fn open(
     state: &mut State,
     tx: &mut Tx,
@@ -383,6 +386,24 @@ pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec
     fx
 }
 
+/// The `open`s whose session a reload didn't find: their commit failed, so their new window
+/// was dropped with it and no tab opened. Each is answered so.
+pub(crate) fn lost_opens(state: &mut State) -> Vec<Effect> {
+    let lost: Vec<SessionId> = state
+        .tmux
+        .waiting_opens()
+        .filter(|id| state.session(*id).is_none())
+        .collect();
+    lost.into_iter()
+        .filter_map(|id| state.tmux.forget_open(id))
+        .map(|(conn, req)| Effect::Reply {
+            conn,
+            req,
+            result: Err(OpError(NOT_SAVED.into())),
+        })
+        .collect()
+}
+
 /// Binds the session to its new pane and tags the pane with it (after the commit, in
 /// `after`), then the reply.
 fn bind(
@@ -406,17 +427,20 @@ fn bind(
         return Err(OpError(WENT_AWAY.into()));
     };
     let (conn, generation, socket) = (*conn, *generation, socket.clone());
-    // Gone after a failed commit and a reload: nothing to bind.
+    // The new window is sent only once the session is saved, and a reload that loses it
+    // answers the open then ([`lost_opens`]), so this shouldn't happen. If it does, a tab
+    // has opened that nothing tracks: the reply says so.
     let Some(s) = state.session(id).cloned() else {
         logs.push(warn(format!(
             "session {id} got a tab but isn't in the brain"
         )));
-        return Err(OpError(NO_TAB.into()));
+        return Err(OpError(LOST.into()));
     };
     if state.tmux.take_exited(pane) {
         // Its agent exited before this answer came: it ends as `pane_gone` would end it,
-        // with no binding left behind. The tab did open, so the reply is the one an exit
-        // right after this answer would have got; the session shows as ended.
+        // and no binding is made. The tab did open, so the reply is the one an exit right
+        // after this answer would have got; the session shows as ended. A refused write
+        // leaves it live with no binding at all: reconcile (4b) ends such sessions.
         if !end_exited(state, tx, id, Vec::new()) {
             logs.push(warn(format!("the end of session {id} was not saved")));
         }

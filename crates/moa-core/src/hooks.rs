@@ -86,16 +86,48 @@ fn resolve(state: &State, env: &HookEnvelope) -> Result<SessionId, &'static str>
     if env.slot.as_deref() == Some("moa") {
         return Err("");
     }
-    env.slot
+    let slot = env
+        .slot
         .as_deref()
         .and_then(|s| s.parse::<SessionId>().ok())
-        .filter(|id| state.session(*id).is_some())
-        .or_else(|| {
-            state
-                .conversation_of_agent(env.agent, &env.conversation_id)
-                .map(|c| c.session_id)
-        })
+        .filter(|id| state.session(*id).is_some());
+    if let Some(id) = slot {
+        return if is_own(state, id, env) {
+            Ok(id)
+        } else {
+            Err("a hook event from another agent in a session's tab was dropped")
+        };
+    }
+    state
+        .conversation_of_agent(env.agent, &env.conversation_id)
+        .map(|c| c.session_id)
         .ok_or("a hook event for an unknown session was dropped")
+}
+
+/// Whether an event under session `id`'s slot comes from the session's own agent. Anything
+/// the agent runs inherits the tab's environment, so a second `claude` started inside it (a
+/// `claude -p` in a tool) sends its events under the same slot. The tab's agent is the one
+/// on one of the session's conversations, or moving to a new one (`/clear`, a resume, a
+/// fork, a compaction), or starting for the first time: a launcher that ignores
+/// `--session-id` starts under an id of its own. A first start is told by nothing having
+/// been heard from the session since `open` made it: every applied event moves its
+/// `last_seen_at`.
+fn is_own(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
+    if state
+        .conversation_of_agent(env.agent, &env.conversation_id)
+        .is_some_and(|c| c.session_id == id)
+    {
+        return true;
+    }
+    match &env.kind {
+        HookKind::SessionStarted {
+            source: StartSource::Startup,
+        } => state
+            .session(id)
+            .is_some_and(|s| s.last_seen_at == Some(s.created_at)),
+        HookKind::SessionStarted { .. } => true,
+        _ => false,
+    }
 }
 
 pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Applied {
@@ -231,10 +263,10 @@ fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource
     }
 }
 
-/// A pane exited: the session bound to it on this server (T11), if still live, ends and
-/// loses the binding. Nothing else checks that a process is alive. A pane nobody is bound
-/// to is remembered, since an `open`'s answer naming it may still be on its way. The caller
-/// sends what `tx` holds.
+/// A pane exited: the session bound to it on this server (T11) loses the binding, and ends
+/// if still live (after a clean exit its `SessionEnd` has already ended it). Nothing else
+/// checks that a process is alive. A pane nobody is bound to is remembered, since an
+/// `open`'s answer naming it may still be on its way. The caller sends what `tx` holds.
 ///
 /// `false` when the write was refused: the exit is reported once, so nothing retries it.
 pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
@@ -245,31 +277,34 @@ pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
     end_exited(state, tx, id, vec![Change::DeletePaneBinding(id)])
 }
 
-/// Ends a live session whose agent's pane is gone: the session, `also`, and the activity
-/// row. `false` when the write was refused.
+/// `also`, and when the session is still live, its end: the session and the activity row.
+/// Its `activity_at` moves to now, so the `SessionEnd` the agent sent on its way out, which
+/// often arrives after the exit, is older: history only, with no second "ended" row.
+/// `false` when the write was refused. Then nothing changes: a bound pane stays bound, and
+/// a session whose pane exited before its `open` was answered stays live with no binding.
+/// Reconcile (4b) ends both.
 pub(crate) fn end_exited(state: &mut State, tx: &mut Tx, id: SessionId, also: Vec<Change>) -> bool {
-    let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) else {
-        return true;
-    };
-    let mut after = session.clone();
-    after.lifecycle = Lifecycle::Ended;
     let mut changes = also;
-    if let Some(text) = activity_text(
-        &after,
-        &HookKind::SessionEnded {
-            reason: String::new(),
-        },
-    ) {
-        changes.push(tx.activity_row(
-            state,
-            ActivityWho::Session,
-            text,
-            Some(("session", id.to_string())),
-        ));
+    if let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) {
+        let mut after = session.clone();
+        after.lifecycle = Lifecycle::Ended;
+        after.activity_at = Some(tx.wall);
+        if let Some(text) = activity_text(
+            &after,
+            &HookKind::SessionEnded {
+                reason: String::new(),
+            },
+        ) {
+            changes.push(tx.activity_row(
+                state,
+                ActivityWho::Session,
+                text,
+                Some(("session", id.to_string())),
+            ));
+        }
+        changes.insert(0, Change::Session(after));
     }
-    changes.insert(0, Change::Session(after));
-    // A refused write leaves the pane bound and the session live; reconcile ends it later.
-    tx.commit(state, changes).is_ok()
+    changes.is_empty() || tx.commit(state, changes).is_ok()
 }
 
 fn source_word(source: StartSource) -> &'static str {
@@ -347,7 +382,8 @@ fn transition(before: &Session, env: &HookEnvelope) -> Session {
 }
 
 /// The activity feed's line for an event, as the spike's `a_event` trigger wrote it:
-/// `<folder> <what>`, the folder being the last part of the session's cwd.
+/// `<folder> <what>`, the folder being the last part of the session's cwd; just `<what>`
+/// when it has none.
 fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
     let what = match kind {
         HookKind::TurnStarted { prompt } => {
@@ -366,6 +402,9 @@ fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
         .cwd
         .as_deref()
         .and_then(|c| c.rsplit('/').next())
-        .unwrap_or("");
-    Some(format!("{folder} {what}"))
+        .filter(|f| !f.is_empty());
+    Some(match folder {
+        Some(folder) => format!("{folder} {what}"),
+        None => what,
+    })
 }

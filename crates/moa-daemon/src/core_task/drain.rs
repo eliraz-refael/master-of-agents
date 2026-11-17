@@ -14,6 +14,7 @@ use moa_core::change::Change;
 use moa_core::effect::{
     Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, TmuxToken, check_order,
 };
+use moa_core::hook::{HookEnvelope, HookLine};
 use moa_core::op::{Done, OpError};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::State;
@@ -25,7 +26,7 @@ use tokio_util::task::TaskTracker;
 use super::recover::fail_held;
 use super::*;
 use crate::clock::Clock;
-use crate::scheduler::SchedCmd;
+use crate::scheduler::{SchedCmd, Wake};
 
 pub(super) struct Core {
     /// The core's own inbox, for answers it gives itself. Weak, so the loop still ends
@@ -154,17 +155,26 @@ impl Core {
         let mut batch: Vec<Change> = Vec::new();
         let mut held: Vec<Held> = Vec::new();
         let mut panicked = false;
+        // The hooks stepped here, with their lines: if the commit fails, they are applied
+        // again after the reload rather than lost with it.
+        let mut replay: Vec<(HookEnvelope, Box<HookLine>)> = Vec::new();
         while let Some(item) = work.pop_front() {
             let stepped = match item {
                 Item::Input(input) => self.step(input, &mut batch, &mut held),
-                // While writes are refused the core would drop the event: keep its line for
-                // the next start instead, and tell a waiting hook there is nothing to say.
-                Item::Hook {
-                    reply,
-                    line: Some(line),
-                    ..
-                } if self.spool.is_some() && self.state.writes_refused(self.clock.wall()) => {
-                    spool_hooks(self.spool.as_deref(), std::iter::once(&*line));
+                // While writes are refused the core would drop the event: keep it for the end
+                // of the refusal instead, and tell a waiting hook there is nothing to say. A
+                // live hook's line goes to the spool; a drained one is still in `.draining`,
+                // which its drain keeps when it sees the count move.
+                Item::Hook { reply, line, .. }
+                    if self.spool.is_some() && self.state.writes_refused(self.clock.wall()) =>
+                {
+                    if let Some(line) = line {
+                        spool_hooks(self.spool.as_deref(), std::iter::once(&*line));
+                    }
+                    self.stats.refused_hooks.fetch_add(1, Ordering::SeqCst);
+                    if let Some(refused) = self.state.refuse_writes() {
+                        let _ = self.sched.send(SchedCmd::Set(Wake::Spool, refused.until));
+                    }
                     if let Some((conn, req)) = reply {
                         let done = Done {
                             text: String::new(),
@@ -175,8 +185,17 @@ impl Core {
                     Stepped::Done
                 }
                 Item::Hook {
-                    reply, envelope, ..
-                } => self.step(Input::Hook { reply, envelope }, &mut batch, &mut held),
+                    reply,
+                    envelope,
+                    line,
+                } => {
+                    let kept = line.map(|line| (envelope.clone(), line));
+                    let stepped = self.step(Input::Hook { reply, envelope }, &mut batch, &mut held);
+                    if matches!(stepped, Stepped::Done) {
+                        replay.extend(kept);
+                    }
+                    stepped
+                }
                 Item::Zone(tz) => {
                     self.tz = tz;
                     self.step(Input::ZoneChanged, &mut batch, &mut held)
@@ -228,6 +247,19 @@ impl Core {
             match self.store().commit(batch).await {
                 Ok(()) => self.failures_in_row = 0,
                 Err(why) => failed = Some(why),
+            }
+        }
+        if failed.is_some() {
+            // Nothing retries a hook as a client retries an op: its event goes first into the
+            // next drain, after the reload has forgotten the keys this one remembered (or to
+            // the spool, with the rest of the carry, if the core stops). A waiting hook was
+            // answered with the drain's failure, so it isn't answered again.
+            for (envelope, line) in replay.into_iter().rev() {
+                self.carry.push_front(Item::Hook {
+                    reply: None,
+                    envelope,
+                    line: Some(line),
+                });
             }
         }
         if (failed.is_some() || panicked)
@@ -300,17 +332,14 @@ impl Core {
                 Effect::Backup { day } => self.due_backups.push(day),
                 Effect::Publish(p) => held.push(Held::Publish(p)),
                 Effect::Reply { conn, req, result } => held.push(Held::Reply { conn, req, result }),
-                // A view of saved state waits for the commit, as replies do.
-                Effect::Tmux {
-                    conn,
-                    cmds,
-                    token: None,
-                } => held.push(Held::Tmux { conn, cmds }),
+                // A view of saved state waits for the commit, as replies do; so does an
+                // `open`'s new window, which starts an agent for a session the commit saves.
+                // The link's plumbing ran above.
+                Effect::Tmux { conn, cmds, token } => held.push(Held::Tmux { conn, cmds, token }),
                 // Handled above.
                 Effect::SetTimer { .. }
                 | Effect::CancelTimer(_)
                 | Effect::Log(_)
-                | Effect::Tmux { token: Some(_), .. }
                 | Effect::TmuxConnect { .. } => {}
             }
         }
@@ -320,10 +349,10 @@ impl Core {
     pub(super) fn run_now(&self, effect: Effect) {
         match effect {
             Effect::SetTimer { key, at } => {
-                let _ = self.sched.send(SchedCmd::Set(key, at));
+                let _ = self.sched.send(SchedCmd::Set(Wake::Core(key), at));
             }
             Effect::CancelTimer(key) => {
-                let _ = self.sched.send(SchedCmd::Cancel(key));
+                let _ = self.sched.send(SchedCmd::Cancel(Wake::Core(key)));
             }
             Effect::Log(LogLine { level, message }) => match level {
                 LogLevel::Info => tracing::info!("{message}"),
@@ -426,9 +455,11 @@ impl Core {
                 Held::Status(reply, data, _) => {
                     let _ = reply.send(data);
                 }
-                Held::Tmux { conn, cmds } => {
-                    self.stats.views_released.fetch_add(1, Ordering::SeqCst);
-                    self.to_link(conn, cmds, None);
+                Held::Tmux { conn, cmds, token } => {
+                    if token.is_none() {
+                        self.stats.views_released.fetch_add(1, Ordering::SeqCst);
+                    }
+                    self.to_link(conn, cmds, token);
                 }
                 Held::Barrier(reply) => {
                     self.store().sync().await;

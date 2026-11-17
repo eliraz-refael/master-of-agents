@@ -596,3 +596,23 @@ fn row_names_the_sql_table_for_every_variant() {
         assert_eq!(c.row(), Some((table, key)), "{c:?}");
     }
 }
+
+/// The dedupe memory is bounded: past `RECENT_HOOKS` keys the oldest is forgotten, from the
+/// set as from the queue, and a key seen again doesn't count twice.
+#[test]
+fn recent_hooks_forget_the_oldest_past_the_bound() {
+    let mut st = State::new(BrainName::default_brain(), Config::default());
+    let key = |n: usize| (1u32, 1u32, n as i64);
+    for n in 0..RECENT_HOOKS {
+        st.remember_hook(key(n));
+    }
+    st.remember_hook(key(0));
+    assert_eq!(st.recent_hooks.len(), RECENT_HOOKS);
+    assert!(st.recent_hook_set.contains(&key(0)));
+    st.remember_hook(key(RECENT_HOOKS));
+    assert_eq!(st.recent_hooks.len(), RECENT_HOOKS);
+    assert_eq!(st.recent_hook_set.len(), RECENT_HOOKS);
+    assert!(!st.recent_hook_set.contains(&key(0)));
+    assert!(st.recent_hook_set.contains(&key(1)));
+    assert!(st.recent_hook_set.contains(&key(RECENT_HOOKS)));
+}

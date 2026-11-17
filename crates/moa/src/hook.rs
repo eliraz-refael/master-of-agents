@@ -50,10 +50,21 @@ pub fn run(args: &[OsString]) -> ExitCode {
         .ok()
         .and_then(|d| i64::try_from(d.as_nanos()).ok())
         .unwrap_or(0);
-    if args.get(2).is_some_and(|a| a == "claude") {
-        hook_claude(at_ns);
-    }
+    // Process-wide, so it is set here and not in `quietly`: a test calling `quietly` must
+    // not silence every other test's panic.
+    std::panic::set_hook(Box::new(|_| {}));
+    quietly(|| {
+        if args.get(2).is_some_and(|a| a == "claude") {
+            hook_claude(at_ns);
+        }
+    });
     ExitCode::SUCCESS
+}
+
+/// Runs `f` so that a panic in it goes no further; with `run`'s silent panic hook, the hook
+/// exits 0 with nothing on stderr whatever happens.
+fn quietly(f: impl FnOnce()) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
 }
 
 fn hook_claude(at_ns: i64) {
@@ -203,4 +214,62 @@ fn print_context(text: &str) {
         std::io::stdout(),
         r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{text}}}}}"#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A payload too big for the wire: the identifying fields, then `filler`.
+    fn too_big(filler: &str) -> Vec<u8> {
+        let head = r#"{"hook_event_name":"PostToolUse","session_id":"conv-1","cwd":"/work/Lantern","tool_response":""#;
+        let mut input = head.as_bytes().to_vec();
+        while input.len() <= HOOK_PAYLOAD_ROOM {
+            input.extend_from_slice(filler.as_bytes());
+        }
+        input
+    }
+
+    /// H12: a cut payload keeps the fields that identify it, and drops the rest.
+    #[test]
+    fn a_cut_payload_keeps_its_identifying_fields() {
+        let mut input = too_big("x");
+        input.extend_from_slice(br#"","tool_name":"Bash"}"#);
+        let cut = parse_payload(&input).expect("a cut payload");
+        assert_eq!(cut["hook_event_name"], "PostToolUse");
+        assert_eq!(cut["session_id"], "conv-1");
+        assert_eq!(cut["cwd"], "/work/Lantern");
+        assert_eq!(cut["tool_name"], "Bash");
+        assert_eq!(cut["moa_cut"], true);
+        assert!(cut.get("tool_response").is_none());
+    }
+
+    /// Stdin capped in the middle of an escaped string: what came before the cut is kept.
+    #[test]
+    fn a_cut_in_the_middle_of_an_escape_keeps_what_came_before() {
+        let mut input = too_big(r#"a\"b\n"#);
+        // The cap falls just after a backslash, so the string ends inside an escape.
+        input.push(b'\\');
+        let cut = parse_payload(&input).expect("a cut payload");
+        assert_eq!(cut["hook_event_name"], "PostToolUse");
+        assert_eq!(cut["session_id"], "conv-1");
+        assert_eq!(cut["cwd"], "/work/Lantern");
+    }
+
+    /// An event name past the cut can't be found: the payload is dropped.
+    #[test]
+    fn a_cut_before_the_event_name_drops_the_payload() {
+        let mut input = br#"{"tool_response":""#.to_vec();
+        while input.len() <= HOOK_PAYLOAD_ROOM {
+            input.push(b'x');
+        }
+        input.extend_from_slice(br#"","hook_event_name":"Stop"}"#);
+        assert_eq!(parse_payload(&input[..HOOK_PAYLOAD_ROOM + 10]), None);
+    }
+
+    /// M3: a panic in the hook goes no further than `quietly`.
+    #[test]
+    fn a_panic_in_the_hook_is_swallowed() {
+        quietly(|| panic!("a test panic"));
+    }
 }

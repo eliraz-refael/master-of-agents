@@ -291,6 +291,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
                 self.core.hook(Some((self.conn, req)), envelope, Some(line));
             }
         }
+        // Behind this event in the inbox: H5 orders what the spool held against it.
+        self.core.drain_spool_if_any();
         Flow::Go
     }
 
