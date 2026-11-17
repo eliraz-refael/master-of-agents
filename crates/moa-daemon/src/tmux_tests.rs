@@ -8,11 +8,12 @@ use jiff::tz::TimeZone;
 use moa_core::config::BrainName;
 use moa_core::state::{CallerInfo, Deps};
 use moa_core::tmux::notify::Notification;
+use moa_platform::fs::write_if_changed;
 use moa_platform::spawn;
 use moa_store::actor::Fault;
 use moa_testkit::TempBrain;
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
-use moa_tmux::conf::{self, write_if_changed};
+use moa_tmux::conf;
 use tokio::time::timeout;
 
 use super::*;
@@ -441,6 +442,7 @@ async fn a_view_held_by_a_failed_commit_never_reaches_the_link() {
         generation: moa_core::tmux::ids::Generation { pid: 1, start: 1 },
         version: "3.8".into(),
         ctl: moa_core::tmux::ids::ClientName("client-1".into()),
+        socket: "moa".into(),
     });
     core.barrier().await;
     let up = sent(&mut rx);

@@ -105,6 +105,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 }
                 None => Vec::new(),
             };
+            // Opens this answers, while the link is as they knew it. Never the same input as
+            // a pane exit, so this commit is the input's only one.
+            let settled = state.tmux.settle(&t);
+            if !settled.is_empty() {
+                fx.extend(ops::sessions::opened(state, now, settled));
+            }
             fx.extend(state.tmux.input(t));
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
@@ -155,6 +161,45 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::TmuxEnsure { tmux },
             ..
         } => state.tmux.ensure(conn, req, tmux),
+        // Answered once tmux says how the new tab turned out. Every tab opens detached
+        // (`-d`) for now, so `bg` changes nothing yet.
+        Input::Client {
+            conn,
+            req,
+            op:
+                Op::SessionOpen {
+                    path,
+                    account,
+                    title,
+                    group,
+                    prompt,
+                    bg: _,
+                },
+            ..
+        } => {
+            let mut tx = Tx::new(now);
+            let asked = ops::sessions::OpenArgs {
+                path: &path,
+                account: account.as_deref(),
+                title: title.as_deref(),
+                group: group.as_deref(),
+                prompt: prompt.as_deref(),
+            };
+            let result = ops::sessions::open(state, &mut tx, now, &asked);
+            let mut fx = post_commit(state, tx);
+            match result {
+                Ok((id, new_window)) => {
+                    state.tmux.wait_open(id, conn, req);
+                    fx.push(new_window);
+                }
+                Err(e) => fx.push(Effect::Reply {
+                    conn,
+                    req,
+                    result: Err(e),
+                }),
+            }
+            fx
+        }
         Input::Client {
             conn,
             req,

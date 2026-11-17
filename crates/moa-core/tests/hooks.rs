@@ -762,6 +762,7 @@ fn link_up(st: &mut State) {
         },
         version: "3.5a".into(),
         ctl: ClientName("client-9".into()),
+        socket: "moa".into(),
     };
     handle_checked(st, Input::Tmux(connected), now());
     let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());

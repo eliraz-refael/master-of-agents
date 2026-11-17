@@ -477,9 +477,23 @@ impl Verb {
                 },
                 SuggestionOp::Ls => Op::SuggestionLs(NoParams),
             },
+            Verb::Open {
+                path,
+                account,
+                title,
+                group,
+                prompt,
+                bg,
+            } => Op::SessionOpen {
+                path: resolve_path(path, ctx)?,
+                account: account.clone(),
+                title: title.clone(),
+                group: group.clone(),
+                prompt: prompt.clone(),
+                bg: *bg,
+            },
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Open { .. }
-            | Verb::Resume { .. }
+            Verb::Resume { .. }
             | Verb::Focus { .. }
             | Verb::Close { .. }
             | Verb::Sleep { .. }

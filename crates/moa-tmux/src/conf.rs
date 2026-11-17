@@ -1,8 +1,6 @@
 //! The tmux config moa generates: two files (`tmux.conf` and `moa.tmux`) and the hooks the
 //! daemon sets when it connects.
 
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use moa_core::tmux::cmd::{Cmd, quote};
@@ -135,36 +133,6 @@ pub fn tmux_conf(moa_tmux: &Path) -> String {
          source-file {}\n",
         quote(&moa_tmux.to_string_lossy())
     )
-}
-
-/// Writes `text` to `path` through a temp file and a rename, mode 0600. `false` when the file
-/// already holds exactly `text`.
-pub fn write_if_changed(path: &Path, text: &str) -> io::Result<bool> {
-    if std::fs::read(path).is_ok_and(|old| old == text.as_bytes()) {
-        return Ok(false);
-    }
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(format!(".{}.tmp", std::process::id()));
-    let tmp = path.with_file_name(tmp_name);
-    let written = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written.map(|()| true)
 }
 
 fn hook_name(name: &str) -> String {

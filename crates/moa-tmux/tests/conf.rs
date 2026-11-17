@@ -8,7 +8,7 @@ use moa_core::tmux::mailbox::{HookMsg, KeyAction, Mailbox};
 use moa_testkit::{Sandbox, Terminal, tmux_path, wait_for};
 use moa_tmux::Notification;
 use moa_tmux::client::{ConnectOptions, ControlClient, Event, Events, ServerInfo};
-use moa_tmux::conf::{hooks, moa_tmux, tmux_conf, unhooks, write_if_changed};
+use moa_tmux::conf::{hooks, moa_tmux, tmux_conf, unhooks};
 
 #[test]
 fn the_generated_config_is_stable() {
@@ -22,24 +22,6 @@ fn the_generated_config_is_stable() {
         "tmux_conf_odd_path",
         tmux_conf(Path::new("/r/it's here/moa.tmux"))
     );
-}
-
-#[test]
-fn write_if_changed_writes_once_and_privately() {
-    use std::os::unix::fs::PermissionsExt;
-    let sb = Sandbox::without_server().unwrap();
-    let path = sb.home().join("moa.tmux");
-    assert!(write_if_changed(&path, "a\n").unwrap());
-    assert!(!write_if_changed(&path, "a\n").unwrap());
-    assert!(write_if_changed(&path, "b\n").unwrap());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\n");
-    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
-    let names: Vec<_> = std::fs::read_dir(sb.home())
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    assert_eq!(names.len(), 1, "a temp file was left: {names:?}");
 }
 
 /// Sources `tmux_conf` on a server whose home holds the user's three possible config files,

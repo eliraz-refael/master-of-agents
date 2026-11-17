@@ -3,6 +3,7 @@
 mod common;
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -162,6 +163,31 @@ async fn a_hook_line_updates_the_session() {
     // The hook needs no hello. `session.ls` does, and it is read after the hook.
     c.hello();
     assert_eq!(display(&mut c), "working");
+}
+
+/// A hook writes its line and exits at once, often before the daemon has accepted the
+/// connection: none of those lines is lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lines_from_hooks_that_already_left_all_arrive() {
+    const N: usize = 20;
+    let d = boot_with(seed_db, |_| {}).await;
+    for i in 0..N {
+        let at = ago(60_000 - 100 * i as i64);
+        let mut s = std::os::unix::net::UnixStream::connect(&d.sock).unwrap();
+        writeln!(
+            s,
+            "{}",
+            notice(&hook_line("UserPromptSubmit", at, i as u32))
+        )
+        .unwrap();
+    }
+    let arrived = timeout(Duration::from_secs(10), async {
+        while event_times(&d.paths).len() < N {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(arrived.is_ok(), "{} of {N}", event_times(&d.paths).len());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -550,4 +576,48 @@ async fn a_spool_that_panics_the_core_is_set_aside() {
     assert_eq!(core.stats().panics.load(Ordering::SeqCst), 0);
     assert_eq!(seen_events(&brain), events);
     core.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_daemon_writes_the_plugin_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let d = boot().await;
+    let dir = d.paths.session_plugin();
+    let files = [
+        dir.join(".claude-plugin/plugin.json"),
+        dir.join("hooks/hooks.json"),
+    ];
+    for f in &files {
+        assert_eq!(mode(f), 0o600, "{f:?}");
+        assert_eq!(mode(f.parent().unwrap()), 0o700, "{f:?}");
+    }
+    assert_eq!(mode(&dir), 0o700);
+    let before: Vec<_> = files
+        .iter()
+        .map(|f| fs::metadata(f).unwrap().modified().unwrap())
+        .collect();
+    // Stop it, and start another on the same root with the same exe: the files are left alone.
+    let mut c = Client::connect(&d.sock);
+    c.hello();
+    assert_eq!(c.call("shutdown", json!({}))["result"], json!({}));
+    timeout(Duration::from_secs(10), d.done)
+        .await
+        .expect("run ends")
+        .expect("no panic")
+        .expect("a clean stop");
+    std::thread::sleep(Duration::from_millis(20));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let opts = common::options(&d.paths, &d.brain, &d.time, moa_daemon::Ready::Channel(tx));
+    let again = tokio::spawn(moa_daemon::run(opts));
+    timeout(Duration::from_secs(10), rx)
+        .await
+        .expect("ready")
+        .expect("run didn't end");
+    let after: Vec<_> = files
+        .iter()
+        .map(|f| fs::metadata(f).unwrap().modified().unwrap())
+        .collect();
+    assert_eq!(before, after);
+    again.abort();
 }

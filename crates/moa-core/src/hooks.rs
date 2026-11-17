@@ -17,7 +17,7 @@ use crate::model::{
 use crate::op::{ConnId, Done, ReqId};
 use crate::peers::peers_note;
 use crate::state::{State, Table};
-use crate::tmux::focus::trusted_panes;
+use crate::tmux::focus::bound_session;
 use crate::tmux::ids::PaneId;
 
 /// What [`apply`] did with an event.
@@ -231,21 +231,29 @@ fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource
     }
 }
 
-/// A pane exited: the session bound to it, if the binding can be believed (T11) and the
-/// session is still live, ends and loses the binding. Nothing else checks that a process is
-/// alive. The caller sends what `tx` holds.
+/// A pane exited: the session bound to it on this server (T11), if still live, ends and
+/// loses the binding. Nothing else checks that a process is alive. A pane nobody is bound
+/// to is remembered, since an `open`'s answer naming it may still be on its way. The caller
+/// sends what `tx` holds.
 ///
 /// `false` when the write was refused: the exit is reported once, so nothing retries it.
 pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
-    let Some((_, id)) = trusted_panes(state).get(&pane).copied() else {
+    let Some(id) = bound_session(state, pane) else {
+        state.tmux.exited_unbound(pane);
         return true;
     };
+    end_exited(state, tx, id, vec![Change::DeletePaneBinding(id)])
+}
+
+/// Ends a live session whose agent's pane is gone: the session, `also`, and the activity
+/// row. `false` when the write was refused.
+pub(crate) fn end_exited(state: &mut State, tx: &mut Tx, id: SessionId, also: Vec<Change>) -> bool {
     let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) else {
         return true;
     };
     let mut after = session.clone();
     after.lifecycle = Lifecycle::Ended;
-    let mut changes = vec![Change::DeletePaneBinding(id)];
+    let mut changes = also;
     if let Some(text) = activity_text(
         &after,
         &HookKind::SessionEnded {

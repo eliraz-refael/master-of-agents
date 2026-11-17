@@ -4,8 +4,10 @@ use std::fs;
 use std::path::Path;
 
 pub mod normalize;
+pub mod plugin;
 
 pub use normalize::{last_assistant_text, normalize};
+pub use plugin::session_plugin;
 
 pub use moa_core::model::TranscriptCheck;
 

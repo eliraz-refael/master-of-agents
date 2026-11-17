@@ -142,9 +142,9 @@ fn conv_key(c: &Conversation) -> ConvKey {
 /// The moactl grammar for one suggestion action: its op, or why it doesn't parse.
 pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Action, String>;
 
-/// What the core needs from outside to run suggestions and compare paths. The daemon
-/// supplies the real ones; the default has no grammar (so no suggestion can carry actions)
-/// and treats every path as already canonical.
+/// What the core needs from outside to run suggestions, compare paths and open sessions.
+/// The daemon supplies the real ones; the default has no grammar (so no suggestion can carry
+/// actions), treats every path as already canonical, and hands out sequential ids.
 #[derive(Clone)]
 pub struct Deps {
     /// Parses one suggestion action with the moactl grammar (`moa_proto::cli::parse_action`),
@@ -153,10 +153,28 @@ pub struct Deps {
     /// Resolves a path to its one canonical spelling.
     pub canonical: fn(&Path) -> PathBuf,
     pub home: PathBuf,
+    /// A new UUIDv7 at a moment (`moa_store::new_uuid`): the core makes no randomness.
+    pub new_uuid: fn(UtcMs) -> uuid::Uuid,
+    /// The Claude Code plugin sessions are started with, as an absolute path.
+    pub session_plugin: PathBuf,
 }
 
 fn identity(p: &Path) -> PathBuf {
     p.to_path_buf()
+}
+
+/// UUIDv7s at `at` whose other bits count up from 1, per thread, so a test knows each id.
+fn sequential_uuid(at: UtcMs) -> uuid::Uuid {
+    thread_local! {
+        static ISSUED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let n = ISSUED.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    let mut bytes = [0u8; 10];
+    bytes[2..].copy_from_slice(&n.to_be_bytes());
+    uuid::Builder::from_unix_timestamp_millis(at.0.max(0) as u64, &bytes).into_uuid()
 }
 
 impl Default for Deps {
@@ -165,6 +183,8 @@ impl Default for Deps {
             parse_action: None,
             canonical: identity,
             home: PathBuf::new(),
+            new_uuid: sequential_uuid,
+            session_plugin: PathBuf::new(),
         }
     }
 }

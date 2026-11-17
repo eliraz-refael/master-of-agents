@@ -1,0 +1,198 @@
+---
+source: crates/moa-agents/tests/plugin.rs
+expression: "all.join(\"\\n\")"
+---
+== .claude-plugin/plugin.json
+{
+  "description": "moa tracks this session (generated; edits are replaced)",
+  "name": "moa",
+  "version": "1"
+}
+
+== hooks/hooks.json
+{
+  "hooks": {
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ],
+        "matcher": "elicitation_dialog"
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ],
+        "matcher": "AskUserQuestion|ExitPlanMode"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "command": "/opt/moa/bin/moa",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "hook",
+              "claude"
+            ],
+            "async": true,
+            "command": "/opt/moa/bin/moa",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

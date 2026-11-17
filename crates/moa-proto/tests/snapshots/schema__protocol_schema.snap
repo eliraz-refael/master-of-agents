@@ -257,6 +257,63 @@ expression: all
             "type": "object"
           },
           {
+            "description": "A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes\nonce tmux says which pane the tab has.",
+            "properties": {
+              "method": {
+                "const": "session.open",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "account": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bg": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "group": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "method": {
                 "const": "task.ls",

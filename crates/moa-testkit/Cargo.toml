@@ -15,8 +15,13 @@ moa-store = { path = "../moa-store" }
 proptest.workspace = true
 rusqlite.workspace = true
 rustix = { version = "1", features = ["pty", "termios", "fs"] }
+serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake-claude.rs"
 
 [lints]
 workspace = true
