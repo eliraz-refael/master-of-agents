@@ -635,6 +635,71 @@ fn a_start_on_another_sessions_conversation_moves_it_without_resetting_it() {
     assert_eq!(st.conversations_of(other_id).count(), 0);
 }
 
+const NESTED: &str = "c0ffee00-0000-4000-8000-000000000009";
+const FOREIGN: &str = "a hook event from another agent in a session's tab was dropped";
+
+/// An event from a second `claude` started inside the session's tab (a `claude -p` in its
+/// Bash tool): it has the tab's `MOA_SESSION`, and a conversation of its own.
+fn nested(seq: u32, plus_ms: i64, kind: HookKind) -> HookEnvelope {
+    let mut e = envelope(seq, plus_ms, kind);
+    e.conversation_id = NESTED.into();
+    e
+}
+
+fn dropped_as_foreign(fx: &[Effect]) -> bool {
+    fx.iter()
+        .any(|e| matches!(e, Effect::Log(l) if l.level == LogLevel::Info && l.message == FOREIGN))
+}
+
+#[test]
+fn another_agent_in_a_sessions_tab_changes_nothing() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    let before = session(&st);
+    let convs = conversations(&st);
+    let kinds = [
+        HookKind::SessionStarted {
+            source: StartSource::Startup,
+        },
+        prompt("list the files"),
+        ended("Three files."),
+        HookKind::SessionEnded {
+            reason: "other".into(),
+        },
+    ];
+    for (seq, kind) in (2..).zip(kinds) {
+        let fx = feed(&mut st, nested(seq, 1000 + 100 * i64::from(seq), kind));
+        assert_eq!(persists(&fx), 0, "{fx:?}");
+        assert!(dropped_as_foreign(&fx), "{fx:?}");
+    }
+    assert_eq!(session(&st), before);
+    assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    assert_eq!(conversations(&st), convs);
+    // The tab's own agent goes on as before.
+    feed(&mut st, envelope(6, 2000, ended("Lit.")));
+    assert_eq!(shown(&st), (DisplayState::Done, "Lit.".into()));
+}
+
+#[test]
+fn a_rotation_into_a_new_conversation_is_the_tabs_own() {
+    for source in [
+        StartSource::Clear,
+        StartSource::Resume,
+        StartSource::Fork,
+        StartSource::Compact,
+    ] {
+        let mut st = seeded();
+        let fx = feed(
+            &mut st,
+            nested(1, 1000, HookKind::SessionStarted { source }),
+        );
+        assert!(!dropped_as_foreign(&fx), "{source:?}: {fx:?}");
+        assert_eq!(conversations(&st).len(), 2, "{source:?}");
+        let fx = feed(&mut st, nested(2, 2000, prompt("go on")));
+        assert_eq!(event_kinds(&fx), ["turn.started"], "{source:?}");
+    }
+}
+
 fn at(plus_ms: i64) -> Now {
     Now::at(
         UtcMs(T0 + plus_ms),

@@ -86,16 +86,48 @@ fn resolve(state: &State, env: &HookEnvelope) -> Result<SessionId, &'static str>
     if env.slot.as_deref() == Some("moa") {
         return Err("");
     }
-    env.slot
+    let slot = env
+        .slot
         .as_deref()
         .and_then(|s| s.parse::<SessionId>().ok())
-        .filter(|id| state.session(*id).is_some())
-        .or_else(|| {
-            state
-                .conversation_of_agent(env.agent, &env.conversation_id)
-                .map(|c| c.session_id)
-        })
+        .filter(|id| state.session(*id).is_some());
+    if let Some(id) = slot {
+        return if is_own(state, id, env) {
+            Ok(id)
+        } else {
+            Err("a hook event from another agent in a session's tab was dropped")
+        };
+    }
+    state
+        .conversation_of_agent(env.agent, &env.conversation_id)
+        .map(|c| c.session_id)
         .ok_or("a hook event for an unknown session was dropped")
+}
+
+/// Whether an event under session `id`'s slot comes from the session's own agent. Anything
+/// the agent runs inherits the tab's environment, so a second `claude` started inside it (a
+/// `claude -p` in a tool) sends its events under the same slot. The tab's agent is the one
+/// on one of the session's conversations, or moving to a new one (`/clear`, a resume, a
+/// fork, a compaction), or starting for the first time: a launcher that ignores
+/// `--session-id` starts under an id of its own. A first start is told by nothing having
+/// been heard from the session since `open` made it: every applied event moves its
+/// `last_seen_at`.
+fn is_own(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
+    if state
+        .conversation_of_agent(env.agent, &env.conversation_id)
+        .is_some_and(|c| c.session_id == id)
+    {
+        return true;
+    }
+    match &env.kind {
+        HookKind::SessionStarted {
+            source: StartSource::Startup,
+        } => state
+            .session(id)
+            .is_some_and(|s| s.last_seen_at == Some(s.created_at)),
+        HookKind::SessionStarted { .. } => true,
+        _ => false,
+    }
 }
 
 pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Applied {
