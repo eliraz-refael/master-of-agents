@@ -138,6 +138,17 @@ fn runs_matching_hooks_in_order_with_the_payload() {
     assert_eq!(context, "peers note\n");
 }
 
+/// A start that answers nothing still leaves the context file, empty: the agent got no note.
+#[test]
+fn a_silent_session_start_leaves_an_empty_context() {
+    let rig = Rig::new(&[("SessionStart", None, "quiet", false)]);
+    let out = rig.run(&[hook("SessionStart", json!({})), FakeStep::Exit], &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tags(&rig.calls()), ["quiet"]);
+    let context = fs::read_to_string(rig.work().join(".fake-claude.context")).unwrap();
+    assert_eq!(context, "");
+}
+
 #[test]
 fn matchers_filter_by_tool_and_notification_type() {
     let rig = Rig::new(&[

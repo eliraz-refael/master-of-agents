@@ -154,7 +154,8 @@ impl Fake {
     }
 
     /// Run one hook: spawn it directly (no shell), feed it the payload, and wait. Only
-    /// SessionStart's stdout matters; it lands in `.fake-claude.context`.
+    /// SessionStart's stdout matters; it lands in `.fake-claude.context`, which a start makes
+    /// even when it says nothing, so a test can tell "no note" from "no start yet".
     fn run(&self, event: &str, hook: &Value, stdin: &str) {
         let command = hook["command"].as_str().expect("hook command");
         let args = hook["args"].as_array().into_iter().flatten();
@@ -168,7 +169,7 @@ impl Fake {
         let _ = pipe.write_all(stdin.as_bytes());
         drop(pipe);
         let out = child.wait_with_output().expect("hook output");
-        if event == "SessionStart" && !out.stdout.is_empty() {
+        if event == "SessionStart" {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
