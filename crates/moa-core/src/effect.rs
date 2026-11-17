@@ -9,6 +9,7 @@ use crate::Now;
 use crate::UtcMs;
 use crate::change::Change;
 use crate::hook::HookEnvelope;
+use crate::model::SessionId;
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::publish::{CoreEvent, Model};
 use crate::state::{CallerInfo, Snapshot, State};
@@ -71,6 +72,8 @@ pub enum TmuxIn {
         generation: Generation,
         version: String,
         ctl: ClientName,
+        /// The server's socket as moa names it (`-L` name or `-S` path), for pane bindings.
+        socket: String,
     },
     Down(Down),
     Notification(Notification),
@@ -105,6 +108,8 @@ pub enum Down {
 pub enum TmuxToken {
     /// The three lists that rebuild the topology.
     Refresh,
+    /// The new window an `open` asked for, and the session in it.
+    Open(SessionId),
 }
 
 #[derive(Clone, PartialEq, Debug)]

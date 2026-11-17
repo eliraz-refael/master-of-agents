@@ -21,6 +21,7 @@ fn deps(b: &TypicalBrain) -> Deps {
         parse_action: Some(moa_proto::cli::parse_action),
         canonical: |p| p.to_path_buf(),
         home: b.home.clone(),
+        ..Deps::default()
     }
 }
 

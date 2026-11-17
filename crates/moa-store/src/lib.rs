@@ -41,6 +41,14 @@ pub fn is_sidecar_name(path: &Path) -> bool {
         .is_some_and(|n| SIDECAR_SUFFIXES.iter().any(|s| n.ends_with(s)))
 }
 
+/// A new UUIDv7 at `at`, its other bits random: the ids of sessions moa starts
+/// (`Deps::new_uuid`). A time before 1970 counts as 1970.
+pub fn new_uuid(at: moa_core::UtcMs) -> uuid::Uuid {
+    let ms = at.0.max(0) as u64;
+    let ts = uuid::Timestamp::from_unix_time(ms / 1000, (ms % 1000) as u32 * 1_000_000, 0, 0);
+    uuid::Uuid::new_v7(ts)
+}
+
 /// The last part of a path, for messages: they name files by file name only.
 pub fn file_name_of(p: &Path) -> String {
     p.file_name()
@@ -245,6 +253,23 @@ mod tests {
     use rusqlite_migration::M;
 
     use super::*;
+
+    #[test]
+    fn new_uuid_is_a_v7_at_the_moment_given() {
+        let at = moa_core::UtcMs(1_800_000_000_123);
+        let (a, b) = (new_uuid(at), new_uuid(at));
+        assert_ne!(a, b, "the other bits are random");
+        for u in [a, b] {
+            assert_eq!(u.get_version(), Some(uuid::Version::SortRand));
+            let (secs, nanos) = u.get_timestamp().unwrap().to_unix();
+            assert_eq!((secs, nanos), (1_800_000_000, 123_000_000));
+        }
+        let (secs, _) = new_uuid(moa_core::UtcMs(-5))
+            .get_timestamp()
+            .unwrap()
+            .to_unix();
+        assert_eq!(secs, 0);
+    }
 
     #[test]
     fn migrating_an_older_db_backs_it_up_first() {

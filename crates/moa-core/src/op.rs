@@ -40,6 +40,22 @@ pub enum Op {
     SessionArchive { qs: Vec<String> },
     #[serde(rename = "session.find")]
     SessionFind { q: String },
+    /// A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes
+    /// once tmux says which pane the tab has.
+    #[serde(rename = "session.open")]
+    SessionOpen {
+        path: PathBuf,
+        #[serde(default)]
+        account: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        bg: bool,
+    },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -223,6 +239,7 @@ impl Op {
         "session.set",
         "session.archive",
         "session.find",
+        "session.open",
         "task.ls",
         "task.add",
         "task.set",
@@ -246,6 +263,7 @@ impl Op {
             | Op::GroupRm { .. }
             | Op::SessionSet { .. }
             | Op::SessionArchive { .. }
+            | Op::SessionOpen { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -274,6 +292,7 @@ impl Op {
             Op::SessionSet { .. } => "session.set",
             Op::SessionArchive { .. } => "session.archive",
             Op::SessionFind { .. } => "session.find",
+            Op::SessionOpen { .. } => "session.open",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",

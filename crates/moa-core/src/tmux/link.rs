@@ -14,6 +14,7 @@ use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
 use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
+use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
 
 const NOT_TMUX: &str = "that isn't a tmux program";
@@ -30,6 +31,8 @@ pub enum Link {
         generation: Generation,
         version: String,
         ctl: ClientName,
+        /// The server's socket, as pane bindings name it.
+        socket: String,
     },
 }
 
@@ -90,6 +93,28 @@ pub struct TmuxState {
     pub(super) written: Written,
     /// When the status clock's timer fires, while it is armed.
     pub(super) clock_at: Option<UtcMs>,
+    /// The `open`s waiting for tmux to say which pane their tab has, with whom to answer.
+    opens: BTreeMap<SessionId, (ConnId, ReqId)>,
+}
+
+/// How an `open`'s new tab turned out.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum OpenEnd {
+    /// The pane it runs in, and the pane's process.
+    Bound { pane: PaneId, pid: i64 },
+    /// tmux refused it (its first error line), or answered with something moa can't read.
+    Failed(Option<String>),
+    /// The link went away before tmux answered.
+    Gone,
+}
+
+/// An `open` that has its answer.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Settled {
+    pub id: SessionId,
+    pub conn: ConnId,
+    pub req: ReqId,
+    pub end: OpenEnd,
 }
 
 impl Default for TmuxState {
@@ -104,7 +129,38 @@ impl Default for TmuxState {
             tmux: None,
             written: Written::default(),
             clock_at: None,
+            opens: BTreeMap::new(),
         }
+    }
+}
+
+/// What an `open`'s `new-window -P` prints: the new pane and its process.
+pub(crate) const OPENED_FORMAT: &str = "P #{pane_id} #{pane_pid}";
+
+/// What tmux said to an `open`'s new window, printed with [`OPENED_FORMAT`].
+fn open_end(results: &[Result<Vec<String>, String>]) -> OpenEnd {
+    let line = match results {
+        [Ok(lines)] => match lines.as_slice() {
+            [line] => line,
+            _ => return OpenEnd::Failed(None),
+        },
+        [Err(e)] => return OpenEnd::Failed(Some(e.lines().next().unwrap_or("").to_string())),
+        _ => return OpenEnd::Failed(None),
+    };
+    let mut words = line.split(' ');
+    let (Some("P"), Some(pane), Some(pid), None) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return OpenEnd::Failed(None);
+    };
+    // `i64::from_str` would accept a leading '+'.
+    let pid = Some(pid)
+        .filter(|p| p.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|p| p.parse::<i64>().ok())
+        .filter(|p| *p > 0);
+    match (pane.parse::<PaneId>(), pid) {
+        (Ok(pane), Some(pid)) => OpenEnd::Bound { pane, pid },
+        _ => OpenEnd::Failed(None),
     }
 }
 
@@ -194,7 +250,8 @@ impl TmuxState {
                 generation,
                 version,
                 ctl,
-            } => self.connected(conn, generation, version, ctl),
+                socket,
+            } => self.connected(conn, generation, version, ctl, socket),
             TmuxIn::Down(d) => self.down(d),
             TmuxIn::Notification(n) => self.notification(&n),
             TmuxIn::Replies {
@@ -207,6 +264,8 @@ impl TmuxState {
                 }
                 match token {
                     TmuxToken::Refresh => self.listed(&results),
+                    // `settle` took it.
+                    TmuxToken::Open(_) => Vec::new(),
                 }
             }
         }
@@ -227,6 +286,51 @@ impl TmuxState {
     /// The clock's timer fired: its deadline is spent, whatever the wall clock says.
     pub(crate) fn clock_fired(&mut self) {
         self.clock_at = None;
+    }
+
+    /// Holds `open`'s reply until tmux says how its tab turned out.
+    pub(crate) fn wait_open(&mut self, id: SessionId, conn: ConnId, req: ReqId) {
+        self.opens.insert(id, (conn, req));
+    }
+
+    /// The `open`s this input answers: the one whose tab tmux reports on, or every one
+    /// when the link goes down or a new connection replaces the one they were asked on.
+    /// Run before [`TmuxState::input`], while the link is still as they knew it.
+    pub(crate) fn settle(&mut self, input: &TmuxIn) -> Vec<Settled> {
+        match input {
+            TmuxIn::Replies {
+                conn,
+                token: TmuxToken::Open(id),
+                results,
+            } if self.conn() == Some(*conn) => self
+                .opens
+                .remove(id)
+                .map(|(conn, req)| Settled {
+                    id: *id,
+                    conn,
+                    req,
+                    end: open_end(results),
+                })
+                .into_iter()
+                .collect(),
+            TmuxIn::Down(_) => self.all_gone(),
+            TmuxIn::Connected { conn, .. } if self.conn().is_some_and(|c| c != *conn) => {
+                self.all_gone()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn all_gone(&mut self) -> Vec<Settled> {
+        std::mem::take(&mut self.opens)
+            .into_iter()
+            .map(|(id, (conn, req))| Settled {
+                id,
+                conn,
+                req,
+                end: OpenEnd::Gone,
+            })
+            .collect()
     }
 
     fn conn(&self) -> Option<u64> {
@@ -269,6 +373,7 @@ impl TmuxState {
         generation: Generation,
         version: String,
         ctl: ClientName,
+        socket: String,
     ) -> Vec<Effect> {
         let mut fx = Vec::new();
         if self.conn() != Some(conn) {
@@ -285,6 +390,7 @@ impl TmuxState {
             generation,
             version,
             ctl,
+            socket,
         };
         self.written.reset();
         fx.extend(self.answer(&running(true)));

@@ -8,6 +8,7 @@ use clap::Args;
 use moa_client::{Client, ClientError, ClientOptions, OnMismatch, own_exe};
 use moa_core::config::{BrainName, Config, caller_store};
 use moa_core::live::DisplayState;
+use moa_core::op::Op;
 use moa_core::publish::word;
 use moa_core::route::{Route, route};
 use moa_core::state::CallerInfo;
@@ -161,9 +162,12 @@ fn verb(m: &Moactl) -> Result<(), String> {
         cwd: Some(here.cwd.clone()),
         home: here.paths.home().to_path_buf(),
     };
-    let op = m.verb.to_op(&ctx).map_err(|e: VerbError| e.to_string())?;
+    let mut op = m.verb.to_op(&ctx).map_err(|e: VerbError| e.to_string())?;
     let config = here.config()?;
     let brain = pick_brain(&here, &config, None, op.writes())?;
+    if let Op::SessionOpen { path, .. } = &mut op {
+        *path = open_folder(path)?;
+    }
     let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let mut opts = here.options(brain);
     opts.autostart = Some(exe);
@@ -178,6 +182,15 @@ fn verb(m: &Moactl) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// `open`'s folder: made when it's missing, as the spike did, then in its canonical form.
+fn open_folder(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_dir() {
+        std::fs::create_dir_all(path).map_err(|e| format!("can't make {}: {e}", path.display()))?;
+        println!("created {}", path.display());
+    }
+    Ok(canonical(path))
 }
 
 /// `moa status`. The terminal server's version and pid are in `--json` only.

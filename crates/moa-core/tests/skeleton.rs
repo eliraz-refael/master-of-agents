@@ -427,6 +427,14 @@ fn op_methods_match_the_variants() {
             summary: None,
         },
         Op::SessionFind { q: "q".into() },
+        Op::SessionOpen {
+            path: "/x".into(),
+            account: Some("acct-a".into()),
+            title: None,
+            group: None,
+            prompt: Some("p".into()),
+            bg: true,
+        },
         Op::Brief(NoParams),
         Op::Attention(NoParams),
         Op::Suggest {
@@ -469,6 +477,7 @@ const WRITES: &[&str] = &[
     "group.rm",
     "session.set",
     "session.archive",
+    "session.open",
     "task.add",
     "task.set",
     "note.add",
@@ -488,6 +497,19 @@ fn session_ops_take_their_flags_as_optional() {
             q: "x".into(),
             title: None,
             group: None
+        }
+    );
+    let open: Op =
+        serde_json::from_str(r#"{"method":"session.open","params":{"path":"/x"}}"#).unwrap();
+    assert_eq!(
+        open,
+        Op::SessionOpen {
+            path: "/x".into(),
+            account: None,
+            title: None,
+            group: None,
+            prompt: None,
+            bg: false,
         }
     );
 }

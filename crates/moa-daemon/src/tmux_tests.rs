@@ -442,6 +442,7 @@ async fn a_view_held_by_a_failed_commit_never_reaches_the_link() {
         generation: moa_core::tmux::ids::Generation { pid: 1, start: 1 },
         version: "3.8".into(),
         ctl: moa_core::tmux::ids::ClientName("client-1".into()),
+        socket: "moa".into(),
     });
     core.barrier().await;
     let up = sent(&mut rx);

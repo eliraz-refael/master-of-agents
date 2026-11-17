@@ -1,5 +1,6 @@
 //! The daemon process: the lock, the socket, the core, and the loop that keeps them up.
 
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -9,9 +10,10 @@ use std::time::Duration;
 
 use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
+use moa_core::model::AgentKind;
 use moa_core::state::Deps;
 use moa_platform::fs::write_if_changed;
-use moa_platform::{Paths, WallTimer, ZoneWatch, ensure_private_dir};
+use moa_platform::{Paths, WallTimer, ZoneWatch, ensure_private_dir, which};
 use moa_tmux::conf;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -60,15 +62,29 @@ pub struct RunOptions {
     pub uid_override: Option<u32>,
 }
 
-/// Reads `moa.toml` (no file is the default config), with folders in their canonical form.
-/// Shared by `moa daemon` and the client that starts it.
+/// Reads `moa.toml` (no file is the default config), with folders in their canonical form
+/// and every Claude account's launcher filled in where `PATH` has one. Shared by
+/// `moa daemon` and the client that starts it.
 pub fn load_config(paths: &Paths) -> Result<Config, DaemonError> {
     let text = paths.read_config()?;
-    Ok(Config::from_file_text(
-        text.as_deref(),
-        paths.home(),
-        moa_platform::canonical,
-    )?)
+    let mut config =
+        Config::from_file_text(text.as_deref(), paths.home(), moa_platform::canonical)?;
+    fill_launchers(&mut config, std::env::var_os("PATH").as_deref());
+    Ok(config)
+}
+
+/// H16: a Claude account with no `launcher` uses the `claude` on `path`, looked for once,
+/// here, since the core can't search `PATH`. One still without a launcher can't open
+/// sessions.
+pub(crate) fn fill_launchers(config: &mut Config, path: Option<&OsStr>) {
+    let mut found: Option<Option<PathBuf>> = None;
+    for a in config
+        .accounts
+        .values_mut()
+        .filter(|a| a.kind == AgentKind::Claude && a.launcher.is_none())
+    {
+        a.launcher = found.get_or_insert_with(|| which("claude", path)).clone();
+    }
 }
 
 /// Everything that has to work before the daemon says `ready`.
@@ -113,10 +129,17 @@ fn tmux_link(paths: &Paths, b: &str) -> Result<TmuxLink, DaemonError> {
     })
 }
 
-/// Writes the Claude Code plugin that sessions are started with, when its text changed.
-fn write_session_plugin(paths: &Paths) -> Result<(), DaemonError> {
+/// The plugin's folder as `CLAUDE_CODE_PLUGIN_DIRS` needs it: absolute, since Claude Code
+/// skips a relative entry without a word.
+fn session_plugin_dir(paths: &Paths) -> io::Result<PathBuf> {
+    std::path::absolute(paths.session_plugin())
+}
+
+/// Writes the Claude Code plugin that sessions are started with, when its text changed, and
+/// says where it is.
+fn write_session_plugin(paths: &Paths) -> Result<PathBuf, DaemonError> {
     let exe = std::env::current_exe()?;
-    let dir = paths.session_plugin();
+    let dir = session_plugin_dir(paths)?;
     for (rel, text) in moa_agents::claude::session_plugin(&exe) {
         let file = dir.join(rel);
         if let Some(parent) = file.parent() {
@@ -127,7 +150,7 @@ fn write_session_plugin(paths: &Paths) -> Result<(), DaemonError> {
         }
         write_if_changed(&file, &text)?;
     }
-    Ok(())
+    Ok(dir)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -192,11 +215,13 @@ async fn bring_up(
             tracing::info!("the terminal link waits for the switch-over");
             None
         };
-        write_session_plugin(paths)?;
+        let session_plugin = write_session_plugin(paths)?;
         let deps = Deps {
             parse_action: Some(moa_proto::cli::parse_action),
             canonical: moa_platform::canonical,
             home: paths.home().to_path_buf(),
+            new_uuid: moa_store::new_uuid,
+            session_plugin,
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

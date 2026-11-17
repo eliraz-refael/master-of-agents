@@ -14,6 +14,7 @@ pub const ALLOWED: &[&str] = &[
     "new-session",
     "source-file",
     "command-prompt",
+    "new-window",
 ];
 
 /// A command that must not be sent, with the reason.
@@ -24,6 +25,8 @@ pub struct Refused(pub &'static str);
 const NOT_ALLOWED: &str = "that isn't a command moa sends";
 const NEEDS_B: &str = "command-prompt needs -b";
 const OWN_CONFIG: &str = "moa only sources its own config";
+const NEEDS_D_P: &str = "new-window needs -d and -P";
+const ENV_NEWLINE: &str = "a new window's environment can't hold a newline";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Cmd {
@@ -89,8 +92,39 @@ impl Cmd {
                     Err(Refused(OWN_CONFIG))
                 }
             }
+            "new-window" => check_new_window(&self.args),
             _ => Ok(()),
         }
+    }
+}
+
+/// `new-window`'s flags, read up to the command it runs: `-d` (the user's view stays put)
+/// and `-P` (it says which pane) are both there, and no `-e` value holds a newline. The
+/// command's own arguments are quoted like any other.
+fn check_new_window(args: &[String]) -> Result<(), Refused> {
+    let (mut detached, mut prints) = (false, false);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-d" => detached = true,
+            "-P" => prints = true,
+            "-a" | "-b" | "-k" | "-S" => {}
+            "-c" | "-F" | "-n" | "-t" => {
+                it.next();
+            }
+            "-e" => {
+                if it.next().is_some_and(|v| v.contains(['\n', '\r'])) {
+                    return Err(Refused(ENV_NEWLINE));
+                }
+            }
+            // The command it runs.
+            _ => break,
+        }
+    }
+    if detached && prints {
+        Ok(())
+    } else {
+        Err(Refused(NEEDS_D_P))
     }
 }
 
@@ -143,4 +177,44 @@ pub fn quote(s: &str) -> String {
         out.push('\'');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_window(flags: &[&str]) -> Cmd {
+        Cmd::new("new-window")
+            .args(flags.iter().copied())
+            .args(["-n", "x", "-c", "/w", "-t", "=moa:"])
+            .args(["/opt/claude", "--name", "-d", "-P"])
+    }
+
+    #[test]
+    fn new_window_needs_d_and_p() {
+        assert_eq!(new_window(&["-d", "-P"]).check(), Ok(()));
+        assert_eq!(new_window(&["-P", "-F", "x", "-d"]).check(), Ok(()));
+        // `-d` and `-P` after the command it runs are the command's own words.
+        for flags in [&["-d"][..], &["-P"], &[]] {
+            assert_eq!(
+                new_window(flags).check(),
+                Err(Refused("new-window needs -d and -P")),
+                "{flags:?}"
+            );
+        }
+        for value in ["A=b\nc", "A=b\rc"] {
+            assert_eq!(
+                new_window(&["-d", "-P", "-e", value]).check(),
+                Err(Refused("a new window's environment can't hold a newline"))
+            );
+        }
+        // A newline in the command's own arguments is quoted, as any argument is.
+        let cmd = new_window(&["-d", "-P"]).arg("two\nlines");
+        assert_eq!(cmd.check(), Ok(()));
+        assert!(
+            cmd.line().ends_with(r#"'two'"\n"'lines'"#),
+            "{}",
+            cmd.line()
+        );
+    }
 }

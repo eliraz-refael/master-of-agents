@@ -198,6 +198,7 @@ async fn local_verbs_work_and_survive_a_reload() {
         parse_action: Some(moa_proto::cli::parse_action),
         canonical: moa_platform::canonical,
         home: paths.home().to_path_buf(),
+        ..Deps::default()
     };
     let mut config =
         moa_daemon::load_config(&paths).unwrap_or_else(|e| panic!("no config ({})", kind(&e)));

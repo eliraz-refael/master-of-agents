@@ -110,6 +110,7 @@ fn connect(s: &mut State, g: Generation) -> Vec<Effect> {
             generation: g,
             version: "3.5a".into(),
             ctl: ClientName("client-9".into()),
+            socket: "moa".into(),
         },
     )
 }

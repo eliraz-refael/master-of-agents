@@ -195,11 +195,32 @@ fn errors_are_one_line_and_exit_1() {
 #[test]
 fn later_verbs_say_so_without_a_daemon() {
     let r = rig(None);
-    let o = r.moactl(&["open", "~/x"]);
+    let o = r.moactl(&["resume", "x"]);
     assert_eq!(o.status.code(), Some(1));
-    assert_eq!(err(&o), "moactl open isn't in this build yet\n");
+    assert_eq!(err(&o), "moactl resume isn't in this build yet\n");
     assert!(r.sockets().is_empty());
     assert!(!r.tb.paths().run_dir().exists());
+}
+
+/// The folder is made first, as the spike did, and sent in its canonical form; with no
+/// terminal linked the daemon then says so.
+#[test]
+fn open_makes_a_missing_folder() {
+    let r = typical();
+    let o = r.moactl(&["open", "../driftwood/new"]);
+    let made = r.tb.root().join("private/driftwood/new");
+    assert!(made.is_dir());
+    // Named from the folder it was typed in, as the system spells it.
+    let shown = fs::canonicalize(r.tb.root())
+        .unwrap()
+        .join("private/driftwood/new");
+    assert_eq!(out(&o), format!("created {}\n", shown.display()));
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o), "moa isn't open in a terminal yet; run moa first\n");
+    // An existing folder is just used.
+    let o = r.moactl(&["open", "."]);
+    assert_eq!(out(&o), "");
+    assert_eq!(err(&o), "moa isn't open in a terminal yet; run moa first\n");
 }
 
 #[test]

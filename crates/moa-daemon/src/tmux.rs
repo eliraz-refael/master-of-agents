@@ -3,7 +3,7 @@
 //! events between the core and the server, reconnects when the client drops, and takes
 //! moa's hooks down on a clean stop.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
@@ -76,17 +76,11 @@ pub(crate) enum TmuxCmd {
     Crash,
 }
 
-/// A token travels to the control client as a tag, and back.
-fn tag_of(token: TmuxToken) -> u64 {
-    match token {
-        TmuxToken::Refresh => 1,
-    }
-}
-
-fn token_of(tag: u64) -> Option<TmuxToken> {
-    match tag {
-        1 => Some(TmuxToken::Refresh),
-        _ => None,
+/// The server's socket as a pane binding names it: the `-L` name, or the `-S` path.
+fn socket_text(socket: &TmuxSocket) -> String {
+    match socket {
+        TmuxSocket::Name(n) => n.clone(),
+        TmuxSocket::Path(p) => p.display().to_string(),
     }
 }
 
@@ -168,16 +162,27 @@ struct Up {
     /// The backoff step that connected it, if one did; a loss before `STEADY` goes on from
     /// there.
     tried: Option<usize>,
+    /// Each token travels to the control client as a tag, and back: the tokens of this
+    /// client's sends still waiting for their answers, by tag.
+    tokens: BTreeMap<u64, TmuxToken>,
+    last_tag: u64,
 }
 
 impl Up {
-    fn connected(&self) -> TmuxIn {
+    fn connected(&self, socket: &TmuxSocket) -> TmuxIn {
         TmuxIn::Connected {
             conn: self.conn,
             generation: self.info.generation,
             version: self.info.version.clone(),
             ctl: self.info.client.clone(),
+            socket: socket_text(socket),
         }
+    }
+
+    fn tag(&mut self, token: TmuxToken) -> u64 {
+        self.last_tag += 1;
+        self.tokens.insert(self.last_tag, token);
+        self.last_tag
     }
 }
 
@@ -340,7 +345,7 @@ impl Actor {
             *lock(&self.sh.tmux) = Some(t);
         }
         match &self.state {
-            State::Up(up) => self.tell(up.connected()),
+            State::Up(up) => self.tell(up.connected(&self.sh.link.socket)),
             State::Backoff { .. } => {}
             State::Idle => self.connect(None).await,
         }
@@ -454,8 +459,10 @@ impl Actor {
             info,
             since: Instant::now(),
             tried,
+            tokens: BTreeMap::new(),
+            last_tag: 0,
         };
-        self.tell(up.connected());
+        self.tell(up.connected(&self.sh.link.socket));
         self.set(State::Up(up));
     }
 
@@ -480,25 +487,29 @@ impl Actor {
         self.connect(Some(next)).await;
     }
 
-    fn send(&self, conn: u64, cmds: Vec<Cmd>, token: Option<TmuxToken>) {
-        match &self.state {
-            State::Up(up) if up.conn == conn => up.client.send(cmds, token.map(tag_of)),
+    fn send(&mut self, conn: u64, cmds: Vec<Cmd>, token: Option<TmuxToken>) {
+        match &mut self.state {
+            State::Up(up) if up.conn == conn => {
+                let tag = token.map(|t| up.tag(t));
+                up.client.send(cmds, tag);
+            }
             // The commands stay out of the log.
             _ => tracing::debug!(conn, cmds = cmds.len(), "not on that connection: dropped"),
         }
     }
 
-    fn event(&self, ev: Event) {
-        let State::Up(up) = &self.state else {
+    fn event(&mut self, ev: Event) {
+        let State::Up(up) = &mut self.state else {
             return;
         };
+        let conn = up.conn;
         match ev {
             // The end of the events says it.
             Event::Notification(Notification::Exit) => {}
             Event::Notification(n) => self.tell(TmuxIn::Notification(n)),
-            Event::Replies { tag, results } => match token_of(tag) {
+            Event::Replies { tag, results } => match up.tokens.remove(&tag) {
                 Some(token) => self.tell(TmuxIn::Replies {
-                    conn: up.conn,
+                    conn,
                     token,
                     results: results
                         .into_iter()

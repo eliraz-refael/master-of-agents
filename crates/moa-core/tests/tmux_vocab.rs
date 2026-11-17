@@ -61,10 +61,15 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
         "that isn't a command moa sends"
     );
     for name in ALLOWED {
-        if *name != "command-prompt" && *name != "source-file" {
+        if !["command-prompt", "source-file", "new-window"].contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");
         }
     }
+    assert_eq!(
+        Cmd::new("new-window").check().unwrap_err().0,
+        "new-window needs -d and -P"
+    );
+    assert!(Cmd::new("new-window").args(["-d", "-P"]).check().is_ok());
     let prompt = Cmd::new("command-prompt");
     assert_eq!(
         prompt.clone().arg("x").check().unwrap_err().0,

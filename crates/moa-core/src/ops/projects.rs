@@ -41,6 +41,27 @@ fn find<'a>(state: &'a State, name: &str) -> Option<&'a Project> {
     })
 }
 
+/// The project a session working in `path` belongs to: the one whose folder is the longest
+/// whole-component prefix of it. A stored folder is tried as written and canonical, since
+/// projects from the spike were never canonicalised.
+pub(crate) fn project_for(state: &State, path: &Path) -> Option<ProjectId> {
+    let canonical = state.deps().canonical;
+    state
+        .projects()
+        .filter_map(|p| {
+            let folder = Path::new(p.path.as_deref()?);
+            [folder.to_path_buf(), canonical(folder)]
+                .into_iter()
+                .filter(|f| is_under(path, f))
+                .map(|f| f.components().count())
+                .max()
+                .map(|depth| (depth, p.id))
+        })
+        // The longest folder; two projects for one folder go to the older one.
+        .max_by_key(|(depth, id)| (*depth, std::cmp::Reverse(*id)))
+        .map(|(_, id)| id)
+}
+
 pub(crate) fn show(state: &State, now: &Now, name: &str) -> Result<Done, OpError> {
     let p = find(state, name).ok_or_else(|| OpError(format!("no project matches '{name}'")))?;
     let mut lines = vec![

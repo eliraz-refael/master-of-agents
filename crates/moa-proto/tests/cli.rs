@@ -243,13 +243,55 @@ fn verb_names_match_clap_and_the_enum() {
 
 #[test]
 fn later_verbs_say_not_yet() {
-    assert_eq!(err(&["open", "~/x"]), "moactl open isn't in this build yet");
+    assert_eq!(
+        err(&["resume", "x"]),
+        "moactl resume isn't in this build yet"
+    );
     assert_eq!(err(&["peers"]), "moactl peers isn't in this build yet");
     assert_eq!(
         err(&["layout", "list"]),
         "moactl layout isn't in this build yet"
     );
     assert_eq!(err(&["setup"]), "moactl setup isn't in this build yet");
+}
+
+#[test]
+fn open_parses_to_session_open() {
+    assert_eq!(
+        op(&[
+            "open",
+            "~/x",
+            "--account",
+            "acct-a",
+            "--title",
+            "Boards",
+            "--group",
+            "Lantern/boards",
+            "--prompt",
+            "look at the boards",
+            "--bg",
+        ]),
+        Op::SessionOpen {
+            path: "/h/x".into(),
+            account: Some("acct-a".into()),
+            title: Some("Boards".into()),
+            group: Some("Lantern/boards".into()),
+            prompt: Some("look at the boards".into()),
+            bg: true,
+        }
+    );
+    // A relative path is the folder it was typed in.
+    assert_eq!(
+        op(&["open", "../tidepool"]),
+        Op::SessionOpen {
+            path: "/h/private/tidepool".into(),
+            account: None,
+            title: None,
+            group: None,
+            prompt: None,
+            bg: false,
+        }
+    );
 }
 
 #[test]

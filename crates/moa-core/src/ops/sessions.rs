@@ -1,19 +1,41 @@
-//! `session ls|set|archive`.
+//! `session ls|set|archive|open`.
+
+use std::path::Path;
 
 use serde_json::json;
 
+use super::cut;
+use super::projects::project_for;
 use crate::Now;
 use crate::change::Change;
-use crate::core::Tx;
+use crate::config::AccountName;
+use crate::core::{Tx, post_commit};
+use crate::effect::{Effect, LogLevel, LogLine, TmuxToken};
 use crate::live::{display_state, is_asleep, spike_state};
-use crate::model::{Group, SessionId, normalize_group_path};
+use crate::model::{
+    Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
+    Session, SessionId, normalize_group_path,
+};
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{Done, OpError};
+use crate::route::{Route, route};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
+use crate::tmux::cmd::Cmd;
+use crate::tmux::ids::PaneId;
+use crate::tmux::link::{Link, OPENED_FORMAT, OpenEnd, Settled};
 
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
+/// How much of a title names its tab, as the spike cut it.
+const WINDOW_NAME_CUT: usize = 24;
+
+const NO_TERMINAL: &str = "moa isn't open in a terminal yet; run moa first";
+const NOT_FULL: &str = "open needs a full path";
+const NO_ACCOUNT: &str = "no account to open with: set open_account in moa.toml";
+const ONLY_CLAUDE: &str = "only Claude accounts can open sessions for now";
+const NO_TAB: &str = "couldn't open a tab for it; see moa's log";
+const WENT_AWAY: &str = "moa's terminal went away before it opened";
 
 pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
     let recent = days_ago(now, 2);
@@ -163,4 +185,273 @@ pub(crate) fn archive(
         text: format!("archived {}", archived.len()),
         data: json!({ "archived": archived }),
     })
+}
+
+/// What `open` was asked.
+pub(crate) struct OpenArgs<'a> {
+    pub path: &'a Path,
+    pub account: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub group: Option<&'a str>,
+    pub prompt: Option<&'a str>,
+}
+
+/// `open`: checks the request, commits the new session, and gives the tokened `new-window`
+/// that starts it in a tab of moa's terminal. The caller holds the reply until tmux says
+/// how the tab turned out ([`opened`]).
+pub(crate) fn open(
+    state: &mut State,
+    tx: &mut Tx,
+    now: &Now,
+    a: &OpenArgs,
+) -> Result<(SessionId, Effect), OpError> {
+    let Link::Up { conn, .. } = state.tmux().link else {
+        return Err(OpError(NO_TERMINAL.into()));
+    };
+    if !a.path.is_absolute() {
+        return Err(OpError(NOT_FULL.into()));
+    }
+    let name = match a.account {
+        Some(n) => n.to_string(),
+        None => state
+            .config()
+            .brain(state.brain())
+            .and_then(|b| b.open_account)
+            .map(|n| n.to_string())
+            .ok_or_else(|| OpError(NO_ACCOUNT.into()))?,
+    };
+    let no_such = || OpError(format!("there's no account called {name}"));
+    let account = AccountName::parse(&name).map_err(|_| no_such())?;
+    let acct = state
+        .config()
+        .accounts
+        .get(&account)
+        .ok_or_else(no_such)?
+        .clone();
+    if acct.kind != AgentKind::Claude {
+        return Err(OpError(ONLY_CLAUDE.into()));
+    }
+    let launcher = acct.launcher.clone().ok_or_else(|| {
+        OpError(format!(
+            "can't find claude for {name}: set its launcher in moa.toml"
+        ))
+    })?;
+    match route(state.config(), Some(&account), a.path, Some(state.brain())) {
+        Route::Brain(b) if b != *state.brain() => {
+            return Err(OpError(format!(
+                "that folder belongs to the {b} brain; open it there"
+            )));
+        }
+        Route::Brain(_) => {}
+        Route::NotAvailable => {
+            return Err(OpError(format!(
+                "{name} can't open sessions in that folder"
+            )));
+        }
+    }
+    let group = match a.group.map(normalize_group_path) {
+        Some(g) if g.is_empty() => return Err(OpError("a group needs a name".into())),
+        other => other,
+    };
+    let given = a.title.filter(|t| !t.trim().is_empty());
+    let title = given
+        .map(str::to_string)
+        .or_else(|| a.path.file_name().map(|f| f.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "agent".to_string());
+
+    let new_uuid = state.deps().new_uuid;
+    let id = SessionId(new_uuid(now.wall));
+    let conv = new_uuid(now.wall).to_string();
+    let path = a.path.display().to_string();
+    let store = acct.store.display().to_string();
+    let session = Session {
+        id,
+        agent_kind: AgentKind::Claude,
+        account: Some(name.clone()),
+        cwd: Some(path.clone()),
+        start_cwd: Some(path.clone()),
+        project_id: project_for(state, a.path),
+        title: Some(title.clone()),
+        title_locked: given.is_some(),
+        group_path: group.clone(),
+        lifecycle: Lifecycle::Live,
+        activity: Activity::Idle,
+        activity_at: Some(now.wall),
+        activity_why: None,
+        last_prompt: None,
+        last_turn_end_at: None,
+        seen_at: None,
+        asleep_at: None,
+        archived_at: None,
+        location: Location::Here,
+        resume_failed: false,
+        created_at: now.wall,
+        last_seen_at: Some(now.wall),
+    };
+    let conversation = Conversation {
+        agent_kind: AgentKind::Claude,
+        conversation_id: conv.clone(),
+        session_id: id,
+        store_dir: Some(store.clone()),
+        spike_account: None,
+        reason: ConversationReason::Start,
+        first_seen_at: now.wall,
+        last_seen_at: now.wall,
+        transcript_path: None,
+        transcript_present: None,
+        transcript_checked_at: None,
+    };
+    let mut changes = vec![Change::Session(session), Change::Conversation(conversation)];
+    if let Some(g) = group.filter(|g| !state.groups.contains_key(g)) {
+        changes.push(Change::Group(Group {
+            path: g,
+            collapsed: false,
+            created_at: now.wall,
+        }));
+    }
+    tx.ui(state, changes, format!("opened {title} with {name}"))?;
+
+    let env = |k: &str, v: &str| ["-e".to_string(), format!("{k}={v}")];
+    let plugin = state.deps().session_plugin.display().to_string();
+    let mut cmd = Cmd::new("new-window")
+        .args(["-d", "-P", "-F", OPENED_FORMAT, "-n"])
+        .arg(cut(&title, WINDOW_NAME_CUT))
+        .arg("-c")
+        .arg(path)
+        .args(["-t", "=moa:"])
+        .args(env("CLAUDE_CONFIG_DIR", &store))
+        .args(env("MOA_SESSION", &id.to_string()))
+        .args(env("MOA_BRAIN", state.brain().as_str()))
+        .args(env("CLAUDE_CODE_PLUGIN_DIRS", &plugin))
+        .arg(launcher.display().to_string())
+        .args(["--session-id", conv.as_str(), "--name", title.as_str()]);
+    if let Some(p) = a.prompt.filter(|p| !p.is_empty()) {
+        cmd = cmd.args(["--", p]);
+    }
+    Ok((
+        id,
+        Effect::Tmux {
+            conn,
+            cmds: vec![cmd],
+            token: Some(TmuxToken::Open(id)),
+        },
+    ))
+}
+
+fn warn(message: String) -> Effect {
+    Effect::Log(LogLine {
+        level: LogLevel::Warn,
+        message,
+    })
+}
+
+/// The answers to `open`s whose tab tmux reported on, or that the link went away from:
+/// each pane bound and tagged, or its session ended, in one commit; then the replies.
+pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec<Effect> {
+    let mut tx = Tx::new(now);
+    let mut logs = Vec::new();
+    let mut after = Vec::new();
+    for Settled { id, conn, req, end } in settled {
+        let result = match end {
+            OpenEnd::Bound { pane, pid } => {
+                bind(state, &mut tx, id, pane, pid, &mut logs, &mut after)
+            }
+            OpenEnd::Failed(why) => {
+                // tmux's first line and ids only: no record contents.
+                logs.push(warn(match why {
+                    Some(line) => format!("tmux couldn't open a tab for session {id}: {line}"),
+                    None => format!("tmux's answer about the tab for session {id} didn't parse"),
+                }));
+                end_open(state, &mut tx, id, true, &mut logs);
+                Err(OpError(NO_TAB.into()))
+            }
+            OpenEnd::Gone => {
+                end_open(state, &mut tx, id, false, &mut logs);
+                Err(OpError(WENT_AWAY.into()))
+            }
+        };
+        after.push(Effect::Reply { conn, req, result });
+    }
+    let mut fx = logs;
+    fx.extend(post_commit(state, tx));
+    fx.extend(after);
+    fx
+}
+
+/// Binds the session to its new pane and tags the pane with it (after the commit, in
+/// `after`), then the reply.
+fn bind(
+    state: &mut State,
+    tx: &mut Tx,
+    id: SessionId,
+    pane: PaneId,
+    pid: i64,
+    logs: &mut Vec<Effect>,
+    after: &mut Vec<Effect>,
+) -> Result<Done, OpError> {
+    // `settle` reports a pane only while the link it came on is up.
+    let Link::Up {
+        conn,
+        generation,
+        socket,
+        ..
+    } = &state.tmux().link
+    else {
+        end_open(state, tx, id, false, logs);
+        return Err(OpError(WENT_AWAY.into()));
+    };
+    let (conn, generation, socket) = (*conn, *generation, socket.clone());
+    // Gone after a failed commit and a reload: nothing to bind.
+    let Some(s) = state.session(id).cloned() else {
+        logs.push(warn(format!(
+            "session {id} got a tab but isn't in the brain"
+        )));
+        return Err(OpError(NO_TAB.into()));
+    };
+    let binding = PaneBinding {
+        session_id: id,
+        server_pid: generation.pid,
+        server_start: generation.start,
+        socket,
+        pane_id: pane.to_string(),
+        pane_pid: pid,
+        bound_at: tx.wall,
+    };
+    if let Err(e) = tx.commit(state, vec![Change::PaneBinding(binding)]) {
+        logs.push(warn(format!("the tab of session {id} was not saved")));
+        return Err(e);
+    }
+    after.push(Effect::Tmux {
+        conn,
+        cmds: vec![Cmd::new("set-option").args([
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.to_string(),
+            "@moa_session".to_string(),
+            id.to_string(),
+        ])],
+        token: None,
+    });
+    let title = s.title.unwrap_or_default();
+    Ok(Done {
+        text: format!(
+            "opened {title} with {} in {}",
+            s.account.unwrap_or_default(),
+            s.cwd.unwrap_or_default()
+        ),
+        data: json!({ "id": id, "title": title }),
+    })
+}
+
+/// An `open` that got no tab: its session ends, marked so when tmux refused it.
+fn end_open(state: &mut State, tx: &mut Tx, id: SessionId, failed: bool, logs: &mut Vec<Effect>) {
+    let Some(s) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) else {
+        return;
+    };
+    let mut s = s.clone();
+    s.lifecycle = Lifecycle::Ended;
+    s.resume_failed |= failed;
+    if tx.commit(state, vec![Change::Session(s)]).is_err() {
+        logs.push(warn(format!("the end of session {id} was not saved")));
+    }
 }

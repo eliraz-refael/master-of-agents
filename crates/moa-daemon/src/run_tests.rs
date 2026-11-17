@@ -166,3 +166,73 @@ async fn an_actor_failure_is_published_as_an_error_event() {
     .expect("an error event");
     assert_eq!(message, "accept loop stopped and was restarted");
 }
+
+/// `CLAUDE_CODE_PLUGIN_DIRS` skips a relative entry, so the plugin's folder is made
+/// absolute even under a relative home.
+#[test]
+fn the_plugin_dir_handed_to_sessions_is_absolute() {
+    let relative = Paths::from_vars(None, Some("rel/home".into()), None, 501, true).unwrap();
+    let dir = session_plugin_dir(&relative).unwrap();
+    assert!(relative.session_plugin().is_relative());
+    assert_eq!(
+        dir,
+        std::env::current_dir()
+            .unwrap()
+            .join(relative.session_plugin())
+    );
+    let rooted = Paths::with_root(Path::new("/tmp/moa-root"));
+    assert_eq!(
+        session_plugin_dir(&rooted).unwrap(),
+        rooted.session_plugin()
+    );
+}
+
+/// H16: a Claude account without a launcher gets the `claude` on `PATH`; one with a
+/// launcher keeps it, and a Codex account is left alone.
+#[test]
+fn load_config_fills_launchers_from_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // Never run: only found.
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let text = r#"
+[accounts.acct-a]
+kind = "claude"
+store = "~/.claude-a"
+[accounts.acct-b]
+kind = "claude"
+store = "~/.claude-b"
+launcher = "/opt/claude"
+[accounts.acct-x]
+kind = "codex"
+store = "~/.codex-x"
+"#;
+    let parsed = || Config::parse(text, Path::new("/h")).unwrap();
+    let launcher = |c: &Config, a: &str| {
+        c.accounts[&moa_core::config::AccountName::parse(a).unwrap()]
+            .launcher
+            .clone()
+    };
+    let mut config = parsed();
+    let path = std::env::join_paths(["/nonexistent".into(), bin.clone()]).unwrap();
+    fill_launchers(&mut config, Some(&path));
+    assert_eq!(launcher(&config, "acct-a"), Some(claude));
+    assert_eq!(
+        launcher(&config, "acct-b"),
+        Some(PathBuf::from("/opt/claude"))
+    );
+    assert_eq!(launcher(&config, "acct-x"), None);
+
+    let mut config = parsed();
+    fill_launchers(&mut config, Some(OsStr::new("/nonexistent")));
+    assert_eq!(launcher(&config, "acct-a"), None);
+    fill_launchers(&mut config, None);
+    assert_eq!(launcher(&config, "acct-a"), None);
+}
