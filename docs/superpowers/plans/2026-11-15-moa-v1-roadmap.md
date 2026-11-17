@@ -454,6 +454,25 @@ Spec §6.6; R2.
   the loop: done (slice 3, Task 1).
 - The daemon's PATH/environment: decided: T1 (slice 3).
 
+**As built** (where slice 3 differs from the list above; the slice 3 plan has the detail):
+- The control client runs `tmux -u -N <sock> -C new-session -A -s _moa -f
+  no-output,ignore-size,no-detach-on-destroy -x 10 -y 3 /bin/sh`, not `attach`. With `-N`, it
+  never starts a server.
+- **The daemon never creates a user shell.** The front door attaches with `new-session -A -s
+  moa -n moa -c <home>` in the user's own environment. Inside moa's own server, it creates `moa`
+  with `-d` and then runs `switch-client`. `tmux.ensure` answers "running" once the link is up.
+- The generated `tmux.conf` mirrors tmux's own default search, with each file sourced `-q`:
+  `/etc/tmux.conf`, `~/.tmux.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf` and
+  `~/.config/tmux/tmux.conf`. It then sources `moa.tmux`, which has these properties:
+  - its labels use no tmux words ("tab", "split");
+  - a user prefix of `C-a` moves to `C-b`;
+  - tmux 3.4 gets a plain gutter.
+- **A tmux 3.4 bug is worked around:** a control client whose output write failed stays
+  attached forever.
+  - The workaround: the control client holds a read end of its own output pipe, and
+    `Spawner` serialises every launch.
+  - The limit: this covers only output that fits in the pipe. The rest is under slice 4.
+
 **Done when:**
 - In the sandbox, every key and the menu reach the daemon, and the status line updates,
   with **zero `Spawner` launches per key** (counter test).
@@ -530,6 +549,75 @@ Spec §6.7, §6.13 (sleep, reboot), §6.12 (peers-note plumbing only).
     (synthetic, scrubbed) through `moa hook`, and can `/clear`, die, or hang.
     The flake's `packages.default` builds only `-p moa` (`cargoExtraArgs`), so test binaries
     never land in the user's `bin/`.
+11. **Carried from slice 3: the terminal link** (`crates/moa-daemon/src/tmux.rs`). Reconcile
+    and launch ops lean on these, so they come first:
+    - **Reap a stuck control client on connect.** If a stale `@moa_ctl` names a client that
+      is still attached, kill its `#{client_pid}`.
+      - Why: tmux 3.4 keeps a control client whose output write failed attached forever
+        (3.8 does too, with many unread replies).
+      - What it breaks: the keys stay silent instead of saying "moa isn't running", and
+        `kill-server` blocks.
+      - Slice 3's held read end covers only output that fits in the pipe (16–64 KiB).
+    - **A link panic while Up** reaches the core as Lost only at the restart (1–30 s later).
+      Until then, ensures answer "up".
+    - **`lost()` marks the link Idle before it probes.** A panic there leaves the core at Lost,
+      with no reconnect.
+    - **A Stop with no live client** (after a restart, during backoff, or idle after a loss)
+      leaves the index-90 hooks naming a dead client. They are replaced on the next connect.
+      The front door could unhook.
+    - **Backoff:** a restart during backoff starts over at step 0.
+    - **Bounds:**
+      - A hung server blocks the actor for up to 20 s, which is longer than the front
+        door's 10 s.
+      - `bootstrap` and `clean_up` aren't bounded.
+      - A Protocol error on the first connect says "lost … couldn't reconnect".
+    - **`ensure` answers "running" before the first refresh has listed the topology.**
+      Reconcile and `focus` must not assume a filled topology at that point.
+    - **Ensure waiters:**
+      - waiters of a closed connection stay until a later answer (this needs a
+        connection-closed signal);
+      - `answer()` empties the waiters before a possible later panic.
+    - **Reload:** if `Topology::from_lists` panics on the same input every time, the link
+      loops forever: Reload, refresh, panic, Reload again.
+    - **Reaper:** a wait-then-flag leaves a small window where a reused pid gets
+      `kill_term`. It needs `waitid(WNOWAIT)` in `moa_platform::sys`.
+    - **`run.rs` makes the brain dir itself**, with its own `DirBuilder`. Use
+      `ensure_private_dir` there, which checks symlinks and ownership.
+    - **Notices:** they are held views, so they drop with an unrelated failed commit. Revisit
+      when notices start to depend on state.
+    - **`detach-on-destroy off`:** with this in the user's config, the terminal drops into
+      `_moa` when moa's last shell exits.
+    - **`_moa`'s shell:** give it `/bin/sh` as two or more arguments, so the command doesn't
+      go through the user's login shell. This applies to both the control client and the
+      create command.
+    - **The window pill has no glyph for a failed agent.**
+    - **Prompts,** for the first slice that sends a `command-prompt`:
+      - unescape `\$` only on 3.4, which needs the version in the core (on 3.5+ a typed
+        `\$` would change);
+      - parse `command-prompt -b` properly;
+      - add a `Cmd` builder for double-quoted prompt templates (T8).
+    - **Tests to watch or add:**
+      - `a_server_that_detaches_the_client_on_attach_is_given_up_on` failed once on 3.8
+        under load, and its panic text was lost. Capture the text if it fails again.
+      - The front door's `kill-server` cleanup for a too-old tmux has no test (that needs a
+        real tmux below 3.4).
+      - The `after_hook` test can't tell a skipped hook from one never sent.
+      - The clock e2e has no negative case.
+      - The user-config e2e checks only `[5]`.
+    - **Small cleanups** (any slice that touches the code):
+      - The T23 guard has gaps: it matches exact needles only, and it skips tests under
+        `src/`.
+      - `new-session` stays on `Cmd`'s allow-list, but only a test uses it.
+      - `Topology::session_named` is now test-only.
+      - Front door duplication: the brain-name parse repeats `ctl::named`, and
+        `make_moa_session` and `create` share their spawn and first-stderr-line code.
+      - `Sandbox::tmux` looks tmux up on PATH, not through `tmux_path()`.
+      - `write_if_changed` leaves an unchanged file's mode as it is.
+      - A trailing `/` or `,` in `XDG_CONFIG_HOME` defeats the config dedupe, so the file is
+        sourced twice or skipped.
+      - The parser's `MAX_BLOCK` counts raw bytes.
+      - The parse-error text is generic.
+      - The front door's "no tmux" line differs from the core's.
 
 **Done when:**
 - Fake agents drive every display state.
@@ -700,6 +788,23 @@ Spec §6.10, §6.12 (retention), §6.9.
    paths once, at import or load, instead of `deps.canonical` per stored project inside
    `project.add` (`crates/moa-core/src/ops/projects.rs` ~155). It also fixes the "third
    spelling" back-link.
+10. **Carried from slice 3: the front door** (`crates/moa/src/front.rs`), with `moa [BRAIN]`:
+    - **Wording when the sandbox comes from `MOA_ROOT` rather than `--sandbox`:**
+      - the "open a new terminal tab" line names plain `moa`, which refuses;
+      - the reserved-word line names `--sandbox` even though it wasn't typed;
+      - with `--sandbox`, the nested line still begins "the <b> moa is running".
+    - **`switch-client` without `-c`** moves tmux's "best" client of the session, which may
+      not be the one that ran `moa`.
+    - **The config search misses Homebrew's tmux config.** Homebrew's tmux reads
+      `$(brew --prefix)/etc/tmux.conf` in place of `/etc/tmux.conf`, and the generated search
+      doesn't source it. Setup could find the path from the tmux binary's prefix.
+    - **Two `moa` at once can lose a terminal.**
+      1. A creates the server.
+      2. B joins and attaches.
+      3. A's second ensure then times out (10 s, on a loaded machine).
+      4. A runs `kill-server` under B's live terminal.
+
+      The fix: check `list-clients` before killing.
 
 **Done when:** a fresh sandbox `HOME` goes from nothing to a working cockpit using only the
 TUI.
