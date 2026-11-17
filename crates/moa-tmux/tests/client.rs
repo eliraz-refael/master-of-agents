@@ -155,9 +155,10 @@ async fn the_events_end_when_the_server_is_killed() {
     client.close().await;
 }
 
-/// On tmux 3.4 a `$` before a letter, `_`, `{` or any non-ASCII character is stored as
-/// `\$` (T17; the non-ASCII case was found by this test).
-fn expected_after_tmux(version: &str, s: &str) -> String {
+/// On tmux 3.4 a `$` before a letter, `_` or `{` is stored as `\$` (T17). Whether a `$`
+/// before a non-ASCII character is too depends on the C library's `isalpha` (macOS's says
+/// yes, glibc's no; found by this test): `non_ascii` picks that spelling.
+fn expected_after_tmux(version: &str, s: &str, non_ascii: bool) -> String {
     if !version.starts_with("3.4") {
         return s.to_string();
     }
@@ -165,29 +166,11 @@ fn expected_after_tmux(version: &str, s: &str) -> String {
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
         if c == '$'
-            && it
-                .peek()
-                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '_' || *n == '{')
+            && it.peek().is_some_and(|n| {
+                n.is_ascii_alphabetic() || *n == '_' || *n == '{' || (non_ascii && !n.is_ascii())
+            })
         {
             out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// Whether 3.4 also escapes a `$` before a non-ASCII character depends on the C library's
-/// `isalpha` (macOS's does, glibc's doesn't), so both spellings of that case compare equal.
-fn either_dollar(s: &str) -> String {
-    let mut out = String::new();
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c == '\\' && it.peek() == Some(&'$') {
-            let mut ahead = it.clone();
-            ahead.next();
-            if ahead.peek().is_some_and(|n| !n.is_ascii()) {
-                continue;
-            }
         }
         out.push(c);
     }
@@ -212,28 +195,32 @@ fn quote_round_trips_through_tmux() {
     let strategy = proptest::string::string_regex(r"[ -~✓中💤\n\t]{0,24}")
         .unwrap()
         .prop_filter("a line starts with %", |s| no_percent_line(s));
-    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
-    runner
-        .run(&strategy, |s| {
-            rt.block_on(async {
-                let set = Cmd::new("set-option").args(["-g", "@q", &s]);
-                client
-                    .run(&set)
-                    .await
-                    .map_err(|e| TestCaseError::fail(e.to_string()))?;
-                let got = client
-                    .run(&display("#{@q}"))
-                    .await
-                    .map_err(|e| TestCaseError::fail(e.to_string()))?;
-                let (mut got, mut want) = (got.join("\n"), expected_after_tmux(&info.version, &s));
-                if info.version.starts_with("3.4") {
-                    (got, want) = (either_dollar(&got), either_dollar(&want));
-                }
-                prop_assert_eq!(got, want);
-                Ok(())
-            })
+    let check = |s: String| {
+        rt.block_on(async {
+            let set = Cmd::new("set-option").args(["-g", "@q", &s]);
+            client
+                .run(&set)
+                .await
+                .map_err(|e| TestCaseError::fail(e.to_string()))?;
+            let got = client
+                .run(&display("#{@q}"))
+                .await
+                .map_err(|e| TestCaseError::fail(e.to_string()))?;
+            // Whole strings: dropping a `\` before a `$` to compare would also drop one the
+            // value had itself.
+            let got = got.join("\n");
+            let plain = expected_after_tmux(&info.version, &s, false);
+            let escaped = expected_after_tmux(&info.version, &s, true);
+            prop_assert!(got == plain || got == escaped, "{got:?}, not {plain:?}");
+            Ok(())
         })
-        .unwrap();
+    };
+    // Found by the random cases: a value's own `\` before a 3.4-escaped `$`.
+    for s in ["\\$💤", "$💤", "\\$a", "$a"] {
+        check(s.to_string()).unwrap();
+    }
+    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
+    runner.run(&strategy, check).unwrap();
     rt.block_on(client.close());
 }
 
