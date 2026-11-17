@@ -64,10 +64,13 @@ jobs:
         with: { tool: cargo-nextest }
       - run: cargo nextest run --workspace
 
-  # aarch64-darwin, the user's platform; nixpkgs tmux (3.8).
+  # x86_64-linux with nixpkgs tmux (3.8). On Linux because the free plan runs only 5 macOS
+  # jobs at once and each run would need two; `macos` above already builds and tests on
+  # macOS, and the darwin flake outputs are evaluated below. The first run of a new cache
+  # builds every crate, so it gets more time.
   nix:
-    runs-on: macos-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     # actions: write lets main's run delete the caches it replaces.
     permissions:
       contents: read
@@ -87,10 +90,11 @@ jobs:
           purge-prefixes: nix-${{ runner.os }}-
           purge-created: 0
           purge-primary-key: never
-      # Linux outputs are not built here, only evaluated, so a broken Linux derivation fails CI.
-      - name: Evaluate the Linux outputs
+      # The other systems' outputs are not built here, only evaluated, so a broken derivation
+      # for them still fails CI.
+      - name: Evaluate the other systems' outputs
         run: |
-          for a in checks.x86_64-linux.nextest checks.aarch64-linux.nextest packages.x86_64-linux.default; do
+          for a in checks.aarch64-darwin.nextest packages.aarch64-darwin.default checks.aarch64-linux.nextest; do
             nix eval ".#$a.drvPath"
           done
       - run: nix flake check -L
