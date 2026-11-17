@@ -119,8 +119,9 @@ pub fn read_ready(first_line: Option<&str>) -> ReadyLine {
 /// The environment a started daemon gets (D17). `HOME` (and `MOA_ROOT` when sandboxed) come
 /// from `paths`, and so does `TMPDIR`, so both sides compute the same fallback socket;
 /// none is copied from the parent. Of the parent's, only what the daemon needs survives:
-/// `PATH`, `USER`, `LANG`, `LC_*`, `MOA_LOG`; `TZ` only when sandboxed (a real home has
-/// the system zone); `MOA_REAL_HOME` only when not sandboxed.
+/// `PATH`, `USER`, `LANG`, `LC_*`, `MOA_LOG`, `TMUX_TMPDIR` (so both sides find the same
+/// tmux socket); `TZ` only when sandboxed (a real home has the system zone);
+/// `MOA_REAL_HOME` only when not sandboxed.
 pub fn daemon_env(
     parent: impl Iterator<Item = (OsString, OsString)>,
     paths: &Paths,
@@ -134,7 +135,7 @@ pub fn daemon_env(
         env.push(("MOA_ROOT".into(), paths.home().into()));
     }
     env.extend(parent.filter(|(k, _)| match k.to_str() {
-        Some("PATH" | "USER" | "LANG" | "MOA_LOG") => true,
+        Some("PATH" | "USER" | "LANG" | "MOA_LOG" | "TMUX_TMPDIR") => true,
         Some("TZ") => sandboxed,
         Some("MOA_REAL_HOME") => !sandboxed,
         Some(k) => k.starts_with("LC_"),
@@ -596,6 +597,23 @@ mod tests {
                 "TMPDIR=/tmp"
             ]
         );
+    }
+
+    /// T20: with `-L` names, the daemon and the front door must find the same tmux socket.
+    #[test]
+    fn daemon_env_passes_tmux_tmpdir() {
+        let parent = || {
+            let mut p = parent();
+            p.push(("TMUX_TMPDIR".into(), "/run/t".into()));
+            p.into_iter()
+        };
+        for paths in [
+            Paths::with_root(Path::new("/r")),
+            Paths::from_vars(None, Some("/home/u".into()), None, 501, true).unwrap(),
+        ] {
+            let env = sorted(daemon_env(parent(), &paths));
+            assert!(env.contains(&"TMUX_TMPDIR=/run/t".to_string()), "{env:?}");
+        }
     }
 
     /// A daemon that answers `hello` (with `pid`), reads `then_read` more lines, sends

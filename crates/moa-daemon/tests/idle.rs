@@ -28,6 +28,7 @@ async fn an_idle_brain_wakes_only_for_the_backup() {
             db: brain.db.clone(),
             backups: backups.clone(),
             events_capacity: 256,
+            tmux: None,
         }),
     )
     .await
@@ -51,7 +52,7 @@ async fn an_idle_brain_wakes_only_for_the_backup() {
             .await
             .expect("barrier is in time");
     }
-    // Startup, the link's answer to Startup's connect (there is no terminal link yet) and
+    // Startup, the link's answer to Startup's connect (this core has no terminal link) and
     // the midnight Timer(Backup), not counting the barriers.
     assert_eq!(stats.inputs.load(Ordering::SeqCst), 3);
     assert_eq!(stats.timer_fires.load(Ordering::SeqCst), 1);

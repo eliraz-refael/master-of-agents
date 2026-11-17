@@ -2,7 +2,7 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +11,7 @@ use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
 use moa_core::state::Deps;
 use moa_platform::{Paths, WallTimer, ZoneWatch, ensure_private_dir};
+use moa_tmux::conf::{self, write_if_changed};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::oneshot;
@@ -22,6 +23,7 @@ use crate::core_task::{CoreHandle, CoreOptions, DaemonError};
 use crate::logging;
 use crate::server::accept_loop;
 use crate::supervise::supervise;
+use crate::tmux::{TmuxLink, tmux_env};
 
 /// How long a stop waits for the core to finish what it holds (backups included).
 const STOP_WAIT: Duration = Duration::from_secs(30);
@@ -36,6 +38,9 @@ pub enum Ready {
     Stdout,
     /// Send the socket's path (tests).
     Channel(oneshot::Sender<PathBuf>),
+    /// Send the socket's path and the core (tests that queue store faults).
+    #[doc(hidden)]
+    Core(oneshot::Sender<(PathBuf, CoreHandle)>),
     Nothing,
 }
 
@@ -88,6 +93,23 @@ fn remove_socket(sock: &Path) {
     {
         tracing::warn!("couldn't remove the socket file: {}", e.kind());
     }
+}
+
+/// Writes the brain's two tmux config files when their text changed (T6), and says where
+/// its server is.
+fn tmux_link(paths: &Paths, b: &str) -> Result<TmuxLink, DaemonError> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(paths.brain_dir(b))?;
+    let moa_tmux = paths.moa_tmux(b);
+    write_if_changed(&moa_tmux, &conf::moa_tmux(b))?;
+    write_if_changed(&paths.tmux_conf(b), &conf::tmux_conf(&moa_tmux))?;
+    Ok(TmuxLink {
+        socket: paths.tmux_socket(b)?,
+        moa_tmux,
+        env: tmux_env(std::env::vars_os()),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -145,6 +167,13 @@ async fn bring_up(
                 config.skipped_tables.join(", ")
             );
         }
+        // T21: until the switch-over, only a sandbox's own server is ever touched.
+        let tmux = if paths.is_sandboxed() {
+            Some(tmux_link(paths, b)?)
+        } else {
+            tracing::info!("the terminal link waits for the switch-over");
+            None
+        };
         let deps = Deps {
             parse_action: Some(moa_proto::cli::parse_action),
             canonical: moa_platform::canonical,
@@ -160,6 +189,7 @@ async fn bring_up(
             db: paths.db(b),
             backups: paths.backups(b),
             events_capacity,
+            tmux,
         })
         .await?;
         Ok::<_, DaemonError>((core, Signals { term, int, hup }))
@@ -190,7 +220,7 @@ fn announce_failure(e: &DaemonError) {
     let _ = out.flush();
 }
 
-fn announce_ready(ready: Ready, sock: &Path) {
+fn announce_ready(ready: Ready, sock: &Path, core: &CoreHandle) {
     match ready {
         Ready::Stdout => {
             let mut out = io::stdout();
@@ -202,6 +232,9 @@ fn announce_ready(ready: Ready, sock: &Path) {
         }
         Ready::Channel(tx) => {
             let _ = tx.send(sock.to_path_buf());
+        }
+        Ready::Core(tx) => {
+            let _ = tx.send((sock.to_path_buf(), core.clone()));
         }
         Ready::Nothing => {}
     }
@@ -249,7 +282,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
             return Err(e);
         }
     };
-    announce_ready(ready, &sock);
+    announce_ready(ready, &sock, &core);
     tracing::info!("ready on {}", sock.display());
 
     let my_uid = uid_override.unwrap_or_else(moa_platform::current_uid);

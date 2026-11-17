@@ -480,6 +480,7 @@ mod tests {
             db: brain.db.clone(),
             backups: brain.dir.path().join("backups"),
             events_capacity: 4,
+            tmux: None,
         })
         .await
         .unwrap();

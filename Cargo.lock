@@ -679,6 +679,7 @@ dependencies = [
  "moa-proto",
  "moa-store",
  "moa-testkit",
+ "moa-tmux",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -750,6 +751,7 @@ dependencies = [
 name = "moa-tmux"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "moa-core",
  "moa-platform",
  "moa-testkit",
