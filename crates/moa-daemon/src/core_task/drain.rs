@@ -14,6 +14,7 @@ use moa_core::change::Change;
 use moa_core::effect::{
     Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, TmuxToken, check_order,
 };
+use moa_core::hook::{HookEnvelope, HookLine};
 use moa_core::op::{Done, OpError};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::State;
@@ -154,6 +155,9 @@ impl Core {
         let mut batch: Vec<Change> = Vec::new();
         let mut held: Vec<Held> = Vec::new();
         let mut panicked = false;
+        // The hooks stepped here, with their lines: if the commit fails, they are applied
+        // again after the reload rather than lost with it.
+        let mut replay: Vec<(HookEnvelope, Box<HookLine>)> = Vec::new();
         while let Some(item) = work.pop_front() {
             let stepped = match item {
                 Item::Input(input) => self.step(input, &mut batch, &mut held),
@@ -175,8 +179,17 @@ impl Core {
                     Stepped::Done
                 }
                 Item::Hook {
-                    reply, envelope, ..
-                } => self.step(Input::Hook { reply, envelope }, &mut batch, &mut held),
+                    reply,
+                    envelope,
+                    line,
+                } => {
+                    let kept = line.map(|line| (envelope.clone(), line));
+                    let stepped = self.step(Input::Hook { reply, envelope }, &mut batch, &mut held);
+                    if matches!(stepped, Stepped::Done) {
+                        replay.extend(kept);
+                    }
+                    stepped
+                }
                 Item::Zone(tz) => {
                     self.tz = tz;
                     self.step(Input::ZoneChanged, &mut batch, &mut held)
@@ -228,6 +241,19 @@ impl Core {
             match self.store().commit(batch).await {
                 Ok(()) => self.failures_in_row = 0,
                 Err(why) => failed = Some(why),
+            }
+        }
+        if failed.is_some() {
+            // Nothing retries a hook as a client retries an op: its event goes first into the
+            // next drain, after the reload has forgotten the keys this one remembered (or to
+            // the spool, with the rest of the carry, if the core stops). A waiting hook was
+            // answered with the drain's failure, so it isn't answered again.
+            for (envelope, line) in replay.into_iter().rev() {
+                self.carry.push_front(Item::Hook {
+                    reply: None,
+                    envelope,
+                    line: Some(line),
+                });
             }
         }
         if (failed.is_some() || panicked)

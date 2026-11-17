@@ -29,11 +29,14 @@ use moa_platform::spool;
 use moa_store::Store;
 use moa_store::actor::Fault;
 use moa_testkit::brain::{TYPICAL_NOW, TYPICAL_TZ, TypicalBrain};
+use moa_testkit::wait_for;
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
 const S: &str = "0195f3a2-1111-7000-8000-000000000001";
 const C: &str = "a1b2c3d4-0000-4000-8000-000000000001";
+/// How long a test waits for something the daemon does on its own.
+const WAIT: Duration = Duration::from_secs(10);
 
 /// The fake clock's now is the Typical brain's, in milliseconds; `ago` is before it.
 fn ago(ms: i64) -> i64 {
@@ -427,6 +430,70 @@ async fn a_hook_left_queued_at_stop_is_spooled() {
     assert_eq!(times, vec![t1, t2, t3, t4]);
     assert!(!spool::draining(&live).exists());
     core.stop().await;
+}
+
+/// The seeded session's `activity`, as saved.
+fn saved_activity(brain: &TypicalBrain) -> String {
+    brain
+        .store()
+        .conn()
+        .query_row("SELECT activity FROM sessions WHERE id = ?1", [S], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
+}
+
+/// A hook stepped in a drain whose commit fails isn't lost with it: it goes first into the
+/// next drain, and is applied there, since the reload forgot the keys the failed drain had
+/// remembered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hook_in_a_drain_whose_commit_fails_is_applied_after_the_reload() {
+    let brain = TypicalBrain::new();
+    seed(&mut brain.store());
+    let live = brain.dir.path().join("spool").join("default.jsonl");
+    let core = started(&brain, &live).await;
+    let stats = core.stats();
+    core.store_fault(Fault::FailNextCommit);
+    core_hook(&core, &hook_line("UserPromptSubmit", ago(1000), 1));
+    let applied = wait_for(WAIT, || (seen_events(&brain) == 1).then_some(()));
+    assert!(
+        applied.is_some(),
+        "the hook was lost with the failed commit"
+    );
+    assert_eq!(stats.commit_failures.load(Ordering::SeqCst), 1);
+    assert_eq!(stats.reloads.load(Ordering::SeqCst), 1);
+    assert_eq!(saved_activity(&brain), "working");
+    // Applied, not spooled.
+    assert!(fs::read_to_string(&live).unwrap_or_default().is_empty());
+    core.stop().await;
+}
+
+/// The same, when the failure stops the core (its store can't be reopened): the event is
+/// spooled for the next start.
+#[tokio::test]
+async fn a_hook_in_a_drain_that_stops_the_core_is_spooled() {
+    let brain = TypicalBrain::new();
+    seed(&mut brain.store());
+    let live = brain.dir.path().join("spool").join("default.jsonl");
+    let core = started(&brain, &live).await;
+    core.store_fault(Fault::Crash);
+    // The reopen finds something that is not a brain.
+    fs::write(&brain.db, b"not a database").unwrap();
+    for ext in ["-wal", "-shm"] {
+        let mut side = brain.db.clone().into_os_string();
+        side.push(ext);
+        let _ = fs::remove_file(side);
+    }
+    let line = hook_line("UserPromptSubmit", ago(1000), 1);
+    core_hook(&core, &line);
+    let ended = timeout(WAIT, core.finished())
+        .await
+        .expect("the core stops");
+    assert!(ended.is_err(), "{ended:?}");
+    timeout(WAIT, core.ended()).await.expect("the core ends");
+    let kept = fs::read_to_string(&live).unwrap();
+    let kept: HookLine = serde_json::from_str(kept.trim_end()).unwrap();
+    assert_eq!(kept, serde_json::from_value::<HookLine>(line).unwrap());
 }
 
 #[tokio::test]
