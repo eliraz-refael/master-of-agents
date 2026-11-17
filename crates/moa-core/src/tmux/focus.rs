@@ -30,6 +30,21 @@ pub(crate) fn trusted_panes(state: &State) -> BTreeMap<PaneId, (WindowId, Sessio
         .collect()
 }
 
+/// The session bound to `pane` on the server the link is connected to. A pane's exit needs
+/// no more than this: tmux never reuses a pane id within one server's life, so a binding of
+/// this generation names this pane. Unlike [`trusted_panes`], the topology isn't asked: an
+/// agent that dies at launch is gone before any refresh lists its pane.
+pub(crate) fn bound_session(state: &State, pane: PaneId) -> Option<SessionId> {
+    let Link::Up { generation, .. } = &state.tmux().link else {
+        return None;
+    };
+    state
+        .pane_bindings()
+        .filter(|b| b.server_pid == generation.pid && b.server_start == generation.start)
+        .find(|b| b.pane_id.parse() == Ok(pane))
+        .map(|b| b.session_id)
+}
+
 /// Sets `seen_at` on every session with an unseen turn end whose trusted pane a user can
 /// see. A session that can't be written now (a row this build doesn't know, or writes
 /// refused) is skipped, and tried again at the next focus change.

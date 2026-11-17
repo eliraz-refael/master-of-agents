@@ -11,6 +11,7 @@ use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine, TmuxToken};
+use crate::hooks::end_exited;
 use crate::live::{display_state, is_asleep, spike_state};
 use crate::model::{
     Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
@@ -412,6 +413,15 @@ fn bind(
         )));
         return Err(OpError(NO_TAB.into()));
     };
+    if state.tmux.take_exited(pane) {
+        // Its agent exited before this answer came: it ends as `pane_gone` would end it,
+        // with no binding left behind. The tab did open, so the reply is the one an exit
+        // right after this answer would have got; the session shows as ended.
+        if !end_exited(state, tx, id, Vec::new()) {
+            logs.push(warn(format!("the end of session {id} was not saved")));
+        }
+        return Ok(opened_reply(s));
+    }
     let binding = PaneBinding {
         session_id: id,
         server_pid: generation.pid,
@@ -436,15 +446,20 @@ fn bind(
         ])],
         token: None,
     });
+    Ok(opened_reply(s))
+}
+
+/// `opened <title> with <account> in <path>`, with the id and title for scripts.
+fn opened_reply(s: Session) -> Done {
     let title = s.title.unwrap_or_default();
-    Ok(Done {
+    Done {
         text: format!(
             "opened {title} with {} in {}",
             s.account.unwrap_or_default(),
             s.cwd.unwrap_or_default()
         ),
-        data: json!({ "id": id, "title": title }),
-    })
+        data: json!({ "id": s.id, "title": title }),
+    }
 }
 
 /// An `open` that got no tab: its session ends, marked so when tmux refused it.

@@ -2,7 +2,7 @@
 //! topology it keeps, the `tmux.ensure` callers waiting for it, and the server's
 //! generations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -95,7 +95,13 @@ pub struct TmuxState {
     pub(super) clock_at: Option<UtcMs>,
     /// The `open`s waiting for tmux to say which pane their tab has, with whom to answer.
     opens: BTreeMap<SessionId, (ConnId, ReqId)>,
+    /// Panes of this server that exited with no session bound to them, oldest first, at
+    /// most [`EXITED_KEPT`]: an `open`'s answer naming one may still be on its way.
+    exited: VecDeque<PaneId>,
 }
+
+/// How many unbound pane exits are remembered.
+const EXITED_KEPT: usize = 64;
 
 /// How an `open`'s new tab turned out.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -130,6 +136,7 @@ impl Default for TmuxState {
             written: Written::default(),
             clock_at: None,
             opens: BTreeMap::new(),
+            exited: VecDeque::new(),
         }
     }
 }
@@ -288,6 +295,29 @@ impl TmuxState {
         self.clock_at = None;
     }
 
+    /// Remembers that `pane` exited with no session bound to it, while the link is up (the
+    /// pane id means something only on this server).
+    pub(crate) fn exited_unbound(&mut self, pane: PaneId) {
+        if !matches!(self.link, Link::Up { .. }) {
+            return;
+        }
+        if self.exited.len() == EXITED_KEPT {
+            self.exited.pop_front();
+        }
+        self.exited.push_back(pane);
+    }
+
+    /// Whether `pane` exited before anything was bound to it, forgetting it.
+    pub(crate) fn take_exited(&mut self, pane: PaneId) -> bool {
+        match self.exited.iter().position(|p| *p == pane) {
+            Some(i) => {
+                self.exited.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Holds `open`'s reply until tmux says how its tab turned out.
     pub(crate) fn wait_open(&mut self, id: SessionId, conn: ConnId, req: ReqId) {
         self.opens.insert(id, (conn, req));
@@ -383,6 +413,10 @@ impl TmuxState {
         if self.generation.is_some_and(|g| g != generation) {
             self.restarts += 1;
             fx.push(log(LogLevel::Info, "the terminal server restarted".into()));
+        }
+        if self.generation != Some(generation) {
+            // Another server's pane ids name other panes.
+            self.exited.clear();
         }
         self.generation = Some(generation);
         self.link = Link::Up {

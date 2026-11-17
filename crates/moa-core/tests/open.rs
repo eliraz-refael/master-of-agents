@@ -16,6 +16,7 @@ use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{CallerInfo, Deps, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
+use moa_core::tmux::notify::Notification;
 use moa_testkit::brain::TypicalBrain;
 use serde_json::json;
 
@@ -728,4 +729,136 @@ fn a_folder_with_no_name_opens_as_agent() {
     let at = argv.iter().position(|a| a == "-n").unwrap();
     assert_eq!(argv[at + 1], "agent");
     assert_eq!(st.session(id).unwrap().project_id, None::<ProjectId>);
+}
+
+fn pane_exited(b: &TypicalBrain, st: &mut State, pane: &str) -> Vec<Effect> {
+    feed(
+        b,
+        st,
+        TmuxIn::Notification(Notification::Message(format!(
+            "moa:hook pane-exited {pane}"
+        ))),
+    )
+}
+
+fn bound(b: &TypicalBrain, st: &mut State, id: SessionId, pane: &str) -> Vec<Effect> {
+    feed(
+        b,
+        st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Open(id),
+            results: vec![Ok(vec![format!("P {pane} 4242")])],
+        },
+    )
+}
+
+fn activity_rows(fx: &[Effect]) -> Vec<String> {
+    changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Activity(a) => Some(a.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An agent that exits at once (a bad launcher, a refused flag) dies before the link's
+/// topology has its pane: the exit still ends the session, trusted on the binding's
+/// generation alone.
+#[test]
+fn a_pane_that_exits_before_the_topology_has_it_ends_its_session() {
+    let (b, mut st) = typical();
+    let id = the_open(&send(&b, &mut st, 1, open_op(&lantern(&b)))).0;
+    bound(&b, &mut st, id, "%7");
+    // No refresh in between: the topology has never listed %7.
+    let fx = pane_exited(&b, &mut st, "%7");
+    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
+    assert!(
+        changes(&fx)
+            .iter()
+            .any(|c| matches!(c, Change::DeletePaneBinding(s) if *s == id)),
+        "{fx:?}"
+    );
+    assert_eq!(activity_rows(&fx), ["lantern ○ ended"]);
+}
+
+/// The other order: the exit is seen before the open's answer binds the pane. The answer
+/// ends the session instead of binding it, and the reply is the same as when the exit comes
+/// after it.
+#[test]
+fn a_pane_that_exits_before_the_open_is_answered_ends_its_session() {
+    let (b, mut st) = typical();
+    let path = lantern(&b);
+    let id = the_open(&send(&b, &mut st, 6, open_op(&path))).0;
+    let early = pane_exited(&b, &mut st, "%7");
+    assert!(changes(&early).is_empty(), "{early:?}");
+    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Live);
+
+    let fx = bound(&b, &mut st, id, "%7");
+    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
+    let saved = changes(&fx);
+    assert!(
+        !saved.iter().any(|c| matches!(c, Change::PaneBinding(_))),
+        "{fx:?}"
+    );
+    assert_eq!(activity_rows(&fx), ["lantern ○ ended"]);
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, Effect::Tmux { token: None, cmds, .. }
+            if cmds.iter().any(|c| c.argv().iter().any(|a| a == "@moa_session")))),
+        "{fx:?}"
+    );
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(6),
+            Ok(Done {
+                text: format!("opened lantern with acct-a in {}", path.display()),
+                data: json!({ "id": id, "title": "lantern" }),
+            })
+        )]
+    );
+}
+
+/// A binding from an earlier server run names a pane id the new server may reuse: its
+/// exit is not this session's.
+#[test]
+fn a_pane_exit_for_an_older_generations_binding_is_ignored() {
+    let (b, mut st) = typical();
+    let id = the_open(&send(&b, &mut st, 1, open_op(&lantern(&b)))).0;
+    bound(&b, &mut st, id, "%7");
+    feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    feed(
+        &b,
+        &mut st,
+        TmuxIn::Connected {
+            conn: 2,
+            generation: Generation {
+                pid: 11,
+                start: 2000,
+            },
+            version: "3.5a".into(),
+            ctl: ClientName("client-9".into()),
+            socket: "moa".into(),
+        },
+    );
+    // The new server has a %7 of its own, in a window: only the generation tells them apart.
+    let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
+    feed(
+        &b,
+        &mut st,
+        TmuxIn::Replies {
+            conn: 2,
+            token: TmuxToken::Refresh,
+            results: vec![
+                lines(&["S $0 moa"]),
+                lines(&["P %7 @1 $0 1 1 0 "]),
+                lines(&["C 0 $0 /dev/ttys1"]),
+            ],
+        },
+    );
+    let fx = pane_exited(&b, &mut st, "%7");
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Live);
 }
