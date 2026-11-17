@@ -1,16 +1,18 @@
 //! Every product launch goes through [`Spawner`], which counts launches.
 
-use std::io;
-use std::os::fd::BorrowedFd;
-use std::process::{Child, Command};
+use std::io::{self, PipeReader};
+use std::os::fd::AsFd as _;
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static LAUNCHES: AtomicU64 = AtomicU64::new(0);
 
-/// One launch at a time. A descriptor made inheritable for one child (`spawn_keeping`) must
-/// not reach another started meanwhile; on macOS this also keeps the pipes `std` makes for
-/// one child (close-on-exec is set after they're made) out of another.
+/// One launch at a time. A descriptor made inheritable for one child
+/// (`spawn_with_held_stdout`) must not reach another started meanwhile. On macOS, where
+/// close-on-exec is set only after a pipe is made, this also keeps the pipes made under it
+/// (`std`'s for a child's stdio, and `spawn_with_held_stdout`'s) out of other children. A
+/// pipe made elsewhere isn't covered.
 static SPAWNING: Mutex<()> = Mutex::new(());
 
 /// Spawns child processes and counts every attempt.
@@ -25,16 +27,22 @@ impl Spawner {
         cmd.spawn()
     }
 
-    /// [`Spawner::spawn`], with the child also holding a copy of `keep` (at a number of its
-    /// own, unused) for as long as it runs. This process's copy is closed once the child has
-    /// started.
-    pub fn spawn_keeping(&self, cmd: &mut Command, keep: BorrowedFd<'_>) -> io::Result<Child> {
+    /// [`Spawner::spawn`], with the child's stdout a new pipe whose read end is returned.
+    /// The child also holds a copy of that read end (at a number of its own, unused) while
+    /// it runs, so its writes don't fail for want of a reader until the pipe is full. The
+    /// pipe is made under the lock, so no other child gets either end, and this process
+    /// keeps only the returned read end.
+    pub fn spawn_with_held_stdout(&self, cmd: &mut Command) -> io::Result<(Child, PipeReader)> {
         let _one = SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
         LAUNCHES.fetch_add(1, Ordering::SeqCst);
-        let inherited = crate::sys::dup_inheritable(keep)?;
+        let (read, write) = std::io::pipe()?;
+        let inherited = crate::sys::dup_inheritable(read.as_fd())?;
+        cmd.stdout(Stdio::from(write));
         let child = cmd.spawn();
         drop(inherited);
-        child
+        // `cmd` held the write end: the reader sees the end only once the child's copies go.
+        cmd.stdout(Stdio::null());
+        Ok((child?, read))
     }
 }
 
@@ -45,32 +53,36 @@ pub fn launches() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::AsFd as _;
-    use std::process::Stdio;
+    use std::io::Read as _;
 
     use super::*;
 
-    /// How many descriptors a child started this way has open.
-    fn open_in_child(keep: Option<BorrowedFd<'_>>) -> usize {
+    /// How many descriptors a child started this way has open (`ls /dev/fd`).
+    fn open_in_child(held: bool) -> usize {
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", "ls /dev/fd"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped());
-        let child = match keep {
-            Some(fd) => Spawner.spawn_keeping(&mut cmd, fd),
-            None => Spawner.spawn(&mut cmd),
-        };
-        let out = child.unwrap().wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .count()
+        cmd.args(["-c", "ls /dev/fd"]).stdin(Stdio::null());
+        let mut text = String::new();
+        if held {
+            let (mut child, mut out) = Spawner.spawn_with_held_stdout(&mut cmd).unwrap();
+            // This ends only if no write end is left here: `cmd`'s copy was dropped.
+            out.read_to_string(&mut text).unwrap();
+            child.wait().unwrap();
+        } else {
+            cmd.stdout(Stdio::piped());
+            let out = Spawner.spawn(&mut cmd).unwrap().wait_with_output().unwrap();
+            text = String::from_utf8_lossy(&out.stdout).into_owned();
+        }
+        text.split_whitespace().count()
     }
 
     #[test]
-    fn a_kept_descriptor_reaches_that_child_only() {
-        let (r, _w) = std::io::pipe().unwrap();
-        let plain = open_in_child(None);
-        assert_eq!(open_in_child(Some(r.as_fd())), plain + 1);
-        assert_eq!(open_in_child(None), plain, "this process's copy is closed");
+    fn a_held_stdout_reaches_that_child_only() {
+        let plain = open_in_child(false);
+        assert_eq!(
+            open_in_child(true),
+            plain + 1,
+            "the child holds the read end"
+        );
+        assert_eq!(open_in_child(false), plain, "this process's copy is closed");
     }
 }

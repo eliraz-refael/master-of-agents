@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::{AsFd as _, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -241,24 +241,24 @@ impl ControlClient {
     pub async fn connect(
         opts: &ConnectOptions,
     ) -> Result<(ControlClient, Events, ServerInfo), ConnectError> {
-        // The child keeps a reader of its own output. tmux 3.4 never lets go of a control
-        // client whose output it failed to write: if this process dies with a notification
-        // on its way, the client would stay attached for good, and `@moa_ctl` with it. With a
-        // reader left, the late lines land in the pipe and the client leaves on its input's
-        // end, as on later versions.
-        let (out_r, out_w) = std::io::pipe().map_err(ConnectError::Spawn)?;
+        // The child holds a reader of its own output. tmux never lets go of a control client
+        // whose output it couldn't write: if this process dies with output on its way, a
+        // write to a pipe with no reader fails, and tmux 3.4 then keeps the client attached
+        // for good, and `@moa_ctl` with it. With the child's reader left, late output lands
+        // in the pipe and the client leaves on its input's end.
+        // Limit: only while the late output fits in the pipe (16–64 KiB). With more unread
+        // output when this process dies (a lagging reader, a large reply, a batch in
+        // flight), tmux keeps the client attached anyway: 3.4 for good, 3.8 too with many
+        // unread replies. Reaping such a client on the next connect is for slice 4.
         let mut cmd = Command::new(&opts.tmux);
         cmd.args(ctl_argv(&opts.socket))
             .env_clear()
             .envs(opts.env.iter().cloned())
             .stdin(Stdio::piped())
-            .stdout(Stdio::from(out_w))
             .stderr(Stdio::piped());
-        let spawned = Spawner.spawn_keeping(&mut cmd, out_r.as_fd());
-        // `cmd` holds a copy of the output's write end; the end of the output is seen only
-        // once no copy is left but the child's.
-        drop(cmd);
-        let mut child = spawned.map_err(ConnectError::Spawn)?;
+        let (mut child, out_r) = Spawner
+            .spawn_with_held_stdout(&mut cmd)
+            .map_err(ConnectError::Spawn)?;
         let pid = child.id();
         let stdin = child.stdin.take().map(ChildStdin::from_std).transpose();
         let stdout = pipe::Receiver::from_owned_fd(OwnedFd::from(out_r)).map(Some);
