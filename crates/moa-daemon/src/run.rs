@@ -377,6 +377,7 @@ async fn keep_up(
     // Stop accepting, then let the core finish: after a fatal stop `finished()` has spoken
     // but the core is still answering its queue, so wait for its end either way.
     stop.cancel();
+    // Lines still in the kernel's accept backlog are dropped here: an accepted window.
     accept.abort();
     let wound_down = tokio::time::timeout(STOP_WAIT, async {
         core.stop().await;

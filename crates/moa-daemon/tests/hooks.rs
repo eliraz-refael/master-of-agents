@@ -9,9 +9,11 @@ use std::time::Duration;
 use common::{Client, boot, boot_with, request};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use moa_agents::claude::{last_assistant_text, normalize};
 use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::config::BrainName;
+use moa_core::hook::HookLine;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Session, SessionId,
 };
@@ -324,5 +326,76 @@ async fn a_drain_whose_commit_fails_keeps_the_draining_file() {
     .expect("not stuck")
     .expect("the core starts");
     assert!(!draining.exists());
+    core.stop().await;
+}
+
+fn core_hook(core: &CoreHandle, line: &Value) {
+    let line: HookLine = serde_json::from_value(line.clone()).unwrap();
+    let envelope = normalize(&line, &last_assistant_text).expect("a known event");
+    core.hook(None, envelope, Some(line));
+}
+
+#[tokio::test]
+async fn a_hook_left_queued_at_stop_is_spooled() {
+    let brain = TypicalBrain::new();
+    seed(&mut brain.store());
+    let live = brain.dir.path().join("spool").join("default.jsonl");
+    let core = timeout(
+        Duration::from_secs(5),
+        CoreHandle::start(options(&brain, &live)),
+    )
+    .await
+    .expect("not stuck")
+    .expect("the core starts");
+    // The first hook's commit is held; `stop` joins the inbox behind it, and the hooks
+    // after that are still waiting when the core stops.
+    let (release, held) = std::sync::mpsc::channel();
+    core.store_fault(Fault::PauseNextCommit(held));
+    let (t1, t2, t3, t4) = (ago(30_000), ago(20_000), ago(10_000), ago(5_000));
+    core_hook(&core, &hook_line("UserPromptSubmit", t1, 1));
+    let stats = core.stats();
+    timeout(Duration::from_secs(5), async {
+        while stats.commits.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first drain commits");
+    let mut stopping = Box::pin(core.stop());
+    // One poll sends the stop to the inbox.
+    assert!(timeout(Duration::ZERO, &mut stopping).await.is_err());
+    core_hook(&core, &hook_line("Stop", t2, 2));
+    core_hook(&core, &hook_line("UserPromptSubmit", t3, 3));
+    release.send(()).unwrap();
+    timeout(Duration::from_secs(5), stopping)
+        .await
+        .expect("the core stops");
+    core.ended().await;
+    // The core is gone: a hook now is spooled at once, the failed-enqueue path.
+    core_hook(&core, &hook_line("Stop", t4, 4));
+    let spooled = fs::read_to_string(&live).unwrap();
+    assert_eq!(spooled.lines().count(), 3, "{spooled}");
+    drop(core);
+
+    // The next start applies them after the one that was committed.
+    let core = timeout(
+        Duration::from_secs(5),
+        CoreHandle::start(options(&brain, &live)),
+    )
+    .await
+    .expect("not stuck")
+    .expect("the core starts");
+    let store = brain.store();
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT at FROM events WHERE session_id = ?1 ORDER BY id")
+        .unwrap();
+    let times: Vec<i64> = stmt
+        .query_map([S], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(times, vec![t1, t2, t3, t4]);
+    assert!(!spool::draining(&live).exists());
     core.stop().await;
 }

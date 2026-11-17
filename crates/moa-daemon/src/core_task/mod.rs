@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -107,6 +107,14 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[allow(clippy::large_enum_variant)]
 enum Item {
     Input(Input),
+    /// A hook event. `line` is the raw line, kept so that an event the core stops before
+    /// applying can be spooled; the drain of the spool itself sends `None`, since the
+    /// lines are still in `.draining`.
+    Hook {
+        reply: Option<(ConnId, ReqId)>,
+        envelope: HookEnvelope,
+        line: Option<Box<HookLine>>,
+    },
     Zone(TimeZone),
     Status {
         caller: CallerInfo,
@@ -117,6 +125,24 @@ enum Item {
     Stop(oneshot::Sender<()>),
     /// Tests only: panics outside `catch_unwind`.
     Crash,
+}
+
+/// Appends hook lines to the spool, as `moa hook` does when the daemon is down. A line that
+/// can't be written is counted, never shown.
+pub(crate) fn spool_hooks<'a>(path: Option<&Path>, lines: impl Iterator<Item = &'a HookLine>) {
+    let Some(path) = path else { return };
+    let mut lost = 0usize;
+    for line in lines {
+        let kept = serde_json::to_vec(line)
+            .map_err(io::Error::other)
+            .and_then(|bytes| spool::append(path, &bytes));
+        if kept.is_err() {
+            lost += 1;
+        }
+    }
+    if lost > 0 {
+        tracing::warn!("{lost} hook events could not be spooled");
+    }
 }
 
 /// What a drain says after its commit, in order.
@@ -155,6 +181,8 @@ pub struct CoreHandle {
     /// Closes when the core task is gone, cleanup included.
     ended: watch::Receiver<()>,
     panic_next: Arc<AtomicU32>,
+    /// Where a hook the core can't take is kept for the next start.
+    spool: Option<PathBuf>,
 }
 
 type SharedStore = Arc<Mutex<StoreHandle>>;
@@ -248,6 +276,7 @@ impl CoreHandle {
         });
 
         let spool = opts.spool.take();
+        let spool_path = spool.clone();
         let conns = Conns::default();
         let core = Core {
             inbox: inbox.downgrade(),
@@ -268,6 +297,7 @@ impl CoreHandle {
             backups_dir: opts.backups,
             failures_in_row: 0,
             carry: VecDeque::new(),
+            spool: spool_path.clone(),
             panic_next: panic_next.clone(),
             finished_tx,
             _ended: ended_tx,
@@ -288,6 +318,7 @@ impl CoreHandle {
             finished,
             ended,
             panic_next,
+            spool: spool_path,
         };
         // Startup is the first item, so this answers after its commit, not after its daily
         // backup (the store thread is busy copying; `barrier()` and `stop()` wait for it). If
@@ -335,7 +366,7 @@ impl CoreHandle {
         let failures = self.stats.commit_failures.load(Ordering::SeqCst);
         let generation = *self.generation.borrow();
         for envelope in envelopes {
-            self.hook(None, envelope);
+            self.hook(None, envelope, None);
         }
         self.committed().await;
         // A failed commit reloads the core, which bumps the generation.
@@ -404,13 +435,25 @@ impl CoreHandle {
         }
     }
 
-    /// A hook event. With `reply`, the core answers it once, after the commit.
-    pub fn hook(&self, reply: Option<(ConnId, ReqId)>, envelope: HookEnvelope) {
-        let input = Input::Hook { reply, envelope };
-        if self.inbox.send(Item::Input(input)).is_err()
-            && let Some((conn, req)) = reply
-        {
-            reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+    /// A hook event. With `reply`, the core answers it once, after the commit. `line` is the
+    /// raw line it came from: when the core has stopped, or stops before applying it, the
+    /// line goes to the spool and the next start applies it.
+    pub fn hook(
+        &self,
+        reply: Option<(ConnId, ReqId)>,
+        envelope: HookEnvelope,
+        line: Option<HookLine>,
+    ) {
+        let item = Item::Hook {
+            reply,
+            envelope,
+            line: line.map(Box::new),
+        };
+        if let Err(mpsc::error::SendError(Item::Hook { line, .. })) = self.inbox.send(item) {
+            spool_hooks(self.spool.as_deref(), line.iter().map(|l| &**l));
+            if let Some((conn, req)) = reply {
+                reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
+            }
         }
     }
 

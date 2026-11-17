@@ -282,13 +282,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             };
         };
         match id {
-            None => self.core.hook(None, envelope),
+            None => self.core.hook(None, envelope, Some(line)),
             Some(id) => {
                 self.next_req += 1;
                 let req = ReqId(self.next_req);
                 self.pending = Some((req, id));
                 self.hook = Some(req);
-                self.core.hook(Some((self.conn, req)), envelope);
+                self.core.hook(Some((self.conn, req)), envelope, Some(line));
             }
         }
         Flow::Go
