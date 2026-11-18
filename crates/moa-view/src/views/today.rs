@@ -81,17 +81,16 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
     // Open suggestions and the ones put off, by id.
     lines.push(Line::new(Vec::new()));
     lines.push(head("SUGGESTIONS  (y accept · n reject)"));
-    let open = data
+    let before = lines.len();
+    for s in data
         .suggestions
         .values()
-        .filter(|s| matches!(s.status, SuggestionStatus::Open | SuggestionStatus::Later));
-    let mut any = false;
-    for s in open {
-        any = true;
+        .filter(|s| matches!(s.status, SuggestionStatus::Open | SuggestionStatus::Later))
+    {
         let text = cut(&format!("? #{} {}", s.id.0, clean(&s.text)), width);
         lines.push(Line::plain(text, Tone::Brain).with_item(Item::Suggestion(s.id)));
     }
-    if !any {
+    if lines.len() == before {
         lines.push(dim("  (none)"));
     }
     lines

@@ -3,9 +3,10 @@
 //! last six sessions under it.
 
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 
 use moa_core::UtcMs;
-use moa_core::model::{Project, ProjectStatus};
+use moa_core::model::{Project, ProjectId, ProjectStatus};
 use moa_core::time::start_of_next_day;
 
 use crate::ctx::Ctx;
@@ -37,10 +38,24 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec<Line> {
             .then(a.id.cmp(&b.id))
     });
 
+    // Each project's live sessions and open tasks, counted in one pass over each.
+    let mut counts: BTreeMap<ProjectId, (usize, usize)> = BTreeMap::new();
+    for r in data.sessions.values().filter(|r| live(r.display_state)) {
+        if let Some(id) = r.session.project_id {
+            counts.entry(id).or_default().0 += 1;
+        }
+    }
+    for t in data.tasks.values().filter(|t| t.status.is_open()) {
+        if let Some(id) = t.project_id {
+            counts.entry(id).or_default().1 += 1;
+        }
+    }
+
     let mut lines = Vec::new();
     for p in projects {
         let open = ui.expanded.contains(&p.id);
-        lines.push(project_line(data, ctx, p, open, width, midnight));
+        let count = counts.get(&p.id).copied().unwrap_or_default();
+        lines.push(project_line(ctx, p, count, open, width, midnight));
         if open {
             opened(&mut lines, data, ctx, p, width);
         }
@@ -52,9 +67,9 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec<Line> {
 /// when the project has had activity, each count only when it isn't 0. An idea is in the
 /// brain's colour, a project idle over 60 days dim.
 fn project_line(
-    data: &Data,
     ctx: &Ctx,
     p: &Project,
+    (running, tasks): (usize, usize),
     open: bool,
     width: usize,
     midnight: UtcMs,
@@ -62,16 +77,6 @@ fn project_line(
     let idle = p
         .last_activity_on
         .map(|day| (-text::days_left(day, ctx.today)).max(0));
-    let running = data
-        .sessions
-        .values()
-        .filter(|r| r.session.project_id == Some(p.id) && live(r.display_state))
-        .count();
-    let tasks = data
-        .tasks
-        .values()
-        .filter(|t| t.project_id == Some(p.id) && t.status.is_open())
-        .count();
 
     let arrow = if open { "▾" } else { "▸" };
     let mut text = format!("{arrow} {}  {}", clean(&p.name), p.status.as_str());

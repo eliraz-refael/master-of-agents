@@ -1,6 +1,8 @@
 //! The status panel (V16, the spike's `status`): every live session on one line, grouped by
 //! what it needs from you, the most urgent group first. Compact enough to hold ~30 sessions.
 
+use std::collections::BTreeMap;
+
 use moa_core::live::DisplayState;
 
 use crate::ctx::Ctx;
@@ -44,15 +46,11 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
     let width = usize::from(width);
     let mut lines = Vec::new();
     // `DisplayState`'s order is the urgency order.
-    for &state in DisplayState::ALL.iter().filter(|s| live(**s)) {
-        let mut members: Vec<&SessionRow> = data
-            .sessions
-            .values()
-            .filter(|r| r.display_state == state)
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
+    let mut groups: BTreeMap<DisplayState, Vec<&SessionRow>> = BTreeMap::new();
+    for row in data.sessions.values().filter(|r| live(r.display_state)) {
+        groups.entry(row.display_state).or_default().push(row);
+    }
+    for (state, mut members) in groups {
         members.sort_by(|a, b| {
             b.session
                 .activity_at

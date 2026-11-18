@@ -60,13 +60,16 @@ pub fn label(row: &SessionRow) -> String {
 /// The sessions `keep` keeps, the most recently seen first.
 pub fn newest_first(data: &Data, keep: impl Fn(&SessionRow) -> bool) -> Vec<&SessionRow> {
     let mut rows: Vec<&SessionRow> = data.sessions.values().filter(|r| keep(r)).collect();
-    rows.sort_by(|a, b| {
-        b.session
-            .last_seen_at
-            .cmp(&a.session.last_seen_at)
-            .then(a.session.id.cmp(&b.session.id))
-    });
+    rows.sort_by(|a, b| by_newest(a, b));
     rows
+}
+
+/// The most recently seen session first (none last), then by id.
+pub fn by_newest(a: &SessionRow, b: &SessionRow) -> std::cmp::Ordering {
+    b.session
+        .last_seen_at
+        .cmp(&a.session.last_seen_at)
+        .then(a.session.id.cmp(&b.session.id))
 }
 
 /// `<indent><glyph> <title or project> [<account>] <age>  <prompt>` in `tone` (the spike's
