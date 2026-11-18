@@ -3,12 +3,13 @@
 
 use std::path::PathBuf;
 
+use moa_core::model::Project;
 use moa_core::op::Op;
 
 use super::{CANCELLED, Out, Panel};
 use crate::ctx::Ctx;
-use crate::data::{Data, SessionRow};
-use crate::text::tilde;
+use crate::data::Data;
+use crate::text::{clean, tilde};
 use crate::views::tree;
 
 /// What a prompt's answer is for.
@@ -87,19 +88,36 @@ pub(super) fn default_account(data: &Data, want: Option<&str>) -> String {
 }
 
 impl Panel {
-    /// `N` on a session row (V21): a new session in its project's folder, asking the account
-    /// first.
-    pub(super) fn choose_account(&mut self, row: &SessionRow, data: &Data, ctx: &Ctx) -> Vec<Out> {
-        let Some(project) = row.session.project_id.and_then(|id| data.projects.get(&id)) else {
+    /// `n` and `N` on a row with a project (V21): a new session in the project's folder,
+    /// after V7's folder checks. `n` opens it under the brain's default account; `N` asks the
+    /// account first.
+    pub(super) fn open_in_project(
+        &mut self,
+        project: Option<&Project>,
+        choose: bool,
+        data: &Data,
+        ctx: &Ctx,
+    ) -> Vec<Out> {
+        let Some(project) = project else {
             return self.say("this row has no project");
         };
         let Some(path) = &project.path else {
-            return self.say(&format!("no folder for {}", project.name));
+            return self.say(&format!("no folder for {}", clean(&project.name)));
         };
         let path = match folder(&tilde(path, &ctx.home), ctx) {
             Ok(path) => path,
             Err(e) => return self.say(&e),
         };
+        if !choose {
+            return vec![Out::Send(Op::SessionOpen {
+                path,
+                account: None,
+                title: None,
+                group: None,
+                prompt: None,
+                bg: false,
+            })];
+        }
         let account = default_account(data, None);
         let ask = Ask::Account {
             group: None,

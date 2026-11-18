@@ -5,7 +5,8 @@
 use std::fmt::Write as _;
 
 use moa_core::UtcMs;
-use moa_core::op::{Done, Op};
+use moa_core::model::Project;
+use moa_core::op::{Done, Op, TaskSet};
 use moa_core::panel::View;
 
 use crate::ctx::Ctx;
@@ -416,6 +417,18 @@ impl Panel {
         }
     }
 
+    /// The project of the selected row, for `n` and `N` (V21): `None` when the row can't have
+    /// one (a group, a suggestion), `Some(None)` when it has none.
+    fn selected_project<'d>(&self, data: &'d Data) -> Option<Option<&'d Project>> {
+        let id = match self.selected()? {
+            Item::Session(id) => data.sessions.get(id)?.session.project_id,
+            Item::Task(id) => data.tasks.get(id)?.project_id,
+            Item::Project(id) => Some(*id),
+            Item::Group(_) | Item::Suggestion(_) => return None,
+        };
+        Some(id.and_then(|id| data.projects.get(&id)))
+    }
+
     fn say(&mut self, text: &str) -> Vec<Out> {
         self.message = Some(text.to_string());
         Vec::new()
@@ -462,15 +475,20 @@ impl Panel {
                             collapsed: !folded,
                         })])
                     }
-                    _ => None,
+                    Item::Task(id) => match data.tasks.get(&id)?.session_id {
+                        Some(s) => Some(vec![Out::Send(Op::SessionFocus { q: s.to_string() })]),
+                        None => Some(self.say("no session linked to this task")),
+                    },
+                    Item::Project(_) | Item::Suggestion(_) => None,
                 };
             }
             Action::NewSession if self.view == View::Tree => {
                 return self.tree_key(action, data, ctx);
             }
-            Action::ChooseAccount => {
-                let row = session?;
-                return Some(self.choose_account(row, data, ctx));
+            Action::NewSession | Action::ChooseAccount => {
+                let project = self.selected_project(data)?;
+                let choose = action == Action::ChooseAccount;
+                return Some(self.open_in_project(project, choose, data, ctx));
             }
             Action::NewGroup | Action::Move | Action::Rename | Action::DeleteGroup => {
                 return self.tree_key(action, data, ctx);
@@ -491,16 +509,25 @@ impl Panel {
                 let q = row.session.id.to_string();
                 return Some(self.confirm(question, Op::SessionRestart { q }));
             }
-            // The picture's tabs, the plan's tasks, suggestions and the other views' `n`
-            // come with their views.
-            Action::NewSession
-            | Action::NextTab
-            | Action::PrevTab
-            | Action::Tab(_)
-            | Action::Done
-            | Action::Drop
-            | Action::Yes
-            | Action::No => return None,
+            Action::Done | Action::Drop => {
+                let Item::Task(id) = selected? else {
+                    return None;
+                };
+                let status = if action == Action::Done {
+                    "done"
+                } else {
+                    "dropped"
+                };
+                return Some(vec![Out::Send(Op::TaskSet(TaskSet {
+                    id: id.0,
+                    status: Some(status.to_string()),
+                    ..TaskSet::default()
+                }))]);
+            }
+            // The picture's tabs and suggestions come with their views.
+            Action::NextTab | Action::PrevTab | Action::Tab(_) | Action::Yes | Action::No => {
+                return None;
+            }
         }
         // A move through the list: nothing to send.
         Some(Vec::new())

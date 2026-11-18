@@ -12,6 +12,7 @@ use crate::data::Data;
 use crate::line::Line;
 use crate::text::SPIN;
 
+pub mod plan;
 pub mod tree;
 
 /// What a view keeps in the panel rather than in the brain: the projects opened in the
@@ -26,6 +27,7 @@ pub struct ViewUi {
 pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec<Line> {
     match view {
         View::Tree => tree::build(data, ctx, ui, width),
+        View::Plan => plan::build(data, ctx, ui, width),
         // The other views come with their builders.
         _ => Vec::new(),
     }
