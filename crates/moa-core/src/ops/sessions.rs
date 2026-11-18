@@ -180,8 +180,9 @@ pub(crate) fn ls_with(
     (fx, result)
 }
 
-/// The Claude agents in `panes` that moa doesn't track (R23): alive, not a terminal, held by
-/// no binding and not tagged, with no `MOA_SESSION`, in the brain's folders (R22). Each with
+/// The Claude agents in `panes` that moa doesn't track (R23): alive, held by no binding and
+/// not tagged, with no `MOA_SESSION`, in the brain's folders (R22). A terminal moa opened
+/// counts when Claude runs in it: that is where one is typed by hand. Each with
 /// its agent and its account: the listed account of its store (R32), else the store
 /// folder's name.
 pub(crate) fn untracked(state: &State, panes: &[PaneInfo]) -> Vec<(PaneInfo, PaneAgent, String)> {
@@ -195,7 +196,7 @@ pub(crate) fn untracked(state: &State, panes: &[PaneInfo]) -> Vec<(PaneInfo, Pan
     let deps = state.deps();
     panes
         .iter()
-        .filter(|p| !p.dead && !p.term && p.tag == Tag::Unset && !held.contains(&p.pane))
+        .filter(|p| !p.dead && p.tag == Tag::Unset && !held.contains(&p.pane))
         .filter(|p| brains_folder(state, &(deps.canonical)(Path::new(&p.cwd))))
         .filter_map(|p| {
             let agent = (deps.inspect)(p.pid, &p.start)

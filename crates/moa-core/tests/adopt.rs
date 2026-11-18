@@ -699,13 +699,35 @@ fn adopt_refuses_a_tab_that_isnt_there() {
     refused(&fx, "there's no tab %5");
 }
 
+/// A terminal moa opened that runs only its shell is refused as one.
 #[test]
-fn adopt_refuses_a_terminal() {
+fn adopt_refuses_a_terminal_with_no_agent() {
+    let mut r = World::new().reconciled();
+    r.tabs[0] = r.tabs[0].replacen("\t50\t0\t\t", "\t50\t0\t1\t", 1);
+    let fx = r.adopt("%5");
+    refused(&fx, "that tab is a terminal, not an agent");
+}
+
+/// A Claude typed in a terminal moa opened is adopted as one typed in any shell. Its tab
+/// gets the adoption's tags only: it stays a terminal, whose agent is checked again before
+/// any kill (R31).
+#[test]
+fn adopt_takes_an_agent_typed_in_a_terminal() {
     let mut r = World::new().reconciled();
     r.tabs[0] = r.tabs[0].replacen("\t50\t0\t\t", "\t50\t0\t1\t", 1);
     r.in_5(Some(&r.home().join(".claude-a")), Some(C9));
     let fx = r.adopt("%5");
-    refused(&fx, "that tab is a terminal, not an agent");
+    let new = adopted_id(&fx);
+    let b = r.st.binding(new).unwrap();
+    assert_eq!(b.pane_id, "%5");
+    assert!(!b.tracked);
+    assert_eq!(
+        set_options(&fx),
+        [
+            &tag("%5", "@moa_adopted", "1"),
+            &tag("%5", "@moa_session", &new.to_string())
+        ]
+    );
 }
 
 #[test]

@@ -139,14 +139,12 @@ pub(crate) fn adopt(
         other => other,
     };
 
-    // The tab: listed, alive, not a terminal, and no binding holds it (R4).
+    // The tab: listed, alive, and no binding holds it (R4). A terminal moa opened is where
+    // an agent is typed by hand, so it may be one; its agent is read below.
     let info = panes
         .iter()
         .find(|p| p.pane == pane && !p.dead)
         .ok_or_else(|| OpError(format!("there's no tab {pane}")))?;
-    if info.term {
-        return Err(OpError(TERMINAL.into()));
-    }
     let kept: Vec<SessionId> = kept_bindings(state, generation, panes)
         .iter()
         .map(|b| b.session_id)
@@ -169,11 +167,11 @@ pub(crate) fn adopt(
         .map(|b| b.session_id)
         .collect();
 
-    // Its agent.
+    // Its agent. A terminal running none is just the user's shell.
     let deps = state.deps().clone();
     let agent = (deps.inspect)(info.pid, &info.start)
         .filter(|a| a.kind == AgentKind::Claude)
-        .ok_or_else(|| OpError(NOT_AN_AGENT.into()))?;
+        .ok_or_else(|| OpError(if info.term { TERMINAL } else { NOT_AN_AGENT }.into()))?;
 
     // The brain's folder (R22), a listed account's store (R32), and this brain's route.
     let cwd = info.cwd.clone();

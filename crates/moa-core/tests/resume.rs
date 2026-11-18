@@ -614,6 +614,24 @@ fn resume_refuses_when_an_untracked_tab_runs_it() {
     assert!(is_asleep(r.s()));
 }
 
+/// Step 6, the agent typed in a terminal moa opened: that tab runs it all the same.
+#[test]
+fn resume_refuses_when_a_terminal_runs_it() {
+    let mut w = World::new();
+    w.deps.inspect = runs_c;
+    let mut r = w.reconciled();
+    assert!(queried(&r.resume(1, false)));
+    let info = format!("I\t%8\t808\t0\t1\t\t\t{}", r.lantern());
+    let fx = r.listed(&[&info], &["S\t%8\t"]);
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(!any_tmux(&fx), "{fx:?}");
+    assert_eq!(
+        refusal(&fx),
+        "it's already running in tab %8; adopt it with moactl adopt %8"
+    );
+    assert!(is_asleep(r.s()));
+}
+
 /// A failed listing doesn't hold the resume back: steps 1–5 still guard it.
 #[test]
 fn a_failed_listing_still_resumes() {

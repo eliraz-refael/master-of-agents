@@ -321,8 +321,12 @@ fn ls_lists_untracked_tabs() {
     let q = home.join("private/q");
     r.tabs.push(tab("%13", 130, "", false, false, &q));
     runs(130, Some(claude(&home.join(".claude-q"), None)));
-    // Not listed: a tab moa started (`MOA_SESSION`), a terminal, a tab a binding holds
-    // though it isn't tagged, a tagged tab, one in another brain's folder, and a shell.
+    // %9: one typed in a terminal moa opened, the natural place to start one by hand.
+    r.tabs.push(tab("%9", 90, "", false, true, &x));
+    runs(90, Some(claude(&store_a, Some("C9"))));
+    // Not listed: a tab moa started (`MOA_SESSION`), a terminal running only its shell, a
+    // tab a binding holds though it isn't tagged, a tagged tab, one in another brain's
+    // folder, and a shell.
     r.tabs.push(tab("%8", 80, "", false, false, &x));
     runs(
         80,
@@ -331,8 +335,7 @@ fn ls_lists_untracked_tabs() {
             ..claude(&store_a, Some("C8"))
         }),
     );
-    r.tabs.push(tab("%9", 90, "", false, true, &x));
-    runs(90, Some(claude(&store_a, Some("C9"))));
+    r.tabs.push(tab("%14", 140, "", false, true, &x));
     let seven = r.at("%7");
     r.tabs[seven] = tab("%7", 70, "", false, false, &home.join("private/web"));
     runs(70, Some(claude(&store_a, Some("C7"))));
@@ -351,7 +354,8 @@ fn ls_lists_untracked_tabs() {
     assert!(
         done.text.ends_with(&format!(
             "UNTRACKED tab %6: acct-a in {shown_x}  → moactl adopt %6\n\
-             UNTRACKED tab %13: .claude-q in {shown_q}  → moactl adopt %13"
+             UNTRACKED tab %13: .claude-q in {shown_q}  → moactl adopt %13\n\
+             UNTRACKED tab %9: acct-a in {shown_x}  → moactl adopt %9"
         )),
         "{}",
         done.text
@@ -361,6 +365,7 @@ fn ls_lists_untracked_tabs() {
         vec![
             json!({"untracked": "%6", "account": "acct-a", "cwd": shown_x}),
             json!({"untracked": "%13", "account": ".claude-q", "cwd": shown_q}),
+            json!({"untracked": "%9", "account": "acct-a", "cwd": shown_x}),
         ]
     );
     // They go after the sessions.

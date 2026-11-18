@@ -728,7 +728,6 @@ pub(crate) fn resumed(
             let inspect = state.deps().inspect;
             let running = panes.iter().find(|p| {
                 !p.dead
-                    && !p.term
                     && bound_session(state, p.pane).is_none()
                     && inspect(p.pid, &p.start).is_some_and(|a| {
                         a.kind == AgentKind::Claude

@@ -144,9 +144,13 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     // Each new binding's tab, its session, and whether it is marked adopted too.
     let mut to_tag: Vec<(PaneId, SessionId, bool)> = Vec::new();
     for info in panes {
-        if info.dead || info.term || held.contains(&info.pane) {
+        if info.dead || held.contains(&info.pane) {
             continue;
         }
+        // A terminal moa opened is where an agent is typed by hand. Its binding is never
+        // tracked: a tracked tab is killed without its agent read again, and this one is the
+        // user's shell.
+        let untracked = info.adopted || info.term;
         let free = |id: SessionId, bound: &BTreeMap<SessionId, PaneBinding>| {
             state.session(id).is_some()
                 && !kept.contains(&id)
@@ -157,18 +161,23 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
             // A tag that isn't a session id counts as another session's (R4).
             Tag::Other => continue,
             // (a) The tab says whose it is. An adopted agent's tab outlives the agent, so
-            // its agent is checked first.
+            // its agent is checked first; a terminal's too.
             Tag::Session(id) => {
                 if !free(id, &bound) {
                     continue;
                 }
-                if info.adopted {
+                if untracked {
                     let agent = inspect(info.pid, &info.start);
                     if !agent_runs(state, id, agent.as_ref(), Some(&info.cwd)) {
                         continue;
                     }
                 }
-                (id, !info.adopted)
+                // A terminal not marked adopted yet (a link lost between the two tags) is
+                // marked now.
+                if info.term && !info.adopted {
+                    to_tag.push((info.pane, id, true));
+                }
+                (id, !untracked)
             }
             Tag::Unset => {
                 let agent = inspect(info.pid, &info.start);
@@ -198,7 +207,7 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
                     continue;
                 }
                 let has_moa_session = agent.as_ref().is_some_and(|a| a.moa_session.is_some());
-                let tracked = !info.adopted && (has_moa_session || spike == Some(id));
+                let tracked = !untracked && (has_moa_session || spike == Some(id));
                 // An untracked binding's tab is marked adopted, as `adopt` marks one: its
                 // agent may leave it open, so the next reconcile checks the agent before
                 // binding it again by its tag (R7, R31).
