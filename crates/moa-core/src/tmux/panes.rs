@@ -1,6 +1,8 @@
 //! Every pane on the server, as reconcile, adopt and `ls` read them: one tokened query of two
 //! `list-panes -a`, and the test of whether a binding still holds its pane (R4).
 
+use std::collections::BTreeMap;
+
 use super::cmd::Cmd;
 use super::ids::{Generation, PaneId};
 use crate::model::{PaneBinding, SessionId};
@@ -49,8 +51,19 @@ pub fn list_panes() -> Vec<Cmd> {
 /// The panes in `info` ([`PANE_INFO`] lines), each with its start command from `start`
 /// ([`PANE_START`] lines). Lines that don't parse are skipped; a pane whose start line is
 /// missing or doesn't parse has an empty `start`.
+///
+/// tmux prints a folder raw, so a folder holding a newline can forge a line of its own. A
+/// pane id listed more than once is left out entirely: neither line can be trusted, and an
+/// unlisted pane is one no binding holds (R4). A forged line for an id the server doesn't
+/// have can only keep a binding of a pane that is already gone, and tmux never reuses a pane
+/// id within one server's life, so nothing moa sends to that id reaches a pane.
 pub fn parse_panes(info: &[String], start: &[String]) -> Vec<PaneInfo> {
     let mut panes: Vec<PaneInfo> = info.iter().filter_map(|l| parse_info(l)).collect();
+    let mut seen = BTreeMap::<PaneId, usize>::new();
+    for p in &panes {
+        *seen.entry(p.pane).or_default() += 1;
+    }
+    panes.retain(|p| seen[&p.pane] == 1);
     for line in start {
         let mut f = line.splitn(3, '\t');
         let (Some("S"), Some(pane), Some(cmd)) = (f.next(), f.next(), f.next()) else {

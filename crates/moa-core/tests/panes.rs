@@ -192,6 +192,54 @@ fn listed(tag: Tag, dead: bool) -> PaneInfo {
     }
 }
 
+/// tmux prints a folder raw, so a folder holding a newline can forge a `PANE_INFO` line of its
+/// own. A pane id listed twice can't be trusted either way: every line for it is dropped.
+#[test]
+fn a_folder_that_forges_a_pane_line_leaves_that_pane_out() {
+    // `%2`'s folder is `/h/x\nI\t%1\t…`: one real line split in two.
+    let forged = format!("I\t%1\t999\t0\t\t\t{SID}\t/h");
+    let info = lines(&[
+        &format!("I\t%1\t101\t0\t\t\t{OTHER}\t/h"),
+        "I\t%2\t102\t0\t\t\t\t/h/x",
+        &forged,
+        "I\t%3\t103\t0\t\t\t\t/h",
+    ]);
+    let start = lines(&["S\t%1\tclaude", "S\t%2\tbash", "S\t%3\tbash"]);
+    let listed: Vec<PaneId> = parse_panes(&info, &start).iter().map(|p| p.pane).collect();
+    assert_eq!(listed, [pane(2), pane(3)]);
+    // So a binding of `%1` isn't held by the forged line, whatever order the lines came in.
+    let g = Generation {
+        pid: 10,
+        start: 1000,
+    };
+    for info in [info.clone(), info.iter().rev().cloned().collect()] {
+        let panes = parse_panes(&info, &start);
+        let found = panes.iter().find(|p| p.pane == pane(1));
+        assert!(!holds(&binding_of("%1", g), g, found));
+    }
+}
+
+/// A forged line for a pane id the server doesn't have is harmless: it can only keep a
+/// binding of a pane that is already gone, and tmux never reuses a pane id within one
+/// server's life, so a kill of that id reaches nothing.
+#[test]
+fn a_forged_line_for_a_missing_pane_adds_only_that_id() {
+    let info = lines(&[
+        "I\t%2\t102\t0\t\t\t\t/h/x",
+        "I\t%99\t999\t0\t\t\t\t/h",
+        "I\t%3\t103\t0\t\t\t\t/h",
+    ]);
+    let listed: Vec<PaneId> = parse_panes(&info, &[]).iter().map(|p| p.pane).collect();
+    assert_eq!(listed, [pane(2), pane(99), pane(3)]);
+}
+
+fn binding_of(pane_id: &str, generation: Generation) -> PaneBinding {
+    PaneBinding {
+        pane_id: pane_id.into(),
+        ..binding(generation)
+    }
+}
+
 #[test]
 fn holds_follows_r4() {
     let g = Generation {
