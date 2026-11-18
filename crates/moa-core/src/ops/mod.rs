@@ -29,6 +29,7 @@ pub(crate) fn run(
         Op::GroupAdd { path } => groups::add(state, tx, now, &path),
         Op::GroupRename { old, new } => groups::rename(state, tx, now, &old, &new),
         Op::GroupRm { path } => groups::rm(state, tx, &path),
+        Op::GroupFold { path, collapsed } => groups::fold(state, tx, &path, collapsed),
         Op::SessionLs { all } => sessions::ls(state, now, all),
         Op::SessionSet { q, title, group } => {
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())
@@ -69,7 +70,9 @@ pub(crate) fn run(
         | Op::SessionResume { .. }
         | Op::SessionAdopt { .. }
         | Op::SessionRestart { .. }
-        | Op::TermOpen { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::TermOpen { .. }
+        | Op::UiPanel { .. }
+        | Op::UiHere { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

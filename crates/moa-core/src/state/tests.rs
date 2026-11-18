@@ -314,13 +314,13 @@ fn changes_name_their_topics() {
         [Topic::Activity]
     );
     assert_eq!(Change::DeleteGroup("g".into()).topics(), [Topic::Groups]);
-    assert!(
+    assert_eq!(
         Change::Meta {
             key: "k".into(),
             value: Some("v".into())
         }
-        .topics()
-        .is_empty()
+        .topics(),
+        [Topic::Brain]
     );
 }
 

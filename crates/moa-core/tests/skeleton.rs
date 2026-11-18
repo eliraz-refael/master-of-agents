@@ -391,6 +391,10 @@ fn op_methods_match_the_variants() {
             new: "B".into(),
         },
         Op::GroupRm { path: "A".into() },
+        Op::GroupFold {
+            path: "A".into(),
+            collapsed: true,
+        },
         Op::SessionLs { all: true },
         Op::SessionSet {
             q: "q".into(),
@@ -471,6 +475,13 @@ fn op_methods_match_the_variants() {
         Op::TmuxEnsure {
             tmux: Some("/usr/bin/tmux".into()),
         },
+        Op::UiPanel {
+            pane: Some("%3".into()),
+            view: Some(moa_core::panel::View::Tree),
+        },
+        Op::UiHere {
+            folder: Some("/x".into()),
+        },
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
     // be serialized or parsed.
@@ -497,6 +508,7 @@ const WRITES: &[&str] = &[
     "group.add",
     "group.rename",
     "group.rm",
+    "group.fold",
     "session.set",
     "session.archive",
     "session.open",

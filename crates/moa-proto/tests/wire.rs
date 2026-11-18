@@ -78,6 +78,32 @@ fn control_methods_decode() {
 }
 
 #[test]
+fn ui_panel_decodes() {
+    let got = decode(json!({"jsonrpc":"2.0","id":1,"method":"ui.panel",
+        "params":{"view":"tree","pane":"%3"}}))
+    .unwrap();
+    assert_eq!(
+        got,
+        Incoming::Request {
+            id: Id::Num(1),
+            call: Call::Op(Op::UiPanel {
+                pane: Some("%3".into()),
+                view: Some(moa_core::panel::View::Tree),
+            })
+        }
+    );
+}
+
+#[test]
+fn an_unknown_view_is_invalid_params() {
+    let (id, bad) = decode(json!({"jsonrpc":"2.0","id":2,"method":"ui.panel",
+        "params":{"view":"nope"}}))
+    .unwrap_err();
+    assert_eq!(id, Some(Id::Num(2)));
+    assert_eq!(bad.code, code::INVALID_PARAMS);
+}
+
+#[test]
 fn unit_ops_take_any_empty_params() {
     for params in [None, Some(Value::Null), Some(json!({}))] {
         let mut m = json!({"jsonrpc":"2.0","id":1,"method":"brief"});

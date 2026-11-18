@@ -18,7 +18,7 @@ use crate::hook::HookEnvelope;
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::ops::adopt::AdoptArgs;
-use crate::ops::launch::ResumeAsk;
+use crate::ops::launch::{ResumeAsk, Tell};
 use crate::state::State;
 
 /// An op that needs a tab, while moa's terminal isn't linked.
@@ -161,13 +161,17 @@ pub(crate) enum Asked {
         all: bool,
     },
     /// A terminal's new window (R16), named `name` and opened in `path`: its tab is tagged
-    /// and brought to the screen once tmux says which pane it has. `reply` is whom to
-    /// answer: nobody, once the caller's connection closed, though the tab still gets its
-    /// tags (R26).
+    /// and brought to the screen once tmux says which pane it has. `tell` is whom to tell:
+    /// nobody, once the caller's connection closed, though the tab still gets its tags (R26).
     Term {
-        reply: Option<(ConnId, ReqId)>,
+        tell: Option<Tell>,
         name: String,
         path: String,
+    },
+    /// `Ctrl-a $` from `client` in a pane that is neither a panel's nor an agent's: the
+    /// folder tmux says it is in, where the terminal opens (V6).
+    Here {
+        client: ClientName,
     },
     /// Session `id`, which isn't live and has no tab, was heard from: does a tab run its
     /// agent? `events` are what it sent meanwhile, applied once it is found (the human's
@@ -521,13 +525,13 @@ impl TmuxState {
         self.queries.retain(|_, a| match a {
             Asked::Resume(r) => r.conn != conn,
             Asked::Adopt { conn: c, .. } | Asked::Ls { conn: c, .. } => *c != conn,
-            Asked::Reconcile | Asked::Term { .. } | Asked::Look { .. } => true,
+            Asked::Reconcile | Asked::Term { .. } | Asked::Here { .. } | Asked::Look { .. } => true,
         });
         for asked in self.queries.values_mut() {
-            if let Asked::Term { reply, .. } = asked
-                && matches!(reply, Some((c, _)) if *c == conn)
+            if let Asked::Term { tell, .. } = asked
+                && matches!(tell, Some(Tell::Reply(c, _)) if *c == conn)
             {
-                *reply = None;
+                *tell = None;
             }
         }
         for launching in self.opens.values_mut() {
@@ -672,7 +676,15 @@ impl TmuxState {
             .collect()
     }
 
-    fn conn(&self) -> Option<u64> {
+    /// Whether `input` connects to another server than the one last connected to: its pane
+    /// ids name other panes.
+    pub(crate) fn another_server(&self, input: &TmuxIn) -> bool {
+        matches!(input, TmuxIn::Connected { generation, .. }
+            if self.generation.is_some_and(|g| g != *generation))
+    }
+
+    /// The link's connection, while it is up.
+    pub(crate) fn conn(&self) -> Option<u64> {
         match self.link {
             Link::Up { conn, .. } => Some(conn),
             _ => None,

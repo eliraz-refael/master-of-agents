@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::live::{DisplayState, display_state};
+use crate::panel::{View, key_of};
 use crate::state::State;
 
 /// A named set of rows a view can subscribe to.
@@ -22,6 +23,8 @@ pub enum Topic {
     Asks,
     Activity,
     Status,
+    Brain,
+    Panels,
 }
 
 impl Topic {
@@ -34,7 +37,40 @@ impl Topic {
         Topic::Asks,
         Topic::Activity,
         Topic::Status,
+        Topic::Brain,
+        Topic::Panels,
     ];
+}
+
+/// The meta key holding the folded tree paths.
+pub const FOLDED_KEY: &str = "tree.folded";
+
+/// The folded tree paths, sorted. A value that doesn't parse reads as empty; the next fold
+/// rewrites it.
+pub fn folded(state: &State) -> Vec<String> {
+    state
+        .meta(FOLDED_KEY)
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default()
+}
+
+/// The `brain` topic's one row (key `brain`): the brain's name, its folders as absolute
+/// paths, the listed accounts with a launcher, the account sessions open with, and the
+/// folded tree paths.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BrainRow {
+    pub name: String,
+    pub folders: Vec<String>,
+    pub accounts: Vec<String>,
+    pub open_account: Option<String>,
+    pub folded: Vec<String>,
+}
+
+/// A `panels` row (key `c<conn>`): one connected panel, its tab and its view.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PanelRow {
+    pub pane: Option<String>,
+    pub view: View,
 }
 
 /// One published rows-by-key map per topic. Unchanged topics keep the same `Arc` across revs.
@@ -106,6 +142,10 @@ impl State {
                     );
                     m.insert("display_state".into(), word(state).into());
                     m.insert("why".into(), why.into());
+                    m.insert(
+                        "adopted".into(),
+                        self.binding(s.id).is_some_and(|b| !b.tracked).into(),
+                    );
                 }
                 (s.id.to_string(), v)
             })
@@ -132,8 +172,48 @@ impl State {
         BTreeMap::from([("counts".to_string(), Value::Object(row))])
     }
 
+    fn brain_rows(&self) -> BTreeMap<String, Value> {
+        let config = self.config();
+        let brain = config.brain(self.brain()).unwrap_or_default();
+        let row = BrainRow {
+            name: self.brain().as_str().to_string(),
+            folders: brain
+                .folders
+                .iter()
+                .filter(|f| !f.as_os_str().is_empty())
+                .map(|f| f.display().to_string())
+                .collect(),
+            accounts: config
+                .accounts
+                .iter()
+                .filter(|(_, a)| a.launcher.is_some())
+                .map(|(name, _)| name.as_str().to_string())
+                .collect(),
+            open_account: brain.open_account.map(|a| a.as_str().to_string()),
+            folded: folded(self),
+        };
+        BTreeMap::from([("brain".to_string(), keyed("brain", &row))])
+    }
+
+    fn panels_rows(&self) -> BTreeMap<String, Value> {
+        self.panels
+            .iter()
+            .map(|(conn, reg)| {
+                let key = key_of(*conn);
+                let row = PanelRow {
+                    pane: reg.pane.map(|p| p.to_string()),
+                    view: reg.view,
+                };
+                let v = keyed(&key, &row);
+                (key, v)
+            })
+            .collect()
+    }
+
     fn build(&self, topic: Topic) -> BTreeMap<String, Value> {
         match topic {
+            Topic::Brain => self.brain_rows(),
+            Topic::Panels => self.panels_rows(),
             Topic::Sessions => self.sessions_rows(),
             Topic::Status => self.status_rows(),
             Topic::Groups => by_key(self.groups().map(|g| (g.path.clone(), g))),
@@ -151,12 +231,27 @@ impl State {
         if topics.is_empty() {
             return None;
         }
+        let built: Vec<_> = topics.iter().map(|t| (*t, self.build(*t))).collect();
+        Some(self.put(built))
+    }
+
+    /// Publishes `topic` only when its rows differ from the ones last published.
+    pub(crate) fn publish_changed(&mut self, topic: Topic) -> Option<Arc<Model>> {
+        let rows = self.build(topic);
+        if self.model.topics.get(&topic).is_some_and(|t| **t == rows) {
+            return None;
+        }
+        Some(self.put(vec![(topic, rows)]))
+    }
+
+    /// Replaces these topics' rows and bumps `rev`.
+    fn put(&mut self, built: Vec<(Topic, BTreeMap<String, Value>)>) -> Arc<Model> {
         let mut next = (*self.model).clone();
-        for t in topics {
-            next.topics.insert(*t, Arc::new(self.build(*t)));
+        for (t, rows) in built {
+            next.topics.insert(t, Arc::new(rows));
         }
         next.rev += 1;
         self.model = Arc::new(next);
-        Some(self.model.clone())
+        self.model.clone()
     }
 }

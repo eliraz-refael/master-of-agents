@@ -115,14 +115,39 @@ fn expected(client: &str, a: KeyAction) -> Vec<String> {
         .collect()
 }
 
+/// Every key but `$`, which opens a terminal (panels.rs).
 #[test]
 fn every_key_gets_its_notice() {
     let mut s = up();
     for a in KeyAction::ALL {
+        if a == KeyAction::Terminal {
+            continue;
+        }
         let fx = message(&mut s, &format!("moa:key {} %3 $0 /dev/ttys1", a.word()));
         assert_eq!(the_notice(&fx), expected("/dev/ttys1", a), "{a:?}");
         assert!(logs(&fx).is_empty(), "{a:?}");
     }
+}
+
+/// `$` asks tmux where tab `%3` is, and says nothing yet.
+#[test]
+fn the_terminal_key_is_no_longer_a_notice() {
+    let mut s = up();
+    let fx = message(&mut s, "moa:key terminal %3 $0 /dev/ttys1");
+    let [
+        Effect::Tmux {
+            conn: 1,
+            cmds,
+            token: Some(TmuxToken::Query(_)),
+        },
+    ] = tmux_effects(&fx)[..]
+    else {
+        panic!("{fx:?}")
+    };
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].name(), "display-message");
+    assert_eq!(cmds[0].argv(), ["-p", "-t", "%3", "#{pane_current_path}"]);
+    assert!(logs(&fx).is_empty(), "{fx:?}");
 }
 
 #[test]

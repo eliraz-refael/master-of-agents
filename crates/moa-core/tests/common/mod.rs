@@ -67,10 +67,15 @@ pub fn feed(b: &TypicalBrain, st: &mut State, t: TmuxIn) -> Vec<Effect> {
 
 /// Request `req` on connection 1.
 pub fn send(b: &TypicalBrain, st: &mut State, req: u64, op: Op) -> Vec<Effect> {
+    send_on(b, st, 1, req, op)
+}
+
+/// Request `req` on connection `conn`.
+pub fn send_on(b: &TypicalBrain, st: &mut State, conn: u64, req: u64, op: Op) -> Vec<Effect> {
     handle_checked(
         st,
         Input::Client {
-            conn: ConnId(1),
+            conn: ConnId(conn),
             req: ReqId(req),
             caller: CallerInfo::default(),
             op,

@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::panel::View;
+
 /// A client connection, as the daemon numbers them.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ConnId(pub u64);
 
 /// A request on a connection.
@@ -23,6 +25,9 @@ pub enum Op {
     GroupRename { old: String, new: String },
     #[serde(rename = "group.rm")]
     GroupRm { path: String },
+    /// Folds or unfolds one tree path. Saved as one value; never a group.
+    #[serde(rename = "group.fold")]
+    GroupFold { path: String, collapsed: bool },
     #[serde(rename = "session.ls")]
     SessionLs {
         #[serde(default)]
@@ -163,6 +168,22 @@ pub enum Op {
         #[serde(default)]
         tmux: Option<PathBuf>,
     },
+    /// A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`
+    /// it shows. Without a view it gets the one this pane last had, else the picture.
+    /// Answers `{key, view}`.
+    #[serde(rename = "ui.panel")]
+    UiPanel {
+        #[serde(default)]
+        pane: Option<String>,
+        #[serde(default)]
+        view: Option<View>,
+    },
+    /// The folder a panel's selection is in, for a terminal opened "here".
+    #[serde(rename = "ui.here")]
+    UiHere {
+        #[serde(default)]
+        folder: Option<String>,
+    },
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -278,6 +299,7 @@ impl Op {
         "group.add",
         "group.rename",
         "group.rm",
+        "group.fold",
         "session.ls",
         "session.set",
         "session.archive",
@@ -302,6 +324,8 @@ impl Op {
         "suggestion.answer",
         "suggestion.ls",
         "tmux.ensure",
+        "ui.panel",
+        "ui.here",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -311,6 +335,7 @@ impl Op {
             Op::GroupAdd { .. }
             | Op::GroupRename { .. }
             | Op::GroupRm { .. }
+            | Op::GroupFold { .. }
             | Op::SessionSet { .. }
             | Op::SessionArchive { .. }
             | Op::SessionOpen { .. }
@@ -335,6 +360,8 @@ impl Op {
             | Op::SuggestionLs(_)
             | Op::TmuxEnsure { .. }
             | Op::TermOpen { .. }
+            | Op::UiPanel { .. }
+            | Op::UiHere { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -345,6 +372,7 @@ impl Op {
             Op::GroupAdd { .. } => "group.add",
             Op::GroupRename { .. } => "group.rename",
             Op::GroupRm { .. } => "group.rm",
+            Op::GroupFold { .. } => "group.fold",
             Op::SessionLs { .. } => "session.ls",
             Op::SessionSet { .. } => "session.set",
             Op::SessionArchive { .. } => "session.archive",
@@ -369,6 +397,8 @@ impl Op {
             Op::SuggestionAnswer { .. } => "suggestion.answer",
             Op::SuggestionLs(_) => "suggestion.ls",
             Op::TmuxEnsure { .. } => "tmux.ensure",
+            Op::UiPanel { .. } => "ui.panel",
+            Op::UiHere { .. } => "ui.here",
             Op::DebugPanic => "debug.panic",
         }
     }

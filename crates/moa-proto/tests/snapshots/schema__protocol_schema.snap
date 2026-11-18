@@ -146,6 +146,35 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Folds or unfolds one tree path. Saved as one value; never a group.",
+            "properties": {
+              "method": {
+                "const": "group.fold",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "collapsed": {
+                    "type": "boolean"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "collapsed"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "method": {
                 "const": "session.ls",
@@ -829,6 +858,69 @@ expression: all
               "params"
             ],
             "type": "object"
+          },
+          {
+            "description": "A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`\nit shows. Without a view it gets the one this pane last had, else the picture.\nAnswers `{key, view}`.",
+            "properties": {
+              "method": {
+                "const": "ui.panel",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "pane": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "view": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/View"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The folder a panel's selection is in, for a terminal opened \"here\".",
+            "properties": {
+              "method": {
+                "const": "ui.here",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "folder": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1012,7 +1104,27 @@ expression: all
           "suggestions",
           "asks",
           "activity",
-          "status"
+          "status",
+          "brain",
+          "panels"
+        ],
+        "type": "string"
+      },
+      "View": {
+        "description": "What a panel shows.",
+        "enum": [
+          "console",
+          "tree",
+          "plan",
+          "status",
+          "today",
+          "activity",
+          "projects",
+          "picture",
+          "picker",
+          "empty-slot",
+          "help",
+          "setup"
         ],
         "type": "string"
       }
@@ -1188,7 +1300,19 @@ expression: all
             },
             "type": "array"
           },
+          "brain": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "panels": {
             "items": {
               "type": "string"
             },
@@ -1243,7 +1367,15 @@ expression: all
             "items": true,
             "type": "array"
           },
+          "brain": {
+            "items": true,
+            "type": "array"
+          },
           "groups": {
+            "items": true,
+            "type": "array"
+          },
+          "panels": {
             "items": true,
             "type": "array"
           },
@@ -1299,7 +1431,15 @@ expression: all
             "items": true,
             "type": "array"
           },
+          "brain": {
+            "items": true,
+            "type": "array"
+          },
           "groups": {
+            "items": true,
+            "type": "array"
+          },
+          "panels": {
             "items": true,
             "type": "array"
           },
