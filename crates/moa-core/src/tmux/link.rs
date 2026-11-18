@@ -662,6 +662,12 @@ impl TmuxState {
         fx
     }
 
+    /// Reads the lists again, after the commands already sent: a tab moa just tagged shows
+    /// its tag in the topology (R18 reads it).
+    pub(crate) fn refresh_after_tagging(&mut self) -> Vec<Effect> {
+        self.refresh()
+    }
+
     /// Reads the lists again, at most one in flight and one more after it.
     fn refresh(&mut self) -> Vec<Effect> {
         let Some(conn) = self.conn() else {

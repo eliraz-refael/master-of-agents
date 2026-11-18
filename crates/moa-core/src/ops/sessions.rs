@@ -1,4 +1,4 @@
-//! `session ls|set|archive|close`. `open` is in [`super::launch`].
+//! `session ls|set|archive|close|sleep`. `open` is in [`super::launch`].
 
 use serde_json::json;
 
@@ -6,15 +6,14 @@ use super::launch::title_of;
 use crate::Now;
 use crate::change::Change;
 use crate::core::Tx;
-use crate::hooks::asleep;
 use crate::live::{display_state, is_asleep, spike_state};
 use crate::model::{Group, Lifecycle, Session, SessionId, normalize_group_path};
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{Done, OpError};
 use crate::reconcile::agent_runs;
+use crate::sleep::{kill_pane, put_to_sleep, why_not};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
-use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::bound_pane;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::ready;
@@ -23,6 +22,8 @@ use crate::tmux::link::ready;
 const TITLE_CUT: usize = 40;
 
 const STILL_OPENING: &str = "it's still opening; try again in a moment";
+
+const SLEEP_USAGE: &str = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
 
 pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
     let recent = days_ago(now, 2);
@@ -195,10 +196,7 @@ pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Resul
             // The adopted agent left its shell tab, which stays the user's: the session goes
             // to sleep, as any unexpected end does, and loses the binding. That is saved, so
             // the answer is success-shaped.
-            let mut changes = vec![Change::DeletePaneBinding(id)];
-            if s.lifecycle == Lifecycle::Live {
-                changes.insert(0, Change::Session(asleep(&s, tx.wall)));
-            }
+            let changes = put_to_sleep(state, tx, id);
             tx.commit(state, changes)?;
             return Ok(Done { text: gone.0, data });
         }
@@ -216,11 +214,138 @@ pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Resul
     }
     tx.ui(state, changes, text)?;
     if let Some(pane) = pane {
-        tx.tmux(Cmd::new("kill-pane").args(["-t".to_string(), pane.to_string()]));
+        tx.tmux(kill_pane(pane));
     }
     Ok(Done {
         text: "closed".into(),
         data,
+    })
+}
+
+/// `sleep Q…` or `sleep --idle H [--dry-run]` (R20): sessions go to sleep, their tabs
+/// killed once that is saved (R15). By name, any running session goes, tracked or not (the
+/// user asked; an adopted one after R31's check). By idle time, only those that could sleep
+/// on their own (R18) after `idle_ms`. Names come first: with them, `idle_ms` is unused.
+pub(crate) fn sleep(
+    state: &mut State,
+    tx: &mut Tx,
+    now: &Now,
+    qs: &[String],
+    idle_ms: Option<i64>,
+    dry_run: bool,
+) -> Result<Done, OpError> {
+    if qs.is_empty() && idle_ms.is_none_or(|ms| ms < 0) {
+        return Err(OpError(SLEEP_USAGE.into()));
+    }
+    ready(state)?;
+    let ids: Vec<SessionId> = match idle_ms {
+        Some(ms) if qs.is_empty() => state
+            .sessions()
+            .map(|s| s.id)
+            .filter(|id| why_not(state, *id, now.wall, ms).is_none())
+            .collect(),
+        _ => {
+            // Every name first: a bad one changes nothing.
+            let mut ids = Vec::new();
+            for q in qs {
+                let id = state.resolve(q)?;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            // Its pane isn't known yet.
+            if ids.iter().any(|id| state.tmux.launching(*id).is_some()) {
+                return Err(OpError(STILL_OPENING.into()));
+            }
+            ids
+        }
+    };
+    // What isn't running here is said, and left as it is.
+    let mut said = Vec::new();
+    let mut running = Vec::new();
+    for id in ids {
+        let Some(s) = state.session(id) else {
+            continue;
+        };
+        if s.lifecycle == Lifecycle::Live && bound_pane(state, id).is_some() {
+            running.push(id);
+        } else {
+            let word = if is_asleep(s) {
+                "asleep"
+            } else {
+                spike_state(s)
+            };
+            said.push(format!(
+                "{} isn't running in moa ({word}); nothing to put to sleep",
+                title_of(state, s)
+            ));
+        }
+    }
+    if dry_run {
+        let mut lines: Vec<String> = running
+            .iter()
+            .filter_map(|id| state.session(*id))
+            .map(|s| {
+                format!(
+                    "would sleep {}  {}",
+                    state.handle_of(s.id),
+                    title_of(state, s)
+                )
+            })
+            .collect();
+        lines.extend(said);
+        if lines.is_empty() {
+            lines.push("nothing to put to sleep".into());
+        }
+        return Ok(Done {
+            text: lines.join("\n"),
+            data: json!({ "would_sleep": running }),
+        });
+    }
+    let mut changes = Vec::new();
+    let mut panes = Vec::new();
+    let mut slept = Vec::new();
+    let mut names = Vec::new();
+    for id in running {
+        match kill_checked(state, id) {
+            Ok(pane) => {
+                panes.extend(pane);
+                slept.push(id);
+                if let Some(s) = state.session(id) {
+                    names.push(title_of(state, s));
+                }
+            }
+            // An adopted agent that left its tab: asleep, and the tab left to the user.
+            Err(gone) => said.push(gone.0),
+        }
+        changes.extend(put_to_sleep(state, tx, id));
+    }
+    // One commit: a refusal leaves every session as it was.
+    if !names.is_empty() {
+        let s = if names.len() > 1 { "s" } else { "" };
+        let text = format!(
+            "put {} session{s} to sleep: {}",
+            names.len(),
+            names.join(", ")
+        );
+        tx.ui(state, changes, text)?;
+    } else if !changes.is_empty() {
+        tx.commit(state, changes)?;
+    }
+    for pane in panes {
+        tx.tmux(kill_pane(pane));
+    }
+    if !names.is_empty() {
+        said.push(format!(
+            "asleep: {} (resumable: moactl resume ID)",
+            names.join(", ")
+        ));
+    } else if said.is_empty() {
+        said.push("nothing to put to sleep".into());
+    }
+    Ok(Done {
+        text: said.join("\n"),
+        data: json!({ "asleep": slept }),
     })
 }
 

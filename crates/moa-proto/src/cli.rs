@@ -181,7 +181,8 @@ pub enum Verb {
         ids: Vec<String>,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long, value_name = "HOURS")]
+        // A negative number reaches `to_op`, which says what is wrong with it.
+        #[arg(long, value_name = "HOURS", allow_negative_numbers = true)]
         idle: Option<f64>,
     },
     /// A plain shell in a new tab.
@@ -294,6 +295,7 @@ impl std::error::Error for VerbError {}
 
 const GROUP_USAGE: &str = "moactl group add PATH | group rename OLD NEW | group rm PATH";
 const TASK_ADD_USAGE: &str = "moactl task add PROJECT TITLE… [--who you|agent|other] [--due DATE] [--session ID] [--status S]";
+const SLEEP_USAGE: &str = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
 const TASK_SET_USAGE: &str = "moactl task set ID [--status S] [--title T] [--who W] [--due D] [--priority P] [--session ID] [--note N]";
 
 fn usage<T>(s: &str) -> Result<T, VerbError> {
@@ -498,6 +500,24 @@ impl Verb {
                 bg: *bg,
             },
             Verb::Close { id } => Op::SessionClose { q: id.clone() },
+            Verb::Sleep { ids, dry_run, idle } => {
+                let idle_ms = match idle {
+                    Some(h) if !h.is_finite() || *h < 0.0 => {
+                        return usage("--idle needs a number of hours, 0 or more");
+                    }
+                    // `as` saturates: an absurd number of hours matches nothing.
+                    Some(h) => Some((h * 3_600_000.0).round() as i64),
+                    None => None,
+                };
+                if ids.is_empty() && idle_ms.is_none() {
+                    return usage(SLEEP_USAGE);
+                }
+                Op::SessionSleep {
+                    qs: ids.clone(),
+                    idle_ms,
+                    dry_run: *dry_run,
+                }
+            }
             // `--pane` is for slice 5's "here"; until then a terminal opens where it was
             // typed.
             Verb::Term { path, title, .. } => Op::TermOpen {
@@ -505,8 +525,7 @@ impl Verb {
                 title: title.clone(),
             },
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Sleep { .. }
-            | Verb::Adopt { .. }
+            Verb::Adopt { .. }
             | Verb::Goto { .. }
             | Verb::Layout { .. }
             | Verb::Peers

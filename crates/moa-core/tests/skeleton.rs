@@ -441,6 +441,11 @@ fn op_methods_match_the_variants() {
             bg: true,
         },
         Op::SessionClose { q: "q".into() },
+        Op::SessionSleep {
+            qs: vec!["q".into()],
+            idle_ms: Some(1),
+            dry_run: true,
+        },
         Op::TermOpen {
             path: "/x".into(),
             title: Some("t".into()),
@@ -491,6 +496,7 @@ const WRITES: &[&str] = &[
     "session.focus",
     "session.resume",
     "session.close",
+    "session.sleep",
     "task.add",
     "task.set",
     "note.add",

@@ -393,6 +393,44 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Puts sessions to sleep: their tabs close and they stay resumable. By name (`qs`), or\nevery one idle `idle_ms` that could sleep on its own. A `dry_run` only says which.",
+            "properties": {
+              "method": {
+                "const": "session.sleep",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "dry_run": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "idle_ms": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "qs": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is\nnamed after `title`, else the folder.",
             "properties": {
               "method": {

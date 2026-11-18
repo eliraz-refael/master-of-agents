@@ -12,6 +12,7 @@ use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
+use crate::sleep;
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
@@ -27,6 +28,8 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
+    // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
+    sleep::run(state, &now, &mut fx);
     // Last, so the status line shows what this input saved, after its `Persist`.
     status::run(state, &now, &mut fx);
     fx
@@ -85,6 +88,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.load(*snapshot);
             state.forget_hooks();
             state.refuse_writes = refuse_writes;
+            // The timer this input armed may have been lost with it: it is armed again.
+            state.sleep_at = None;
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
@@ -187,6 +192,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.push(quiet_timer(state, now.wall));
             fx
         }
+        // The check at the end of every input does the work.
+        Input::Timer(TimerKey::Sleep) => Vec::new(),
         // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
         // gets its tags (R26).
         Input::ClientGone(conn) => {
@@ -563,8 +570,19 @@ impl Tx {
     pub(crate) fn ui_each(
         &mut self,
         state: &mut State,
+        changes: Vec<Change>,
+        texts: Vec<String>,
+    ) -> Result<(), OpError> {
+        self.ui_by(state, changes, texts, ActivityWho::You)
+    }
+
+    /// [`Tx::ui_each`] with the activity rows written by `who`.
+    pub(crate) fn ui_by(
+        &mut self,
+        state: &mut State,
         mut changes: Vec<Change>,
         texts: Vec<String>,
+        who: ActivityWho,
     ) -> Result<(), OpError> {
         for text in &texts {
             changes.push(Change::Event(Event {
@@ -578,7 +596,7 @@ impl Tx {
                 text: Some(text.clone()),
                 detail: None,
             }));
-            changes.push(self.activity_row(state, ActivityWho::You, text.clone(), None));
+            changes.push(self.activity_row(state, who, text.clone(), None));
         }
         self.commit(state, changes)?;
         self.events

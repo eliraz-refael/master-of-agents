@@ -250,6 +250,9 @@ pub struct State {
     next_ids: NextIds,
     unknown: Vec<LoadNote>,
     pub(crate) tmux: TmuxState,
+    /// The sleep deadline the timer is armed at, if any (R19): `SetTimer` and `CancelTimer`
+    /// go out only when it changes.
+    pub(crate) sleep_at: Option<UtcMs>,
     /// The keys of the last [`RECENT_HOOKS`] hook events applied, oldest first, and the same
     /// keys for lookup: a hook that arrives twice is applied once.
     pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
@@ -283,6 +286,7 @@ impl State {
             next_ids: NextIds::default(),
             unknown: Vec::new(),
             tmux: TmuxState::default(),
+            sleep_at: None,
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),
         }

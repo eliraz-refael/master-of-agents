@@ -877,6 +877,7 @@ fn bind(
         cmds,
         token: None,
     });
+    after.extend(state.tmux.refresh_after_tagging());
     let went = went_to(state, &s);
     (Ok(launched_reply(state, launching.kind, s)), Some(went))
 }

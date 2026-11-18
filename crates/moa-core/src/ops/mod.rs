@@ -31,6 +31,11 @@ pub(crate) fn run(
         }
         Op::SessionArchive { qs } => sessions::archive(state, tx, now, &qs),
         Op::SessionClose { q } => sessions::close(state, tx, now, &q),
+        Op::SessionSleep {
+            qs,
+            idle_ms,
+            dry_run,
+        } => sessions::sleep(state, tx, now, &qs, idle_ms, dry_run),
         Op::SessionFind { q } => read::find(state, now, &q),
         Op::TaskLs { project, all } => tasks::ls(state, now, project.as_deref(), all),
         Op::TaskAdd(a) => tasks::add(state, tx, now, &a),

@@ -318,6 +318,42 @@ fn focus_parses_to_session_focus() {
     );
 }
 
+/// `sleep` by name, or by how long sessions have been idle (R20).
+#[test]
+fn sleep_parses_to_session_sleep() {
+    assert_eq!(
+        op(&["sleep", "a1b2", "lantern"]),
+        Op::SessionSleep {
+            qs: vec!["a1b2".into(), "lantern".into()],
+            idle_ms: None,
+            dry_run: false,
+        }
+    );
+    assert_eq!(
+        op(&["sleep", "--idle", "1.5", "--dry-run"]),
+        Op::SessionSleep {
+            qs: Vec::new(),
+            idle_ms: Some(5_400_000),
+            dry_run: true,
+        }
+    );
+    assert_eq!(
+        op(&["sleep", "--idle", "0"]),
+        Op::SessionSleep {
+            qs: Vec::new(),
+            idle_ms: Some(0),
+            dry_run: false,
+        }
+    );
+    let hours = "--idle needs a number of hours, 0 or more";
+    for bad in ["-1", "NaN", "inf", "-0.5"] {
+        assert_eq!(err(&["sleep", "--idle", bad]), hours, "{bad}");
+    }
+    let usage = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
+    assert_eq!(err(&["sleep"]), usage);
+    assert_eq!(err(&["sleep", "--dry-run"]), usage);
+}
+
 #[test]
 fn usage_errors_are_the_spikes() {
     assert_eq!(

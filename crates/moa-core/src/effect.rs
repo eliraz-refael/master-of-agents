@@ -31,6 +31,8 @@ pub enum TimerKey {
     Clock,
     /// The earliest moment a working session turns quiet.
     Quiet,
+    /// The earliest moment an idle session could go to sleep (R19).
+    Sleep,
 }
 
 // `Client` carries a whole `Op`; one is built per request, so boxing it buys nothing.

@@ -153,8 +153,11 @@ impl Topology {
             | Notification::WindowClose { .. }
             | Notification::SessionsChanged
             | Notification::LayoutChange { .. }
-            // A renamed session changes what `session_named` answers.
-            | Notification::Other("session-renamed") => Applied::Refresh,
+            // A renamed session changes what `session_named` answers, and a renamed window
+            // which window is the cockpit (by name: `moa` in the session `moa`).
+            | Notification::Other(
+                "session-renamed" | "window-renamed" | "unlinked-window-renamed",
+            ) => Applied::Refresh,
             _ => Applied::Same,
         }
     }

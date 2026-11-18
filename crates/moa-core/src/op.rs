@@ -71,6 +71,17 @@ pub enum Op {
     /// Ends a session and kills its tab, once moa can prove the tab is the session's.
     #[serde(rename = "session.close")]
     SessionClose { q: String },
+    /// Puts sessions to sleep: their tabs close and they stay resumable. By name (`qs`), or
+    /// every one idle `idle_ms` that could sleep on its own. A `dry_run` only says which.
+    #[serde(rename = "session.sleep")]
+    SessionSleep {
+        #[serde(default)]
+        qs: Vec<String>,
+        #[serde(default)]
+        idle_ms: Option<i64>,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is
     /// named after `title`, else the folder.
     #[serde(rename = "term.open")]
@@ -258,6 +269,7 @@ impl Op {
         "session.focus",
         "session.resume",
         "session.close",
+        "session.sleep",
         "term.open",
         "task.ls",
         "task.add",
@@ -286,6 +298,7 @@ impl Op {
             | Op::SessionFocus { .. }
             | Op::SessionResume { .. }
             | Op::SessionClose { .. }
+            | Op::SessionSleep { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -319,6 +332,7 @@ impl Op {
             Op::SessionFocus { .. } => "session.focus",
             Op::SessionResume { .. } => "session.resume",
             Op::SessionClose { .. } => "session.close",
+            Op::SessionSleep { .. } => "session.sleep",
             Op::TermOpen { .. } => "term.open",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
