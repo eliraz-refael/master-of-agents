@@ -1,11 +1,14 @@
-//! Claude Code's on-disk layout: where a conversation's transcript lives.
+//! Claude Code's on-disk layout: where a conversation's transcript lives, and how a tab
+//! running Claude is recognised.
 
 use std::fs;
 use std::path::Path;
 
+pub mod agent;
 pub mod normalize;
 pub mod plugin;
 
+pub use agent::{merge, pane_agent, project_slot};
 pub use normalize::{last_assistant_text, normalize};
 pub use plugin::session_plugin;
 

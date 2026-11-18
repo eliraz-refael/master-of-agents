@@ -1,26 +1,27 @@
 //! `open`: a fresh session in a new tab of moa's terminal, on the typical brain. The reply
 //! waits for tmux to say which pane the tab has.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use moa_core::UtcMs;
 use moa_core::change::Change;
-use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Down, Effect, Input, LogLine, TmuxIn, TmuxToken, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind};
-use moa_core::live::{DisplayState, display_state};
+use moa_core::live::{DisplayState, display_state, is_asleep};
 use moa_core::model::{
     Activity, AgentKind, ConversationReason, Lifecycle, Location, PaneBinding, ProjectId, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
-use moa_core::state::{CallerInfo, Deps, State};
+use moa_core::state::State;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
 use moa_testkit::brain::TypicalBrain;
 use serde_json::json;
 
-const PLUGIN: &str = "/opt/moa/plugin/session";
+use common::*;
 
 /// Brain `default` (folder `~/work`, opening with `acct-a`) and a `work` brain beside it.
 /// `acct-b` sends everything to `work`, `acct-c` has no launcher, `acct-d` is limited to
@@ -60,49 +61,11 @@ store = "~/.codex-x"
 launcher = "/opt/codex"
 "#;
 
-/// The typical brain under `toml`, its link not yet up.
-fn loaded(toml: &str) -> (TypicalBrain, State) {
-    let b = TypicalBrain::new();
-    let config = Config::parse(toml, &b.home).unwrap();
-    let deps = Deps {
-        session_plugin: PathBuf::from(PLUGIN),
-        ..Deps::default()
-    };
-    let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
-    handle_checked(&mut st, Input::Startup(Box::new(b.snapshot())), b.now());
-    (b, st)
-}
-
-fn generation() -> Generation {
-    Generation {
-        pid: 10,
-        start: 1000,
-    }
-}
-
-fn link_up(b: &TypicalBrain, st: &mut State) {
-    feed(
-        b,
-        st,
-        TmuxIn::Connected {
-            conn: 1,
-            generation: generation(),
-            version: "3.5a".into(),
-            ctl: ClientName("client-9".into()),
-            socket: "moa".into(),
-        },
-    );
-}
-
 /// The typical brain under [`TOML`], linked.
 fn typical() -> (TypicalBrain, State) {
     let (b, mut st) = loaded(TOML);
     link_up(&b, &mut st);
     (b, st)
-}
-
-fn feed(b: &TypicalBrain, st: &mut State, t: TmuxIn) -> Vec<Effect> {
-    handle_checked(st, Input::Tmux(t), b.now())
 }
 
 fn open_op(path: &Path) -> Op {
@@ -116,60 +79,11 @@ fn open_op(path: &Path) -> Op {
     }
 }
 
-fn send(b: &TypicalBrain, st: &mut State, req: u64, op: Op) -> Vec<Effect> {
-    handle_checked(
-        st,
-        Input::Client {
-            conn: ConnId(1),
-            req: ReqId(req),
-            caller: CallerInfo::default(),
-            op,
-        },
-        b.now(),
-    )
-}
-
 /// The `n`th id the default `new_uuid` hands out in a thread, at the typical now.
 fn nth(b: &TypicalBrain, n: u64) -> uuid::Uuid {
     let mut bytes = [0u8; 10];
     bytes[2..].copy_from_slice(&n.to_be_bytes());
     uuid::Builder::from_unix_timestamp_millis(b.now().wall.0 as u64, &bytes).into_uuid()
-}
-
-fn changes(fx: &[Effect]) -> Vec<&Change> {
-    fx.iter()
-        .filter_map(|e| match e {
-            Effect::Persist(c) => Some(c.iter()),
-            _ => None,
-        })
-        .flatten()
-        .collect()
-}
-
-fn replies(fx: &[Effect]) -> Vec<(ReqId, Result<Done, OpError>)> {
-    fx.iter()
-        .filter_map(|e| match e {
-            Effect::Reply { req, result, .. } => Some((*req, result.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The commands of the one tokened `Open`, and its session.
-fn the_open(fx: &[Effect]) -> (SessionId, &[Cmd]) {
-    let opens: Vec<_> = fx
-        .iter()
-        .filter_map(|e| match e {
-            Effect::Tmux {
-                conn: 1,
-                cmds,
-                token: Some(TmuxToken::Open(id)),
-            } => Some((*id, cmds.as_slice())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(opens.len(), 1, "{fx:?}");
-    opens[0]
 }
 
 fn lantern(b: &TypicalBrain) -> PathBuf {
@@ -306,6 +220,7 @@ fn open_replies_after_the_pane_is_bound() {
         pane_id: "%7".into(),
         pane_pid: 4242,
         bound_at: b.now().wall,
+        tracked: true,
     };
     assert_eq!(changes(&fx), [&Change::PaneBinding(binding)]);
     let set = Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()]);
@@ -695,6 +610,7 @@ fn a_closed_connections_open_still_binds() {
         pane_id: "%7".into(),
         pane_pid: 4242,
         bound_at: b.now().wall,
+        tracked: true,
     };
     assert_eq!(changes(&fx), [&Change::PaneBinding(binding)]);
     let set = Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()]);
@@ -874,30 +790,30 @@ fn activity_rows(fx: &[Effect]) -> Vec<String> {
 }
 
 /// An agent that exits at once (a bad launcher, a refused flag) dies before the link's
-/// topology has its pane: the exit still ends the session, trusted on the binding's
-/// generation alone.
+/// topology has its pane: the exit, with no `SessionEnd` before it, still puts the session
+/// to sleep, trusted on the binding's generation alone.
 #[test]
-fn a_pane_that_exits_before_the_topology_has_it_ends_its_session() {
+fn a_pane_that_exits_before_the_topology_has_it_puts_its_session_to_sleep() {
     let (b, mut st) = typical();
     let id = the_open(&send(&b, &mut st, 1, open_op(&lantern(&b)))).0;
     bound(&b, &mut st, id, "%7");
     // No refresh in between: the topology has never listed %7.
     let fx = pane_exited(&b, &mut st, "%7");
-    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
+    assert!(is_asleep(st.session(id).unwrap()));
     assert!(
         changes(&fx)
             .iter()
             .any(|c| matches!(c, Change::DeletePaneBinding(s) if *s == id)),
         "{fx:?}"
     );
-    assert_eq!(activity_rows(&fx), ["lantern ○ ended"]);
+    assert!(activity_rows(&fx).is_empty(), "{fx:?}");
 }
 
 /// The other order: the exit is seen before the open's answer binds the pane. The answer
-/// ends the session instead of binding it, and the reply is the same as when the exit comes
-/// after it.
+/// puts the session to sleep instead of binding it, and the reply is the same as when the
+/// exit comes after it.
 #[test]
-fn a_pane_that_exits_before_the_open_is_answered_ends_its_session() {
+fn a_pane_that_exits_before_the_open_is_answered_puts_its_session_to_sleep() {
     let (b, mut st) = typical();
     let path = lantern(&b);
     let id = the_open(&send(&b, &mut st, 6, open_op(&path))).0;
@@ -906,13 +822,13 @@ fn a_pane_that_exits_before_the_open_is_answered_ends_its_session() {
     assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Live);
 
     let fx = bound(&b, &mut st, id, "%7");
-    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
+    assert!(is_asleep(st.session(id).unwrap()));
     let saved = changes(&fx);
     assert!(
         !saved.iter().any(|c| matches!(c, Change::PaneBinding(_))),
         "{fx:?}"
     );
-    assert_eq!(activity_rows(&fx), ["lantern ○ ended"]);
+    assert!(activity_rows(&fx).is_empty(), "{fx:?}");
     assert!(
         !fx.iter()
             .any(|e| matches!(e, Effect::Tmux { token: None, cmds, .. }
@@ -963,7 +879,7 @@ fn a_pane_exit_for_an_older_generations_binding_is_ignored() {
             token: TmuxToken::Refresh,
             results: vec![
                 lines(&["S $0 moa"]),
-                lines(&["P %7 @1 $0 1 1 0 "]),
+                lines(&["P %7 @1 $0 1 1 0 0 "]),
                 lines(&["C 0 $0 /dev/ttys1"]),
             ],
         },

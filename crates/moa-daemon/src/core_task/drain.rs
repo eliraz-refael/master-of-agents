@@ -55,6 +55,9 @@ pub(super) struct Core {
     pub(super) failures_in_row: u32,
     /// Items a drain left for the next one: what followed a panic.
     pub(super) carry: VecDeque<Item>,
+    /// `StartDrained` panicked once and was sent again: a second panic stops the core, as
+    /// one loading the brain does.
+    pub(super) start_drained_again: bool,
     /// Where unapplied hooks are kept when the core stops.
     pub(super) spool: Option<PathBuf>,
     pub(super) panic_next: Arc<AtomicU32>,
@@ -75,7 +78,8 @@ pub(super) enum Flow {
 /// How one input went through `handle`.
 pub(super) enum Stepped {
     Done,
-    /// `handle` panicked. `loading` is true for `Startup` and `Reload`, which aren't retried.
+    /// `handle` panicked. `loading` is true for `Startup` and `Reload`, which aren't retried,
+    /// and for a `StartDrained` already sent again.
     Panicked {
         loading: bool,
     },
@@ -159,8 +163,13 @@ impl Core {
         // again after the reload rather than lost with it.
         let mut replay: Vec<(HookEnvelope, Box<HookLine>)> = Vec::new();
         while let Some(item) = work.pop_front() {
+            // A `StartDrained` whose step panics is sent again after the reload.
+            let mut start_drained = false;
             let stepped = match item {
-                Item::Input(input) => self.step(input, &mut batch, &mut held),
+                Item::Input(input) => {
+                    start_drained = matches!(input, Input::StartDrained);
+                    self.step(input, &mut batch, &mut held)
+                }
                 // While writes are refused the core would drop the event: keep it for the end
                 // of the refusal instead, and tell a waiting hook there is nothing to say. A
                 // live hook's line goes to the spool; a drained one is still in `.draining`,
@@ -237,6 +246,12 @@ impl Core {
                     while let Some(rest) = work.pop_back() {
                         self.carry.push_front(rest);
                     }
+                    // Sent once per start, and reconcile waits for it (R2): it goes again,
+                    // first, after the reload.
+                    if start_drained {
+                        self.start_drained_again = true;
+                        self.carry.push_front(Item::Input(Input::StartDrained));
+                    }
                     break;
                 }
             }
@@ -285,7 +300,11 @@ impl Core {
         batch: &mut Vec<Change>,
         held: &mut Vec<Held>,
     ) -> Stepped {
-        let loading = matches!(input, Input::Startup(_) | Input::Reload { .. });
+        let loading = match input {
+            Input::Startup(_) | Input::Reload { .. } => true,
+            Input::StartDrained => self.start_drained_again,
+            _ => false,
+        };
         let target = match &input {
             Input::Client { conn, req, .. } => Some((*conn, *req)),
             // A hook that waits for its answer gets one even when it panics.
@@ -294,6 +313,8 @@ impl Core {
         };
         let now = Now::at(self.clock.wall(), self.clock.mono(), self.tz.clone());
         self.stats.inputs.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
+        lock(&self.stats.stepped).push(kind(&input));
         let panic_next = &self.panic_next;
         let state = &mut self.state;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -355,6 +376,7 @@ impl Core {
                 let _ = self.sched.send(SchedCmd::Cancel(Wake::Core(key)));
             }
             Effect::Log(LogLine { level, message }) => match level {
+                LogLevel::Debug => tracing::debug!("{message}"),
                 LogLevel::Info => tracing::info!("{message}"),
                 LogLevel::Warn => tracing::warn!("{message}"),
                 LogLevel::Error => tracing::error!("{message}"),
@@ -508,4 +530,21 @@ fn take_drain(
         }
     }
     work
+}
+
+/// An input's kind, for the tests' record of what was stepped.
+#[cfg(test)]
+fn kind(input: &Input) -> &'static str {
+    match input {
+        Input::Startup(_) => "Startup",
+        Input::Reload { .. } => "Reload",
+        Input::Client { .. } => "Client",
+        Input::ClientGone(_) => "ClientGone",
+        Input::Timer(_) => "Timer",
+        Input::ZoneChanged => "ZoneChanged",
+        Input::ActorFailed { .. } => "ActorFailed",
+        Input::Tmux(_) => "Tmux",
+        Input::Hook { .. } => "Hook",
+        Input::StartDrained => "StartDrained",
+    }
 }

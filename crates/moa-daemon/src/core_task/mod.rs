@@ -34,6 +34,8 @@ use crate::tmux::{self, TmuxCmd, TmuxLink};
 
 mod drain;
 mod recover;
+#[cfg(test)]
+mod tests;
 
 use drain::{Core, UNEXPECTED};
 
@@ -100,6 +102,9 @@ pub struct Stats {
     pub refused_hooks: AtomicU64,
     /// Drains of the hook spool that have run, at start and after.
     pub spool_drains: AtomicU64,
+    /// The kind of every input stepped, in order.
+    #[cfg(test)]
+    pub(crate) stepped: Mutex<Vec<&'static str>>,
 }
 
 /// One reply on a connection.
@@ -199,8 +204,9 @@ pub struct CoreHandle {
 type SharedStore = Arc<Mutex<StoreHandle>>;
 
 impl CoreHandle {
-    /// Opens the store, loads it and runs `Startup`. Returns once Startup's batch has been
-    /// committed, so a fault a test queues next always meets its own commit.
+    /// Opens the store, loads it and runs `Startup`, then the spool's drain and
+    /// `StartDrained`. Returns once those have been committed, so a fault a test queues next
+    /// always meets its own commit.
     pub async fn start(opts: CoreOptions) -> Result<CoreHandle, DaemonError> {
         // Opening can migrate and VACUUM: keep it off the runtime's threads.
         let (db, backups) = (opts.db.clone(), opts.backups.clone());
@@ -328,6 +334,7 @@ impl CoreHandle {
             backups_dir: opts.backups,
             failures_in_row: 0,
             carry: VecDeque::new(),
+            start_drained_again: false,
             spool: spool.clone(),
             panic_next: panic_next.clone(),
             finished_tx,
@@ -373,6 +380,13 @@ impl CoreHandle {
             // Started only now, so the drain at start is never run beside another one.
             tokio::spawn(drainer.run(asks, handle.ended.clone()));
         }
+        // Reconcile waits for this (R2): the drain has run, whether its commit landed or its
+        // `.draining` file was kept for a later drain, so a spooled clean exit is applied
+        // before any tab is looked at. Waited for, so that what a test queues next (a fault,
+        // a panic) meets the input it means.
+        let _ = handle.inbox.send(Item::Input(Input::StartDrained));
+        handle.committed().await;
+        handle.alive()?;
         Ok(handle)
     }
 

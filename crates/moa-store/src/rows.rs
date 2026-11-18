@@ -431,6 +431,7 @@ pub(crate) const PANE_BINDINGS: &[&str] = &[
     "pane_id",
     "pane_pid",
     "bound_at",
+    "tracked",
 ];
 
 pub(crate) fn pane_binding(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<PaneBinding> {
@@ -449,6 +450,7 @@ pub(crate) fn pane_binding(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Pane
         pane_id: txt_or_empty(r, "pane_id"),
         pane_pid: r.int("pane_pid").unwrap_or(0),
         bound_at: ms(r, "bound_at"),
+        tracked: r.int("tracked").is_none_or(|n| n != 0),
     };
     Flags::new(r).finish(notes, || Change::PaneBinding(p.clone()));
     Some(p)
@@ -791,7 +793,8 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
                     p.socket,
                     p.pane_id,
                     p.pane_pid,
-                    p.bound_at.0
+                    p.bound_at.0,
+                    p.tracked
                 ])?;
         }
         Change::SpikePane(p) => {

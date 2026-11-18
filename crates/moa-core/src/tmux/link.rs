@@ -16,7 +16,12 @@ use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::state::State;
 
+/// An op that needs a tab, while moa's terminal isn't linked.
+pub(crate) const NO_TERMINAL: &str = "moa isn't open in a terminal yet; run moa first";
+/// An op that acts on bindings, before this connection's reconcile (R10).
+pub const NOT_READY: &str = "moa is still looking at its tabs; try again in a moment";
 const NOT_TMUX: &str = "that isn't a tmux program";
 const GAVE_UP: &str = "moa lost its terminal server and couldn't reconnect; see the log";
 const CANT_LINK: &str = "moa couldn't talk to its terminal; see moa's log";
@@ -82,11 +87,21 @@ pub struct TmuxState {
     pub topology: Topology,
     /// How many times the server was seen to restart (a new generation).
     pub restarts: u32,
-    /// `tmux.ensure` callers waiting for the link.
+    /// `tmux.ensure` callers waiting for the link: to connect, or, while it is up, for the
+    /// next ping.
     waiters: Vec<(ConnId, ReqId)>,
+    /// The `tmux.ensure` callers the ping that is out answers.
+    pinged: Vec<(ConnId, ReqId)>,
+    /// The number of the ping that is out on this connection, if one is: only its answer
+    /// counts.
+    pinging: Option<u64>,
+    next_ping: u64,
     refresh: Refresh,
     /// The last server generation the link connected to.
     generation: Option<Generation>,
+    /// The socket of the last server the link connected to: the one a `NoServer` means
+    /// (one per daemon). Spike panes are compared with it.
+    socket: Option<String>,
     /// The tmux program the front door found.
     tmux: Option<PathBuf>,
     /// The status options last written to the server, by name. Forgotten whenever the
@@ -100,7 +115,33 @@ pub struct TmuxState {
     /// Panes of this server that exited with no session bound to them, oldest first, at
     /// most [`EXITED_KEPT`]: an `open`'s answer naming one may still be on its way.
     exited: VecDeque<PaneId>,
+    /// The pane queries waiting for their answer, by number, and what each was asked for.
+    queries: BTreeMap<u64, Asked>,
+    next_query: u64,
+    /// The start drain of the hook spool has run (`Input::StartDrained`). Set once per
+    /// daemon start, never reset: reconcile waits for it (R2).
+    pub drained: bool,
+    /// Why the link last went down, whatever happened since.
+    pub last_down: Option<Down>,
+    /// This connection's panes have been reconciled: the bindings can be trusted (R10).
+    reconciled: bool,
+    /// This connection's reconciles that started and never finished (one that panicked):
+    /// kept across a reload, so a reconcile that always panics is tried a bounded number of
+    /// times, not again after every reload.
+    pub(crate) unfinished_reconciles: u32,
+    /// This connection's reconciles were given up on, and the log said so.
+    pub(crate) reconcile_given_up: bool,
 }
+
+/// What a pane query was asked for: who reads its answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Asked {
+    Reconcile,
+}
+
+/// A pane query's answer: each command's lines, or `Err` when any command failed or the
+/// link went before tmux answered.
+pub(crate) type Answer = Result<Vec<Vec<String>>, ()>;
 
 /// How many unbound pane exits are remembered.
 const EXITED_KEPT: usize = 64;
@@ -132,13 +173,24 @@ impl Default for TmuxState {
             topology: Topology::default(),
             restarts: 0,
             waiters: Vec::new(),
+            pinged: Vec::new(),
+            pinging: None,
+            next_ping: 0,
             refresh: Refresh::Idle,
             generation: None,
+            socket: None,
             tmux: None,
             written: Written::default(),
             clock_at: None,
             opens: BTreeMap::new(),
             exited: VecDeque::new(),
+            queries: BTreeMap::new(),
+            next_query: 0,
+            drained: false,
+            last_down: None,
+            reconciled: false,
+            unfinished_reconciles: 0,
+            reconcile_given_up: false,
         }
     }
 }
@@ -185,6 +237,11 @@ fn running(yes: bool) -> Result<Done, OpError> {
     })
 }
 
+/// The no-op a `Ping` sends: tmux prints the fixed text back.
+pub fn ping() -> Cmd {
+    Cmd::new("display-message").args(["-p", "moa:ping"])
+}
+
 /// A four-second notice on one client. `-l` keeps the text literal.
 pub fn notice(client: &ClientName, text: &str) -> Cmd {
     Cmd::new("display-message")
@@ -194,7 +251,29 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
         .arg(format!("moa: {text}"))
 }
 
-fn log(level: LogLevel, message: String) -> Effect {
+/// Sets one of moa's options (`@moa_session`, `@moa_adopted`) on one pane.
+pub(crate) fn set_pane_option(pane: PaneId, name: &str, value: &str) -> Cmd {
+    Cmd::new("set-option").args([
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        name.to_string(),
+        value.to_string(),
+    ])
+}
+
+/// The link's connection, for an op that acts on bindings: up, and this connection's panes
+/// reconciled.
+pub fn ready(state: &State) -> Result<u64, OpError> {
+    let tmux = state.tmux();
+    match tmux.link {
+        Link::Up { conn, .. } if tmux.reconciled => Ok(conn),
+        Link::Up { .. } => Err(OpError(NOT_READY.into())),
+        Link::Down | Link::Connecting => Err(OpError(NO_TERMINAL.into())),
+    }
+}
+
+pub(crate) fn log(level: LogLevel, message: String) -> Effect {
     Effect::Log(LogLine { level, message })
 }
 
@@ -217,7 +296,9 @@ impl TmuxState {
     }
 
     /// `tmux.ensure`: answered now, or once the link knows. Linked is running: the `moa`
-    /// session is the front door's to make, in the user's environment (T1).
+    /// session is the front door's to make, in the user's environment (T1). While linked,
+    /// the answer waits for a ping sent after it: a server killed a moment ago still looks
+    /// linked until the link sees its client drop, and the front door would attach to it.
     pub(crate) fn ensure(
         &mut self,
         conn: ConnId,
@@ -235,11 +316,10 @@ impl TmuxState {
             self.tmux = Some(t);
         }
         match self.link {
-            Link::Up { .. } => vec![Effect::Reply {
-                conn,
-                req,
-                result: running(true),
-            }],
+            Link::Up { .. } => {
+                self.waiters.push((conn, req));
+                self.ping().into_iter().collect()
+            }
             Link::Connecting => {
                 self.waiters.push((conn, req));
                 Vec::new()
@@ -275,18 +355,30 @@ impl TmuxState {
                     TmuxToken::Refresh => self.listed(&results),
                     // `settle` took it.
                     TmuxToken::Open(_) => Vec::new(),
+                    // `answered` took it.
+                    TmuxToken::Query(_) => Vec::new(),
+                    TmuxToken::Ping(n) => self.pinged(n, &results),
                 }
             }
         }
     }
 
     /// After a reload: the link and what it knows stay; its bookkeeping starts over, since a
-    /// failed commit or a panic may have left it half-changed.
+    /// failed commit or a panic may have left it half-changed. A reconcile's changes may be
+    /// among those the reload dropped, so its flag goes too.
     pub(crate) fn reload(&mut self) -> Vec<Effect> {
         self.refresh = Refresh::Idle;
         self.written.reset();
+        self.reconciled = false;
+        // The ping out may have been lost with the handling that sent it: its callers wait
+        // for a new one, and its answer, if it comes, is dropped.
+        self.unping();
         match self.link {
-            Link::Up { .. } => self.refresh(),
+            Link::Up { .. } => {
+                let mut fx = self.refresh();
+                fx.extend(self.ping());
+                fx
+            }
             Link::Connecting => vec![self.connect()],
             Link::Down => Vec::new(),
         }
@@ -328,6 +420,7 @@ impl TmuxState {
     /// `conn` closed: its ensures are forgotten, and its opens go on with nobody to answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
         self.waiters.retain(|(c, _)| *c != conn);
+        self.pinged.retain(|(c, _)| *c != conn);
         for reply in self.opens.values_mut() {
             if matches!(reply, Some((c, _)) if *c == conn) {
                 *reply = None;
@@ -372,6 +465,79 @@ impl TmuxState {
         }
     }
 
+    /// Asks tmux about the server's panes, on this connection: the tokened commands, whose
+    /// answer [`TmuxState::answered`] hands back. `None` while the link isn't up.
+    pub(crate) fn ask(&mut self, asked: Asked, cmds: Vec<Cmd>) -> Option<Effect> {
+        let conn = self.conn()?;
+        self.next_query += 1;
+        let n = self.next_query;
+        self.queries.insert(n, asked);
+        Some(Effect::Tmux {
+            conn,
+            cmds,
+            token: Some(TmuxToken::Query(n)),
+        })
+    }
+
+    /// The pane queries this input answers: the one tmux replied to, or every one, failed,
+    /// when the link goes down or a new connection replaces the one they were asked on. Run
+    /// before [`TmuxState::input`], like [`TmuxState::settle`].
+    pub(crate) fn answered(&mut self, input: &TmuxIn) -> Vec<(Asked, Answer)> {
+        match input {
+            TmuxIn::Replies {
+                conn,
+                token: TmuxToken::Query(n),
+                results,
+            } if self.conn() == Some(*conn) => self
+                .queries
+                .remove(n)
+                .map(|asked| {
+                    let lines = results.iter().cloned().collect::<Result<Vec<_>, _>>();
+                    (asked, lines.map_err(|_| ()))
+                })
+                .into_iter()
+                .collect(),
+            TmuxIn::Down(_) => self.all_failed(),
+            TmuxIn::Connected { conn, .. } if self.conn().is_some_and(|c| c != *conn) => {
+                self.all_failed()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn all_failed(&mut self) -> Vec<(Asked, Answer)> {
+        std::mem::take(&mut self.queries)
+            .into_values()
+            .map(|asked| (asked, Err(())))
+            .collect()
+    }
+
+    /// The pane queries waiting for their answer, by number.
+    pub fn queries(&self) -> impl Iterator<Item = u64> + '_ {
+        self.queries.keys().copied()
+    }
+
+    /// Whether a query for `asked` is waiting for its answer.
+    pub(crate) fn asking(&self, asked: Asked) -> bool {
+        self.queries.values().any(|a| *a == asked)
+    }
+
+    /// Whether this connection's panes have been reconciled.
+    pub fn reconciled(&self) -> bool {
+        self.reconciled
+    }
+
+    /// This connection's panes are reconciled: the bindings can be trusted until the next
+    /// connection or reload.
+    pub(crate) fn set_reconciled(&mut self) {
+        self.reconciled = self.conn().is_some();
+    }
+
+    /// The socket of the last server the link connected to, if it ever connected.
+    pub(crate) fn last_socket(&self) -> Option<&str> {
+        self.socket.as_deref()
+    }
+
     fn all_gone(&mut self) -> Vec<Settled> {
         std::mem::take(&mut self.opens)
             .into_iter()
@@ -394,6 +560,50 @@ impl TmuxState {
         Effect::TmuxConnect {
             tmux: self.tmux.clone(),
         }
+    }
+
+    /// Sends the ping for the ensures that wait, unless one is out (its answer may predate
+    /// them: they wait for the next) or none waits.
+    fn ping(&mut self) -> Option<Effect> {
+        let conn = self.conn()?;
+        if self.pinging.is_some() || self.waiters.is_empty() {
+            return None;
+        }
+        self.next_ping += 1;
+        self.pinging = Some(self.next_ping);
+        self.pinged = std::mem::take(&mut self.waiters);
+        Some(Effect::Tmux {
+            conn,
+            cmds: vec![ping()],
+            token: Some(TmuxToken::Ping(self.next_ping)),
+        })
+    }
+
+    /// No ping is out any more: its callers wait again, ahead of those who came after.
+    fn unping(&mut self) {
+        self.pinging = None;
+        let later = std::mem::take(&mut self.waiters);
+        self.waiters = std::mem::take(&mut self.pinged);
+        self.waiters.extend(later);
+    }
+
+    /// Ping `n` came back. Answered, the server runs; failed, the link drops the client
+    /// and says `Lost`, and its callers wait for what the link finds next.
+    fn pinged(&mut self, n: u64, results: &[Result<Vec<String>, String>]) -> Vec<Effect> {
+        if self.pinging != Some(n) || results.iter().any(Result::is_err) {
+            return Vec::new();
+        }
+        self.pinging = None;
+        let mut fx: Vec<Effect> = std::mem::take(&mut self.pinged)
+            .into_iter()
+            .map(|(conn, req)| Effect::Reply {
+                conn,
+                req,
+                result: running(true),
+            })
+            .collect();
+        fx.extend(self.ping());
+        fx
     }
 
     /// Reads the lists again, at most one in flight and one more after it.
@@ -427,8 +637,13 @@ impl TmuxState {
     ) -> Vec<Effect> {
         let mut fx = Vec::new();
         if self.conn() != Some(conn) {
-            // A new connection: nothing asked on another one will be answered.
+            // A new connection: nothing asked on another one will be answered, and its
+            // panes are yet to be reconciled, with a fresh count of tries.
             self.refresh = Refresh::Idle;
+            self.unping();
+            self.reconciled = false;
+            self.unfinished_reconciles = 0;
+            self.reconcile_given_up = false;
         }
         if self.generation.is_some_and(|g| g != generation) {
             self.restarts += 1;
@@ -439,6 +654,7 @@ impl TmuxState {
             self.exited.clear();
         }
         self.generation = Some(generation);
+        self.socket = Some(socket.clone());
         self.link = Link::Up {
             conn,
             generation,
@@ -453,6 +669,11 @@ impl TmuxState {
     }
 
     fn down(&mut self, d: Down) -> Vec<Effect> {
+        self.last_down = Some(d.clone());
+        self.reconciled = false;
+        // A ping's callers wait for what the link finds, as those who came while it
+        // connected do.
+        self.unping();
         self.link = match d {
             // The link is reconnecting.
             Down::Lost => Link::Connecting,
@@ -553,3 +774,6 @@ impl TmuxState {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests;

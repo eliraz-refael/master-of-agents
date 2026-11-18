@@ -53,9 +53,9 @@ async fn an_idle_brain_wakes_only_for_the_backup() {
             .await
             .expect("barrier is in time");
     }
-    // Startup, the link's answer to Startup's connect (this core has no terminal link) and
-    // the midnight Timer(Backup), not counting the barriers.
-    assert_eq!(stats.inputs.load(Ordering::SeqCst), 3);
+    // Startup, the link's answer to Startup's connect (this core has no terminal link),
+    // StartDrained and the midnight Timer(Backup), not counting the barriers.
+    assert_eq!(stats.inputs.load(Ordering::SeqCst), 4);
     assert_eq!(stats.timer_fires.load(Ordering::SeqCst), 1);
     assert!(backups.join("daily-2026-11-15.db").exists());
     assert!(backups.join("daily-2026-11-16.db").exists());

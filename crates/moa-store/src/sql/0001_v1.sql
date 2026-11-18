@@ -23,7 +23,7 @@ CREATE TABLE conversations (agent_kind TEXT NOT NULL, conversation_id TEXT NOT N
 CREATE INDEX conversations_session ON conversations(session_id, first_seen_at);
 CREATE TABLE pane_bindings (session_id TEXT PRIMARY KEY REFERENCES sessions(id), server_pid INTEGER NOT NULL,
   server_start INTEGER NOT NULL, socket TEXT NOT NULL, pane_id TEXT NOT NULL, pane_pid INTEGER NOT NULL,
-  bound_at INTEGER NOT NULL) STRICT;
+  bound_at INTEGER NOT NULL, tracked INTEGER NOT NULL DEFAULT 1) STRICT;
 CREATE TABLE spike_panes (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pane_id TEXT NOT NULL,
   tmux TEXT, imported_at INTEGER NOT NULL) STRICT;
 CREATE TABLE events (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, session_id TEXT, conversation_id TEXT,

@@ -814,6 +814,7 @@ fn pane_binding(pid: i64) -> PaneBinding {
         pane_id: "%5".into(),
         pane_pid: 99,
         bound_at: UtcMs(1),
+        tracked: true,
     }
 }
 
@@ -836,7 +837,7 @@ fn link_up(st: &mut State) {
         token: TmuxToken::Refresh,
         results: vec![
             lines(&["S $0 moa", "S $1 _moa"]),
-            lines(&["P %5 @1 $0 1 1 0 "]),
+            lines(&["P %5 @1 $0 1 1 0 0 "]),
             lines(&["C 0 $0 /dev/ttys1"]),
         ],
     };
@@ -849,56 +850,179 @@ fn pane_message(word: &str) -> Input {
     ))))
 }
 
+fn unbinds(fx: &[Effect]) -> usize {
+    changes(fx)
+        .iter()
+        .filter(|c| matches!(c, Change::DeletePaneBinding(s) if *s == sid()))
+        .count()
+}
+
+/// A pane exit with no `SessionEnd` before it (a crash, a kill, a reboot): moa can't tell
+/// it from a choice, so the session goes to sleep. Its activity and `activity_at` stay, and
+/// no "ended" row is written.
 #[test]
-fn a_pane_exit_ends_its_bound_session() {
+fn a_pane_exit_with_no_end_is_asleep() {
     for word in ["pane-exited", "pane-died"] {
         let mut st = seeded_with(vec![pane_binding(10)]);
         link_up(&mut st);
         let fx = handle_checked(&mut st, pane_message(word), now());
-        assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
-        assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
-        assert!(
-            changes(&fx)
-                .iter()
-                .any(|c| matches!(c, Change::DeletePaneBinding(_)))
-        );
+        let s = session(&st);
+        assert_eq!(shown(&st).0, DisplayState::Asleep, "{word}");
+        assert_eq!(s.lifecycle, Lifecycle::Ended);
+        assert_eq!(s.asleep_at, Some(now().wall));
+        assert_eq!(s.activity_at, Some(UtcMs(T0)));
+        assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+        assert_eq!(unbinds(&fx), 1, "{fx:?}");
     }
 }
 
-/// A clean exit: the agent's `SessionEnd` comes first and ends the session; the pane's exit
-/// after it still takes the binding away, and writes no second "ended" row.
-#[test]
-fn a_pane_exit_after_the_session_ended_still_unbinds_it() {
-    let mut st = seeded_with(vec![pane_binding(10)]);
-    link_up(&mut st);
-    let fx = feed(&mut st, ends(1, 1000, "prompt_input_exit"));
-    assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
-    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
-    assert_eq!(
-        changes(&fx)
-            .iter()
-            .filter(|c| matches!(c, Change::DeletePaneBinding(s) if *s == sid()))
-            .count(),
-        1,
-        "{fx:?}"
-    );
-    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
-    assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+/// An agent's end is two messages, its `SessionEnd` and its pane's exit, and either can
+/// arrive first. Both orders, on a bound session: the hook first (at +1s), or the exit
+/// first and the hook, sent just before it, after (at +59s: older than the exit, newer than
+/// the session's last activity). Each case is named, with the effects of both messages.
+fn ended_both_ways(reason: &str) -> [(&'static str, State, Vec<Effect>); 2] {
+    let run = |hook_first: bool| {
+        let mut st = seeded_with(vec![pane_binding(10)]);
+        link_up(&mut st);
+        let mut fx = Vec::new();
+        if hook_first {
+            fx.extend(feed(&mut st, ends(1, 1000, reason)));
+            fx.extend(handle_checked(&mut st, pane_message("pane-exited"), now()));
+        } else {
+            fx.extend(handle_checked(&mut st, pane_message("pane-exited"), now()));
+            fx.extend(feed(&mut st, ends(1, 59_000, reason)));
+        }
+        (st, fx)
+    };
+    let (a, fa) = run(true);
+    let (b, fb) = run(false);
+    [("hook first", a, fa), ("exit first", b, fb)]
 }
 
-/// The other order: the pane's exit is seen first and ends the session; the agent's
-/// `SessionEnd`, sent just before it exited, arrives after. It is older than the exit, so it
-/// is history only: no second "ended" row.
 #[test]
-fn a_session_end_after_the_pane_exit_is_history_only() {
-    let mut st = seeded_with(vec![pane_binding(10)]);
-    link_up(&mut st);
-    let fx = handle_checked(&mut st, pane_message("pane-exited"), now());
+fn an_unexpected_exit_is_asleep_whichever_message_comes_first() {
+    for (case, st, fx) in ended_both_ways("other") {
+        let s = session(&st);
+        assert_eq!(shown(&st).0, DisplayState::Asleep, "{case}");
+        assert_eq!(s.lifecycle, Lifecycle::Ended, "{case}");
+        assert!(s.asleep_at.is_some(), "{case}");
+        assert_eq!(unbinds(&fx), 1, "{case}: {fx:?}");
+        assert_eq!(event_kinds(&fx), ["session.ended"], "{case}");
+        assert!(activity_texts(&fx).is_empty(), "{case}: {fx:?}");
+    }
+}
+
+/// A late clean end wins over the asleep its pane's exit left.
+#[test]
+fn a_clean_quit_ends_whichever_message_comes_first() {
+    for (case, st, fx) in ended_both_ways("prompt_input_exit") {
+        let s = session(&st);
+        assert_eq!(shown(&st).0, DisplayState::Ended, "{case}");
+        assert_eq!(s.lifecycle, Lifecycle::Ended, "{case}");
+        assert_eq!(s.asleep_at, None, "{case}");
+        assert_eq!(unbinds(&fx), 1, "{case}: {fx:?}");
+        assert_eq!(event_kinds(&fx), ["session.ended"], "{case}");
+        assert_eq!(activity_texts(&fx), ["Lantern ○ ended"], "{case}");
+    }
+}
+
+/// A clean end ends an asleep session even when it is older than the session's last
+/// activity, and `activity_at` stays the later of the two. Ended then, a second clean end
+/// is history only.
+#[test]
+fn a_clean_end_older_than_the_sleep_still_ends_it() {
+    let mut st = seeded();
+    reseed(&mut st, None, |s| {
+        s.lifecycle = Lifecycle::Ended;
+        s.asleep_at = Some(UtcMs(T0 + 6000));
+        s.activity_at = Some(UtcMs(T0 + 5000));
+    });
+    let fx = feed(&mut st, ends(1, 1000, "prompt_input_exit"));
+    let s = session(&st);
+    assert_eq!((s.lifecycle, s.asleep_at), (Lifecycle::Ended, None));
+    assert_eq!(s.activity_at, Some(UtcMs(T0 + 5000)));
     assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
-    let fx = feed(&mut st, ends(1, 59_000, "prompt_input_exit"));
+    let fx = feed(&mut st, ends(2, 7000, "logout"));
     assert_eq!(event_kinds(&fx), ["session.ended"]);
     assert!(activity_texts(&fx).is_empty(), "{fx:?}");
-    assert_eq!(session(&st).lifecycle, Lifecycle::Ended);
+}
+
+#[test]
+fn a_session_end_after_sleep_keeps_it_asleep() {
+    let mut st = seeded();
+    reseed(&mut st, None, |s| {
+        s.lifecycle = Lifecycle::Ended;
+        s.asleep_at = Some(UtcMs(T0 + 500));
+    });
+    let fx = feed(&mut st, ends(1, 1000, "other"));
+    assert_eq!(shown(&st).0, DisplayState::Asleep);
+    assert_eq!(session(&st).asleep_at, Some(UtcMs(T0 + 500)));
+    assert_eq!(event_kinds(&fx), ["session.ended"]);
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+}
+
+/// Hooks fired before the agent died can land after it went to sleep (all but SessionStart
+/// are async). Older than the sleep, they are history only: the session stays asleep, as it
+/// was left, with no feed row. A start from before the sleep doesn't bring it back either.
+#[test]
+fn late_events_from_before_an_unexpected_end_are_history_only() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    feed(&mut st, ends(2, 5000, "other"));
+    let asleep = session(&st);
+    assert_eq!(asleep.asleep_at, Some(UtcMs(T0 + 5000)));
+    let late = [
+        envelope(3, 3000, ended("Lit.")),
+        envelope(
+            4,
+            3500,
+            HookKind::NeedsAnswer {
+                what: "Which lamp?".into(),
+            },
+        ),
+        started(5, 4000, StartSource::Startup),
+    ];
+    for env in late {
+        let kind = env.kind.event_kind();
+        let fx = feed(&mut st, env);
+        assert_eq!(event_kinds(&fx), [kind]);
+        assert!(activity_texts(&fx).is_empty(), "{kind}: {fx:?}");
+        assert_eq!(session(&st), asleep, "{kind}");
+    }
+    assert_eq!(shown(&st).0, DisplayState::Asleep);
+    let s = session(&st);
+    assert_eq!(s.activity, Activity::Working);
+    assert_eq!(s.activity_why.as_deref(), Some("Fix the lamp"));
+    assert_eq!(s.activity_at, Some(UtcMs(T0 + 1000)));
+}
+
+/// The same after a pane exit: a Stop sent just before it, arriving after, is history only.
+#[test]
+fn a_late_stop_after_a_pane_exit_is_history_only() {
+    let mut st = seeded_with(vec![pane_binding(10)]);
+    link_up(&mut st);
+    handle_checked(&mut st, pane_message("pane-exited"), now());
+    let asleep = session(&st);
+    let fx = feed(&mut st, envelope(1, 59_000, ended("Lit.")));
+    assert_eq!(event_kinds(&fx), ["turn.ended"]);
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+    assert_eq!(session(&st), asleep);
+}
+
+/// `logout` is a clean quit; a reason moa doesn't know is not.
+#[test]
+fn logout_and_unknown_reasons() {
+    let mut st = seeded();
+    let fx = feed(&mut st, ends(1, 1000, "logout"));
+    assert_eq!(shown(&st).0, DisplayState::Ended);
+    assert_eq!(session(&st).asleep_at, None);
+    assert_eq!(activity_texts(&fx), ["Lantern ○ ended"]);
+
+    let mut st = seeded();
+    let fx = feed(&mut st, ends(1, 1000, "bye"));
+    assert_eq!(shown(&st).0, DisplayState::Asleep);
+    assert_eq!(session(&st).asleep_at, Some(UtcMs(T0 + 1000)));
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
 }
 
 /// M8: a session with no folder has no folder in its feed line, and no space before it.
@@ -933,7 +1057,7 @@ fn a_pane_exit_under_refused_writes_changes_nothing_and_is_logged() {
     assert_eq!(persists(&fx), 0);
     let warned = fx.iter().any(|e| {
         matches!(e, Effect::Log(l) if l.level == LogLevel::Warn
-            && l.message == "a pane exit was not saved; reconcile will end its session at the next start")
+            && l.message == "a pane exit was not saved; reconcile puts its session to sleep once moa can save again")
     });
     assert!(warned, "{fx:?}");
 }

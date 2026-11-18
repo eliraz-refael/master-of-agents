@@ -374,6 +374,9 @@ pub struct PaneBinding {
     pub pane_id: String,
     pub pane_pid: i64,
     pub bound_at: UtcMs,
+    /// moa started the agent in this pane, so its hooks reach moa. `false` for an agent moa
+    /// adopted: it shows alive or dead only, and never sleeps on its own.
+    pub tracked: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -382,6 +385,22 @@ pub struct SpikePane {
     pub pane_id: String,
     pub tmux: Option<String>,
     pub imported_at: UtcMs,
+}
+
+/// The agent a pane runs, as its process and start command show it (`Deps::inspect`). Of
+/// the process's environment only `CLAUDE_CONFIG_DIR` (`store_dir`) and the `MOA_*` keys are
+/// kept.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PaneAgent {
+    pub kind: AgentKind,
+    pub store_dir: Option<String>,
+    pub conversation: Option<String>,
+    pub moa_session: Option<String>,
+    pub moa_brain: Option<String>,
+    pub title: Option<String>,
+    pub group: Option<String>,
+    /// When the agent's process started.
+    pub started_at: Option<UtcMs>,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

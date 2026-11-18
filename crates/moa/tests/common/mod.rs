@@ -105,17 +105,51 @@ pub fn moactl(tb: &TempBrain) -> PathBuf {
     path
 }
 
-/// Waits until `term` shows the status line and the daemon reports its terminal link.
+/// Waits until `term` shows the status line and the daemon reports its terminal link. A
+/// failure names the caller's line, and shows the terminal and the daemon's log.
+#[track_caller]
 pub fn came_up(tb: &TempBrain, term: &Terminal) {
-    assert!(term.wait_for_text(STATUS_LINE, SHOWS), "no status line");
+    assert!(
+        term.wait_for_text(STATUS_LINE, SHOWS),
+        "no status line\n{}",
+        what_happened(tb, term)
+    );
     let linked = wait_for(SHOWS, || status_json(tb)["tmux"].is_object().then_some(()));
-    assert!(linked.is_some(), "not linked: {}", status_json(tb));
+    assert!(
+        linked.is_some(),
+        "not linked: {}\n{}",
+        status_json(tb),
+        what_happened(tb, term)
+    );
+}
+
+/// For a failure message: what `term` showed last, what `moa status` says, and the tail of
+/// the daemon's log.
+pub fn what_happened(tb: &TempBrain, term: &Terminal) -> String {
+    let status = Command::new(MOA)
+        .arg("status")
+        .env_clear()
+        .envs(tb.env())
+        .current_dir(tb.root())
+        .timeout(Duration::from_secs(5))
+        .output()
+        .map_or_else(|e| e.to_string(), |o| out(&o) + &err(&o));
+    format!(
+        "the terminal showed: {}\nmoa status: {status}\n{}",
+        term.tail(1500),
+        tb.log_tail(B, 60)
+    )
 }
 
 /// The root's `moa.toml`: brain `default` on `<root>/work`, opening sessions with `acct-a`,
 /// a Claude account whose store is `<root>/.claude-a` and whose launcher is fake-claude, so
 /// the real `claude` is never looked for. Both folders are made.
 pub fn moa_toml_with_fake_account(tb: &TempBrain) {
+    moa_toml_with_launcher(tb, &fake_claude());
+}
+
+/// [`moa_toml_with_fake_account`], with `launcher` as `acct-a`'s launcher.
+pub fn moa_toml_with_launcher(tb: &TempBrain, launcher: &Path) {
     let work = tb.root().join("work");
     let store = tb.root().join(".claude-a");
     for dir in [&work, &store] {
@@ -126,7 +160,7 @@ pub fn moa_toml_with_fake_account(tb: &TempBrain) {
          [accounts.acct-a]\nkind = \"claude\"\nstore = \"{}\"\nlauncher = \"{}\"\n",
         work.display(),
         store.display(),
-        fake_claude().display()
+        launcher.display()
     );
     let paths = tb.paths();
     std::fs::create_dir_all(paths.config_dir()).unwrap();

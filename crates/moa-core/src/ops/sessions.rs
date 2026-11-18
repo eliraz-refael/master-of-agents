@@ -11,7 +11,7 @@ use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine, TmuxToken};
-use crate::hooks::end_exited;
+use crate::hooks::lost_agent;
 use crate::live::{display_state, is_asleep, spike_state};
 use crate::model::{
     Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
@@ -24,14 +24,13 @@ use crate::state::State;
 use crate::time::{days_ago, local_text};
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::{Link, OPENED_FORMAT, OpenEnd, Settled};
+use crate::tmux::link::{Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled, set_pane_option};
 
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
 /// How much of a title names its tab, as the spike cut it.
 const WINDOW_NAME_CUT: usize = 24;
 
-const NO_TERMINAL: &str = "moa isn't open in a terminal yet; run moa first";
 const NOT_FULL: &str = "open needs a full path";
 const NO_ACCOUNT: &str = "no account to open with: set open_account in moa.toml";
 const ONLY_CLAUDE: &str = "only Claude accounts can open sessions for now";
@@ -440,12 +439,13 @@ fn bind(
         return Err(OpError(LOST.into()));
     };
     if state.tmux.take_exited(pane) {
-        // Its agent exited before this answer came: it ends as `pane_gone` would end it,
-        // and no binding is made. The tab did open, so the reply is the one an exit right
-        // after this answer would have got; the session shows as ended. A refused write
-        // leaves it live with no binding at all: reconcile (4b) ends such sessions.
-        if !end_exited(state, tx, id, Vec::new()) {
-            logs.push(warn(format!("the end of session {id} was not saved")));
+        // Its agent exited before this answer came: it goes to sleep as `pane_gone` would
+        // put it, and no binding is made. The tab did open, so the reply is the one an exit
+        // right after this answer would have got; the session shows as asleep, or ended if
+        // its clean quit came first. A refused write leaves it live with no binding at all:
+        // reconcile puts such sessions to sleep.
+        if !lost_agent(state, tx, id, Vec::new()) {
+            logs.push(warn(format!("the sleep of session {id} was not saved")));
         }
         return Ok(opened_reply(s));
     }
@@ -457,6 +457,7 @@ fn bind(
         pane_id: pane.to_string(),
         pane_pid: pid,
         bound_at: tx.wall,
+        tracked: true,
     };
     if let Err(e) = tx.commit(state, vec![Change::PaneBinding(binding)]) {
         logs.push(warn(format!("the tab of session {id} was not saved")));
@@ -464,13 +465,7 @@ fn bind(
     }
     after.push(Effect::Tmux {
         conn,
-        cmds: vec![Cmd::new("set-option").args([
-            "-p".to_string(),
-            "-t".to_string(),
-            pane.to_string(),
-            "@moa_session".to_string(),
-            id.to_string(),
-        ])],
+        cmds: vec![set_pane_option(pane, "@moa_session", &id.to_string())],
         token: None,
     });
     Ok(opened_reply(s))

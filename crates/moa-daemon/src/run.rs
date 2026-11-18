@@ -218,6 +218,7 @@ async fn bring_up(
             home: paths.home().to_path_buf(),
             new_uuid: moa_store::new_uuid,
             session_plugin,
+            inspect: crate::inspect::inspect_pane,
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

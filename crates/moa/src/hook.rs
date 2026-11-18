@@ -194,13 +194,16 @@ fn pick_brain(paths: &Paths, env: &HookEnv, payload: &Value) -> Option<BrainName
 fn send(socket: &Path, line: &[u8]) -> Option<UnixStream> {
     let mut stream = net::connect_within(socket, CONNECT).ok()?;
     stream.set_write_timeout(Some(WRITE)).ok()?;
+    // Set before the write: once the daemon has answered and closed its end, macOS refuses
+    // socket options (EINVAL), though the answer is still there to read. The wait still
+    // starts at the read.
+    stream.set_read_timeout(Some(SESSION_START_WAIT)).ok()?;
     stream.write_all(line).ok()?;
     Some(stream)
 }
 
-/// The `context` of the daemon's reply, when it gives one in time.
+/// The `context` of the daemon's reply, when it gives one in time (`send` set the wait).
 fn read_context(stream: UnixStream) -> Option<String> {
-    stream.set_read_timeout(Some(SESSION_START_WAIT)).ok()?;
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).ok()?;
     let reply: Value = serde_json::from_str(&reply).ok()?;
@@ -271,5 +274,31 @@ mod tests {
     #[test]
     fn a_panic_in_the_hook_is_swallowed() {
         quietly(|| panic!("a test panic"));
+    }
+
+    /// C8: a daemon quick enough to answer and hang up before the hook starts reading still
+    /// has its context printed.
+    #[test]
+    fn an_answer_that_comes_before_the_read_is_kept() {
+        let tb = moa_testkit::TempBrain::new(None);
+        let socket = tb.paths().socket("default").expect("a socket path");
+        std::fs::create_dir_all(socket.parent().expect("a run dir")).expect("the run dir");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let daemon = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("the hook connects");
+            let mut reader = BufReader::new(stream);
+            reader
+                .read_line(&mut String::new())
+                .expect("the hook's line");
+            writeln!(
+                reader.get_mut(),
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"context":"hi"}}}}"#
+            )
+            .expect("the answer");
+        });
+        let stream = send(&socket, b"{}\n").expect("the line is sent");
+        // The daemon has answered and closed its end before the hook reads.
+        daemon.join().expect("the daemon thread");
+        assert_eq!(read_context(stream).as_deref(), Some("hi"));
     }
 }

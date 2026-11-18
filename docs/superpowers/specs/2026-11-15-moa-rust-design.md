@@ -368,7 +368,7 @@ scope file live inside the repo; both move out at the switch-over.
 | `suggestions` | id, text, status (open/accepted/rejected/later), actions (JSON list of `{verb, args}`), result, created_at, resolved_at | `suggestions.action` (moactl arg strings) re-parsed and re-validated; invalid ones kept as text and flagged |
 | `sessions` | **id (UUIDv7, moa's)**, agent_kind, account, cwd, start_cwd, project_id, title, title_locked, group_path, lifecycle (live/ended), activity (working/idle/needs_permission/needs_answer/failed), activity_at, activity_why, last_prompt, last_turn_end_at, seen_at, asleep_at, archived_at, location (here/elsewhere), resume_failed, created_at, last_seen_at | `sessions`: new id per row; `state` split: working/idle/waiting → live + activity (waiting → needs_permission); ended → ended; archived → `archived_at`; elsewhere → `location`; `grp` → `group_path` |
 | `conversations` | agent_kind, conversation_id, session_id, store_dir, reason (start/clear/fork/resume/import), first_seen_at, last_seen_at, transcript_path, transcript_present, transcript_checked_at | v1 only; one `import` row per spike session from its `session_id` + account's store |
-| `pane_bindings` | session_id, server_pid, server_start, socket, pane_id, pane_pid, bound_at | `sessions.pane` + `sessions.tmux`, kept only if verified against the live server at adoption |
+| `pane_bindings` | session_id, server_pid, server_start, socket, pane_id, pane_pid, bound_at, tracked (0 for an adopted agent) | `sessions.pane` + `sessions.tmux`, kept only if verified against the live server at adoption |
 | `events` | id, at, session_id, conversation_id, account, cwd, kind, text, detail (JSON) | `events`; kinds mapped (start → session.started, prompt → turn.started, stop → turn.ended, waiting → needs.permission, end → session.ended, ui → ui) |
 | `activity` | id, at, who (brain/session/you), text, ref_kind, ref_id | `activity` copied; new rows are written by the Core, not SQL triggers |
 | `groups` | path, collapsed, created_at | `groups` |
@@ -540,10 +540,13 @@ status line and moa read this one model (lesson 44).
 
 **Rotation and lifecycle.** SessionEnd with reason `clear` followed by SessionStart with a new
 id and the same `MOA_SESSION` (or, for spike-launched sessions with no `MOA_SESSION`, the same
-pane binding) adds a `conversations` row (reason `clear`); the session stays live. Other
-SessionEnds set `ended` unless the pane is still running the agent. A pane exit with no
-SessionEnd sets ended too (lesson 3). moa's own ACP session carries `MOA_SESSION=moa` and is
-never listed as a worker (lesson 31).
+pane binding) adds a `conversations` row (reason `clear`); the session stays live. A clean
+quit (SessionEnd reason `prompt_input_exit` or `logout`) sets `ended`, whichever of it and the
+pane's exit arrives first. An unexpected end (any other reason, or a pane exit with no
+SessionEnd) puts the session to sleep (asleep, U7): moa can't tell a crash, a kill or a reboot
+from a choice, and both resume. Liveness still comes from pane events, never from a hook's
+last event (lesson 3). moa's own ACP session carries `MOA_SESSION=moa` and is never listed as
+a worker (lesson 31).
 
 **Multi-account resume [C11]** (R5 §8.3):
 1. Resume uses the launcher of the store the current conversation was **recorded** in, never

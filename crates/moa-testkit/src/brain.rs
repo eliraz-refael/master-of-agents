@@ -9,7 +9,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use moa_agents::claude::find_transcript;
 use moa_core::config::{BrainConfig, BrainName, Config};
-use moa_core::effect::{handle_checked, reply_of};
+use moa_core::effect::{Down, TmuxIn, handle_checked, reply_of};
 use moa_core::op::{Done, Op, OpError};
 use moa_core::state::Deps;
 use moa_core::{Input, Now, State, UtcMs};
@@ -105,6 +105,23 @@ impl TypicalBrain {
         let _ = handle_checked(
             &mut state,
             Input::Startup(Box::new(self.snapshot())),
+            self.now(),
+        );
+        state
+    }
+}
+
+impl TypicalBrain {
+    /// [`TypicalBrain::state`] as a daemon shows it once it has looked at its tabs and
+    /// found none: after the start drain, with no terminal server (reconcile, R5). The
+    /// fixture's live sessions go to sleep, except the one somewhere else and the two whose
+    /// spike tab is on the spike's own server.
+    pub fn reconciled_state(&self) -> State {
+        let mut state = self.state();
+        let _ = handle_checked(&mut state, Input::StartDrained, self.now());
+        let _ = handle_checked(
+            &mut state,
+            Input::Tmux(TmuxIn::Down(Down::NoServer)),
             self.now(),
         );
         state

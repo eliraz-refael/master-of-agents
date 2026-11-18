@@ -1,9 +1,12 @@
 use super::*;
 use crate::change::Change;
 use crate::config::{BrainName, Config};
-use crate::effect::RefuseWrites;
+use crate::effect::{RefuseWrites, TmuxIn, check_order};
 use crate::model::Group;
+use crate::op::{ConnId, Done, ReqId};
 use crate::state::{LoadNote, Snapshot};
+use crate::tmux::cmd::Cmd;
+use crate::tmux::ids::{ClientName, Generation};
 use jiff::tz::TimeZone;
 use std::time::Duration;
 
@@ -149,4 +152,95 @@ fn a_write_to_a_skipped_rows_key_is_refused() {
         assert!(tx.changes.is_empty());
     }
     assert_eq!(s.groups().count(), 0);
+}
+
+fn linked() -> State {
+    let mut s = state_with_unknown(vec![]);
+    handle(
+        &mut s,
+        Input::Tmux(TmuxIn::Connected {
+            conn: 1,
+            generation: Generation {
+                pid: 10,
+                start: 1000,
+            },
+            version: "3.5a".into(),
+            ctl: ClientName("client-9".into()),
+            socket: "moa".into(),
+        }),
+        now(),
+    );
+    s
+}
+
+fn kill() -> Cmd {
+    Cmd::new("kill-pane").args(["-t", "%3"])
+}
+
+fn sends(fx: &[Effect]) -> Vec<&Effect> {
+    fx.iter()
+        .filter(|e| matches!(e, Effect::Tmux { .. }))
+        .collect()
+}
+
+fn done() -> Done {
+    Done {
+        text: String::new(),
+        data: serde_json::Value::Null,
+    }
+}
+
+/// R15: a plain op's tmux commands go out after its `Persist` and `Publish`, untokened on
+/// the link's connection, and only for a change that was saved.
+#[test]
+fn tx_cmds_follow_the_commit() {
+    let mut s = linked();
+    let mut tx = Tx::new(&now());
+    tx.commit(&mut s, vec![group("A")]).unwrap();
+    tx.tmux(kill());
+    let fx = finish_op(&mut s, tx, ConnId(1), ReqId(1), Ok(done()));
+    check_order(&fx).unwrap();
+    match fx.as_slice() {
+        [
+            Effect::Persist(_),
+            Effect::Publish(_),
+            Effect::Tmux {
+                conn: 1,
+                cmds,
+                token: None,
+            },
+            Effect::Reply { .. },
+        ] => assert_eq!(cmds, &[kill()]),
+        other => panic!("{other:?}"),
+    }
+
+    // Writes refused: nothing was saved, so nothing goes out.
+    s.refuse_writes = Some(RefuseWrites {
+        until: UtcMs(2_000_000),
+        reason: "disk full".into(),
+    });
+    let mut tx = Tx::new(&now());
+    assert!(tx.commit(&mut s, vec![group("B")]).is_err());
+    tx.cmds.push(kill());
+    assert!(sends(&post_commit(&mut s, tx)).is_empty());
+    s.refuse_writes = None;
+
+    // An op that returns `Err` says nothing it queued.
+    let mut tx = Tx::new(&now());
+    tx.cmds.push(kill());
+    tx.events.push(CoreEvent::Ui { text: "x".into() });
+    let fx = finish_op(&mut s, tx, ConnId(1), ReqId(2), Err(OpError("no".into())));
+    assert!(
+        matches!(fx.as_slice(), [Effect::Reply { result: Err(_), .. }]),
+        "{fx:?}"
+    );
+
+    // With the link down they are dropped; the commit still stands.
+    let mut s = state_with_unknown(vec![]);
+    let mut tx = Tx::new(&now());
+    tx.commit(&mut s, vec![group("C")]).unwrap();
+    tx.tmux(kill());
+    let fx = post_commit(&mut s, tx);
+    assert!(sends(&fx).is_empty(), "{fx:?}");
+    assert!(matches!(fx[0], Effect::Persist(_)), "{fx:?}");
 }

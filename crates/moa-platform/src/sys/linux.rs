@@ -148,6 +148,88 @@ fn names_in(buf: &[u8], name: &OsStr) -> bool {
     false
 }
 
+/// A pid `/proc` may be asked about: zero and pids past `i32` are never read as a process.
+fn proc_pid(pid: u32) -> Option<u32> {
+    super::signalable(pid).map(|_| pid)
+}
+
+/// Appends the whole of `path` to `buf`, and answers how many bytes it added.
+fn read_into(path: &str, buf: &mut Vec<u8>) -> Option<usize> {
+    use std::io::Read as _;
+    let before = buf.len();
+    std::fs::File::open(path).ok()?.read_to_end(buf).ok()?;
+    Some(buf.len() - before)
+}
+
+/// `pid`'s argv and kept environment from `/proc/<pid>/cmdline` and `/proc/<pid>/environ`,
+/// both read into `buf`. Another user's `environ` can't be read, which reads as `None`, like
+/// a gone process.
+pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::ProcArgs> {
+    let pid = proc_pid(pid)?;
+    buf.clear();
+    let argv = read_into(&format!("/proc/{pid}/cmdline"), buf)?;
+    read_into(&format!("/proc/{pid}/environ"), buf)?;
+    let (cmdline, environ) = buf.split_at(argv);
+    Some(crate::proc::parse_proc_files(cmdline, environ))
+}
+
+/// `pid`'s direct children from each of its threads' `children` file. A kernel built
+/// without those files gets a scan of every process's `stat` for the parent pid instead.
+pub(crate) fn child_pids(pid: u32) -> Vec<u32> {
+    let Some(pid) = proc_pid(pid) else {
+        return Vec::new();
+    };
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Vec::new();
+    };
+    let mut kids = Vec::new();
+    let mut listed = false;
+    for task in tasks.flatten() {
+        if let Ok(text) = std::fs::read_to_string(task.path().join("children")) {
+            listed = true;
+            kids.extend(crate::proc::pid_list(&text));
+        }
+    }
+    if !listed {
+        kids = scan_children(pid);
+    }
+    kids.sort_unstable();
+    kids.dedup();
+    kids
+}
+
+/// Every process whose `/proc/<pid>/stat` names `parent` as its parent.
+fn scan_children(parent: u32) -> Vec<u32> {
+    let Ok(all) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    all.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|kid| {
+            std::fs::read_to_string(format!("/proc/{kid}/stat"))
+                .ok()
+                .and_then(|s| crate::proc::stat_ppid(&s))
+                == Some(parent)
+        })
+        .collect()
+}
+
+/// When `pid` started: field 22 of `/proc/<pid>/stat`, in clock ticks since boot, plus the
+/// boot time (`btime` in `/proc/stat`).
+pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
+    let pid = proc_pid(pid)?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ticks = crate::proc::stat_start_ticks(&stat)?;
+    let boot = crate::proc::boot_time(&std::fs::read_to_string("/proc/stat").ok()?)?;
+    // SAFETY: `sysconf` takes one integer and touches no memory.
+    let hz = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+        .ok()
+        .filter(|&hz| hz > 0)?;
+    let since_boot =
+        Duration::from_secs(ticks / hz) + Duration::from_nanos((ticks % hz) * 1_000_000_000 / hz);
+    std::time::UNIX_EPOCH.checked_add(Duration::from_secs(boot) + since_boot)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

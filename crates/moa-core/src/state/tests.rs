@@ -474,6 +474,7 @@ fn row_names_the_sql_table_for_every_variant() {
         pane_id: "%1".into(),
         pane_pid: 2,
         bound_at: UtcMs(1),
+        tracked: true,
     };
     let spike = SpikePane {
         session_id: id,

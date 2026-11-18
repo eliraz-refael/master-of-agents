@@ -57,6 +57,18 @@ pub fn fake_claude() -> PathBuf {
         .expect("fake-claude isn't built: run the tests with --workspace")
 }
 
+/// `fake-claude` under the name `claude`: the symlink `<dir>/bin/claude`, so process reads
+/// recognise it as Claude by its argv (R9). Returns the symlink's path.
+pub fn fake_claude_named_claude(dir: &Path) -> PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("make the bin folder");
+    let link = bin.join("claude");
+    // A second call replaces the link; a link that can't be replaced fails just below.
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(fake_claude(), &link).expect("link fake-claude as claude");
+    link
+}
+
 /// Write `steps` as `<dir>/.fake-claude.jsonl`, the script fake-claude reads from its cwd.
 pub fn write_script(dir: &Path, steps: &[FakeStep]) {
     let mut text = String::new();

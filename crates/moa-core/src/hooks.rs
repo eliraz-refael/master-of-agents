@@ -1,10 +1,10 @@
 //! Hook events in the core: which session one is for, whether it is new, what it changes and
 //! what is written down. `core.rs` dispatches here. A session starting or ending brings its
-//! lifecycle and conversation rotation; a pane that exits ends its session.
+//! lifecycle and conversation rotation. A clean quit ends a session; any other end, a pane
+//! that exits among them, puts it to sleep (R14).
 
 use serde_json::json;
 
-use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine};
@@ -19,6 +19,7 @@ use crate::peers::peers_note;
 use crate::state::{State, Table};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::PaneId;
+use crate::{Now, UtcMs};
 
 /// What [`apply`] did with an event.
 #[allow(clippy::enum_variant_names)]
@@ -29,8 +30,8 @@ pub(crate) enum Applied {
     Dropped(&'static str),
     /// Already applied once.
     Duplicate,
-    /// Older than the session's last activity, or an end that leaves the session live:
-    /// written to history, nothing else.
+    /// Older than the session's last activity, an end that leaves the session live, or one
+    /// for a session already ended: written to history, nothing else.
     HistoryOnly,
     Applied,
 }
@@ -149,15 +150,37 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         changes.push(row);
     }
 
-    // An older event keeps its history row and changes nothing else. So does an end that
-    // is only the conversation changing (`/clear`, a resume).
-    let older = before.activity_at.is_some_and(|t| env.at < t);
-    let rotating = matches!(&env.kind, HookKind::SessionEnded { reason } if reason == "clear" || reason == "resume");
-    if older || rotating {
+    // An older event keeps its history row and changes nothing else. Older is than the
+    // session's last activity, or than its going to sleep: a sleep keeps `activity_at` (R5),
+    // and a hook the agent sent before it died can still arrive after. An end goes by its
+    // kind first (R14): one that is only the conversation changing (`/clear`, a resume)
+    // changes nothing either, a clean quit ends a session that is asleep however old it is,
+    // and any other end of a session already ended is history only.
+    let older = before
+        .activity_at
+        .max(before.asleep_at)
+        .is_some_and(|t| env.at < t);
+    let ended = before.lifecycle == Lifecycle::Ended;
+    let after = match &env.kind {
+        HookKind::SessionEnded { reason } => match end_kind(reason) {
+            EndKind::Clean if ended && before.asleep_at.is_some() => {
+                Some(woken_to_end(&before, env))
+            }
+            EndKind::Rotating => None,
+            _ if older || ended => None,
+            EndKind::Clean => Some(transition(&before, env)),
+            // Heard from, as every applied event is; the rest stays as it was left (R5).
+            EndKind::Unexpected => Some(Session {
+                last_seen_at: before.last_seen_at.max(Some(env.at)),
+                ..asleep(&before, env.at)
+            }),
+        },
+        _ if older => None,
+        _ => Some(transition(&before, env)),
+    };
+    let Some(after) = after else {
         return commit(state, tx, key, changes, Applied::HistoryOnly);
-    }
-
-    let after = transition(&before, env);
+    };
     if let Some(project) = after
         .project_id
         .and_then(|p| state.projects.get(&p))
@@ -263,10 +286,53 @@ fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource
     }
 }
 
-/// A pane exited: the session bound to it on this server (T11) loses the binding, and ends
-/// if still live (after a clean exit its `SessionEnd` has already ended it). Nothing else
-/// checks that a process is alive. A pane nobody is bound to is remembered, since an
-/// `open`'s answer naming it may still be on its way. The caller sends what `tx` holds.
+/// What a `SessionEnd`'s reason says about the agent (R14).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EndKind {
+    /// Only the conversation changing (`/clear`, a resume): the agent goes on.
+    Rotating,
+    /// The user quit the agent: the session ends.
+    Clean,
+    /// Anything else, a crash, a kill or a reboot among them: moa can't tell it from a
+    /// choice, so the session goes to sleep, to be resumed.
+    Unexpected,
+}
+
+pub(crate) fn end_kind(reason: &str) -> EndKind {
+    match reason {
+        "clear" | "resume" => EndKind::Rotating,
+        "prompt_input_exit" | "logout" => EndKind::Clean,
+        _ => EndKind::Unexpected,
+    }
+}
+
+/// The session put to sleep at `at`: ended, with the time it went to sleep. Its activity,
+/// why and `activity_at` stay (R5), so it shows as it was left.
+pub(crate) fn asleep(s: &Session, at: UtcMs) -> Session {
+    Session {
+        lifecycle: Lifecycle::Ended,
+        asleep_at: Some(at),
+        ..s.clone()
+    }
+}
+
+/// An asleep session that a clean quit ends: the quit can arrive after the pane's exit put
+/// it to sleep, and older than that, and it still wins (R14). The times only move forward.
+fn woken_to_end(before: &Session, env: &HookEnvelope) -> Session {
+    Session {
+        lifecycle: Lifecycle::Ended,
+        asleep_at: None,
+        activity_at: before.activity_at.max(Some(env.at)),
+        last_seen_at: before.last_seen_at.max(Some(env.at)),
+        ..before.clone()
+    }
+}
+
+/// A pane exited: the session bound to it on this server (T11) loses the binding, and goes
+/// to sleep if still live (after a clean exit its `SessionEnd` has already ended it, and one
+/// that comes later still ends it). Nothing else checks that a process is alive. A pane
+/// nobody is bound to is remembered, since an `open`'s answer naming it may still be on its
+/// way. The caller sends what `tx` holds.
 ///
 /// `false` when the write was refused: the exit is reported once, so nothing retries it.
 pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
@@ -274,35 +340,20 @@ pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
         state.tmux.exited_unbound(pane);
         return true;
     };
-    end_exited(state, tx, id, vec![Change::DeletePaneBinding(id)])
+    lost_agent(state, tx, id, vec![Change::DeletePaneBinding(id)])
 }
 
-/// `also`, and when the session is still live, its end: the session and the activity row.
-/// Its `activity_at` moves to now, so the `SessionEnd` the agent sent on its way out, which
-/// often arrives after the exit, is older: history only, with no second "ended" row.
+/// `also`, and when the session is still live, its agent gone with no clean quit: the
+/// session goes to sleep, with no activity row (R14). The `SessionEnd` the agent sent on its
+/// way out, which often arrives after the exit, then decides: a clean quit ends the session,
+/// anything else is history only.
 /// `false` when the write was refused. Then nothing changes: a bound pane stays bound, and
 /// a session whose pane exited before its `open` was answered stays live with no binding.
-/// Reconcile (4b) ends both.
-pub(crate) fn end_exited(state: &mut State, tx: &mut Tx, id: SessionId, also: Vec<Change>) -> bool {
+/// Reconcile puts both to sleep.
+pub(crate) fn lost_agent(state: &mut State, tx: &mut Tx, id: SessionId, also: Vec<Change>) -> bool {
     let mut changes = also;
     if let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) {
-        let mut after = session.clone();
-        after.lifecycle = Lifecycle::Ended;
-        after.activity_at = Some(tx.wall);
-        if let Some(text) = activity_text(
-            &after,
-            &HookKind::SessionEnded {
-                reason: String::new(),
-            },
-        ) {
-            changes.push(tx.activity_row(
-                state,
-                ActivityWho::Session,
-                text,
-                Some(("session", id.to_string())),
-            ));
-        }
-        changes.insert(0, Change::Session(after));
+        changes.insert(0, Change::Session(asleep(session, tx.wall)));
     }
     changes.is_empty() || tx.commit(state, changes).is_ok()
 }
@@ -383,13 +434,14 @@ fn transition(before: &Session, env: &HookEnvelope) -> Session {
 
 /// The activity feed's line for an event, as the spike's `a_event` trigger wrote it:
 /// `<folder> <what>`, the folder being the last part of the session's cwd; just `<what>`
-/// when it has none.
+/// when it has none. An end that leaves the session asleep has none (R14).
 fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
     let what = match kind {
         HookKind::TurnStarted { prompt } => {
             let line: String = prompt.replace('\n', " ").chars().take(90).collect();
             format!("› {line}")
         }
+        HookKind::SessionEnded { .. } if session.asleep_at.is_some() => return None,
         HookKind::SessionEnded { .. } => "○ ended".to_string(),
         HookKind::TurnEnded { .. } => "✓ turn done".to_string(),
         HookKind::TurnFailed { .. } => "✗ failed".to_string(),
