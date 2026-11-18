@@ -278,7 +278,7 @@ fn today_lists_tasks_sessions_and_suggestions() {
     assert_eq!(lines[2].text(), "✓ Kite: Proofread chapter 1  [done]");
     assert_eq!(lines[2].spans[0].tone, Tone::Dim);
 
-    // Live sessions that aren't working, seen in the last day, the newest first.
+    // Live sessions waiting on you, seen in the last day, the newest first.
     let waiting = at(&lines, "WAITING ON YOU");
     assert_eq!(lines[waiting - 1].text(), "");
     let order = [
@@ -287,7 +287,6 @@ fn today_lists_tasks_sessions_and_suggestions() {
         "設計レビュー",
         "Dev server",
         "Migrate DB",
-        "Import the whole",
         "Hand started",
     ];
     for (i, name) in order.iter().enumerate() {
@@ -301,11 +300,6 @@ fn today_lists_tasks_sessions_and_suggestions() {
     let migrate = line_with(&lines, "Migrate DB");
     assert_eq!(migrate.text(), "✗ Migrate DB [acct-b]  5h");
     assert_eq!(migrate.spans[0].tone, Tone::Text);
-    // Quiet is dim outside the status panel.
-    assert_eq!(
-        line_with(&lines, "Import the whole").spans[0].tone,
-        Tone::Dim
-    );
 
     let working = at(&lines, "WORKING");
     let scaffold = &lines[working + 1];
@@ -331,13 +325,43 @@ fn today_lists_tasks_sessions_and_suggestions() {
 }
 
 #[test]
+fn a_quiet_session_is_still_working_in_today() {
+    // Quiet is a working turn gone silent: the agent isn't waiting on you.
+    let (mut data, ctx) = lantern();
+    let lines = today(&data, &ctx, 80);
+    let (waiting, working) = (at(&lines, "WAITING ON YOU"), at(&lines, "WORKING"));
+    let quiet = at(&lines, "Import the whole");
+    assert!(working < quiet, "{}", debug_lines(&lines));
+    assert!(quiet < at(&lines, "SUGGESTIONS"));
+    assert!(
+        !texts(&lines[waiting..working])
+            .iter()
+            .any(|l| l.contains("Import the whole"))
+    );
+    // Newest seen first, after the working session; dim outside the status panel.
+    assert_eq!(quiet, working + 2);
+    assert_eq!(
+        lines[quiet].text(),
+        "◌ Import the whole archive of old notes into the new format [acct-a]  6h"
+    );
+    assert_eq!(lines[quiet].spans[0].tone, Tone::Dim);
+
+    // A quiet session alone still shows the section.
+    data.sessions.remove(&session(2));
+    let lines = today(&data, &ctx, 80);
+    assert_eq!(at(&lines, "Import the whole"), at(&lines, "WORKING") + 1);
+}
+
+#[test]
 fn an_empty_today_says_so_in_each_section() {
     let (mut data, ctx) = lantern();
     data.tasks.clear();
     data.suggestions.clear();
     // Seen over a day ago: not waiting on you.
     let day_ago = moa_core::UtcMs(ctx.now.0 - 25 * 3_600_000);
-    data.sessions.retain(|id, _| *id != session(2));
+    // Nothing working or quiet, so no WORKING section.
+    data.sessions
+        .retain(|id, _| ![session(2), session(7)].contains(id));
     for row in data.sessions.values_mut() {
         row.session.last_seen_at = Some(day_ago);
     }

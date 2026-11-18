@@ -44,11 +44,12 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
         lines.push(line);
     }
 
-    // Live sessions that aren't working, seen in the last day, the newest first.
+    // Live sessions waiting on you, seen in the last day, the newest first. A quiet one is a
+    // working turn gone silent, not waiting on you: it stays with the working ones.
     let since = UtcMs(ctx.now.0.saturating_sub(DAY_MS));
     let need = newest_first(data, |r| {
         live(r.display_state)
-            && r.display_state != DisplayState::Working
+            && !working(r.display_state)
             && r.session.last_seen_at.is_some_and(|seen| seen >= since)
     });
     lines.push(Line::new(Vec::new()));
@@ -57,21 +58,26 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
         lines.push(dim("  (nothing)"));
     }
     for row in need {
-        let tone = match row.display_state {
-            DisplayState::Waiting => Tone::Warn,
-            // Quiet is cyan only in the status panel (V16).
-            DisplayState::Quiet => Tone::Dim,
-            _ => Tone::Text,
+        let tone = if row.display_state == DisplayState::Waiting {
+            Tone::Warn
+        } else {
+            Tone::Text
         };
         lines.push(session_line(row, ctx, width, tone));
     }
 
-    let working = newest_first(data, |r| r.display_state == DisplayState::Working);
-    if !working.is_empty() {
+    let busy = newest_first(data, |r| working(r.display_state));
+    if !busy.is_empty() {
         lines.push(Line::new(Vec::new()));
         lines.push(head("WORKING"));
-        for row in working {
-            lines.push(session_line(row, ctx, width, Tone::Ok));
+        for row in busy {
+            // Quiet is cyan only in the status panel (V16).
+            let tone = if row.display_state == DisplayState::Quiet {
+                Tone::Dim
+            } else {
+                Tone::Ok
+            };
+            lines.push(session_line(row, ctx, width, tone));
         }
     }
 
@@ -109,6 +115,11 @@ fn task_line(data: &Data, t: &Task, width: usize) -> Line {
     );
     let tone = if done { Tone::Dim } else { Tone::Text };
     Line::plain(cut(&text, width), tone).with_item(Item::Task(t.id))
+}
+
+/// Mid-turn: working, or working but silent past the quiet limit (the core's `Quiet`).
+fn working(state: DisplayState) -> bool {
+    matches!(state, DisplayState::Working | DisplayState::Quiet)
 }
 
 /// The sessions `keep` keeps, the most recently seen first.
