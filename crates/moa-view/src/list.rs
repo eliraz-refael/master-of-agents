@@ -58,7 +58,7 @@ impl ListState {
     /// first line. Then `top` is kept within the lines, following or not.
     pub fn follow(&mut self, lines: &[Line], body: usize) {
         let body = body.max(1);
-        if let (true, Some(sel)) = (self.tracking, self.sel) {
+        if let (true, Some(sel)) = (self.tracking, self.current(lines)) {
             let selectable = selectable(lines);
             let mut start = selectable
                 .iter()
@@ -81,7 +81,7 @@ impl ListState {
             if self.top > start {
                 self.top = start.max(fits);
             }
-            if end >= self.top + body {
+            if end >= self.top.saturating_add(body) {
                 self.top = fits;
             }
             self.top = self.top.min(sel);
@@ -93,7 +93,7 @@ impl ListState {
     pub fn step(&mut self, lines: &[Line], down: bool) {
         self.tracking = true;
         let selectable = selectable(lines);
-        let Some(sel) = self.sel else {
+        let Some(sel) = self.current(lines) else {
             self.start_or_scroll(lines, &selectable, 1, down);
             return;
         };
@@ -129,12 +129,12 @@ impl ListState {
         self.tracking = true;
         let body = body.max(1);
         let selectable = selectable(lines);
-        let Some(sel) = self.sel else {
+        let Some(sel) = self.current(lines) else {
             self.start_or_scroll(lines, &selectable, body, down);
             return;
         };
         self.sel = if down {
-            let to = sel + body;
+            let to = sel.saturating_add(body);
             selectable
                 .iter()
                 .copied()
@@ -153,7 +153,7 @@ impl ListState {
     pub fn wheel(&mut self, lines: &[Line], body: usize, down: bool) {
         let body = body.max(1);
         self.top = if down {
-            (self.top + 3).min(max_top(lines, body))
+            self.top.saturating_add(3).min(max_top(lines, body))
         } else {
             self.top.min(max_top(lines, body)).saturating_sub(3)
         };
@@ -161,11 +161,12 @@ impl ListState {
             .into_iter()
             .filter(|&i| self.top <= i && i < self.top + body)
             .collect();
-        if let Some(sel) = self.sel
-            && !shown.contains(&sel)
-            && let Some(near) = nearest(&shown, sel)
-        {
-            self.sel = Some(near);
+        if !self.current(lines).is_some_and(|sel| shown.contains(&sel)) {
+            // The nearest visible item; a stale selection with none in view is dropped.
+            self.sel = self
+                .sel
+                .and_then(|sel| nearest(&shown, sel))
+                .or(self.current(lines));
         }
         self.tracking = false;
     }
@@ -176,7 +177,7 @@ impl ListState {
         if y >= body {
             return None;
         }
-        let mut i = self.top + y;
+        let mut i = self.top.checked_add(y)?;
         if i >= lines.len() {
             return None;
         }
@@ -196,15 +197,26 @@ impl ListState {
         }
     }
 
-    /// A key with no selection: it selects the first item, or with none, moves `top` by `by`
-    /// lines, no further than the last line (`follow` keeps it within the body).
+    /// The selection, when it is a selectable line of `lines`. After the rows change and
+    /// before `reselect`, `sel` can be stale: past the end, or on a line that isn't an item.
+    fn current(&self, lines: &[Line]) -> Option<usize> {
+        self.sel
+            .filter(|&i| lines.get(i).is_some_and(Line::selectable))
+    }
+
+    /// A key with no selection (or a stale one): it selects the first item, or with none,
+    /// moves `top` by `by` lines, no further than the last line (`follow` keeps it within the
+    /// body).
     fn start_or_scroll(&mut self, lines: &[Line], selectable: &[usize], by: usize, down: bool) {
-        if let Some(&first) = selectable.first() {
-            self.sel = Some(first);
-        } else if down {
-            self.top = (self.top + by).min(lines.len().saturating_sub(1));
-        } else {
-            self.top = self.top.saturating_sub(by);
+        self.sel = selectable.first().copied();
+        if self.sel.is_some() {
+            return;
         }
+        let last = lines.len().saturating_sub(1);
+        self.top = if down {
+            self.top.saturating_add(by).min(last)
+        } else {
+            self.top.min(last).saturating_sub(by)
+        };
     }
 }

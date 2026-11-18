@@ -254,6 +254,66 @@ fn a_list_with_nothing_to_select_scrolls_with_keys() {
     assert_eq!(s.sel, None);
 }
 
+/// After the rows shrink and before `reselect`, the selection and the scroll can point past
+/// the end; no method may read past the rows.
+#[test]
+fn a_stale_selection_never_reads_past_the_rows() {
+    let lists: Vec<Vec<Line>> = vec![
+        vec![],
+        vec![h()],
+        vec![i(0)],
+        vec![h(), i(0), m()],
+        vec![i(0), h(), i(1)],
+    ];
+    let stale = [3, 5, 1000, usize::MAX];
+    for lines in &lists {
+        let first = lines.iter().position(Line::selectable);
+        for &at in &stale {
+            for top in [0, at] {
+                let s = ListState {
+                    sel: Some(at),
+                    top,
+                    tracking: true,
+                };
+                let what = format!("{} lines, sel {at}, top {top}", lines.len());
+
+                let mut t = s.clone();
+                t.follow(lines, 3);
+                assert!(t.top <= lines.len().saturating_sub(3), "follow: {what}");
+
+                assert_eq!(s.selected(lines), None, "selected: {what}");
+                for y in 0..4 {
+                    let hit = s.row_at(lines, y, 3);
+                    assert!(hit.is_none_or(|r| lines[r].selectable()), "row_at: {what}");
+                }
+
+                let keys: [&dyn Fn(&mut ListState); 6] = [
+                    &|t| t.step(lines, true),
+                    &|t| t.step(lines, false),
+                    &|t| t.page(lines, 3, true),
+                    &|t| t.page(lines, 3, false),
+                    &|t| t.ends(lines, true),
+                    &|t| t.wheel(lines, 3, true),
+                ];
+                for key in keys {
+                    let mut t = s.clone();
+                    key(&mut t);
+                    t.follow(lines, 3);
+                    assert!(t.top <= lines.len().saturating_sub(3), "a key: {what}");
+                    if let Some(sel) = t.sel {
+                        assert!(sel < lines.len(), "a key keeps it stale: {what}");
+                    }
+                }
+
+                // A key from a stale selection starts from the first item.
+                let mut t = s.clone();
+                t.step(lines, true);
+                assert_eq!(t.sel, first, "step: {what}");
+            }
+        }
+    }
+}
+
 #[test]
 fn debug_lines_shows_tone_bold_text_chip_and_kind() {
     let lines = vec![
