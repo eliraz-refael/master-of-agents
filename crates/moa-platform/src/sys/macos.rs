@@ -184,3 +184,109 @@ pub fn notify_post_name(name: &str) -> io::Result<()> {
         Err(io::Error::other(format!("notify_post failed: {status}")))
     }
 }
+
+/// A pid libproc and `sysctl` may be asked about: zero (the kernel) and pids past `i32` are
+/// never read as a process.
+fn proc_pid(pid: u32) -> Option<libc::pid_t> {
+    super::signalable(pid)
+}
+
+/// `KERN_ARGMAX`: the most bytes a process's arguments and environment can take, so the
+/// size of a buffer `KERN_PROCARGS2` always fits in. 1 MiB if the kernel won't say.
+fn arg_max() -> usize {
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    let mut max: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: a two-entry name, and `max` is a live `c_int` whose size is passed in `size`;
+    // `sysctl` writes at most that many bytes. No new value is set.
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            (&raw mut max).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    match usize::try_from(max) {
+        Ok(max) if ret == 0 && max > 0 => max,
+        _ => 1 << 20,
+    }
+}
+
+/// `pid`'s argv and kept environment through `sysctl([CTL_KERN, KERN_PROCARGS2, pid])`,
+/// read into `buf` (sized from `KERN_ARGMAX` on first use). The kernel refuses another
+/// user's process, which reads as `None`, like a gone one.
+pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::ProcArgs> {
+    let pid = proc_pid(pid)?;
+    if buf.is_empty() {
+        buf.resize(arg_max(), 0);
+    }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = buf.len();
+    // SAFETY: a three-entry name, and `buf` is live and writable for `size` bytes, which
+    // `sysctl` never writes past. No new value is set.
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 {
+        return None;
+    }
+    crate::proc::parse_procargs2(&buf[..size.min(buf.len())])
+}
+
+/// `pid`'s direct children through `proc_listchildpids`, which answers a **count of pids**,
+/// not bytes. A buffer that comes back full may have cut the list short, so it grows once.
+pub(crate) fn child_pids(pid: u32) -> Vec<u32> {
+    const ROOM: usize = 64;
+    let Some(pid) = proc_pid(pid) else {
+        return Vec::new();
+    };
+    let mut pids = list_children(pid, ROOM);
+    if pids.len() == ROOM {
+        pids = list_children(pid, ROOM * 16);
+    }
+    pids.into_iter()
+        .filter_map(|p| u32::try_from(p).ok().filter(|&p| p > 0))
+        .collect()
+}
+
+/// Up to `room` of `pid`'s children; empty when libproc fails (the process is gone).
+fn list_children(pid: libc::pid_t, room: usize) -> Vec<libc::pid_t> {
+    let mut pids: Vec<libc::pid_t> = vec![0; room];
+    let bytes =
+        libc::c_int::try_from(room * std::mem::size_of::<libc::pid_t>()).expect("a small buffer");
+    // SAFETY: `pids` is live and writable for `bytes` bytes, and libproc writes at most
+    // that many.
+    let n = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate(usize::try_from(n).unwrap_or(0).min(room));
+    pids
+}
+
+/// When `pid` started: `proc_pidinfo(PROC_PIDTBSDINFO)`'s `pbi_start_tvsec` and
+/// `pbi_start_tvusec`.
+pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
+    let pid = proc_pid(pid)?;
+    // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays; all-zero is
+    // valid.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is live and writable for `size` bytes, and libproc writes at most that
+    // many.
+    let n =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    if n != size {
+        return None;
+    }
+    let at = std::time::Duration::from_secs(info.pbi_start_tvsec)
+        + std::time::Duration::from_micros(info.pbi_start_tvusec);
+    std::time::UNIX_EPOCH.checked_add(at)
+}

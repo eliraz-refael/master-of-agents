@@ -1,11 +1,12 @@
-//! moa's platform layer: paths, the build id, the counting spawner, the wall-clock alarm
-//! and the time-zone watch.
+//! moa's platform layer: paths, the build id, the counting spawner, the wall-clock alarm,
+//! the time-zone watch and process reads.
 
 pub mod alarm;
 pub mod build_id;
 pub mod fs;
 pub mod net;
 pub mod paths;
+pub mod proc;
 pub mod service;
 pub mod spawn;
 pub mod spool;
