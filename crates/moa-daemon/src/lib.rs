@@ -4,6 +4,7 @@
 
 pub mod clock;
 pub mod core_task;
+pub mod inspect;
 pub mod logging;
 mod run;
 pub mod scheduler;
