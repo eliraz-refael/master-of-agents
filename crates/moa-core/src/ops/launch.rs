@@ -999,9 +999,6 @@ pub(crate) fn term(
         req,
         result: Err(OpError(text.into())),
     };
-    if !matches!(state.tmux().link, Link::Up { .. }) {
-        return vec![reply(NO_TERMINAL)];
-    }
     if !path.is_absolute() {
         return vec![reply(TERM_NOT_FULL)];
     }
@@ -1027,6 +1024,7 @@ pub(crate) fn term(
         name,
         path: folder,
     };
+    // Asked only while the link is up.
     match state.tmux.ask(asked, vec![cmd]) {
         Some(query) => vec![query],
         None => vec![reply(NO_TERMINAL)],

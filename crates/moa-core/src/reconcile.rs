@@ -56,26 +56,22 @@ pub(crate) fn ask_if_due(state: &mut State, now: &Now) -> Option<Effect> {
     state.tmux.ask(Asked::Reconcile, list_panes())
 }
 
-/// What the pane queries this input answered lead to. `replied` is whether the input was
+/// What the answers to reconcile's pane queries lead to. `replied` is whether the input was
 /// tmux's reply: otherwise the link went before it came, and the next connection asks again.
 pub(crate) fn answered(
     state: &mut State,
     now: &Now,
-    answers: Vec<(Asked, Answer)>,
+    answers: Vec<Answer>,
     replied: bool,
 ) -> Vec<Effect> {
     let mut fx = Vec::new();
-    for (asked, answer) in answers {
-        match (asked, answer) {
-            (Asked::Reconcile, Ok(lists)) if lists.len() == 2 => {
+    for answer in answers {
+        match answer {
+            Ok(lists) if lists.len() == 2 => {
                 fx.extend(run(state, now, &parse_panes(&lists[0], &lists[1])));
             }
-            (Asked::Reconcile, _) if replied => {
-                fx.push(log(LogLevel::Warn, "listing the tabs failed".to_string()))
-            }
-            (Asked::Reconcile, _) => {}
-            // `handle` gives these to `ops::launch::resumed` and `ops::launch::term_opened`.
-            (Asked::Resume(_) | Asked::Term { .. }, _) => {}
+            _ if replied => fx.push(log(LogLevel::Warn, "listing the tabs failed".to_string())),
+            _ => {}
         }
     }
     fx

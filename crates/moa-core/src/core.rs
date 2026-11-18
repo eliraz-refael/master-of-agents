@@ -128,24 +128,24 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.extend(state.tmux.input(t));
             // Reconcile reads its listing, a resume its own and a terminal its new tab, once
             // the link is as the input left it.
-            let (mine, answers): (Vec<_>, Vec<_>) = answers
-                .into_iter()
-                .partition(|(asked, _)| matches!(asked, Asked::Resume(_) | Asked::Term { .. }));
-            let mut more = reconcile::answered(state, now, answers, replied);
-            for (asked, answer) in mine {
+            let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
+            for (asked, answer) in answers {
                 match asked {
-                    Asked::Resume(ask) => {
-                        let panes = answer.and_then(|lists| match lists.as_slice() {
-                            [info, start] => Ok(parse_panes(info, start)),
-                            _ => Err(()),
-                        });
-                        more.extend(ops::launch::resumed(state, now, ask, panes));
-                    }
-                    Asked::Term { reply, name, path } => {
-                        more.extend(ops::launch::term_opened(state, reply, &name, &path, answer));
-                    }
-                    Asked::Reconcile => {}
+                    Asked::Reconcile => reconciles.push(answer),
+                    Asked::Resume(ask) => resumes.push((ask, answer)),
+                    Asked::Term { reply, name, path } => terms.push((reply, name, path, answer)),
                 }
+            }
+            let mut more = reconcile::answered(state, now, reconciles, replied);
+            for (ask, answer) in resumes {
+                let panes = answer.and_then(|lists| match lists.as_slice() {
+                    [info, start] => Ok(parse_panes(info, start)),
+                    _ => Err(()),
+                });
+                more.extend(ops::launch::resumed(state, now, ask, panes));
+            }
+            for (reply, name, path, answer) in terms {
+                more.extend(ops::launch::term_opened(state, reply, &name, &path, answer));
             }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));

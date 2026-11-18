@@ -13,8 +13,8 @@ use moa_core::effect::{Effect, Input, Publish, RefuseWrites, TmuxIn, TmuxToken, 
 use moa_core::hook::{HookEnvelope, HookKind};
 use moa_core::live::is_asleep;
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent,
-    PaneBinding, Session, SessionId,
+    Activity, AgentKind, Conversation, ConversationReason, EventKind, Lifecycle, Location,
+    PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{Deps, LoadNote, State};
@@ -444,7 +444,6 @@ fn close_of_an_adopted_session_whose_agent_runs_kills_its_tab() {
 fn the_agents_end_after_close_is_history_only() {
     let mut r = World::new().reconciled();
     r.close(1);
-    let before = r.s().clone();
 
     let at = r.b.now().wall.0 + 1000;
     let fx = handle_checked(
@@ -470,6 +469,12 @@ fn the_agents_end_after_close_is_history_only() {
         },
         r.b.now(),
     );
+    // Saved as history, and nothing more.
+    assert!(
+        changes(&fx).iter().any(|c| matches!(c, Change::Event(e)
+            if e.kind.0 == EventKind::SESSION_ENDED && e.session_id == Some(s_id()))),
+        "{fx:?}"
+    );
     assert!(
         !changes(&fx).iter().any(|c| matches!(c, Change::Session(_))),
         "{fx:?}"
@@ -483,7 +488,6 @@ fn the_agents_end_after_close_is_history_only() {
     let after = r.s();
     assert_eq!(after.lifecycle, Lifecycle::Ended);
     assert!(after.asleep_at.is_none());
-    assert_eq!(after.lifecycle, before.lifecycle);
 }
 
 // --- term ---

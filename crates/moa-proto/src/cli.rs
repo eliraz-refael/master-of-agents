@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
-use moa_core::op::{Action, Answer, NoParams, Op, TaskAdd, TaskSet};
+use moa_core::op::{Answer, NoParams, Op, TaskAdd, TaskSet};
 
 /// What `moactl` parses: a global `--json` and one verb.
 #[derive(Parser, Debug)]
@@ -520,7 +520,7 @@ impl Verb {
 }
 
 /// Parse a suggestion's action with the `moactl` grammar. No cwd: paths must be full.
-pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Action, String> {
+pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Op, String> {
     if !ACTION_VERBS.contains(&a.verb.as_str()) {
         let mut verbs = ACTION_VERBS.to_vec();
         verbs.sort_unstable();
@@ -547,9 +547,5 @@ pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Action, String>
         cwd: None,
         home: home.to_path_buf(),
     };
-    parsed
-        .verb
-        .to_op(&ctx)
-        .map(Action::Op)
-        .map_err(|e| e.to_string())
+    parsed.verb.to_op(&ctx).map_err(|e| e.to_string())
 }

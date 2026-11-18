@@ -15,7 +15,7 @@ use crate::change::Change;
 use crate::config::{AccountName, BrainName, Config, caller_store};
 use crate::effect::RefuseWrites;
 use crate::model::*;
-use crate::op::Action;
+use crate::op::Op;
 use crate::publish::{ACTIVITY_SHOWN, Model};
 use crate::tmux::link::{Link, TmuxState};
 
@@ -141,7 +141,7 @@ fn conv_key(c: &Conversation) -> ConvKey {
 }
 
 /// The moactl grammar for one suggestion action: its op, or why it doesn't parse.
-pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Action, String>;
+pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Op, String>;
 
 /// What the core needs from outside to run suggestions, compare paths and open sessions.
 /// The daemon supplies the real ones; the default has no grammar (so no suggestion can carry

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use moa_core::model::SuggestionAction;
-use moa_core::op::{Action, Answer, NoParams, Op, TaskAdd, TaskSet};
+use moa_core::op::{Answer, NoParams, Op, TaskAdd, TaskSet};
 use moa_proto::cli::{Moactl, VERB_NAMES, VerbCtx, parse_action};
 
 fn ctx() -> VerbCtx {
@@ -334,7 +334,7 @@ fn usage_errors_are_the_spikes() {
     );
 }
 
-fn act(verb: &str, args: &[&str]) -> Result<Action, String> {
+fn act(verb: &str, args: &[&str]) -> Result<Op, String> {
     parse_action(
         &SuggestionAction {
             verb: verb.into(),
@@ -348,7 +348,7 @@ fn act(verb: &str, args: &[&str]) -> Result<Action, String> {
 fn actions_parse_with_the_same_grammar() {
     assert!(matches!(
         act("task", &["set", "1", "--status", "done"]),
-        Ok(Action::Op(Op::TaskSet(_)))
+        Ok(Op::TaskSet(_))
     ));
     assert!(
         act("task", &["1", "--status", "done"])
@@ -360,9 +360,9 @@ fn actions_parse_with_the_same_grammar() {
     assert_eq!(act("open", &["~/x"]).unwrap_err(), wl);
     assert_eq!(
         act("close", &["3f9a1c52"]),
-        Ok(Action::Op(Op::SessionClose {
+        Ok(Op::SessionClose {
             q: "3f9a1c52".into()
-        }))
+        })
     );
     assert_eq!(
         act("project", &["X", "--add", "rel"]).unwrap_err(),
@@ -384,10 +384,7 @@ fn every_verb_and_subcommand_is_reserved() {
 #[test]
 fn close_and_term_parse() {
     assert_eq!(op(&["close", "x"]), Op::SessionClose { q: "x".into() });
-    assert_eq!(
-        act("close", &["x"]),
-        Ok(Action::Op(Op::SessionClose { q: "x".into() }))
-    );
+    assert_eq!(act("close", &["x"]), Ok(Op::SessionClose { q: "x".into() }));
     assert_eq!(
         op(&["term"]),
         Op::TermOpen {

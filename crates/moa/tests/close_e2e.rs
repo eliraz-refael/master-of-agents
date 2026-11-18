@@ -89,8 +89,9 @@ fn close_and_term_end_to_end() {
         (!panes(&tb).iter().any(|p| p[0] == pane)).then_some(())
     });
     assert!(gone.is_some(), "{pane} is still there: {:?}", panes(&tb));
-    // The kill's own end (an exit, `SessionEnd(other)`) didn't put it to sleep.
-    shows(&tb, &id, "ended");
+    // That the kill's own end (an exit, `SessionEnd(other)`) doesn't put it to sleep is the
+    // core's `the_agents_end_after_close_is_history_only`: nothing here sees when moa has
+    // heard of it.
 
     let work = tb.root().join("work");
     let o = run_exe(
