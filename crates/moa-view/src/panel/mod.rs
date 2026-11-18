@@ -3,7 +3,6 @@
 //! program or touches a file.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
 
 use moa_core::UtcMs;
 use moa_core::op::{Done, Op};
@@ -16,9 +15,13 @@ use crate::geometry::{Geometry, Rect, Size, geometry};
 use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
-use crate::text::{clean, tilde};
-use crate::views::tree;
-use crate::views::{self, ViewUi};
+use crate::text::clean;
+use crate::views::{self, ViewUi, tree};
+
+mod ask;
+mod tree_keys;
+
+use ask::Ask;
 
 /// What a panel asks its loop to do.
 // One is built per key, click or reply, so boxing the op buys nothing.
@@ -99,36 +102,6 @@ pub fn debug_screen(screen: &Screen) -> String {
     out
 }
 
-/// What a prompt's answer is for.
-#[derive(Clone, PartialEq, Eq, Debug)]
-enum Ask {
-    /// `n`: the folder, then the title, then the account.
-    Folder {
-        group: Option<String>,
-        account: String,
-    },
-    Title {
-        group: Option<String>,
-        path: PathBuf,
-        account: String,
-    },
-    Account {
-        group: Option<String>,
-        path: PathBuf,
-        title: Option<String>,
-    },
-    NewGroup,
-    Move {
-        q: String,
-    },
-    RenameSession {
-        q: String,
-    },
-    RenameGroup {
-        old: String,
-    },
-}
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Prompt {
     editor: Editor,
@@ -165,51 +138,6 @@ const CANCELLED: &str = "cancelled";
 /// The body width a view is built for: at least 10 cells (V2).
 fn build_width(g: &Geometry) -> u16 {
     g.body.w.max(10)
-}
-
-/// The folder a typed answer names, checked as `n` checks it (V7): it starts with `~` or `/`,
-/// and it is a folder. Which brain it belongs to is the core's to judge.
-fn folder(typed: &str, ctx: &Ctx) -> Result<PathBuf, String> {
-    let missing = || format!("no folder {typed}");
-    let path = if typed.starts_with('/') {
-        PathBuf::from(typed)
-    } else if typed == "~" {
-        ctx.home.clone()
-    } else if let Some(rest) = typed.strip_prefix("~/") {
-        ctx.home.join(rest)
-    } else if typed.starts_with('~') {
-        // Another user's home: not one moa can name.
-        return Err(missing());
-    } else {
-        return Err("a folder starts with ~ or /".to_string());
-    };
-    if (ctx.is_dir)(&path) {
-        Ok(path)
-    } else {
-        Err(missing())
-    }
-}
-
-/// The account prompt's label: the brain's accounts to choose from.
-fn account_label(data: &Data) -> String {
-    let accounts = data.brain.as_ref().map(|b| b.accounts.join(" / "));
-    match accounts {
-        Some(list) if !list.is_empty() => format!("account ({list}):"),
-        _ => "account:".to_string(),
-    }
-}
-
-/// The account a new session starts under: `want` when the brain lists it, else the brain's
-/// own default, else its first account.
-fn default_account(data: &Data, want: Option<&str>) -> String {
-    let Some(brain) = &data.brain else {
-        return want.unwrap_or_default().to_string();
-    };
-    want.filter(|w| brain.accounts.iter().any(|a| a == w))
-        .or(brain.open_account.as_deref())
-        .or(brain.accounts.first().map(String::as_str))
-        .unwrap_or_default()
-        .to_string()
 }
 
 impl Panel {
@@ -506,23 +434,6 @@ impl Panel {
         Vec::new()
     }
 
-    /// The group the selection is in: a node's own path when it is a real group, or a
-    /// session's group. A node made from a project's name, or `Loose`, is the top level: a new
-    /// session there must not make it a permanent group (V5).
-    fn selected_group(&self, data: &Data) -> Option<String> {
-        match self.selected()? {
-            Item::Group(path) if tree::is_group(data, path) => Some(path.clone()),
-            Item::Session(id) => data
-                .sessions
-                .get(id)?
-                .session
-                .group_path
-                .as_deref()
-                .and_then(tree::tidy),
-            _ => None,
-        }
-    }
-
     /// Does `action` to the selected item. `None` when it doesn't apply to it, so the key's
     /// next meaning is tried.
     fn act(&mut self, action: Action, data: &Data, ctx: &Ctx, body: usize) -> Option<Vec<Out>> {
@@ -555,46 +466,14 @@ impl Panel {
                 };
             }
             Action::NewSession if self.view == View::Tree => {
-                return Some(self.new_session(data, ctx));
+                return self.tree_key(action, data, ctx);
             }
             Action::ChooseAccount => {
                 let row = session?;
                 return Some(self.choose_account(row, data, ctx));
             }
-            Action::NewGroup => {
-                let prefill = self
-                    .selected_group(data)
-                    .map_or(String::new(), |g| format!("{g}/"));
-                return Some(self.ask("new group:".to_string(), prefill, Ask::NewGroup));
-            }
-            Action::Move => {
-                let row = session?;
-                let label = format!("move {} to group:", tree::name(row));
-                let prefill = self.selected_group(data).unwrap_or_default();
-                let q = row.session.id.to_string();
-                return Some(self.ask(label, prefill, Ask::Move { q }));
-            }
-            Action::Rename => {
-                if let Some(row) = session {
-                    let prefill = row.session.title.clone().unwrap_or_default();
-                    let q = row.session.id.to_string();
-                    return Some(self.ask(
-                        "rename session:".to_string(),
-                        prefill,
-                        Ask::RenameSession { q },
-                    ));
-                }
-                let Item::Group(old) = selected? else {
-                    return None;
-                };
-                let leaf = old.rsplit('/').next().unwrap_or_default().to_string();
-                return Some(self.ask("rename group:".to_string(), leaf, Ask::RenameGroup { old }));
-            }
-            Action::DeleteGroup => {
-                let Item::Group(path) = selected? else {
-                    return None;
-                };
-                return Some(vec![Out::Send(Op::GroupRm { path })]);
+            Action::NewGroup | Action::Move | Action::Rename | Action::DeleteGroup => {
+                return self.tree_key(action, data, ctx);
             }
             Action::Archive => {
                 let q = session?.session.id.to_string();
@@ -625,137 +504,5 @@ impl Panel {
         }
         // A move through the list: nothing to send.
         Some(Vec::new())
-    }
-
-    /// The tree's `n` (V7): asks the folder, prefilled from the newest session in the
-    /// selected group or below it, else the selected session's, else the brain's first
-    /// folder, else `~/`.
-    fn new_session(&mut self, data: &Data, ctx: &Ctx) -> Vec<Out> {
-        let group = self.selected_group(data);
-        let from = match self.selected() {
-            Some(Item::Group(path)) => tree::listed(data)
-                .filter(|r| tree::is_under(&tree::node_of(r), path))
-                .max_by_key(|r| (r.session.last_seen_at, r.session.id)),
-            Some(Item::Session(id)) => data.sessions.get(id),
-            _ => None,
-        };
-        // Field by field: a session without a folder still lends its account.
-        let brain = data.brain.as_ref();
-        let folder = from
-            .and_then(|r| r.session.cwd.clone())
-            .or_else(|| brain.and_then(|b| b.folders.first().cloned()));
-        let account = from
-            .and_then(|r| r.session.account.clone())
-            .or_else(|| brain.and_then(|b| b.open_account.clone()));
-        let folder = folder.map_or("~/".to_string(), |f| tilde(&f, &ctx.home));
-        let label = format!(
-            "new session in {} · folder:",
-            group.as_deref().unwrap_or("top level")
-        );
-        let account = default_account(data, account.as_deref());
-        self.ask(label, folder, Ask::Folder { group, account })
-    }
-
-    /// `N` on a session row (V21): a new session in its project's folder, asking the account
-    /// first.
-    fn choose_account(&mut self, row: &SessionRow, data: &Data, ctx: &Ctx) -> Vec<Out> {
-        let Some(project) = row.session.project_id.and_then(|id| data.projects.get(&id)) else {
-            return self.say("this row has no project");
-        };
-        let Some(path) = &project.path else {
-            return self.say(&format!("no folder for {}", project.name));
-        };
-        let path = match folder(&tilde(path, &ctx.home), ctx) {
-            Ok(path) => path,
-            Err(e) => return self.say(&e),
-        };
-        let account = default_account(data, None);
-        let ask = Ask::Account {
-            group: None,
-            path,
-            title: None,
-        };
-        self.ask(account_label(data), account, ask)
-    }
-
-    /// A prompt's answer, trimmed: the next prompt, an op, or why neither.
-    fn answered(&mut self, ask: Ask, text: String, data: &Data, ctx: &Ctx) -> Vec<Out> {
-        let send = |op| vec![Out::Send(op)];
-        match ask {
-            Ask::Folder { group, account } => {
-                if text.is_empty() {
-                    return self.say(CANCELLED);
-                }
-                match folder(&text, ctx) {
-                    Ok(path) => self.ask(
-                        "title:".to_string(),
-                        String::new(),
-                        Ask::Title {
-                            group,
-                            path,
-                            account,
-                        },
-                    ),
-                    Err(e) => self.say(&e),
-                }
-            }
-            Ask::Title {
-                group,
-                path,
-                account,
-            } => {
-                let title = (!text.is_empty()).then_some(text);
-                let ask = Ask::Account { group, path, title };
-                self.ask(account_label(data), account, ask)
-            }
-            Ask::Account { group, path, title } => {
-                if text.is_empty() {
-                    return self.say(CANCELLED);
-                }
-                send(Op::SessionOpen {
-                    path,
-                    account: Some(text),
-                    title,
-                    group,
-                    prompt: None,
-                    bg: false,
-                })
-            }
-            Ask::NewGroup => match tree::tidy(&text) {
-                Some(path) => send(Op::GroupAdd { path }),
-                None => self.say(CANCELLED),
-            },
-            Ask::Move { q } => match tree::tidy(&text) {
-                Some(group) => send(Op::SessionSet {
-                    q,
-                    title: None,
-                    group: Some(group),
-                }),
-                None => self.say(CANCELLED),
-            },
-            Ask::RenameSession { q } => {
-                if text.is_empty() {
-                    return self.say(CANCELLED);
-                }
-                send(Op::SessionSet {
-                    q,
-                    title: Some(text),
-                    group: None,
-                })
-            }
-            Ask::RenameGroup { old } => {
-                let (parent, leaf) = old.rsplit_once('/').unwrap_or(("", &old));
-                // Tidied as the core will, so `leaf/` is no rename either.
-                let Some(text) = tree::tidy(&text).filter(|t| t != leaf) else {
-                    return self.say(CANCELLED);
-                };
-                let new = if parent.is_empty() {
-                    text
-                } else {
-                    format!("{parent}/{text}")
-                };
-                send(Op::GroupRename { old, new })
-            }
-        }
     }
 }
