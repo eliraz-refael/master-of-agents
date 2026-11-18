@@ -38,3 +38,6 @@ toml = "1.2.1"
 schemars = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+unicode-width = "0.2"
+unicode-segmentation = "1"
+textwrap = { version = "0.16", default-features = false, features = ["unicode-width"] }
