@@ -243,10 +243,7 @@ fn verb_names_match_clap_and_the_enum() {
 
 #[test]
 fn later_verbs_say_not_yet() {
-    assert_eq!(
-        err(&["resume", "x"]),
-        "moactl resume isn't in this build yet"
-    );
+    assert_eq!(err(&["close", "x"]), "moactl close isn't in this build yet");
     assert_eq!(err(&["peers"]), "moactl peers isn't in this build yet");
     assert_eq!(
         err(&["layout", "list"]),
@@ -290,6 +287,24 @@ fn open_parses_to_session_open() {
             group: None,
             prompt: None,
             bg: false,
+        }
+    );
+}
+
+#[test]
+fn resume_parses_to_session_resume() {
+    assert_eq!(
+        op(&["resume", "lantern"]),
+        Op::SessionResume {
+            q: "lantern".into(),
+            bg: false
+        }
+    );
+    assert_eq!(
+        op(&["resume", "a1b2", "--bg"]),
+        Op::SessionResume {
+            q: "a1b2".into(),
+            bg: true
         }
     );
 }

@@ -188,9 +188,10 @@ fn a_closed_focus_waiter_is_dropped() {
     assert_eq!(to, [(ConnId(1), ReqId(1))]);
 }
 
-/// A session that isn't running and has no tab opening would be resumed, which comes later.
+/// A session that isn't running and has no tab opening is resumed (R12): its checks pass,
+/// and the tabs are looked at first (`resume.rs` follows it to its tab).
 #[test]
-fn focus_of_a_session_with_no_tab_says_resume_isnt_here_yet() {
+fn focus_of_a_session_with_no_tab_resumes_it() {
     let (b, mut st) = reconciled();
     let id = open_bg(&b, &mut st, 1);
     feed(
@@ -204,11 +205,15 @@ fn focus_of_a_session_with_no_tab_says_resume_isnt_here_yet() {
     );
     let fx = focus_from(&b, &mut st, 1, 2, &id.to_string());
     assert!(selects(&fx).is_empty(), "{fx:?}");
-    assert_eq!(
-        replies(&fx),
-        [(
-            ReqId(2),
-            Err(OpError("resume isn't in this build yet".into()))
-        )]
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert!(
+        fx.iter().any(|e| matches!(
+            e,
+            Effect::Tmux {
+                token: Some(TmuxToken::Query(_)),
+                ..
+            }
+        )),
+        "{fx:?}"
     );
 }

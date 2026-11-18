@@ -35,7 +35,7 @@ pub(crate) fn ask_if_due(state: &mut State, now: &Now) -> Option<Effect> {
     let tmux = state.tmux();
     if !tmux.drained
         || tmux.reconciled()
-        || tmux.asking(Asked::Reconcile)
+        || tmux.asking(&Asked::Reconcile)
         || !matches!(tmux.link, Link::Up { .. })
         || state.writes_refused(now.wall)
     {
@@ -74,6 +74,8 @@ pub(crate) fn answered(
                 fx.push(log(LogLevel::Warn, "listing the tabs failed".to_string()))
             }
             (Asked::Reconcile, _) => {}
+            // `handle` gives these to `ops::launch::resumed`.
+            (Asked::Resume(_), _) => {}
         }
     }
     fx

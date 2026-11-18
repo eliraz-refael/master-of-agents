@@ -656,6 +656,7 @@ version = "0.1.0"
 dependencies = [
  "insta",
  "jiff",
+ "moa-agents",
  "moa-platform",
  "moa-proto",
  "moa-testkit",

@@ -53,9 +53,10 @@ pub(crate) fn run(
         }
         Op::SuggestionLs(_) => suggestions::ls(state),
         // `handle` answers these with the link; they are never run as ops.
-        Op::TmuxEnsure { .. } | Op::SessionOpen { .. } | Op::SessionFocus { .. } => {
-            Err(OpError("moa can't answer that here".into()))
-        }
+        Op::TmuxEnsure { .. }
+        | Op::SessionOpen { .. }
+        | Op::SessionFocus { .. }
+        | Op::SessionResume { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

@@ -195,9 +195,9 @@ fn errors_are_one_line_and_exit_1() {
 #[test]
 fn later_verbs_say_so_without_a_daemon() {
     let r = rig(None);
-    let o = r.moactl(&["resume", "x"]);
+    let o = r.moactl(&["close", "x"]);
     assert_eq!(o.status.code(), Some(1));
-    assert_eq!(err(&o), "moactl resume isn't in this build yet\n");
+    assert_eq!(err(&o), "moactl close isn't in this build yet\n");
     assert!(r.sockets().is_empty());
     assert!(!r.tb.paths().run_dir().exists());
 }

@@ -24,6 +24,7 @@ schema = ["dep:schemars"]
 proptest.workspace = true
 insta.workspace = true
 tempfile.workspace = true
+moa-agents = { path = "../moa-agents" }
 moa-platform = { path = "../moa-platform" }
 moa-testkit = { path = "../moa-testkit" }
 moa-proto = { path = "../moa-proto" }

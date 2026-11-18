@@ -339,6 +339,35 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Relaunches a session's conversation in a new tab, under the account whose store it\nwas recorded in (C11); one that runs is only brought to the screen. The tab comes to\nthe screen unless `bg`.",
+            "properties": {
+              "method": {
+                "const": "session.resume",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "bg": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "method": {
                 "const": "task.ls",

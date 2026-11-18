@@ -493,9 +493,12 @@ impl Verb {
                 bg: *bg,
             },
             Verb::Focus { q } => Op::SessionFocus { q: q.clone() },
+            Verb::Resume { id, bg } => Op::SessionResume {
+                q: id.clone(),
+                bg: *bg,
+            },
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Resume { .. }
-            | Verb::Close { .. }
+            Verb::Close { .. }
             | Verb::Sleep { .. }
             | Verb::Term { .. }
             | Verb::Adopt { .. }

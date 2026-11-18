@@ -59,6 +59,15 @@ pub enum Op {
     /// Brings a session's tab to the screen. A write: a session not running is resumed.
     #[serde(rename = "session.focus")]
     SessionFocus { q: String },
+    /// Relaunches a session's conversation in a new tab, under the account whose store it
+    /// was recorded in (C11); one that runs is only brought to the screen. The tab comes to
+    /// the screen unless `bg`.
+    #[serde(rename = "session.resume")]
+    SessionResume {
+        q: String,
+        #[serde(default)]
+        bg: bool,
+    },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -244,6 +253,7 @@ impl Op {
         "session.find",
         "session.open",
         "session.focus",
+        "session.resume",
         "task.ls",
         "task.add",
         "task.set",
@@ -269,6 +279,7 @@ impl Op {
             | Op::SessionArchive { .. }
             | Op::SessionOpen { .. }
             | Op::SessionFocus { .. }
+            | Op::SessionResume { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -299,6 +310,7 @@ impl Op {
             Op::SessionFind { .. } => "session.find",
             Op::SessionOpen { .. } => "session.open",
             Op::SessionFocus { .. } => "session.focus",
+            Op::SessionResume { .. } => "session.resume",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",

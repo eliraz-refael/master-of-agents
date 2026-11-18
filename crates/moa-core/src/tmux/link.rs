@@ -16,6 +16,7 @@ use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::ops::launch::ResumeAsk;
 use crate::state::State;
 
 /// An op that needs a tab, while moa's terminal isn't linked.
@@ -133,9 +134,12 @@ pub struct TmuxState {
 }
 
 /// What a pane query was asked for: who reads its answer.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Asked {
     Reconcile,
+    /// A resume whose checks passed, looking for a tab that already runs its conversation
+    /// (R13 step 6).
+    Resume(ResumeAsk),
 }
 
 /// A pane query's answer: each command's lines, or `Err` when any command failed or the
@@ -160,9 +164,8 @@ pub(crate) enum OpenEnd {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LaunchKind {
     Open,
-    // These come with `moactl resume` and restart.
-    #[allow(dead_code)]
     Resume,
+    // Comes with `moactl restart`.
     #[allow(dead_code)]
     Restart,
 }
@@ -445,11 +448,13 @@ impl TmuxState {
         self.opens.get_mut(&id)
     }
 
-    /// `conn` closed: its ensures and focus waiters are forgotten, and its launches go on
-    /// with nobody to answer.
+    /// `conn` closed: its ensures, resumes still looking at the tabs and focus waiters are
+    /// forgotten, and its launches go on with nobody to answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
         self.waiters.retain(|(c, _)| *c != conn);
         self.pinged.retain(|(c, _)| *c != conn);
+        self.queries
+            .retain(|_, a| !matches!(a, Asked::Resume(r) if r.conn == conn));
         for launching in self.opens.values_mut() {
             if matches!(launching.reply, Some((c, _)) if c == conn) {
                 launching.reply = None;
@@ -548,8 +553,8 @@ impl TmuxState {
     }
 
     /// Whether a query for `asked` is waiting for its answer.
-    pub(crate) fn asking(&self, asked: Asked) -> bool {
-        self.queries.values().any(|a| *a == asked)
+    pub(crate) fn asking(&self, asked: &Asked) -> bool {
+        self.queries.values().any(|a| a == asked)
     }
 
     /// Whether this connection's panes have been reconciled.

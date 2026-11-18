@@ -219,6 +219,8 @@ async fn bring_up(
             new_uuid: moa_store::new_uuid,
             session_plugin,
             inspect: crate::inspect::inspect_pane,
+            transcript: moa_agents::claude::find_transcript,
+            is_dir: std::path::Path::is_dir,
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

@@ -16,7 +16,8 @@ use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
-use crate::tmux::link::{self, LaunchKind, Launching, Link};
+use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
+use crate::tmux::panes::parse_panes;
 use crate::tmux::status;
 use crate::{Now, UtcMs};
 
@@ -125,8 +126,21 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
             fx.extend(state.tmux.input(t));
-            // Reconcile reads its listing, once the link is as the input left it.
+            // Reconcile reads its listing, and a resume its own, once the link is as the
+            // input left it.
+            let (resumes, answers): (Vec<_>, Vec<_>) = answers
+                .into_iter()
+                .partition(|(asked, _)| matches!(asked, Asked::Resume(_)));
             let mut more = reconcile::answered(state, now, answers, replied);
+            for (asked, answer) in resumes {
+                if let Asked::Resume(ask) = asked {
+                    let panes = answer.and_then(|lists| match lists.as_slice() {
+                        [info, start] => Ok(parse_panes(info, start)),
+                        _ => Err(()),
+                    });
+                    more.extend(ops::launch::resumed(state, now, ask, panes));
+                }
+            }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));
             }
@@ -252,7 +266,14 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             req,
             op: Op::SessionFocus { q },
             ..
-        } => ops::launch::focus(state, conn, req, &q),
+        } => ops::launch::focus(state, now, conn, req, &q),
+        // Answered at once, or after one pane query and the new tab (C11).
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionResume { q, bg },
+            ..
+        } => ops::launch::start_resume(state, now, conn, req, &q, !bg, false),
         Input::Client {
             conn,
             req,

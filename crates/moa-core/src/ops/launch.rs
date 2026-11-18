@@ -1,4 +1,4 @@
-//! Agents in new tabs of moa's terminal: `open` (and later `resume` and restart) through one
+//! Agents in new tabs of moa's terminal: `open`, `resume` (and later restart) through one
 //! window builder (R11), the answers once tmux says how each tab turned out, and `focus`.
 
 use std::path::{Path, PathBuf};
@@ -9,24 +9,26 @@ use super::cut;
 use super::projects::project_for;
 use crate::Now;
 use crate::change::Change;
-use crate::config::AccountName;
+use crate::config::{AccountConfig, AccountName};
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine, TmuxToken};
 use crate::hooks::{asleep, lost_agent};
 use crate::model::{
     Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
-    Session, SessionId, normalize_group_path,
+    Session, SessionId, TranscriptCheck, normalize_group_path, project_slot,
 };
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::reconcile::on_this_server;
 use crate::route::{Route, route};
 use crate::state::State;
 use crate::tmux::cmd::{Cmd, literal_format};
-use crate::tmux::focus::bound_pane;
+use crate::tmux::focus::{bound_pane, bound_session};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{
-    LaunchKind, Launching, Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled, ready,
+    Asked, LaunchKind, Launching, Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled, ready,
     set_pane_option,
 };
+use crate::tmux::panes::{PaneInfo, list_panes};
 
 /// How much of a title names its tab, as the spike cut it.
 const WINDOW_NAME_CUT: usize = 24;
@@ -40,13 +42,19 @@ const NOT_SAVED: &str = "moa couldn't save that session; nothing was opened, try
 const LOST: &str = "moa lost that session; a tab may have opened for it, see moa's log";
 const UNTRACKED: &str =
     "moa couldn't save which tab it runs in; it may show as untracked until moa restarts";
-const NO_RESUME: &str = "resume isn't in this build yet";
+const ELSEWHERE: &str = "it's running in another app right now; close it there first";
+const OTHER_TERMINAL: &str =
+    "it's running in another moa terminal; use it there, or close it there first";
+const NO_CONVERSATION: &str =
+    "moa doesn't know which conversation it had; start it fresh with moactl open";
+const NOT_LISTED: &str =
+    "the account its conversation was recorded in isn't in moa.toml; add it there to resume";
+const NO_FOLDER: &str = "moa doesn't know which folder it ran in; start it fresh with moactl open";
+const UNSAFE_ID: &str = "that conversation's id isn't one moa can resume";
 
 /// The conversation a launch runs: a new one under this id, or an old one resumed.
 pub(crate) enum Conv<'a> {
     Fresh(&'a str),
-    // Comes with `moactl resume`.
-    #[allow(dead_code)]
     Resume(&'a str),
 }
 
@@ -187,14 +195,7 @@ pub(crate) fn open(
         .get(&account)
         .ok_or_else(no_such)?
         .clone();
-    if acct.kind != AgentKind::Claude {
-        return Err(OpError(ONLY_CLAUDE.into()));
-    }
-    let launcher = acct.launcher.clone().ok_or_else(|| {
-        OpError(format!(
-            "can't find claude for {name}: set its launcher in moa.toml"
-        ))
-    })?;
+    let launcher = launcher_of(&name, &acct)?;
     match route(state.config(), Some(&account), a.path, Some(state.brain())) {
         Route::Brain(b) if b != *state.brain() => {
             return Err(OpError(format!(
@@ -282,6 +283,427 @@ pub(crate) fn open(
         prompt: a.prompt,
     };
     Ok((id, new_window(state, conn, &spec)))
+}
+
+/// The launcher of a Claude account (rule 6), or why it has none.
+fn launcher_of(name: &str, acct: &AccountConfig) -> Result<PathBuf, OpError> {
+    if acct.kind != AgentKind::Claude {
+        return Err(OpError(ONLY_CLAUDE.into()));
+    }
+    acct.launcher.clone().ok_or_else(|| {
+        OpError(format!(
+            "can't find claude for {name}: set its launcher in moa.toml"
+        ))
+    })
+}
+
+/// A resume whose checks passed (R13 steps 1–5): what it launches.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Checked {
+    pub id: SessionId,
+    pub conv: String,
+    pub folder: String,
+    pub store: PathBuf,
+    pub launcher: PathBuf,
+    pub title: String,
+}
+
+/// Where a resume's checks leave it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Resume {
+    /// It runs in this pane: it is only brought to the screen (step 1).
+    Running(SessionId, PaneId),
+    /// Its tab is opening: the caller waits for it.
+    Waiting(SessionId),
+    /// It can be launched, once the tabs show none running its conversation (step 6).
+    Check(Checked),
+}
+
+/// A resume waiting for its pane query (R13 step 6).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct ResumeAsk {
+    pub conn: ConnId,
+    pub req: ReqId,
+    pub checked: Checked,
+    pub kind: LaunchKind,
+    /// The tab comes to the screen once it is bound.
+    pub focus: bool,
+    /// `focus` asked: the caller hears where it went, as a focus waiter does.
+    pub via_focus: bool,
+}
+
+/// The listed account whose store the conversation was recorded in (R32: no store is
+/// Claude's own `<home>/.claude`), compared as canonical folders: `open` records a store as
+/// moa.toml spells it, a hook's rotation as the canonical path.
+pub(crate) fn account_of(
+    state: &State,
+    conv: &Conversation,
+) -> Result<(AccountName, AccountConfig), OpError> {
+    let store = state.store_of(conv.store_dir.as_deref());
+    state
+        .account_of_store(&store)
+        .and_then(|name| {
+            let acct = state.config().accounts.get(&name)?.clone();
+            Some((name, acct))
+        })
+        .ok_or_else(|| OpError(NOT_LISTED.into()))
+}
+
+/// The folder a resume runs in (R13 step 4): of the session's `cwd` and `start_cwd`, the one
+/// whose Claude project slot holds the conversation's transcript, since Claude finds a
+/// conversation by the folder it began in; else `start_cwd`, else `cwd`.
+pub(crate) fn resume_folder(s: &Session, conv: &Conversation) -> Option<String> {
+    let known = |f: &Option<String>| f.clone().filter(|f| !f.is_empty());
+    let (cwd, start) = (known(&s.cwd), known(&s.start_cwd));
+    let slot = conv
+        .transcript_path
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .map(|f| f.to_string_lossy().into_owned());
+    let holds = |f: &Option<String>| {
+        f.as_deref()
+            .is_some_and(|f| slot.as_deref() == Some(project_slot(Path::new(f)).as_str()))
+    };
+    if holds(&start) {
+        return start;
+    }
+    if holds(&cwd) {
+        return cwd;
+    }
+    start.or(cwd)
+}
+
+/// `resume Q` (C11), R13 steps 1–5, once the tabs are reconciled (R10). A missing transcript
+/// commits `resume_failed` with its refusal (rule 3), so the caller says what `tx` holds
+/// whatever comes back.
+pub(crate) fn resume(
+    state: &mut State,
+    tx: &mut Tx,
+    q: &str,
+    kind: LaunchKind,
+) -> Result<Resume, OpError> {
+    ready(state)?;
+    let id = state.resolve(q)?;
+    check(state, tx, id, kind)
+}
+
+/// Steps 1–5 for session `id`, the link up and reconciled. A restart skips step 1: its own
+/// tab is the one it replaces.
+fn check(
+    state: &mut State,
+    tx: &mut Tx,
+    id: SessionId,
+    kind: LaunchKind,
+) -> Result<Resume, OpError> {
+    // 1. Running, or about to.
+    if state.tmux.launching(id).is_some() {
+        return Ok(Resume::Waiting(id));
+    }
+    if kind != LaunchKind::Restart
+        && let Some(pane) = bound_pane(state, id)
+    {
+        return Ok(Resume::Running(id, pane));
+    }
+    let Some(s) = state.session(id).cloned() else {
+        return Err(OpError(LOST.into()));
+    };
+    // 2. Running somewhere moa can't reach, or never known.
+    if s.location == Location::Elsewhere {
+        return Err(OpError(ELSEWHERE.into()));
+    }
+    let socket = match &state.tmux().link {
+        Link::Up { socket, .. } => socket.clone(),
+        _ => return Err(OpError(NO_TERMINAL.into())),
+    };
+    if state
+        .spike_panes()
+        .any(|p| p.session_id == id && !on_this_server(p.tmux.as_deref(), &socket))
+    {
+        return Err(OpError(OTHER_TERMINAL.into()));
+    }
+    let Some(conv) = state.current_conversation(id).cloned() else {
+        return Err(OpError(NO_CONVERSATION.into()));
+    };
+    // 3. The account the conversation was recorded in.
+    let (account, acct) = account_of(state, &conv)?;
+    let name = account.to_string();
+    if conv.agent_kind != AgentKind::Claude {
+        return Err(OpError(ONLY_CLAUDE.into()));
+    }
+    let launcher = launcher_of(&name, &acct)?;
+    // 4. The folder it began in, there, and this brain's.
+    let folder = resume_folder(&s, &conv).ok_or_else(|| OpError(NO_FOLDER.into()))?;
+    let deps = state.deps().clone();
+    if !(deps.is_dir)(Path::new(&folder)) {
+        return Err(OpError(format!("its folder {folder} is gone")));
+    }
+    let routed = (deps.canonical)(Path::new(&folder));
+    match route(state.config(), Some(&account), &routed, Some(state.brain())) {
+        Route::Brain(b) if b != *state.brain() => {
+            return Err(OpError(format!(
+                "that folder belongs to the {b} brain; resume it there"
+            )));
+        }
+        Route::Brain(_) => {}
+        Route::NotAvailable => {
+            return Err(OpError(format!("{name} can't run sessions in that folder")));
+        }
+    }
+    // 5. Its transcript, in that account's store.
+    match (deps.transcript)(&acct.store, &conv.conversation_id) {
+        TranscriptCheck::Present(_) => {}
+        TranscriptCheck::UnsafeId => return Err(OpError(UNSAFE_ID.into())),
+        TranscriptCheck::Missing | TranscriptCheck::NotChecked => {
+            let store = (deps.canonical)(&acct.store);
+            let elsewhere = state.config().accounts.iter().find(|(_, a)| {
+                a.kind == AgentKind::Claude
+                    && (deps.canonical)(&a.store) != store
+                    && matches!(
+                        (deps.transcript)(&a.store, &conv.conversation_id),
+                        TranscriptCheck::Present(_)
+                    )
+            });
+            let text = match elsewhere {
+                Some((other, _)) => format!(
+                    "its conversation is in {other}'s folder, not {name}'s; moa won't resume it under the wrong account"
+                ),
+                None => format!(
+                    "its conversation isn't in {name}'s folder any more, so it can't be resumed"
+                ),
+            };
+            // The next open asks "start fresh or pick a conversation". A refused write
+            // leaves only the refusal, which still holds.
+            let failed = Session {
+                resume_failed: true,
+                ..s
+            };
+            let _ = tx.commit(state, vec![Change::Session(failed)]);
+            return Err(OpError(text));
+        }
+    }
+    let title = s
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| {
+            Path::new(&folder)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "agent".to_string());
+    Ok(Resume::Check(Checked {
+        id,
+        conv: conv.conversation_id,
+        folder,
+        store: acct.store,
+        launcher,
+        title,
+    }))
+}
+
+/// `resume Q`, and `focus Q` of a session that isn't running (R12): checked, then one pane
+/// query; [`resumed`] goes on with its answer. `focus` brings the tab to the screen once it
+/// is bound; `via_focus` answers as `focus` does.
+pub(crate) fn start_resume(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    q: &str,
+    focus: bool,
+    via_focus: bool,
+) -> Vec<Effect> {
+    let mut tx = Tx::new(now);
+    let checked = resume(state, &mut tx, q, LaunchKind::Resume);
+    let mut fx = post_commit(state, tx);
+    fx.extend(go_on(
+        state,
+        conn,
+        req,
+        LaunchKind::Resume,
+        focus,
+        via_focus,
+        checked,
+    ));
+    fx
+}
+
+/// What a resume does where its checks left it, short of the launch: answered, joined to the
+/// launch it waits for, or a pane query asked.
+fn go_on(
+    state: &mut State,
+    conn: ConnId,
+    req: ReqId,
+    kind: LaunchKind,
+    focus: bool,
+    via_focus: bool,
+    checked: Result<Resume, OpError>,
+) -> Vec<Effect> {
+    let reply = |result| Effect::Reply { conn, req, result };
+    match checked {
+        Err(e) => vec![reply(Err(e))],
+        Ok(Resume::Waiting(id)) => {
+            if let Some(launching) = state.tmux.launching(id) {
+                launching.waiters.push((conn, req));
+                launching.focus |= focus;
+            }
+            Vec::new()
+        }
+        Ok(Resume::Running(id, pane)) => {
+            let Some(s) = state.session(id) else {
+                return vec![reply(Err(OpError(LOST.into())))];
+            };
+            let went = went_to(state, s);
+            if !focus {
+                let title = went.data["title"].as_str().unwrap_or_default();
+                let text = format!("{title} is already running");
+                return vec![reply(Ok(Done { text, ..went }))];
+            }
+            let mut fx = Vec::new();
+            if let Link::Up { conn: link, .. } = state.tmux().link {
+                fx.push(Effect::Tmux {
+                    conn: link,
+                    cmds: focus_cmds(pane).to_vec(),
+                    token: None,
+                });
+            }
+            fx.push(reply(Ok(went)));
+            fx
+        }
+        Ok(Resume::Check(checked)) => {
+            let ask = ResumeAsk {
+                conn,
+                req,
+                checked,
+                kind,
+                focus,
+                via_focus,
+            };
+            state
+                .tmux
+                .ask(Asked::Resume(ask), list_panes())
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+/// A resume's pane query came back. The tabs were listed while other inputs ran, so steps
+/// 1–5 are run again first. Then step 6: a tab no binding holds whose agent runs the
+/// conversation refuses it; a listing that failed goes on, since steps 1–5 still guard it.
+/// Then R13a's one commit, and the window.
+pub(crate) fn resumed(
+    state: &mut State,
+    now: &Now,
+    ask: ResumeAsk,
+    panes: Result<Vec<PaneInfo>, ()>,
+) -> Vec<Effect> {
+    let ResumeAsk {
+        conn,
+        req,
+        checked,
+        kind,
+        focus,
+        via_focus,
+    } = ask;
+    let reply = |result| Effect::Reply { conn, req, result };
+    let mut tx = Tx::new(now);
+    let again = ready(state).and_then(|_| check(state, &mut tx, checked.id, kind));
+    let mut fx = post_commit(state, tx);
+    let checked = match again {
+        // Unchanged: the listing answers for it.
+        Ok(Resume::Check(c)) if c == checked => c,
+        // Running, opening or refused by now, or its conversation or folder moved: it goes
+        // on as a new resume would (a moved one looks at the tabs again).
+        other => {
+            fx.extend(go_on(state, conn, req, kind, focus, via_focus, other));
+            return fx;
+        }
+    };
+    let Link::Up { conn: link, .. } = state.tmux().link else {
+        fx.push(reply(Err(OpError(NO_TERMINAL.into()))));
+        return fx;
+    };
+    let id = checked.id;
+    match panes {
+        Ok(panes) => {
+            let inspect = state.deps().inspect;
+            let running = panes.iter().find(|p| {
+                !p.dead
+                    && !p.term
+                    && bound_session(state, p.pane).is_none()
+                    && inspect(p.pid, &p.start).is_some_and(|a| {
+                        a.kind == AgentKind::Claude
+                            && a.conversation.as_deref() == Some(checked.conv.as_str())
+                    })
+            });
+            if let Some(p) = running {
+                let pane = p.pane;
+                fx.push(reply(Err(OpError(format!(
+                    "it's already running in tab {pane}; adopt it with moactl adopt {pane}"
+                )))));
+                return fx;
+            }
+        }
+        Err(()) => fx.push(warn(format!(
+            "listing the tabs failed; resuming session {id} without looking for its agent"
+        ))),
+    }
+
+    // R13a.
+    let Some(s) = state.session(id).cloned() else {
+        fx.push(reply(Err(OpError(LOST.into()))));
+        return fx;
+    };
+    let mut tx = Tx::new(now);
+    let live = Session {
+        lifecycle: Lifecycle::Live,
+        asleep_at: None,
+        location: Location::Here,
+        resume_failed: false,
+        activity: Activity::Idle,
+        activity_why: None,
+        activity_at: Some(now.wall),
+        last_seen_at: Some(now.wall),
+        // The folder it runs in, which the reply names.
+        cwd: Some(checked.folder.clone()),
+        ..s
+    };
+    let text = format!("resumed {}", checked.title);
+    if let Err(e) = tx.ui(state, vec![Change::Session(live)], text) {
+        fx.push(reply(Err(e)));
+        return fx;
+    }
+    let (answer, waiters) = if via_focus {
+        (None, vec![(conn, req)])
+    } else {
+        (Some((conn, req)), Vec::new())
+    };
+    state.tmux.wait_open(
+        id,
+        Launching {
+            reply: answer,
+            kind,
+            focus,
+            waiters,
+            launched_at: tx.wall,
+        },
+    );
+    let spec = LaunchSpec {
+        id,
+        title: &checked.title,
+        folder: &checked.folder,
+        store: &checked.store,
+        launcher: &checked.launcher,
+        conv: Conv::Resume(&checked.conv),
+        prompt: None,
+    };
+    let window = new_window(state, link, &spec);
+    fx.extend(post_commit(state, tx));
+    fx.push(window);
+    fx
 }
 
 fn warn(message: String) -> Effect {
@@ -410,7 +832,7 @@ fn bind(
         if !lost_agent(state, tx, id, Vec::new()) {
             logs.push(warn(format!("the sleep of session {id} was not saved")));
         }
-        return (Ok(launched_reply(launching.kind, s)), None);
+        return (Ok(launched_reply(state, launching.kind, s)), None);
     }
     let binding = PaneBinding {
         session_id: id,
@@ -440,12 +862,13 @@ fn bind(
         token: None,
     });
     let went = went_to(state, &s);
-    (Ok(launched_reply(launching.kind, s)), Some(went))
+    (Ok(launched_reply(state, launching.kind, s)), Some(went))
 }
 
-/// A launch's answer, with the id and title for scripts.
-fn launched_reply(kind: LaunchKind, s: Session) -> Done {
-    let title = s.title.unwrap_or_default();
+/// A launch's answer, with the id and title (else the handle) for scripts. A resume's
+/// commit made `cwd` the folder it was launched in.
+fn launched_reply(state: &State, kind: LaunchKind, s: Session) -> Done {
+    let title = title_of(state, &s);
     let cwd = s.cwd.unwrap_or_default();
     let text = match kind {
         LaunchKind::Open => format!(
@@ -461,13 +884,17 @@ fn launched_reply(kind: LaunchKind, s: Session) -> Done {
     }
 }
 
-/// `went to <title>`: the title, else the handle.
-fn went_to(state: &State, s: &Session) -> Done {
-    let title = s
-        .title
+/// What a session is called in a launch's answers: its title, else its handle.
+fn title_of(state: &State, s: &Session) -> String {
+    s.title
         .clone()
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| state.handle_of(s.id));
+        .unwrap_or_else(|| state.handle_of(s.id))
+}
+
+/// `went to <title>`: the title, else the handle.
+fn went_to(state: &State, s: &Session) -> Done {
+    let title = title_of(state, s);
     Done {
         text: format!("went to {title}"),
         data: json!({ "id": s.id, "title": title }),
@@ -503,8 +930,15 @@ fn end_launch(
 
 /// `focus Q`: once the tabs are reconciled, a running session's tab comes to the screen; a
 /// session whose tab is opening is brought there once it is bound, and answered then.
-/// Nothing is saved, so the commands go out on their own, before the reply.
-pub(crate) fn focus(state: &mut State, conn: ConnId, req: ReqId, q: &str) -> Vec<Effect> {
+/// Nothing is saved, so the commands go out on their own, before the reply. Any other
+/// session is resumed, and answered once its tab is there (R12).
+pub(crate) fn focus(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    q: &str,
+) -> Vec<Effect> {
     let reply = |result| Effect::Reply { conn, req, result };
     let link = match ready(state) {
         Ok(link) => link,
@@ -528,8 +962,7 @@ pub(crate) fn focus(state: &mut State, conn: ConnId, req: ReqId, q: &str) -> Vec
             },
             reply(Ok(went_to(state, s))),
         ],
-        // Resuming it comes with `moactl resume`.
-        _ => vec![reply(Err(OpError(NO_RESUME.into())))],
+        _ => start_resume(state, now, conn, req, &id.to_string(), true, true),
     }
 }
 

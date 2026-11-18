@@ -145,7 +145,8 @@ pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Action, String>;
 
 /// What the core needs from outside to run suggestions, compare paths and open sessions.
 /// The daemon supplies the real ones; the default has no grammar (so no suggestion can carry
-/// actions), treats every path as already canonical, and hands out sequential ids.
+/// actions), treats every path as already canonical, hands out sequential ids, and finds
+/// every folder and transcript there.
 #[derive(Clone)]
 pub struct Deps {
     /// Parses one suggestion action with the moactl grammar (`moa_proto::cli::parse_action`),
@@ -162,6 +163,11 @@ pub struct Deps {
     /// (the daemon reads them in-process). Called only where a pane is checked, never per
     /// event.
     pub inspect: fn(i64, &[String]) -> Option<PaneAgent>,
+    /// Looks for a conversation's transcript in a store (`moa_agents::claude::find_transcript`):
+    /// directory reads only, before a resume (C11 rule 2).
+    pub transcript: fn(&Path, &str) -> TranscriptCheck,
+    /// Whether a folder exists (`Path::is_dir`): a resume refuses one that is gone.
+    pub is_dir: fn(&Path) -> bool,
 }
 
 fn identity(p: &Path) -> PathBuf {
@@ -191,6 +197,8 @@ impl Default for Deps {
             new_uuid: sequential_uuid,
             session_plugin: PathBuf::new(),
             inspect: |_, _| None,
+            transcript: |_, _| TranscriptCheck::Present(PathBuf::new()),
+            is_dir: |_| true,
         }
     }
 }
