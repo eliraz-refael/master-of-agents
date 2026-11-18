@@ -517,10 +517,16 @@ fn sleep_eligibility_table() {
 
 /// S, eligible in every other way, with a resume of it still waiting for its tab: resumed
 /// from asleep, then reloaded with its binding back, since no input from outside makes a
-/// bound session's launch wait.
+/// bound session's launch wait. The reload shows the resume's commit (R13a's times), or it
+/// would answer the launch as lost; S is due six hours after it.
 fn waiting_launch() -> Rig {
     let mut w = World::new();
+    let launched = w.b.now().wall;
+    let s = w.s.clone();
+    w.s.activity_at = Some(launched);
+    w.s.last_seen_at = Some(launched);
     let (bound, info) = (w.snapshot(), w.info().unwrap());
+    w.s = s;
     w.s.lifecycle = Lifecycle::Ended;
     w.s.asleep_at = w.s.activity_at;
     w.binding = None;
@@ -559,6 +565,7 @@ fn waiting_launch() -> Rig {
     feed(&r.b, &mut r.st, lists(&base_panes()));
     assert!(r.st.tmux().reconciled());
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    r.due = UtcMs(launched.0 + SIX);
     r
 }
 

@@ -919,3 +919,83 @@ fn a_restart_whose_tab_fails_sleeps() {
     assert_eq!(s.asleep_at, Some(r.b.now().wall));
     assert!(!s.resume_failed);
 }
+
+/// The batch that held the restart's commit failed: the reload brings S back as it was, its
+/// adopted tab bound and its agent running (the kill and the window were dropped with the
+/// batch). The caller hears nothing was saved, and the launch isn't left waiting: another
+/// restart looks at the tabs again rather than joining a launch that never went out, and
+/// the old agent's own end counts again.
+#[test]
+fn a_reload_that_lost_a_restarts_commit_answers_it() {
+    let mut r = World::new().reconciled();
+    let s = r.s().clone();
+    let binding = r.st.binding(s_id()).cloned().unwrap();
+    let convs: Vec<Conversation> = r.st.conversations_of(s_id()).cloned().collect();
+    let fx = r.committed(1);
+    assert_eq!(windows(&fx).len(), 1, "{fx:?}");
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(s);
+    snap.conversations.extend(convs);
+    snap.pane_bindings.push(binding.clone());
+    let fx = handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Err(OpError(
+                "moa couldn't save that session; nothing was opened, try again".into()
+            ))
+        )]
+    );
+    assert_eq!(r.st.binding(s_id()), Some(&binding));
+    assert!(!is_asleep(r.s()));
+
+    // A restart now looks at the tabs again (once they are reconciled), not at a dead launch.
+    let lantern = shown(&r.b.home.join("work/lantern"));
+    let line = format!("I\t%5\t505\t0\t\t1\t{S}\t{lantern}");
+    listed(&mut r.st, &r.b, &[&line], &[]);
+    let fx = r.restart(2);
+    assert!(queried(&fx), "{fx:?}");
+    handle_checked(
+        &mut r.st,
+        Input::ClientGone(moa_core::op::ConnId(1)),
+        r.b.now(),
+    );
+
+    // The old agent still runs: its end is S's.
+    old_agent_ended(&mut r, 1000);
+    assert!(is_asleep(r.s()), "{:?}", r.s());
+}
+
+/// A reload that kept the restart's commit (another batch failed) leaves its launch
+/// waiting: its kill and window went out, and tmux's answer binds the new tab.
+#[test]
+fn a_reload_that_kept_a_restarts_commit_keeps_waiting() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    assert!(r.st.binding(s_id()).is_none());
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(r.s().clone());
+    snap.conversations
+        .extend(r.st.conversations_of(s_id()).cloned());
+    let fx = handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    listed(&mut r.st, &r.b, &[], &[]);
+    let fx = r.bound("%7");
+    assert_eq!(replies(&fx), [(ReqId(1), restarted())]);
+    assert_eq!(r.st.binding(s_id()).map(|b| b.tracked), Some(true));
+}

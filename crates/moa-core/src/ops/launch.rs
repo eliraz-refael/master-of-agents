@@ -896,23 +896,57 @@ pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec
     fx
 }
 
-/// The launches whose session a reload didn't find: their commit failed, so their new
-/// window was dropped with it and no tab opened. Each is answered so.
+/// The launches whose commit a reload doesn't show: it failed, so their new window (and a
+/// restart's kill) was dropped with it and no tab opened. Each is answered so and stops
+/// waiting, so a later resume or focus doesn't join it and close, sleep and adopt don't
+/// find it still opening. The session is as the reload has it, as it was before the
+/// launch: a resumed one asleep or ended, a restarted one still in its adopted tab, whose
+/// agent's own events count again. One left live with no tab goes to sleep at the
+/// reconcile the reload asks for (R5).
 pub(crate) fn lost_opens(state: &mut State) -> Vec<Effect> {
-    let lost: Vec<SessionId> = state
-        .tmux
-        .waiting_opens()
-        .filter(|id| state.session(*id).is_none())
+    let lost: Vec<(SessionId, LaunchKind)> = state
+        .tmux()
+        .launches()
+        .filter(|(id, l)| !launch_saved(state, *id, l))
+        .map(|(id, l)| (id, l.kind))
         .collect();
-    lost.into_iter()
-        .filter_map(|id| state.tmux.forget_open(id))
-        .flat_map(|l| l.reply.into_iter().chain(l.waiters))
-        .map(|(conn, req)| Effect::Reply {
-            conn,
-            req,
-            result: Err(OpError(NOT_SAVED.into())),
-        })
-        .collect()
+    let mut fx = Vec::new();
+    for (id, kind) in lost {
+        if kind == LaunchKind::Restart {
+            state.restarted.remove(&id);
+        }
+        let Some(l) = state.tmux.forget_open(id) else {
+            continue;
+        };
+        fx.extend(
+            l.reply
+                .into_iter()
+                .chain(l.waiters)
+                .map(|(conn, req)| Effect::Reply {
+                    conn,
+                    req,
+                    result: Err(OpError(NOT_SAVED.into())),
+                }),
+        );
+    }
+    fx
+}
+
+/// Whether the state shows launch `l` of session `id` committed: an `open`'s session
+/// exists; a resume's is live as R13a left it, with `activity_at` at the launch's time or
+/// later (only newer events move it); a restart's old binding is gone (its commit deleted it,
+/// and nothing binds the session while the launch waits).
+fn launch_saved(state: &State, id: SessionId, l: &Launching) -> bool {
+    let Some(s) = state.session(id) else {
+        return false;
+    };
+    match l.kind {
+        LaunchKind::Open => true,
+        LaunchKind::Resume => {
+            s.lifecycle == Lifecycle::Live && s.activity_at.is_some_and(|t| t >= l.launched_at)
+        }
+        LaunchKind::Restart => state.binding(id).is_none(),
+    }
 }
 
 /// A bound launch's reply, and what its focus waiters hear, when that differs.

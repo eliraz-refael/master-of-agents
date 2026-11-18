@@ -535,6 +535,11 @@ impl TmuxState {
         self.opens.keys().copied()
     }
 
+    /// The launches waiting, each with its session.
+    pub(crate) fn launches(&self) -> impl Iterator<Item = (SessionId, &Launching)> + '_ {
+        self.opens.iter().map(|(id, l)| (*id, l))
+    }
+
     /// Stops waiting for `id`'s tab, and gives back its launch.
     pub(crate) fn forget_open(&mut self, id: SessionId) -> Option<Launching> {
         self.opens.remove(&id)

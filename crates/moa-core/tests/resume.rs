@@ -1133,3 +1133,74 @@ fn an_unchecked_transcript_refuses_and_marks() {
         "its conversation isn't in acct-a's folder any more, so it can't be resumed"
     );
 }
+
+/// The batch that held a resume's commit (R13a) failed: the reload brings S back asleep, and
+/// its window was dropped with the batch. The caller and a focus waiting on it hear nothing
+/// was saved, and the launch isn't left waiting: a second resume looks at the tabs again,
+/// and close isn't told it is still opening.
+#[test]
+fn a_reload_that_lost_a_resumes_commit_answers_it() {
+    let mut r = World::new().reconciled();
+    let s = r.s().clone();
+    let convs: Vec<Conversation> = r.st.conversations_of(s_id()).cloned().collect();
+    let fx = r.launched(1, false);
+    the_open(&fx);
+    let focus = send(&r.b, &mut r.st, 2, Op::SessionFocus { q: S.into() });
+    assert!(replies(&focus).is_empty(), "{focus:?}");
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(s);
+    snap.conversations.extend(convs);
+    let fx = handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    let not_saved = || {
+        Err(OpError(
+            "moa couldn't save that session; nothing was opened, try again".into(),
+        ))
+    };
+    assert_eq!(
+        replies(&fx),
+        [(ReqId(1), not_saved()), (ReqId(2), not_saved())]
+    );
+    assert!(is_asleep(r.s()));
+
+    // Once the tabs are reconciled again: a resume asks for them, as a new one does.
+    listed(&mut r.st, &r.b, &[], &[]);
+    let fx = r.resume(3, false);
+    assert!(queried(&fx), "{fx:?}");
+}
+
+/// A reload that kept the resume's commit (another batch failed) leaves its launch waiting:
+/// its window went out, and tmux's answer binds it.
+#[test]
+fn a_reload_that_kept_a_resumes_commit_keeps_waiting() {
+    let mut r = World::new().reconciled();
+    r.launched(1, false);
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(r.s().clone());
+    snap.conversations
+        .extend(r.st.conversations_of(s_id()).cloned());
+    let fx = handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    listed(&mut r.st, &r.b, &[], &[]);
+    let fx = r.bound("%7");
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            done(format!("resumed {TITLE} in {}", r.lantern()))
+        )]
+    );
+}
