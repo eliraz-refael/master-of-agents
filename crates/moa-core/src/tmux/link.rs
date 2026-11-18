@@ -94,8 +94,9 @@ pub struct TmuxState {
     pub(super) written: Written,
     /// When the status clock's timer fires, while it is armed.
     pub(super) clock_at: Option<UtcMs>,
-    /// The `open`s waiting for tmux to say which pane their tab has, with whom to answer.
-    opens: BTreeMap<SessionId, (ConnId, ReqId)>,
+    /// The `open`s waiting for tmux to say which pane their tab has, with whom to answer:
+    /// nobody, once the caller's connection closed.
+    opens: BTreeMap<SessionId, Option<(ConnId, ReqId)>>,
     /// Panes of this server that exited with no session bound to them, oldest first, at
     /// most [`EXITED_KEPT`]: an `open`'s answer naming one may still be on its way.
     exited: VecDeque<PaneId>,
@@ -119,8 +120,8 @@ pub(crate) enum OpenEnd {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Settled {
     pub id: SessionId,
-    pub conn: ConnId,
-    pub req: ReqId,
+    /// Whom to answer, unless the caller went.
+    pub reply: Option<(ConnId, ReqId)>,
     pub end: OpenEnd,
 }
 
@@ -321,7 +322,17 @@ impl TmuxState {
 
     /// Holds `open`'s reply until tmux says how its tab turned out.
     pub(crate) fn wait_open(&mut self, id: SessionId, conn: ConnId, req: ReqId) {
-        self.opens.insert(id, (conn, req));
+        self.opens.insert(id, Some((conn, req)));
+    }
+
+    /// `conn` closed: its ensures are forgotten, and its opens go on with nobody to answer.
+    pub(crate) fn client_gone(&mut self, conn: ConnId) {
+        self.waiters.retain(|(c, _)| *c != conn);
+        for reply in self.opens.values_mut() {
+            if matches!(reply, Some((c, _)) if *c == conn) {
+                *reply = None;
+            }
+        }
     }
 
     /// The sessions whose `open` is waiting.
@@ -331,7 +342,7 @@ impl TmuxState {
 
     /// Stops waiting for `id`'s tab, and says whom to answer.
     pub(crate) fn forget_open(&mut self, id: SessionId) -> Option<(ConnId, ReqId)> {
-        self.opens.remove(&id)
+        self.opens.remove(&id).flatten()
     }
 
     /// The `open`s this input answers: the one whose tab tmux reports on, or every one
@@ -346,10 +357,9 @@ impl TmuxState {
             } if self.conn() == Some(*conn) => self
                 .opens
                 .remove(id)
-                .map(|(conn, req)| Settled {
+                .map(|reply| Settled {
                     id: *id,
-                    conn,
-                    req,
+                    reply,
                     end: open_end(results),
                 })
                 .into_iter()
@@ -365,10 +375,9 @@ impl TmuxState {
     fn all_gone(&mut self) -> Vec<Settled> {
         std::mem::take(&mut self.opens)
             .into_iter()
-            .map(|(id, (conn, req))| Settled {
+            .map(|(id, reply)| Settled {
                 id,
-                conn,
-                req,
+                reply,
                 end: OpenEnd::Gone,
             })
             .collect()

@@ -270,6 +270,15 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
     moa_key(&tb, &term, "c", NOT_RUNNING);
 }
 
+/// The hooks moa sets at index 90.
+const MOA_HOOKS: [&str; 5] = [
+    "pane-exited",
+    "pane-died",
+    "window-layout-changed",
+    "client-attached",
+    "client-detached",
+];
+
 /// The user's own file, with screen's prefix (Ctrl-a), a waiting command and a hook.
 #[test]
 fn a_user_tmux_conf_with_run_shell_and_hooks() {
@@ -289,7 +298,9 @@ fn a_user_tmux_conf_with_run_shell_and_hooks() {
     assert_eq!(option(&tb, "@user_opt"), "1");
     let set = hooks(&tb);
     assert!(set.contains("pane-exited[5]"), "{set}");
-    assert!(set.contains("pane-exited[90]"), "{set}");
+    for hook in MOA_HOOKS {
+        assert!(set.contains(&format!("{hook}[90]")), "{hook}: {set}");
+    }
 
     shutdown(&tb);
     let gone = wait_for(QUICK, || (!hooks(&tb).contains("[90]")).then_some(()));

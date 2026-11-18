@@ -118,7 +118,7 @@ async fn after_hook_blocks_are_skipped() {
         "set-hook",
         "-g",
         "after-new-session[91]",
-        "display-message -p from-hook",
+        "display-message -p from-hook ; set -g @after_ran 1",
     ])
     .unwrap();
     let (client, _events, _) = connect(&sb).await;
@@ -127,6 +127,8 @@ async fn after_hook_blocks_are_skipped() {
         .await
         .unwrap();
     assert_eq!(client.run(&display("next")).await, Ok(vec!["next".into()]));
+    // The hook ran, so its block was sent and skipped, not never sent.
+    assert_eq!(sb.tmux(&["show", "-gv", "@after_ran"]).unwrap().trim(), "1");
     client.close().await;
 }
 

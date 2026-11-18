@@ -61,7 +61,8 @@ fn method_of(call: &Call) -> &'static str {
     }
 }
 
-/// Closes the connection's reply channel in the core however the session ends.
+/// Closes the connection's reply channel in the core, and tells the core it went, however
+/// the session ends.
 struct ConnGuard {
     core: CoreHandle,
     conn: ConnId,

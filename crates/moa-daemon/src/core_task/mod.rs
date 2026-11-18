@@ -571,8 +571,11 @@ impl CoreHandle {
         (id, rx)
     }
 
+    /// The connection closed: no reply reaches it any more, and the core forgets what it
+    /// waits for.
     pub fn close_conn(&self, conn: ConnId) {
         lock(&self.conns).remove(&conn);
+        let _ = self.inbox.send(Item::Input(Input::ClientGone(conn)));
     }
 
     pub fn send(&self, conn: ConnId, req: ReqId, caller: CallerInfo, op: Op) {

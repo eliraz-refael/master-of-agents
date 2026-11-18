@@ -678,6 +678,36 @@ fn a_new_connection_fails_waiting_opens() {
     assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
 }
 
+/// A launch keeps running when its caller goes: the tab is still bound and tagged, and only
+/// the reply is dropped.
+#[test]
+fn a_closed_connections_open_still_binds() {
+    let (b, mut st) = typical();
+    let id = the_open(&send(&b, &mut st, 1, open_op(&lantern(&b)))).0;
+    let fx = handle_checked(&mut st, Input::ClientGone(ConnId(1)), b.now());
+    assert!(fx.is_empty(), "{fx:?}");
+    let fx = bound(&b, &mut st, id, "%7");
+    let binding = PaneBinding {
+        session_id: id,
+        server_pid: 10,
+        server_start: 1000,
+        socket: "moa".into(),
+        pane_id: "%7".into(),
+        pane_pid: 4242,
+        bound_at: b.now().wall,
+    };
+    assert_eq!(changes(&fx), [&Change::PaneBinding(binding)]);
+    let set = Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()]);
+    assert!(
+        fx.iter().any(
+            |e| matches!(e, Effect::Tmux { cmds, token: None, .. } if cmds == std::slice::from_ref(&set))
+        ),
+        "the pane is tagged: {fx:?}"
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Live);
+}
+
 /// A reload after the open's commit failed in the store: the session isn't in the brain, and
 /// its new window was never sent (it waits for the commit). The open is answered then, and a
 /// late answer about a tab finds nobody waiting. An open whose session was saved still waits.

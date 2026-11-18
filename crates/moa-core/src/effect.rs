@@ -48,6 +48,8 @@ pub enum Input {
         caller: CallerInfo,
         op: Op,
     },
+    /// A client's connection closed: nothing is answered on it any more.
+    ClientGone(ConnId),
     Timer(TimerKey),
     ZoneChanged,
     ActorFailed {
