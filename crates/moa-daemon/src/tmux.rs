@@ -115,6 +115,8 @@ enum AfterRestart {
     BackOff(usize),
 }
 
+/// A panic during a backoff step's own connect left `Connecting`, so that restart connects
+/// afresh and counts from step 0; only a restart during the wait resumes its step.
 fn after_restart(doing: Doing) -> AfterRestart {
     match doing {
         Doing::Idle => AfterRestart::StayIdle,
@@ -548,9 +550,10 @@ impl Actor {
         let name = Cmd::new("set-option").args(["-g", "@moa_ctl", info.client.0.as_str()]);
         let linked = async {
             linking(&client, &source).await?;
-            reap_stale(&client, &info.client).await;
+            reap_stale(&client, &info.client).await?;
             linking(&client, &name).await
         };
+        // Only a loss matters here; a refusal was logged.
         if linked.await.is_err() {
             client.close().await;
             return self.lost(tried).await;
@@ -650,12 +653,13 @@ impl Actor {
     }
 }
 
-/// One step of a connect's bootstrap. tmux refusing it is logged and the link goes on;
-/// `Err` when the client has gone, or the step took longer than `STEP_WAIT`.
-async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<(), CmdError> {
+/// One step of a connect's bootstrap: its output, or `None` when tmux refused it, which is
+/// logged and the link goes on. `Err` when the client has gone, or the step took longer
+/// than `STEP_WAIT`.
+async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<Option<Vec<String>>, CmdError> {
     let ran = tokio::time::timeout(STEP_WAIT, client.run(cmd)).await;
     match ran.unwrap_or(Err(CmdError::Gone)) {
-        Ok(_) => Ok(()),
+        Ok(lines) => Ok(Some(lines)),
         Err(CmdError::Gone) => Err(CmdError::Gone),
         Err(e) => {
             tracing::warn!(
@@ -663,7 +667,7 @@ async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<(), CmdError> {
                 cmd.name(),
                 first_line(&e.to_string())
             );
-            Ok(())
+            Ok(None)
         }
     }
 }
@@ -671,20 +675,19 @@ async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<(), CmdError> {
 /// Stops the control client that `@moa_ctl` still names, when it isn't `ours` and is still
 /// attached: an earlier daemon's link that tmux kept (tmux 3.4 keeps a control client whose
 /// output it couldn't write, and 3.8 one with many unread replies). Left attached, it keeps
-/// the keys from saying moa isn't running, and `kill-server` waits on it. Each command waits
-/// at most `STEP_WAIT`; a failure leaves it be.
-async fn reap_stale(client: &ControlClient, ours: &ClientName) {
-    let run = async |cmd: Cmd| {
-        let ran = tokio::time::timeout(STEP_WAIT, client.run(&cmd)).await;
-        ran.ok().and_then(Result::ok).unwrap_or_default()
-    };
-    let shown = run(Cmd::new("show-options").args(["-gqv", "@moa_ctl"])).await;
+/// the keys from saying moa isn't running, and `kill-server` waits on it. Its commands are
+/// bootstrap steps (`linking`): a refusal is logged and leaves nothing to reap, and a
+/// timeout or a gone client is `Err`, a loss.
+async fn reap_stale(client: &ControlClient, ours: &ClientName) -> Result<(), CmdError> {
+    let show = Cmd::new("show-options").args(["-gqv", "@moa_ctl"]);
+    let shown = linking(client, &show).await?.unwrap_or_default();
     let old = shown.first().map(String::as_str).unwrap_or("");
     if old.is_empty() || old == ours.0 {
-        return;
+        return Ok(());
     }
     let format = "#{client_control_mode} #{client_pid} #{client_name}";
-    let clients = run(Cmd::new("list-clients").args(["-F", format])).await;
+    let list = Cmd::new("list-clients").args(["-F", format]);
+    let clients = linking(client, &list).await?.unwrap_or_default();
     for line in &clients {
         let mut f = line.splitn(3, ' ');
         let (Some("1"), Some(pid), Some(name)) = (f.next(), f.next(), f.next()) else {
@@ -697,6 +700,7 @@ async fn reap_stale(client: &ControlClient, ours: &ClientName) {
             tracing::info!(pid, "a stuck terminal link from before was stopped");
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

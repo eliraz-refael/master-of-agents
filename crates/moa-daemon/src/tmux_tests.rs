@@ -378,7 +378,8 @@ async fn a_restart_during_backoff_resumes_its_step() {
 }
 
 /// Sends `signal` to `pid` with the shell's own `kill`, which a build sandbox has even
-/// where no `kill` program is installed.
+/// where no `kill` program is installed. `moa_platform` has only `kill_term`, no stop or
+/// continue, and this crate allows no `unsafe` to call libc itself.
 fn signal(pid: &str, signal: &str) -> bool {
     std::process::Command::new("/bin/sh")
         .args(["-c", "kill -s \"$1\" \"$2\"", "sh", signal, pid])
@@ -395,21 +396,30 @@ impl Drop for Resume {
     }
 }
 
+/// Stops the brain's server; it continues when the guard drops. Declare the guard after
+/// the brain, so it drops first: the brain's own drop talks to tmux.
+fn stop_server(tb: &TempBrain) -> Resume {
+    let pid = tb.tmux(B, &["display-message", "-p", "#{pid}"]).unwrap();
+    assert!(signal(&pid, "STOP"), "the server stops");
+    Resume(pid)
+}
+
+fn connect_options(link: &TmuxLink, wait: Duration) -> ConnectOptions {
+    ConnectOptions {
+        tmux: moa_testkit::tmux_path().unwrap_or_else(|e| panic!("{e}")),
+        socket: link.socket.args().to_vec(),
+        env: link.env.clone(),
+        wait,
+    }
+}
+
 /// A server that never answers (here, stopped) is given up on after `wait`, not 20 s.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hung_server_is_given_up_on_within_the_wait() {
     let tb = TempBrain::new(None);
     let link = server(&tb);
-    let pid = tb.tmux(B, &["display-message", "-p", "#{pid}"]).unwrap();
-    assert!(signal(&pid, "STOP"), "the server stops");
-    // Declared after the brain, so it drops first: the brain's own drop talks to tmux.
-    let _resume = Resume(pid);
-    let opts = ConnectOptions {
-        tmux: moa_testkit::tmux_path().unwrap_or_else(|e| panic!("{e}")),
-        socket: link.socket.args().to_vec(),
-        env: link.env.clone(),
-        wait: Duration::from_millis(300),
-    };
+    let _resume = stop_server(&tb);
+    let opts = connect_options(&link, Duration::from_millis(300));
     let result = timeout(PATIENCE, ControlClient::connect(&opts))
         .await
         .expect("connect gave up in time");
@@ -418,6 +428,29 @@ async fn a_hung_server_is_given_up_on_within_the_wait() {
         Err(e) => panic!("{e}"),
         Ok((_, _, info)) => panic!("a stopped server answered: {info:?}"),
     }
+}
+
+/// Review fix (Task 1): a reap step that times out is a loss, as every bootstrap step's is,
+/// not "nothing to reap". The server stops after the connect, so the reap's first command
+/// is the one that waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reap_on_a_hung_server_is_a_loss() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let (client, _events, info) = timeout(
+        PATIENCE,
+        ControlClient::connect(&connect_options(&link, CONNECT_WAIT)),
+    )
+    .await
+    .expect("connected in time")
+    .unwrap_or_else(|e| panic!("connect failed: {e}"));
+    let resume = stop_server(&tb);
+    let reaped = timeout(PATIENCE, reap_stale(&client, &info.client))
+        .await
+        .expect("the reap gave up in time");
+    assert_eq!(reaped, Err(CmdError::Gone));
+    drop(resume);
+    client.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
