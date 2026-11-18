@@ -76,11 +76,7 @@ impl fmt::Display for PathsError {
             ),
             Self::UnsafeDir(dir, reason) => {
                 let d = dir.display();
-                write!(f, "{d} {reason}; moa won't use it")?;
-                if *reason == "is open to other users" {
-                    write!(f, " (chmod 700 {d})")?;
-                }
-                Ok(())
+                write!(f, "{d} {reason}; moa won't use it")
             }
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -305,9 +301,10 @@ pub fn sandbox_root(home: &Path) -> PathBuf {
     home.join(".local/state/moa-sandbox")
 }
 
-/// Creates `dir` (and missing parents) with mode 0700, then refuses it unless
-/// it is a real directory of ours that no one else can reach. Never follows a
-/// link: the socket fallback lives in a shared `$TMPDIR`.
+/// Creates `dir` (and missing parents) with mode 0700, then refuses it unless it is a real
+/// directory of ours. One that others can reach (an older moa's, or one the user made) is
+/// closed to them: set to 0700, with an info log. Never follows a link: the socket fallback
+/// lives in a shared `$TMPDIR`.
 pub fn ensure_private_dir(dir: &Path) -> Result<(), PathsError> {
     // A trailing slash makes lstat follow a link, so drop it first.
     let dir: PathBuf = dir.components().collect();
@@ -335,12 +332,26 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), PathsError> {
         return Err(PathsError::UnsafeDir(dir.to_path_buf(), "isn't yours"));
     }
     if meta.mode() & 0o077 != 0 {
-        return Err(PathsError::UnsafeDir(
-            dir.to_path_buf(),
-            "is open to other users",
-        ));
+        close_to_others(dir, &meta).map_err(with_path)?;
+        tracing::info!("a private folder was open to other users; moa closed it to them");
     }
     Ok(())
+}
+
+/// Sets `dir`, which `meta` (its `lstat`) found to be a folder of ours, to 0700. It is
+/// opened without following a link and checked to be that same folder first, so a link put
+/// in its place since the look is never followed.
+fn close_to_others(dir: &Path, meta: &std::fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let folder = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(dir)?;
+    let now = folder.metadata()?;
+    if (now.dev(), now.ino()) != (meta.dev(), meta.ino()) {
+        return Err(io::Error::other("it changed while moa looked at it"));
+    }
+    folder.set_permissions(std::fs::Permissions::from_mode(0o700))
 }
 
 /// The first `dir/name` in `path` that is a regular file with an execute bit. Only

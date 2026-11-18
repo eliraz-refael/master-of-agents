@@ -799,27 +799,22 @@ async fn the_daemon_writes_the_plugin_once() {
 }
 
 /// M9: the plugin's folders are checked like the daemon's other private folders: its
-/// `hooks.json` names a command Claude runs, so a folder others can reach is refused, not
-/// used.
+/// `hooks.json` names a command Claude runs, so a folder of ours that others can reach is
+/// closed to them before it is used.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_plugin_folder_others_can_reach_is_refused() {
+async fn a_plugin_folder_others_can_reach_is_closed_to_them() {
     use std::os::unix::fs::PermissionsExt;
-    let root = common::short_root();
-    let paths = Paths::with_root(root.path());
-    let brain = TypicalBrain::new();
-    common::place_db(&paths, &brain);
-    let hooks = paths.session_plugin().join("hooks");
-    fs::create_dir_all(&hooks).unwrap();
-    for dir in [paths.session_plugin(), hooks.clone()] {
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    fs::set_permissions(&hooks, fs::Permissions::from_mode(0o755)).unwrap();
-    let time = FakeTime::new(brain.now().wall);
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    let opts = common::options(&paths, &brain, &time, moa_daemon::Ready::Channel(tx));
-    let ended = timeout(WAIT, moa_daemon::run(opts))
-        .await
-        .expect("run ends");
-    let e = ended.expect_err("the daemon refuses the folder");
-    assert!(e.to_string().contains("is open to other users"), "{e}");
+    let d = boot_with(
+        |paths| {
+            let hooks = paths.session_plugin().join("hooks");
+            fs::create_dir_all(&hooks).unwrap();
+            fs::set_permissions(paths.session_plugin(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&hooks, fs::Permissions::from_mode(0o755)).unwrap();
+        },
+        |_| {},
+    )
+    .await;
+    let hooks = d.paths.session_plugin().join("hooks");
+    let mode = fs::metadata(&hooks).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
 }
