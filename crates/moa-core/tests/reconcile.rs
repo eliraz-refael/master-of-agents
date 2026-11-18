@@ -543,6 +543,12 @@ fn an_adopted_agent_that_exits_in_its_shell_tab_shows_asleep() {
         has_log(&fx, "reconciled the tabs: 3 kept, 0 bound, 1 put to sleep"),
         "{fx:?}"
     );
+    // The shell tab is the user's again, without moa's tags.
+    assert_eq!(
+        unsets(&fx),
+        untagged("%4").iter().collect::<Vec<_>>(),
+        "{fx:?}"
+    );
 }
 
 /// An agent with no `CLAUDE_CONFIG_DIR` and no conversation on its command line.

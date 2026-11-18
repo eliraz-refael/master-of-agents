@@ -844,6 +844,11 @@ fn sleep_by_name() {
         format!("{TITLE}'s agent isn't running in that tab any more")
     );
     assert!(kills(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        unsets(&fx),
+        untagged("%1").iter().collect::<Vec<_>>(),
+        "{fx:?}"
+    );
     assert!(is_asleep(r.s()));
     assert!(r.st.binding(s_id()).is_none());
     // It is asleep, so a script reading `asleep` sees it.

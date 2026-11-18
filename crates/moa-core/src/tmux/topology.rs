@@ -217,6 +217,11 @@ impl Topology {
         self.moa_sessions.insert(p, id);
     }
 
+    /// Records that `p` has no session tag any more, as moa just unset it.
+    pub fn untag(&mut self, p: PaneId) {
+        self.moa_sessions.remove(&p);
+    }
+
     /// The moa session a pane was tagged with (`@moa_session`), if any.
     pub fn moa_session(&self, p: PaneId) -> Option<SessionId> {
         self.moa_sessions.get(&p).copied()

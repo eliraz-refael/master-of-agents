@@ -436,6 +436,22 @@ fn close_of_an_adopted_session_whose_agent_left_kills_nothing() {
     AGENT_RUNS.with(|c| c.set(false));
     let fx = r.close(1);
     assert!(kills(&fx).is_empty(), "{fx:?}");
+    // The tab is the user's again: moa's tags come off it, after the commit (R15).
+    let want = untagged("%9");
+    assert_eq!(unsets(&fx), want.iter().collect::<Vec<_>>(), "{fx:?}");
+    let persist = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Persist(_)))
+        .unwrap();
+    let untag = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Tmux { cmds, .. } if cmds.contains(&want[0])))
+        .unwrap();
+    assert!(persist < untag, "{fx:?}");
+    assert_eq!(
+        r.st.tmux().topology.moa_session("%9".parse().unwrap()),
+        None
+    );
     assert!(
         changes(&fx)
             .iter()

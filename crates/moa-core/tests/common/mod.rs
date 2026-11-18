@@ -136,3 +136,30 @@ pub fn listed(st: &mut State, b: &TypicalBrain, info: &[&str], start: &[&str]) -
         },
     )
 }
+
+/// `set-option -p -u -t <pane> <name>`: one of moa's options taken off a tab.
+pub fn unset(pane: &str, name: &str) -> Cmd {
+    Cmd::new("set-option").args(["-p", "-u", "-t", pane, name])
+}
+
+/// The options taken off tabs (`set-option -p -u`), in the order they go out.
+pub fn unsets(fx: &[Effect]) -> Vec<&Cmd> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| {
+            c.name() == "set-option"
+                && c.argv()
+                    .get(..2)
+                    .is_some_and(|a| a[0] == "-p" && a[1] == "-u")
+        })
+        .collect()
+}
+
+/// What tab `pane` loses when its adopted agent left: the session tag, then the mark.
+pub fn untagged(pane: &str) -> Vec<Cmd> {
+    vec![unset(pane, "@moa_session"), unset(pane, "@moa_adopted")]
+}

@@ -311,6 +311,17 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
         .arg(format!("moa: {text}"))
 }
 
+/// Unsets one of moa's options (`@moa_session`, `@moa_adopted`) on one pane.
+pub(crate) fn unset_pane_option(pane: PaneId, name: &str) -> Cmd {
+    Cmd::new("set-option").args([
+        "-p".to_string(),
+        "-u".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        name.to_string(),
+    ])
+}
+
 /// Sets one of moa's options (`@moa_session`, `@moa_adopted`) on one pane.
 pub(crate) fn set_pane_option(pane: PaneId, name: &str, value: &str) -> Cmd {
     Cmd::new("set-option").args([
@@ -703,6 +714,13 @@ impl TmuxState {
     pub(crate) fn tag_sent(&mut self, pane: PaneId, id: SessionId) {
         self.sent_tags.insert(pane, id);
         self.topology.tag(pane, id);
+    }
+
+    /// Moa took the session tag off `pane`, after a saved commit: neither the topology nor
+    /// the tags waiting for a listing keep it.
+    pub(crate) fn untag_sent(&mut self, pane: PaneId) {
+        self.sent_tags.remove(&pane);
+        self.topology.untag(pane);
     }
 
     /// Reads the lists again, at most one in flight and one more after it.

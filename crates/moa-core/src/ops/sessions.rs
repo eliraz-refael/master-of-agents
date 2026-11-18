@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{ConnId, Done, OpError, ReqId, SLEEP_USAGE};
-use crate::reconcile::agent_runs;
+use crate::reconcile::{agent_runs, tagged_for, untag_pane};
 use crate::sleep::{kill_pane, put_to_sleep, why_not};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
@@ -123,8 +123,9 @@ pub(crate) fn listed(
 }
 
 /// `ls` against `panes`, the listing asked for it (R23). First the adopted sessions whose
-/// agent left its tab go to sleep, in one commit (R5, R31); then the reply is `ls`'s, plus a
-/// row per agent moa doesn't track, each with the line that adopts it. With the tabs not
+/// agent left its tab go to sleep, in one commit (R5, R31), and their tabs' tags come off;
+/// then the reply is `ls`'s, plus a row per agent moa doesn't track, each with the line that
+/// adopts it. With the tabs not
 /// reconciled any more (a reload since it asked), the bindings can't be trusted: just `ls`.
 pub(crate) fn ls_with(
     state: &mut State,
@@ -142,10 +143,15 @@ pub(crate) fn ls_with(
         let mut tx = Tx::new(now);
         let changes: Vec<Change> = gone
             .iter()
-            .flat_map(|id| put_to_sleep(state, &tx, *id))
+            .flat_map(|(id, _)| put_to_sleep(state, &tx, *id))
             .collect();
         match tx.commit(state, changes) {
-            Ok(()) => fx.extend(post_commit(state, tx)),
+            Ok(()) => {
+                for pane in gone.iter().filter_map(|(_, pane)| *pane) {
+                    untag_pane(state, &mut tx, pane);
+                }
+                fx.extend(post_commit(state, tx));
+            }
             Err(_) => fx.push(log(
                 LogLevel::Warn,
                 format!(
@@ -194,41 +200,52 @@ pub(crate) fn untracked(state: &State, panes: &[PaneInfo]) -> Vec<(PaneInfo, Pan
         .filter_map(|p| {
             let agent = (deps.inspect)(p.pid, &p.start)
                 .filter(|a| a.kind == AgentKind::Claude && a.moa_session.is_none())?;
-            let store = state.store_of(agent.store_dir.as_deref());
-            let account = state.account_of_store(&store).map_or_else(
-                || {
-                    store.file_name().map_or_else(
-                        || store.display().to_string(),
-                        |n| n.to_string_lossy().into_owned(),
-                    )
-                },
-                |a| a.to_string(),
-            );
+            let account = account_label(state, agent.store_dir.as_deref());
             Some((p.clone(), agent, account))
         })
         .collect()
 }
 
+/// How the store a `CLAUDE_CONFIG_DIR` value names is shown (R23): the listed account whose
+/// store it is (R32), else the store folder's name.
+pub(crate) fn account_label(state: &State, dir: Option<&str>) -> String {
+    let store = state.store_of(dir);
+    if let Some(account) = state.account_of_store(&store) {
+        return account.to_string();
+    }
+    match store.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => store.display().to_string(),
+    }
+}
+
 /// The sessions whose untracked binding of this server (`generation`) has lost its agent, as
 /// `panes` shows it (R23, R31): its tab is gone, or no longer runs the session's agent there.
-/// Tracked bindings need no look: their tab dies with the agent.
-fn agents_gone(state: &State, generation: Generation, panes: &[PaneInfo]) -> Vec<SessionId> {
+/// Each with its tab when that is still there with the adoption's tags on it. Tracked
+/// bindings need no look: their tab dies with the agent.
+fn agents_gone(
+    state: &State,
+    generation: Generation,
+    panes: &[PaneInfo],
+) -> Vec<(SessionId, Option<PaneId>)> {
     let inspect = state.deps().inspect;
     state
         .pane_bindings()
         .filter(|b| {
             !b.tracked && b.server_pid == generation.pid && b.server_start == generation.start
         })
-        .filter(|b| {
+        .filter_map(|b| {
             let info = listed_pane(b, panes);
             let runs = holds(b, generation, info)
                 && info.is_some_and(|i| {
                     let agent = inspect(i.pid, &i.start);
                     agent_runs(state, b.session_id, agent.as_ref(), Some(&i.cwd))
                 });
-            !runs
+            let tagged = info
+                .filter(|i| !i.dead && tagged_for(i, b.session_id))
+                .map(|i| i.pane);
+            (!runs).then_some((b.session_id, tagged))
         })
-        .map(|b| b.session_id)
         .collect()
 }
 
@@ -351,13 +368,17 @@ pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Resul
     let data = json!({ "id": id });
     let pane = match kill_checked(state, id) {
         Ok(pane) => pane,
-        Err(gone) => {
+        Err(left) => {
             // The adopted agent left its shell tab, which stays the user's: the session goes
-            // to sleep, as any unexpected end does, and loses the binding. That is saved, so
-            // the answer is success-shaped.
+            // to sleep, as any unexpected end does, and loses the binding, and the tab its
+            // tags. That is saved, so the answer is success-shaped.
             let changes = put_to_sleep(state, tx, id);
             tx.commit(state, changes)?;
-            return Ok(Done { text: gone.0, data });
+            untag_pane(state, tx, left.pane);
+            return Ok(Done {
+                text: left.said,
+                data,
+            });
         }
     };
     let text = format!("closed {}", title_of(state, &s));
@@ -465,6 +486,7 @@ pub(crate) fn sleep(
     let mut panes = Vec::new();
     let mut slept = Vec::new();
     let mut names = Vec::new();
+    let mut left_tabs = Vec::new();
     for id in running {
         match kill_checked(state, id) {
             Ok(pane) => {
@@ -473,8 +495,12 @@ pub(crate) fn sleep(
                     names.push(title_of(state, s));
                 }
             }
-            // An adopted agent that left its tab: asleep, and the tab left to the user.
-            Err(gone) => said.push(gone.0),
+            // An adopted agent that left its tab: asleep, and the tab left to the user,
+            // without moa's tags.
+            Err(left) => {
+                said.push(left.said);
+                left_tabs.push(left.pane);
+            }
         }
         // Asleep either way, so `asleep` lists it.
         slept.push(id);
@@ -495,6 +521,9 @@ pub(crate) fn sleep(
     for pane in panes {
         tx.tmux(kill_pane(pane));
     }
+    for pane in left_tabs {
+        untag_pane(state, tx, pane);
+    }
     if !names.is_empty() {
         said.push(format!(
             "asleep: {} (resumable: moactl resume ID)",
@@ -514,8 +543,8 @@ pub(crate) fn sleep(
 /// untracked (adopted) one may be a shell the agent has left: its process is read again,
 /// and a pane that no longer runs the session's agent is refused. A kill has no listing, so
 /// no folder is compared. The caller puts a refused session to sleep and deletes its
-/// binding, in its own commit.
-pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId>, OpError> {
+/// binding, in its own commit, then takes the tab's tags off ([`untag_pane`]).
+pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId>, AgentLeft> {
     let (Some(pane), Some(b)) = (bound_pane(state, id), state.binding(id)) else {
         return Ok(None);
     };
@@ -530,7 +559,16 @@ pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId
         .session(id)
         .map(|s| title_of(state, s))
         .unwrap_or_else(|| state.handle_of(id));
-    Err(OpError(format!(
-        "{title}'s agent isn't running in that tab any more"
-    )))
+    Err(AgentLeft {
+        said: format!("{title}'s agent isn't running in that tab any more"),
+        pane,
+    })
+}
+
+/// A kill [`kill_checked`] refused: the adopted agent left its tab (R31).
+pub(crate) struct AgentLeft {
+    /// What the user is told.
+    pub said: String,
+    /// The tab, left to the user.
+    pub pane: PaneId,
 }

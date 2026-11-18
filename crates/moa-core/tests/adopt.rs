@@ -555,6 +555,50 @@ fn a_default_folder_adoption_stays_live_in_ls() {
     still_live(&mut r, 3);
 }
 
+/// The adopted agent leaves its shell tab and the user types another Claude there: `ls`
+/// puts the session to sleep and takes moa's tags off the tab, so the next `ls` lists the
+/// new agent as one moa doesn't track (R23), ready to be adopted.
+#[test]
+fn a_tab_an_adopted_agent_left_is_listed_again_once_another_runs_there() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    r.in_5(Some(&store), Some(C9));
+    let new = adopted_id(&r.adopt("%5"));
+    let five = "%5".parse().unwrap();
+    assert_eq!(r.st.tmux().topology.moa_session(five), Some(new));
+
+    // The agent left: the listing shows %5 as adopt tagged it, running no agent.
+    AGENTS.with(|a| a.borrow_mut().remove(&50));
+    let lantern = r.lantern();
+    let tagged = format!("I\t%5\t50\t0\t\t1\t{new}\t{}", lantern.display());
+    let k = line("%7", 70, K, &r.home().join("private/web"));
+    send(&r.b, &mut r.st, 2, Op::SessionLs { all: false });
+    let fx = listed(&mut r.st, &r.b, &[&tagged, &k], &[]);
+    assert_eq!(r.st.session(new).unwrap().lifecycle, Lifecycle::Ended);
+    assert!(r.st.binding(new).is_none());
+    assert_eq!(
+        unsets(&fx),
+        untagged("%5").iter().collect::<Vec<_>>(),
+        "{fx:?}"
+    );
+    assert_eq!(r.st.tmux().topology.moa_session(five), None);
+
+    // Another Claude, typed in that shell.
+    r.in_5(Some(&store), Some("C10"));
+    send(&r.b, &mut r.st, 3, Op::SessionLs { all: false });
+    let untagged = line("%5", 50, "", &lantern);
+    let fx = listed(&mut r.st, &r.b, &[&untagged, &k], &[]);
+    let done = one_reply(&fx).unwrap();
+    let shown_lantern = shown(&lantern);
+    assert!(
+        done.text.ends_with(&format!(
+            "UNTRACKED tab %5: acct-a in {shown_lantern}  → moactl adopt %5"
+        )),
+        "{}",
+        done.text
+    );
+}
+
 #[test]
 fn adopt_takes_the_newest_free_transcript_since_the_agent_started() {
     let mut r = World::new().reconciled();

@@ -16,7 +16,7 @@ use crate::hooks::asleep;
 use crate::model::{AgentKind, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId};
 use crate::state::State;
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::{Answer, Asked, Link, log, set_pane_option};
+use crate::tmux::link::{Answer, Asked, Link, log, set_pane_option, unset_pane_option};
 use crate::tmux::panes::{PaneInfo, Tag, holds, list_panes, parse_panes};
 
 /// How many reconciles of one connection may start and never finish (a panic) before moa
@@ -119,6 +119,8 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     // its binding go (its agent was just found gone).
     let held: BTreeSet<PaneId> = holding.keys().copied().collect();
     let mut kept: BTreeSet<SessionId> = BTreeSet::new();
+    // The tabs an adopted agent left: their tags come off once the commit is saved.
+    let mut to_untag: Vec<PaneId> = Vec::new();
     for (pane, mut bs) in holding {
         bs.sort_by_key(|b| std::cmp::Reverse((b.bound_at, b.session_id)));
         let b = bs[0];
@@ -127,6 +129,9 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
             let info = listed[&pane];
             let agent = inspect(info.pid, &info.start);
             if !agent_runs(state, b.session_id, agent.as_ref(), Some(&info.cwd)) {
+                if tagged_for(info, b.session_id) {
+                    to_untag.push(pane);
+                }
                 continue;
             }
         }
@@ -262,6 +267,9 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     for (pane, id, adopted) in to_tag {
         tag_pane(state, &mut tx, pane, id, adopted);
     }
+    for pane in to_untag {
+        untag_pane(state, &mut tx, pane);
+    }
     state.tmux.set_reconciled();
     let mut fx = vec![log(
         LogLevel::Info,
@@ -280,6 +288,26 @@ pub(crate) fn tag_pane(state: &mut State, tx: &mut Tx, pane: PaneId, id: Session
     }
     tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
     state.tmux.tag_sent(pane, id);
+}
+
+/// Takes moa's tags off `pane` once `tx`'s commit is saved (R15): its adopted agent left,
+/// its session went to sleep, and the shell tab is the user's again, so an agent typed in it
+/// next shows as one moa doesn't track (R23). The session tag goes first, as [`tag_pane`]
+/// set it last.
+pub(crate) fn untag_pane(state: &mut State, tx: &mut Tx, pane: PaneId) {
+    tx.tmux(unset_pane_option(pane, "@moa_session"));
+    tx.tmux(unset_pane_option(pane, "@moa_adopted"));
+    state.tmux.untag_sent(pane);
+}
+
+/// Whether listed tab `info` carries the tags of session `id`'s adoption: its session tag,
+/// or the adopted mark with no session tag (a link lost between the two).
+pub(crate) fn tagged_for(info: &PaneInfo, id: SessionId) -> bool {
+    match info.tag {
+        Tag::Session(t) => t == id,
+        Tag::Unset => info.adopted,
+        Tag::Other => false,
+    }
 }
 
 /// The link found no server (R2, R4): no pane is left, so every binding goes, and every

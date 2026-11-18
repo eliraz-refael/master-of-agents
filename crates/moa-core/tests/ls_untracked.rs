@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 
 use moa_core::UtcMs;
 use moa_core::change::Change;
-use moa_core::effect::{Down, Effect, Input, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{Down, Effect, Input, LogLevel, LogLine, TmuxIn, TmuxToken, handle_checked};
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent,
     PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError};
-use moa_core::state::{Deps, State};
+use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_testkit::brain::TypicalBrain;
 use serde_json::{Value, json};
 
@@ -164,10 +164,18 @@ struct Rig {
     st: State,
     /// The tabs every listing shows.
     tabs: Vec<String>,
+    /// What the rig was loaded from, for a reload.
+    snap: Snapshot,
 }
 
 impl Rig {
     fn new() -> Rig {
+        Rig::build(false)
+    }
+
+    /// With `a_unknown`, A's row holds a value this build doesn't know: no commit may
+    /// change it.
+    fn build(a_unknown: bool) -> Rig {
         AGENTS.with(|a| a.borrow_mut().clear());
         let b = TypicalBrain::new();
         let deps = Deps {
@@ -189,20 +197,50 @@ impl Rig {
         ]);
         snap.pane_bindings
             .extend([binding(K, "%7", 70, true), binding(A, "%5", 50, false)]);
+        if a_unknown {
+            snap.unknown.push(LoadNote {
+                table: "sessions",
+                key: A.into(),
+                reason: "a state this build doesn't know",
+            });
+        }
         let tabs = vec![
             tab("%5", 50, A, true, false, &b.home.join("private/lantern")),
             tab("%7", 70, K, false, false, &b.home.join("private/web")),
         ];
         // A's agent still runs, so reconcile keeps its binding.
         runs(50, Some(claude(&b.home.join(".claude-a"), Some(CA))));
-        let mut st = loaded_with(&b, TOML, deps, snap);
+        let mut st = loaded_with(&b, TOML, deps, snap.clone());
         link_up(&b, &mut st);
         handle_checked(&mut st, Input::StartDrained, b.now());
         let lines: Vec<&str> = tabs.iter().map(String::as_str).collect();
         listed(&mut st, &b, &lines, &[]);
         assert!(st.tmux().reconciled());
         assert!(st.binding(id(A)).is_some_and(|b| !b.tracked));
-        Rig { b, st, tabs }
+        Rig { b, st, tabs, snap }
+    }
+
+    /// tmux answers pane query `n` with [`Rig::tabs`].
+    fn answer(&mut self, n: u64) -> Vec<Effect> {
+        let tabs = self.tabs.clone();
+        feed(
+            &self.b,
+            &mut self.st,
+            TmuxIn::Replies {
+                conn: 1,
+                token: TmuxToken::Query(n),
+                results: vec![Ok(tabs), Ok(Vec::new())],
+            },
+        )
+    }
+
+    /// Where tab `pane` is in [`Rig::tabs`].
+    fn at(&self, pane: &str) -> usize {
+        let prefix = format!("I\t{pane}\t");
+        self.tabs
+            .iter()
+            .position(|t| t.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("no tab {pane}"))
     }
 
     fn home(&self) -> PathBuf {
@@ -295,7 +333,8 @@ fn ls_lists_untracked_tabs() {
     );
     r.tabs.push(tab("%9", 90, "", false, true, &x));
     runs(90, Some(claude(&store_a, Some("C9"))));
-    r.tabs[1] = tab("%7", 70, "", false, false, &home.join("private/web"));
+    let seven = r.at("%7");
+    r.tabs[seven] = tab("%7", 70, "", false, false, &home.join("private/web"));
     runs(70, Some(claude(&store_a, Some("C7"))));
     r.tabs.push(tab("%11", 110, Y, false, false, &x));
     runs(110, Some(claude(&store_a, Some("C11"))));
@@ -394,8 +433,90 @@ fn an_adopted_agent_that_left_its_tab_shows_asleep_in_ls() {
     assert_eq!(row(&done, A)["alive"], json!("asleep"));
     assert_eq!(row(&done, A)["tracked"], json!(true));
     assert!(!line_of(&r.st, &done, A).contains("adopted:"));
-    // The tab is still tagged with A: it isn't listed as untracked.
+    // The listing still shows the tab tagged with A: it isn't listed as untracked yet.
     assert!(untracked_rows(&done).is_empty());
+
+    // The tab is the user's again: moa's tags come off it once the sleep is saved (R15).
+    let want = untagged("%5");
+    assert_eq!(unsets(&fx), want.iter().collect::<Vec<_>>(), "{fx:?}");
+    let untag = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Tmux { cmds, .. } if cmds.contains(&want[0])))
+        .unwrap();
+    assert!(persist < untag, "{fx:?}");
+    assert_eq!(
+        r.st.tmux().topology.moa_session("%5".parse().unwrap()),
+        None
+    );
+
+    // Another Claude typed in that shell shows in the next `ls`, as one moa doesn't track.
+    let lantern = r.home().join("private/lantern");
+    let five = r.at("%5");
+    r.tabs[five] = tab("%5", 50, "", false, false, &lantern);
+    runs(
+        50,
+        Some(claude(&r.home().join(".claude-a"), Some("C-next"))),
+    );
+    let fx = r.ls();
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    let done = one_reply(&fx).unwrap();
+    assert_eq!(
+        untracked_rows(&done),
+        vec![json!({"untracked": "%5", "account": "acct-a", "cwd": shown(&lantern)})]
+    );
+}
+
+/// The tabs were reloaded between the ask and the answer: the bindings can't be trusted
+/// until the tabs are reconciled again (R10), so `ls` acts on nothing and lists none.
+#[test]
+fn ls_whose_tabs_were_reloaded_meanwhile_answers_without_the_list() {
+    let mut r = Rig::new();
+    r.tabs
+        .push(tab("%6", 60, "", false, false, &r.home().join("private/x")));
+    runs(60, Some(claude(&r.home().join(".claude-a"), Some("C6"))));
+    runs(50, None);
+    r.ask_ls();
+    let n = r.st.tmux().queries().max().unwrap();
+    let snap = r.snap.clone();
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    assert!(!r.st.tmux().reconciled());
+    let fx = r.answer(n);
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(unsets(&fx).is_empty(), "{fx:?}");
+    let done = one_reply(&fx).unwrap();
+    assert!(untracked_rows(&done).is_empty());
+    assert_eq!(row(&done, A)["alive"], json!("idle"));
+    assert!(r.st.binding(id(A)).is_some());
+}
+
+/// The sleep of an adopted session whose agent left can't be saved: one warn with a count,
+/// nothing taken off its tab, and the reply shows it as it is.
+#[test]
+fn ls_whose_sleep_isnt_saved_says_so_in_the_log() {
+    let mut r = Rig::build(true);
+    runs(50, None);
+    let fx = r.ls();
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(unsets(&fx).is_empty(), "{fx:?}");
+    assert!(
+        fx.iter().any(|e| matches!(
+            e,
+            Effect::Log(LogLine { level: LogLevel::Warn, message })
+                if message == "1 adopted sessions whose agent left weren't put to sleep: nothing was saved"
+        )),
+        "{fx:?}"
+    );
+    let done = one_reply(&fx).unwrap();
+    assert_eq!(row(&done, A)["alive"], json!("idle"));
+    assert_eq!(row(&done, A)["tracked"], json!(false));
+    assert!(r.st.binding(id(A)).is_some());
 }
 
 /// An adopted agent that left, and another Claude in the tab running a conversation of its
