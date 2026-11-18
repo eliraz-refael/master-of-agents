@@ -1,6 +1,8 @@
 //! `suggest` and `suggestion yes|no|later|ls` on the typical brain, with the real moactl
 //! grammar (today is Sunday 2026-11-15, noon in New York).
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use moa_core::change::Change;
@@ -292,7 +294,7 @@ fn yes_runs_every_action_in_one_transaction() {
     let reply = moa_core::effect::reply_of(&fx).unwrap().as_ref().unwrap();
     assert_eq!(
         reply.text,
-        "done; but task set 99 --status done: no task #99; close 3f9a1c52: close isn't in this build yet"
+        "done; but task set 99 --status done: no task #99; close 3f9a1c52: moa isn't open in a terminal yet; run moa first"
     );
     let t1 = st.tasks().find(|t| t.id == TaskId(1)).unwrap();
     assert_eq!(t1.status, TaskStatus::Active);
@@ -311,8 +313,7 @@ fn yes_runs_every_action_in_one_transaction() {
             .iter()
             .any(|t| t.starts_with("noted (fact): board ordered"))
     );
-    let failed =
-        "task set 99 --status done: no task #99; close 3f9a1c52: close isn't in this build yet";
+    let failed = "task set 99 --status done: no task #99; close 3f9a1c52: moa isn't open in a terminal yet; run moa first";
     assert_eq!(
         row(&st, 5).result.as_deref(),
         Some(failed),
@@ -453,4 +454,73 @@ fn suggestion_ls_matches_the_spike_layout() {
     let now = b.now();
     let text = ok(&mut st, Op::SuggestionLs(NoParams), &now).text;
     insta::assert_snapshot!("suggestion_ls_matches_the_spike_layout", text);
+}
+
+/// `close` runs from a suggestion through the same transaction (R15): the session ends,
+/// and its tab is killed once the whole answer is saved.
+#[test]
+fn a_suggestion_can_close_a_session() {
+    let toml = "[brains.default]\nfolders = [\"~/work\"]\nopen_account = \"acct-a\"\n\n\
+                [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-a\"\nlauncher = \"/opt/claude\"\n";
+    let b = TypicalBrain::new();
+    let deps = Deps {
+        session_plugin: PathBuf::from(common::PLUGIN),
+        ..deps(&b)
+    };
+    let mut st = common::loaded_with(&b, toml, deps, b.snapshot());
+    common::link_up(&b, &mut st);
+    handle_checked(&mut st, Input::StartDrained, b.now());
+    common::listed(&mut st, &b, &[], &[]);
+    let open = Op::SessionOpen {
+        path: b.home.join("work/lantern"),
+        account: None,
+        title: None,
+        group: None,
+        prompt: None,
+        bg: true,
+    };
+    let id = common::the_open(&common::send(&b, &mut st, 1, open)).0;
+    common::feed(
+        &b,
+        &mut st,
+        moa_core::effect::TmuxIn::Replies {
+            conn: 1,
+            token: moa_core::effect::TmuxToken::Open(id),
+            results: vec![Ok(vec!["P %7 4242".into()])],
+        },
+    );
+    let now = b.now();
+    let handle = st.handle_of(id);
+    let made = ok(
+        &mut st,
+        suggest("Close lantern", &[&format!("close {handle}")]),
+        &now,
+    );
+    let n = made.data["id"].as_i64().unwrap();
+
+    let fx = effects(&mut st, answer(n, Answer::Yes), &now);
+    assert_eq!(
+        moa_core::effect::reply_of(&fx)
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .text,
+        "done"
+    );
+    let s = st.session(id).unwrap();
+    assert_eq!(s.lifecycle, moa_core::model::Lifecycle::Ended);
+    assert!(s.asleep_at.is_none());
+    let kill = moa_core::tmux::cmd::Cmd::new("kill-pane").args(["-t", "%7"]);
+    let killed = fx
+        .iter()
+        .position(
+            |e| matches!(e, Effect::Tmux { conn: 1, cmds, token: None } if cmds == std::slice::from_ref(&kill)),
+        )
+        .unwrap_or_else(|| panic!("the tab is killed: {fx:?}"));
+    let saved = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Persist(_)))
+        .unwrap();
+    assert!(saved < killed, "{fx:?}");
+    assert_eq!(persists(&fx).len(), 1, "one transaction: {fx:?}");
 }

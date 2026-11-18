@@ -243,7 +243,6 @@ fn verb_names_match_clap_and_the_enum() {
 
 #[test]
 fn later_verbs_say_not_yet() {
-    assert_eq!(err(&["close", "x"]), "moactl close isn't in this build yet");
     assert_eq!(err(&["peers"]), "moactl peers isn't in this build yet");
     assert_eq!(
         err(&["layout", "list"]),
@@ -359,7 +358,12 @@ fn actions_parse_with_the_same_grammar() {
     let wl = "a suggestion can run moactl archive, close, group, note, project, set, task";
     assert_eq!(act("rm", &["-rf", "x"]).unwrap_err(), wl);
     assert_eq!(act("open", &["~/x"]).unwrap_err(), wl);
-    assert_eq!(act("close", &["3f9a1c52"]), Ok(Action::NotYet("close")));
+    assert_eq!(
+        act("close", &["3f9a1c52"]),
+        Ok(Action::Op(Op::SessionClose {
+            q: "3f9a1c52".into()
+        }))
+    );
     assert_eq!(
         act("project", &["X", "--add", "rel"]).unwrap_err(),
         "use a full path in a suggestion"
@@ -373,4 +377,44 @@ fn every_verb_and_subcommand_is_reserved() {
     for verb in VERB_NAMES {
         assert!(RESERVED_BRAIN_NAMES.contains(verb), "{verb} isn't reserved");
     }
+}
+
+/// `close` maps to its op, from moactl and from a suggestion alike; `term` opens a shell in
+/// the folder it names, else where it was typed; the help says "tab" (R30).
+#[test]
+fn close_and_term_parse() {
+    assert_eq!(op(&["close", "x"]), Op::SessionClose { q: "x".into() });
+    assert_eq!(
+        act("close", &["x"]),
+        Ok(Action::Op(Op::SessionClose { q: "x".into() }))
+    );
+    assert_eq!(
+        op(&["term"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h/private/lantern"),
+            title: None
+        }
+    );
+    assert_eq!(
+        op(&["term", "../web", "--title", "dev", "--pane", "%3"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h/private/web"),
+            title: Some("dev".into())
+        }
+    );
+    assert_eq!(
+        op(&["term", "~"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h"),
+            title: None
+        }
+    );
+
+    use clap::CommandFactory;
+    let help = Moactl::command().render_help().to_string();
+    let line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("term "))
+        .unwrap_or_else(|| panic!("{help}"));
+    assert!(line.ends_with("A plain shell in a new tab"), "{line}");
 }

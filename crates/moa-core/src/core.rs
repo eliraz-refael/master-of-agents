@@ -126,19 +126,25 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
             fx.extend(state.tmux.input(t));
-            // Reconcile reads its listing, and a resume its own, once the link is as the
-            // input left it.
-            let (resumes, answers): (Vec<_>, Vec<_>) = answers
+            // Reconcile reads its listing, a resume its own and a terminal its new tab, once
+            // the link is as the input left it.
+            let (mine, answers): (Vec<_>, Vec<_>) = answers
                 .into_iter()
-                .partition(|(asked, _)| matches!(asked, Asked::Resume(_)));
+                .partition(|(asked, _)| matches!(asked, Asked::Resume(_) | Asked::Term { .. }));
             let mut more = reconcile::answered(state, now, answers, replied);
-            for (asked, answer) in resumes {
-                if let Asked::Resume(ask) = asked {
-                    let panes = answer.and_then(|lists| match lists.as_slice() {
-                        [info, start] => Ok(parse_panes(info, start)),
-                        _ => Err(()),
-                    });
-                    more.extend(ops::launch::resumed(state, now, ask, panes));
+            for (asked, answer) in mine {
+                match asked {
+                    Asked::Resume(ask) => {
+                        let panes = answer.and_then(|lists| match lists.as_slice() {
+                            [info, start] => Ok(parse_panes(info, start)),
+                            _ => Err(()),
+                        });
+                        more.extend(ops::launch::resumed(state, now, ask, panes));
+                    }
+                    Asked::Term { reply, name, path } => {
+                        more.extend(ops::launch::term_opened(state, reply, &name, &path, answer));
+                    }
+                    Asked::Reconcile => {}
                 }
             }
             if connected {
@@ -181,7 +187,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.push(quiet_timer(state, now.wall));
             fx
         }
-        // Its waiters are dropped; a launch it asked for goes on (R26).
+        // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
+        // gets its tags (R26).
         Input::ClientGone(conn) => {
             state.tmux.client_gone(conn);
             Vec::new()
@@ -267,6 +274,14 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::SessionFocus { q },
             ..
         } => ops::launch::focus(state, now, conn, req, &q),
+        // Answered once tmux says which pane the new tab has. It binds nothing, so it
+        // needs the link up but not the tabs reconciled.
+        Input::Client {
+            conn,
+            req,
+            op: Op::TermOpen { path, title },
+            ..
+        } => ops::launch::term(state, conn, req, &path, title.as_deref()),
         // Answered at once, or after one pane query and the new tab (C11).
         Input::Client {
             conn,

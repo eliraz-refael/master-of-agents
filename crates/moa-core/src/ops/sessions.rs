@@ -1,19 +1,28 @@
-//! `session ls|set|archive`. `open` is in [`super::launch`].
+//! `session ls|set|archive|close`. `open` is in [`super::launch`].
 
 use serde_json::json;
 
+use super::launch::title_of;
 use crate::Now;
 use crate::change::Change;
 use crate::core::Tx;
+use crate::hooks::asleep;
 use crate::live::{display_state, is_asleep, spike_state};
-use crate::model::{Group, SessionId, normalize_group_path};
+use crate::model::{Group, Lifecycle, Session, SessionId, normalize_group_path};
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{Done, OpError};
+use crate::reconcile::agent_runs;
 use crate::state::State;
 use crate::time::{days_ago, local_text};
+use crate::tmux::cmd::Cmd;
+use crate::tmux::focus::bound_pane;
+use crate::tmux::ids::PaneId;
+use crate::tmux::link::ready;
 
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
+
+const STILL_OPENING: &str = "it's still opening; try again in a moment";
 
 pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
     let recent = days_ago(now, 2);
@@ -163,4 +172,80 @@ pub(crate) fn archive(
         text: format!("archived {}", archived.len()),
         data: json!({ "archived": archived }),
     })
+}
+
+/// `close Q`: the session ends (not asleep: the user meant it, R14), and its tab is killed
+/// once that is saved (R15), when moa can prove the tab is the session's (R31). A session
+/// that isn't running is still marked ended, as the spike did.
+pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Result<Done, OpError> {
+    ready(state)?;
+    let id = state.resolve(q)?;
+    // Its pane isn't known yet.
+    if state.tmux.launching(id).is_some() {
+        return Err(OpError(STILL_OPENING.into()));
+    }
+    let s = state
+        .session(id)
+        .cloned()
+        .ok_or_else(|| OpError(format!("no session matches '{q}'")))?;
+    let data = json!({ "id": id });
+    let pane = match kill_checked(state, id) {
+        Ok(pane) => pane,
+        Err(gone) => {
+            // The adopted agent left its shell tab, which stays the user's: the session goes
+            // to sleep, as any unexpected end does, and loses the binding. That is saved, so
+            // the answer is success-shaped.
+            let mut changes = vec![Change::DeletePaneBinding(id)];
+            if s.lifecycle == Lifecycle::Live {
+                changes.insert(0, Change::Session(asleep(&s, tx.wall)));
+            }
+            tx.commit(state, changes)?;
+            return Ok(Done { text: gone.0, data });
+        }
+    };
+    let text = format!("closed {}", title_of(state, &s));
+    let ended = Session {
+        lifecycle: Lifecycle::Ended,
+        asleep_at: None,
+        activity_at: Some(now.wall),
+        ..s
+    };
+    let mut changes = vec![Change::Session(ended)];
+    if state.binding(id).is_some() {
+        changes.push(Change::DeletePaneBinding(id));
+    }
+    tx.ui(state, changes, text)?;
+    if let Some(pane) = pane {
+        tx.tmux(Cmd::new("kill-pane").args(["-t".to_string(), pane.to_string()]));
+    }
+    Ok(Done {
+        text: "closed".into(),
+        data,
+    })
+}
+
+/// The pane to kill for session `id`, checked again first (R31): `None` when it isn't
+/// running here. A tracked binding's pane is the agent's, since it dies with it. An
+/// untracked (adopted) one may be a shell the agent has left: its process is read again,
+/// and a pane that no longer runs the session's agent is refused. A kill has no listing, so
+/// no folder is compared. The caller puts a refused session to sleep and deletes its
+/// binding, in its own commit.
+pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId>, OpError> {
+    let (Some(pane), Some(b)) = (bound_pane(state, id), state.binding(id)) else {
+        return Ok(None);
+    };
+    if b.tracked {
+        return Ok(Some(pane));
+    }
+    let inspect = state.deps().inspect;
+    if agent_runs(state, id, inspect(b.pane_pid, &[]).as_ref(), None) {
+        return Ok(Some(pane));
+    }
+    let title = state
+        .session(id)
+        .map(|s| title_of(state, s))
+        .unwrap_or_else(|| state.handle_of(id));
+    Err(OpError(format!(
+        "{title}'s agent isn't running in that tab any more"
+    )))
 }

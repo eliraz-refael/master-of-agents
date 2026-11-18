@@ -30,6 +30,7 @@ pub(crate) fn run(
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())
         }
         Op::SessionArchive { qs } => sessions::archive(state, tx, now, &qs),
+        Op::SessionClose { q } => sessions::close(state, tx, now, &q),
         Op::SessionFind { q } => read::find(state, now, &q),
         Op::TaskLs { project, all } => tasks::ls(state, now, project.as_deref(), all),
         Op::TaskAdd(a) => tasks::add(state, tx, now, &a),
@@ -56,7 +57,8 @@ pub(crate) fn run(
         Op::TmuxEnsure { .. }
         | Op::SessionOpen { .. }
         | Op::SessionFocus { .. }
-        | Op::SessionResume { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::SessionResume { .. }
+        | Op::TermOpen { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

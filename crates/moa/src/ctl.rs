@@ -175,6 +175,13 @@ fn verb(m: &Moactl) -> Result<(), String> {
         home: here.paths.home().to_path_buf(),
     };
     let mut op = m.verb.to_op(&ctx).map_err(|e: VerbError| e.to_string())?;
+    // A terminal opens in a folder that is there, named as the system spells it.
+    if let Op::TermOpen { path, .. } = &mut op {
+        if !path.is_dir() {
+            return Err(format!("no folder {}", path.display()));
+        }
+        *path = canonical(path);
+    }
     let config = here.config()?;
     // `open` goes where the folder it opens belongs, unless MOA_BRAIN says otherwise.
     let brain = match &mut op {

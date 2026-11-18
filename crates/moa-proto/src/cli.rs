@@ -184,7 +184,7 @@ pub enum Verb {
         #[arg(long, value_name = "HOURS")]
         idle: Option<f64>,
     },
-    /// A plain shell in a new window.
+    /// A plain shell in a new tab.
     Term {
         path: Option<String>,
         #[arg(long)]
@@ -497,10 +497,15 @@ impl Verb {
                 q: id.clone(),
                 bg: *bg,
             },
+            Verb::Close { id } => Op::SessionClose { q: id.clone() },
+            // `--pane` is for slice 5's "here"; until then a terminal opens where it was
+            // typed.
+            Verb::Term { path, title, .. } => Op::TermOpen {
+                path: resolve_path(path.as_deref().unwrap_or("."), ctx)?,
+                title: title.clone(),
+            },
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Close { .. }
-            | Verb::Sleep { .. }
-            | Verb::Term { .. }
+            Verb::Sleep { .. }
             | Verb::Adopt { .. }
             | Verb::Goto { .. }
             | Verb::Layout { .. }
@@ -538,9 +543,6 @@ pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Action, String>
         let first = text.lines().next().unwrap_or("");
         first.strip_prefix("error: ").unwrap_or(first).to_string()
     })?;
-    if matches!(parsed.verb, Verb::Close { .. }) {
-        return Ok(Action::NotYet("close"));
-    }
     let ctx = VerbCtx {
         cwd: None,
         home: home.to_path_buf(),

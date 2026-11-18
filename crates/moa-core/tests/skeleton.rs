@@ -440,6 +440,11 @@ fn op_methods_match_the_variants() {
             q: "q".into(),
             bg: true,
         },
+        Op::SessionClose { q: "q".into() },
+        Op::TermOpen {
+            path: "/x".into(),
+            title: Some("t".into()),
+        },
         Op::Brief(NoParams),
         Op::Attention(NoParams),
         Op::Suggest {
@@ -485,6 +490,7 @@ const WRITES: &[&str] = &[
     "session.open",
     "session.focus",
     "session.resume",
+    "session.close",
     "task.add",
     "task.set",
     "note.add",

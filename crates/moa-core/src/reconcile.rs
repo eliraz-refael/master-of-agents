@@ -74,8 +74,8 @@ pub(crate) fn answered(
                 fx.push(log(LogLevel::Warn, "listing the tabs failed".to_string()))
             }
             (Asked::Reconcile, _) => {}
-            // `handle` gives these to `ops::launch::resumed`.
-            (Asked::Resume(_), _) => {}
+            // `handle` gives these to `ops::launch::resumed` and `ops::launch::term_opened`.
+            (Asked::Resume(_) | Asked::Term { .. }, _) => {}
         }
     }
     fx

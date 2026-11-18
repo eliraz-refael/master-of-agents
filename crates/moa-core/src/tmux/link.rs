@@ -140,6 +140,15 @@ pub(crate) enum Asked {
     /// A resume whose checks passed, looking for a tab that already runs its conversation
     /// (R13 step 6).
     Resume(ResumeAsk),
+    /// A terminal's new window (R16), named `name` and opened in `path`: its tab is tagged
+    /// and brought to the screen once tmux says which pane it has. `reply` is whom to
+    /// answer: nobody, once the caller's connection closed, though the tab still gets its
+    /// tags (R26).
+    Term {
+        reply: Option<(ConnId, ReqId)>,
+        name: String,
+        path: String,
+    },
 }
 
 /// A pane query's answer: each command's lines, or `Err` when any command failed or the
@@ -234,21 +243,26 @@ fn open_end(results: &[Result<Vec<String>, String>]) -> OpenEnd {
         [Err(e)] => return OpenEnd::Failed(Some(e.lines().next().unwrap_or("").to_string())),
         _ => return OpenEnd::Failed(None),
     };
+    match opened_pane(line) {
+        Some((pane, pid)) => OpenEnd::Bound { pane, pid },
+        None => OpenEnd::Failed(None),
+    }
+}
+
+/// The pane and its process in a line printed with [`OPENED_FORMAT`], if it is one.
+pub(crate) fn opened_pane(line: &str) -> Option<(PaneId, i64)> {
     let mut words = line.split(' ');
     let (Some("P"), Some(pane), Some(pid), None) =
         (words.next(), words.next(), words.next(), words.next())
     else {
-        return OpenEnd::Failed(None);
+        return None;
     };
     // `i64::from_str` would accept a leading '+'.
     let pid = Some(pid)
         .filter(|p| p.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|p| p.parse::<i64>().ok())
-        .filter(|p| *p > 0);
-    match (pane.parse::<PaneId>(), pid) {
-        (Ok(pane), Some(pid)) => OpenEnd::Bound { pane, pid },
-        _ => OpenEnd::Failed(None),
-    }
+        .filter(|p| *p > 0)?;
+    Some((pane.parse::<PaneId>().ok()?, pid))
 }
 
 /// An absolute path whose last part is `tmux`.
@@ -449,12 +463,19 @@ impl TmuxState {
     }
 
     /// `conn` closed: its ensures, resumes still looking at the tabs and focus waiters are
-    /// forgotten, and its launches go on with nobody to answer.
+    /// forgotten, and its launches and terminals go on with nobody to answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
         self.waiters.retain(|(c, _)| *c != conn);
         self.pinged.retain(|(c, _)| *c != conn);
         self.queries
             .retain(|_, a| !matches!(a, Asked::Resume(r) if r.conn == conn));
+        for asked in self.queries.values_mut() {
+            if let Asked::Term { reply, .. } = asked
+                && matches!(reply, Some((c, _)) if *c == conn)
+            {
+                *reply = None;
+            }
+        }
         for launching in self.opens.values_mut() {
             if matches!(launching.reply, Some((c, _)) if c == conn) {
                 launching.reply = None;

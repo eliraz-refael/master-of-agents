@@ -25,8 +25,8 @@ use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_pane, bound_session};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{
-    Asked, LaunchKind, Launching, Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled, ready,
-    set_pane_option,
+    Answer, Asked, LaunchKind, Launching, Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled,
+    opened_pane, ready, set_pane_option,
 };
 use crate::tmux::panes::{PaneInfo, list_panes};
 
@@ -51,6 +51,8 @@ const NOT_LISTED: &str =
     "the account its conversation was recorded in isn't in moa.toml; add it there to resume";
 const NO_FOLDER: &str = "moa doesn't know which folder it ran in; start it fresh with moactl open";
 const UNSAFE_ID: &str = "that conversation's id isn't one moa can resume";
+const TERM_NOT_FULL: &str = "term needs a full path";
+const NO_SHELL: &str = "couldn't open a terminal; see moa's log";
 
 /// The conversation a launch runs: a new one under this id, or an old one resumed.
 pub(crate) enum Conv<'a> {
@@ -904,7 +906,7 @@ fn named(s: &Session) -> Option<String> {
 }
 
 /// What a session is called in a launch's answers: its title, else its handle.
-fn title_of(state: &State, s: &Session) -> String {
+pub(crate) fn title_of(state: &State, s: &Session) -> String {
     named(s).unwrap_or_else(|| state.handle_of(s.id))
 }
 
@@ -980,6 +982,121 @@ pub(crate) fn focus(
         ],
         _ => start_resume(state, now, conn, req, &id.to_string(), true, true),
     }
+}
+
+/// `term [PATH]` (R16): a plain shell in a new tab, in folder `path`. The window runs no
+/// command, so it is the user's shell with no moa environment, and nothing is bound or
+/// saved. [`term_opened`] tags it once tmux says which pane it has.
+pub(crate) fn term(
+    state: &mut State,
+    conn: ConnId,
+    req: ReqId,
+    path: &Path,
+    title: Option<&str>,
+) -> Vec<Effect> {
+    let reply = |text: &str| Effect::Reply {
+        conn,
+        req,
+        result: Err(OpError(text.into())),
+    };
+    if !matches!(state.tmux().link, Link::Up { .. }) {
+        return vec![reply(NO_TERMINAL)];
+    }
+    if !path.is_absolute() {
+        return vec![reply(TERM_NOT_FULL)];
+    }
+    let folder = path.display().to_string();
+    let deps = state.deps();
+    // The title, else `~` for home, else the folder's name.
+    let named = title
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| (with_tilde(&folder, &deps.home, deps.canonical) == "~").then(|| "~".into()))
+        .or_else(|| path.file_name().map(|f| f.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "~".to_string());
+    // Cut before `literal_format`, as a launch's name is.
+    let name = cut(&format!("⌨ {named}"), WINDOW_NAME_CUT);
+    let cmd = Cmd::new("new-window")
+        .args(["-d", "-P", "-F", OPENED_FORMAT, "-n"])
+        .arg(literal_format(&name))
+        .arg("-c")
+        .arg(literal_format(&folder))
+        .args(["-t", "=moa:"]);
+    let asked = Asked::Term {
+        reply: Some((conn, req)),
+        name,
+        path: folder,
+    };
+    match state.tmux.ask(asked, vec![cmd]) {
+        Some(query) => vec![query],
+        None => vec![reply(NO_TERMINAL)],
+    }
+}
+
+/// tmux answered a terminal's new window: its tab is tagged as a terminal with its label
+/// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen.
+/// Nothing is saved, so the commands go out on their own, before the reply. A caller that
+/// went has nobody to tell, and the tab is still tagged.
+pub(crate) fn term_opened(
+    state: &State,
+    reply: Option<(ConnId, ReqId)>,
+    name: &str,
+    path: &str,
+    answer: Answer,
+) -> Vec<Effect> {
+    let pane = answer.ok().and_then(|lists| match lists.as_slice() {
+        [lines] => match lines.as_slice() {
+            [line] => opened_pane(line),
+            _ => None,
+        },
+        _ => None,
+    });
+    let mut fx = Vec::new();
+    let result = match (pane, &state.tmux().link) {
+        (Some((pane, _)), Link::Up { conn, .. }) => {
+            let mut cmds = vec![
+                set_pane_option(pane, "@moa_term", "1"),
+                set_pane_option(pane, "@moa_label", &literal_format(name)),
+            ];
+            cmds.extend(focus_cmds(pane));
+            fx.push(Effect::Tmux {
+                conn: *conn,
+                cmds,
+                token: None,
+            });
+            let deps = state.deps();
+            Ok(Done {
+                text: format!(
+                    "opened a terminal in {} (tab {name})",
+                    with_tilde(path, &deps.home, deps.canonical)
+                ),
+                data: json!({ "pane": pane.to_string(), "name": name }),
+            })
+        }
+        _ => {
+            fx.push(warn(
+                "tmux didn't open a terminal's tab, or its answer didn't parse".into(),
+            ));
+            Err(OpError(NO_SHELL.into()))
+        }
+    };
+    if let Some((conn, req)) = reply {
+        fx.push(Effect::Reply { conn, req, result });
+    }
+    fx
+}
+
+/// `path` with `home` (as given, or `canonical`) written `~`.
+fn with_tilde(path: &str, home: &Path, canonical: fn(&Path) -> PathBuf) -> String {
+    let path = Path::new(path);
+    for home in [home.to_path_buf(), canonical(home)] {
+        match path.strip_prefix(&home) {
+            Ok(rest) if rest.as_os_str().is_empty() => return "~".into(),
+            Ok(rest) => return format!("~/{}", rest.display()),
+            Err(_) => {}
+        }
+    }
+    path.display().to_string()
 }
 
 #[cfg(test)]

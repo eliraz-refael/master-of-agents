@@ -68,6 +68,17 @@ pub enum Op {
         #[serde(default)]
         bg: bool,
     },
+    /// Ends a session and kills its tab, once moa can prove the tab is the session's.
+    #[serde(rename = "session.close")]
+    SessionClose { q: String },
+    /// A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is
+    /// named after `title`, else the folder.
+    #[serde(rename = "term.open")]
+    TermOpen {
+        path: PathBuf,
+        #[serde(default)]
+        title: Option<String>,
+    },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -254,6 +265,8 @@ impl Op {
         "session.open",
         "session.focus",
         "session.resume",
+        "session.close",
+        "term.open",
         "task.ls",
         "task.add",
         "task.set",
@@ -280,6 +293,7 @@ impl Op {
             | Op::SessionOpen { .. }
             | Op::SessionFocus { .. }
             | Op::SessionResume { .. }
+            | Op::SessionClose { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -294,6 +308,7 @@ impl Op {
             | Op::Attention(_)
             | Op::SuggestionLs(_)
             | Op::TmuxEnsure { .. }
+            | Op::TermOpen { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -311,6 +326,8 @@ impl Op {
             Op::SessionOpen { .. } => "session.open",
             Op::SessionFocus { .. } => "session.focus",
             Op::SessionResume { .. } => "session.resume",
+            Op::SessionClose { .. } => "session.close",
+            Op::TermOpen { .. } => "term.open",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",
