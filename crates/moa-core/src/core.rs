@@ -88,7 +88,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx
         }
         Input::Tmux(t) => {
-            // A pane that exited ends its session, before the link looks at the tree.
+            // A pane that exited puts its session to sleep, before the link looks at the tree.
             let mut fx = match link::exited_pane(&t) {
                 Some(pane) => {
                     let mut tx = Tx::new(now);
@@ -97,7 +97,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     if !saved {
                         fx.push(Effect::Log(LogLine {
                             level: LogLevel::Warn,
-                            message: "a pane exit was not saved; reconcile will end its session at the next start".into(),
+                            message: "a pane exit was not saved; reconcile will put its session to sleep at the next start".into(),
                         }));
                     }
                     if !fx.is_empty() {

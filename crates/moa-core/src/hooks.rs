@@ -150,11 +150,16 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         changes.push(row);
     }
 
-    // An older event keeps its history row and changes nothing else. An end goes by its kind
-    // first (R14): one that is only the conversation changing (`/clear`, a resume) changes
-    // nothing either, a clean quit ends a session that is asleep however old it is, and any
-    // other end of a session already ended is history only.
-    let older = before.activity_at.is_some_and(|t| env.at < t);
+    // An older event keeps its history row and changes nothing else. Older is than the
+    // session's last activity, or than its going to sleep: a sleep keeps `activity_at` (R5),
+    // and a hook the agent sent before it died can still arrive after. An end goes by its
+    // kind first (R14): one that is only the conversation changing (`/clear`, a resume)
+    // changes nothing either, a clean quit ends a session that is asleep however old it is,
+    // and any other end of a session already ended is history only.
+    let older = before
+        .activity_at
+        .max(before.asleep_at)
+        .is_some_and(|t| env.at < t);
     let ended = before.lifecycle == Lifecycle::Ended;
     let after = match &env.kind {
         HookKind::SessionEnded { reason } => match end_kind(reason) {

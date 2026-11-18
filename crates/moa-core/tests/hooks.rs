@@ -961,6 +961,54 @@ fn a_session_end_after_sleep_keeps_it_asleep() {
     assert!(activity_texts(&fx).is_empty(), "{fx:?}");
 }
 
+/// Hooks fired before the agent died can land after it went to sleep (all but SessionStart
+/// are async). Older than the sleep, they are history only: the session stays asleep, as it
+/// was left, with no feed row. A start from before the sleep doesn't bring it back either.
+#[test]
+fn late_events_from_before_an_unexpected_end_are_history_only() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    feed(&mut st, ends(2, 5000, "other"));
+    let asleep = session(&st);
+    assert_eq!(asleep.asleep_at, Some(UtcMs(T0 + 5000)));
+    let late = [
+        envelope(3, 3000, ended("Lit.")),
+        envelope(
+            4,
+            3500,
+            HookKind::NeedsAnswer {
+                what: "Which lamp?".into(),
+            },
+        ),
+        started(5, 4000, StartSource::Startup),
+    ];
+    for env in late {
+        let kind = env.kind.event_kind();
+        let fx = feed(&mut st, env);
+        assert_eq!(event_kinds(&fx), [kind]);
+        assert!(activity_texts(&fx).is_empty(), "{kind}: {fx:?}");
+        assert_eq!(session(&st), asleep, "{kind}");
+    }
+    assert_eq!(shown(&st).0, DisplayState::Asleep);
+    let s = session(&st);
+    assert_eq!(s.activity, Activity::Working);
+    assert_eq!(s.activity_why.as_deref(), Some("Fix the lamp"));
+    assert_eq!(s.activity_at, Some(UtcMs(T0 + 1000)));
+}
+
+/// The same after a pane exit: a Stop sent just before it, arriving after, is history only.
+#[test]
+fn a_late_stop_after_a_pane_exit_is_history_only() {
+    let mut st = seeded_with(vec![pane_binding(10)]);
+    link_up(&mut st);
+    handle_checked(&mut st, pane_message("pane-exited"), now());
+    let asleep = session(&st);
+    let fx = feed(&mut st, envelope(1, 59_000, ended("Lit.")));
+    assert_eq!(event_kinds(&fx), ["turn.ended"]);
+    assert!(activity_texts(&fx).is_empty(), "{fx:?}");
+    assert_eq!(session(&st), asleep);
+}
+
 /// `logout` is a clean quit; a reason moa doesn't know is not.
 #[test]
 fn logout_and_unknown_reasons() {
@@ -1009,7 +1057,7 @@ fn a_pane_exit_under_refused_writes_changes_nothing_and_is_logged() {
     assert_eq!(persists(&fx), 0);
     let warned = fx.iter().any(|e| {
         matches!(e, Effect::Log(l) if l.level == LogLevel::Warn
-            && l.message == "a pane exit was not saved; reconcile will end its session at the next start")
+            && l.message == "a pane exit was not saved; reconcile will put its session to sleep at the next start")
     });
     assert!(warned, "{fx:?}");
 }

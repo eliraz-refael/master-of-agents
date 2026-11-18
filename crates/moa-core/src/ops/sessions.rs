@@ -445,7 +445,7 @@ fn bind(
         // its clean quit came first. A refused write leaves it live with no binding at all:
         // reconcile puts such sessions to sleep.
         if !lost_agent(state, tx, id, Vec::new()) {
-            logs.push(warn(format!("the end of session {id} was not saved")));
+            logs.push(warn(format!("the sleep of session {id} was not saved")));
         }
         return Ok(opened_reply(s));
     }
