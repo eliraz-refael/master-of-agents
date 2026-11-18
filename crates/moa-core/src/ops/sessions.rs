@@ -28,7 +28,7 @@ use crate::tmux::panes::{PaneInfo, Tag, holds, kept_bindings, list_panes, listed
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
 
-const STILL_OPENING: &str = "it's still opening; try again in a moment";
+pub(crate) const STILL_OPENING: &str = "it's still opening; try again in a moment";
 
 pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
     let recent = days_ago(now, 2);
@@ -125,8 +125,9 @@ pub(crate) fn listed(
 /// `ls` against `panes`, the listing asked for it (R23). First the adopted sessions whose
 /// agent left its tab go to sleep, in one commit (R5, R31), and their tabs' tags come off;
 /// then the reply is `ls`'s, plus a row per agent moa doesn't track, each with the line that
-/// adopts it. With the tabs not
-/// reconciled any more (a reload since it asked), the bindings can't be trusted: just `ls`.
+/// adopts it. While writes are refused nobody is put to sleep: a later `ls` does it. With the
+/// tabs not reconciled any more (a reload since it asked), the bindings can't be trusted:
+/// just `ls`.
 pub(crate) fn ls_with(
     state: &mut State,
     now: &Now,
@@ -139,7 +140,7 @@ pub(crate) fn ls_with(
     };
     let mut fx = Vec::new();
     let gone = agents_gone(state, generation, panes);
-    if !gone.is_empty() {
+    if !gone.is_empty() && !state.writes_refused(now.wall) {
         let mut tx = Tx::new(now);
         let changes: Vec<Change> = gone
             .iter()

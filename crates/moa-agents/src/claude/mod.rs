@@ -16,11 +16,7 @@ pub use normalize::{last_assistant_text, normalize};
 pub use plugin::session_plugin;
 
 pub use moa_core::model::TranscriptCheck;
-
-/// True for ids that are safe to use as a file name: `^[A-Za-z0-9-]{1,64}$`.
-fn safe_id(id: &str) -> bool {
-    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
+use moa_core::model::safe_id;
 
 /// Looks for `<store>/projects/*/<conversation_id>.jsonl`. It checks that the file exists and
 /// never reads it.

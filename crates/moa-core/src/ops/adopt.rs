@@ -8,13 +8,14 @@ use serde_json::json;
 
 use super::launch::{UNSAFE_ID, title_of};
 use super::projects::project_for;
+use super::sessions::STILL_OPENING;
 use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, finish_op};
 use crate::effect::Effect;
 use crate::model::{
     Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
-    Session, SessionId, normalize_group_path,
+    Session, SessionId, normalize_group_path, safe_id,
 };
 use crate::op::{ADOPT_USAGE, ConnId, Done, OpError, ReqId};
 use crate::reconcile::tag_pane;
@@ -30,14 +31,7 @@ const TERMINAL: &str = "that tab is a terminal, not an agent";
 const NOT_AN_AGENT: &str = "that tab isn't running an agent moa recognizes";
 const NO_ACCOUNT: &str = "moa doesn't know the account that agent runs under; add it to moa.toml";
 const NO_CONVERSATION: &str = "no conversation it wrote yet; ask it one thing first, or pass --id";
-const STILL_OPENING: &str = "it's still opening; try again in a moment";
 const LOST: &str = "moa lost that session; try again";
-
-/// Whether `id` is one moa can resume: `^[A-Za-z0-9-]{1,64}$`, the rule a transcript's file
-/// name is checked by (`moa_agents::claude::find_transcript`).
-fn safe_id(id: &str) -> bool {
-    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
 
 /// What `adopt` was asked.
 #[derive(Clone, PartialEq, Eq, Debug)]
