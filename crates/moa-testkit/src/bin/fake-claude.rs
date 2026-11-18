@@ -1,37 +1,56 @@
 //! A stand-in for the `claude` binary: it runs the hooks of the injected plugin the way Claude
-//! Code does (exec form, payload on stdin), driven by a script of `FakeStep`s.
+//! Code does (exec form, payload on stdin), driven by a script of `FakeStep`s. Like Claude, it
+//! has a transcript for a conversation by its first hook: one line, written only inside the
+//! temp dir (R34).
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use moa_agents::claude::project_slot;
 use moa_testkit::FakeStep;
 use serde_json::{Map, Value, json};
 
 const FIRST_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+/// The one line of every synthetic transcript (R34).
+const TRANSCRIPT_LINE: &str = "{\"type\":\"summary\",\"summary\":\"fake\"}\n";
 
 struct Fake {
     session_id: String,
     rotations: u32,
     cwd: PathBuf,
     hooks: Value,
+    /// Where Claude would keep its conversations: `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
+    store: PathBuf,
+    /// The ids a `SessionStart` has fired for.
+    started: HashSet<String>,
 }
 
 fn main() {
-    let (mut session_id, prompt) = parse_args(std::env::args().skip(1));
-    if session_id.is_empty() {
-        session_id = FIRST_ID.into();
-    }
+    let args = parse_args(std::env::args().skip(1));
+    let session_id = if args.id.is_empty() {
+        FIRST_ID.into()
+    } else {
+        args.id
+    };
     let cwd = std::env::current_dir().expect("cwd");
     let mut fake = Fake {
         session_id,
         rotations: 1,
         hooks: load_hooks(),
         cwd,
+        store: store(),
+        started: HashSet::new(),
     };
-    if let Some(prompt) = prompt {
+    // A resumed conversation has a transcript already; one that lost it gets one.
+    if args.resumed {
+        fake.write_transcript();
+    }
+    if let Some(prompt) = args.prompt {
         let mut fields = Map::new();
         fields.insert("prompt".into(), Value::String(prompt));
         fake.fire("UserPromptSubmit", fields);
@@ -74,14 +93,26 @@ fn one(key: &str, value: &str) -> Map<String, Value> {
     m
 }
 
+/// What fake-claude reads from its arguments.
+struct Args {
+    /// The conversation id, from `--session-id` or `--resume`.
+    id: String,
+    /// The id came from `--resume`.
+    resumed: bool,
+    prompt: Option<String>,
+}
+
 /// The conversation id (`--session-id` or `--resume`) and the positional prompt; Claude's other
 /// flags are accepted and ignored.
-fn parse_args(args: impl Iterator<Item = String>) -> (String, Option<String>) {
-    let (mut id, mut prompt) = (String::new(), None);
+fn parse_args(args: impl Iterator<Item = String>) -> Args {
+    let (mut id, mut resumed, mut prompt) = (String::new(), false, None);
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--session-id" | "--resume" => id = args.next().unwrap_or_default(),
+            "--session-id" | "--resume" => {
+                resumed = arg == "--resume";
+                id = args.next().unwrap_or_default();
+            }
             "--name" => {
                 args.next();
             }
@@ -93,7 +124,36 @@ fn parse_args(args: impl Iterator<Item = String>) -> (String, Option<String>) {
             _ => prompt = Some(arg),
         }
     }
-    (id, prompt)
+    Args {
+        id,
+        resumed,
+        prompt,
+    }
+}
+
+/// `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`: where Claude keeps its conversations.
+fn store() -> PathBuf {
+    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".claude"),
+    }
+}
+
+/// Whether `path` is inside the temp dir or `/tmp`, so fake-claude may write there. A path
+/// with `..` in it never is, and neither is a temp dir of `/`. A run that inherited a
+/// developer's real `HOME` can't touch their Claude folder.
+fn in_temp(path: &Path) -> bool {
+    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    [std::env::temp_dir(), PathBuf::from("/tmp")]
+        .into_iter()
+        .flat_map(|root| {
+            let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+            [root, canonical]
+        })
+        .filter(|root| root.parent().is_some())
+        .any(|root| path.starts_with(root))
 }
 
 fn load_script() -> Vec<FakeStep> {
@@ -126,15 +186,44 @@ fn load_hooks() -> Value {
 }
 
 impl Fake {
-    fn fire(&self, event: &str, fields: Map<String, Value>) {
-        let config = std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_default();
+    /// `<store>/projects/<project_slot(cwd)>/<id>.jsonl`, where Claude keeps the current
+    /// conversation.
+    fn transcript(&self) -> PathBuf {
+        self.store
+            .join("projects")
+            .join(project_slot(&self.cwd))
+            .join(format!("{}.jsonl", self.session_id))
+    }
+
+    /// Writes the current conversation's synthetic transcript, one line, unless it is there
+    /// already or the store isn't inside the temp dir (R34).
+    fn write_transcript(&self) {
+        let path = self.transcript();
+        if !in_temp(&path) {
+            return;
+        }
+        fs::create_dir_all(path.parent().expect("a projects folder")).expect("projects folder");
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => file
+                .write_all(TRANSCRIPT_LINE.as_bytes())
+                .expect("write transcript"),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => panic!("transcript {path:?}: {e}"),
+        }
+    }
+
+    fn fire(&mut self, event: &str, fields: Map<String, Value>) {
+        // A real Claude has its transcript by its first hook for a conversation.
+        if event == "SessionStart" && self.started.insert(self.session_id.clone()) {
+            self.write_transcript();
+        }
         let mut payload = fields;
         payload.insert("hook_event_name".into(), event.into());
         payload.insert("session_id".into(), self.session_id.clone().into());
         payload.insert("cwd".into(), self.cwd.to_string_lossy().into_owned().into());
         payload.insert(
             "transcript_path".into(),
-            format!("{config}/projects/x/{}.jsonl", self.session_id).into(),
+            self.transcript().to_string_lossy().into_owned().into(),
         );
         let subject = match event {
             "Notification" => payload.get("notification_type"),

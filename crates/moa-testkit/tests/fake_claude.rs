@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
+use moa_agents::claude::project_slot;
 use moa_testkit::{FakeStep, fake_claude, wait_for, write_script};
 use serde_json::{Map, Value, json};
 
@@ -83,6 +84,16 @@ impl Rig {
         self.command(steps, args).output().unwrap()
     }
 
+    /// Where fake-claude keeps the transcript of `id`: `<store>/projects/<slot>/<id>.jsonl`.
+    fn transcript(&self, id: &str) -> PathBuf {
+        let slot = project_slot(&self.work().canonicalize().unwrap());
+        self.dir
+            .path()
+            .join("config/projects")
+            .join(slot)
+            .join(format!("{id}.jsonl"))
+    }
+
     /// The recorded calls as (tag, payload).
     fn calls(&self) -> Vec<(String, Value)> {
         fs::read_to_string(self.dir.path().join("calls"))
@@ -134,9 +145,12 @@ fn runs_matching_hooks_in_order_with_the_payload() {
         start["cwd"],
         rig.work().canonicalize().unwrap().to_str().unwrap()
     );
-    let transcript = start["transcript_path"].as_str().unwrap();
-    assert!(transcript.ends_with(&format!("config/projects/x/{id}.jsonl")));
-    assert!(!PathBuf::from(transcript).exists());
+    // R34: the transcript is in the store, under the cwd's project slot, from the start.
+    assert_eq!(
+        start["transcript_path"].as_str().unwrap(),
+        rig.transcript(id).to_str().unwrap()
+    );
+    assert!(rig.transcript(id).is_file());
     assert_eq!(calls[1].1["last_assistant_message"], "Lantern is lit");
     let context = fs::read_to_string(rig.work().join(".fake-claude.context")).unwrap();
     assert_eq!(context, "peers note\n");
@@ -286,4 +300,90 @@ fn a_prompt_argument_is_the_first_prompt() {
     assert_eq!(tags(&calls), ["prompt"]);
     assert_eq!(calls[0].1["prompt"], "light the Lantern");
     assert_eq!(calls[0].1["session_id"], ID2);
+}
+
+/// R34: a real Claude has a transcript by its first hook, so fake-claude writes one line
+/// where Claude would, and names that file in its hooks.
+#[test]
+fn a_session_start_writes_a_synthetic_transcript() {
+    let rig = Rig::new(&[("SessionStart", None, "start", false)]);
+    let out = rig.run(
+        &[
+            hook("SessionStart", json!({"source": "startup"})),
+            FakeStep::Clear,
+            FakeStep::Exit,
+        ],
+        &["--session-id", ID1],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let calls = rig.calls();
+    assert_eq!(tags(&calls), ["start", "start"]);
+    for (id, (_, payload)) in [ID1, ID2].into_iter().zip(&calls) {
+        assert_eq!(
+            payload["transcript_path"].as_str().unwrap(),
+            rig.transcript(id).to_str().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(rig.transcript(id)).unwrap(),
+            "{\"type\":\"summary\",\"summary\":\"fake\"}\n"
+        );
+    }
+
+    // `--resume` of a conversation with no transcript makes one, before any hook.
+    let id = "00000000-0000-4000-8000-000000000003";
+    let out = rig.run(&[FakeStep::Exit], &["--resume", id]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(rig.transcript(id).is_file());
+
+    // A transcript that is there already is left as it is.
+    fs::write(rig.transcript(id), "kept\n").unwrap();
+    let out = rig.run(
+        &[
+            hook("SessionStart", json!({"source": "resume"})),
+            FakeStep::Exit,
+        ],
+        &["--resume", id],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(fs::read_to_string(rig.transcript(id)).unwrap(), "kept\n");
+}
+
+/// With no `CLAUDE_CONFIG_DIR` the store is `$HOME/.claude`. A store outside the temp dir
+/// (a developer's real `HOME`, inherited) is never written to. Both stores below are under
+/// `/`, where a write would fail fake-claude, so a broken guard can't pass unseen.
+#[test]
+fn no_transcript_is_written_outside_the_temp_dir() {
+    let rig = Rig::new(&[("SessionStart", None, "start", false)]);
+    let home = PathBuf::from("/nonexistent-moa-test-home");
+    let out = rig
+        .command(
+            &[hook("SessionStart", json!({})), FakeStep::Exit],
+            &["--resume", ID1],
+        )
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let slot = project_slot(&rig.work().canonicalize().unwrap());
+    let path = home
+        .join(".claude/projects")
+        .join(slot)
+        .join(format!("{ID1}.jsonl"));
+    let calls = rig.calls();
+    assert_eq!(
+        calls[0].1["transcript_path"].as_str().unwrap(),
+        path.to_str().unwrap()
+    );
+    assert!(!home.exists());
+
+    // A store that leaves `/tmp` through `..` isn't inside it.
+    let escape = PathBuf::from("/tmp/../nonexistent-moa-test-store");
+    let out = rig
+        .command(&[hook("SessionStart", json!({})), FakeStep::Exit], &[])
+        .env("CLAUDE_CONFIG_DIR", &escape)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(!escape.exists());
 }
