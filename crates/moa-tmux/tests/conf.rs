@@ -7,7 +7,7 @@ use moa_core::tmux::ids::{ClientName, PaneId};
 use moa_core::tmux::mailbox::{HookMsg, KeyAction, Mailbox};
 use moa_testkit::{Sandbox, Terminal, tmux_path, wait_for};
 use moa_tmux::Notification;
-use moa_tmux::client::{ConnectOptions, ControlClient, Event, Events, ServerInfo};
+use moa_tmux::client::{CONNECT_WAIT, ConnectOptions, ControlClient, Event, Events, ServerInfo};
 use moa_tmux::conf::{hooks, moa_tmux, tmux_conf, unhooks};
 
 #[test]
@@ -118,6 +118,7 @@ fn opts(sb: &Sandbox) -> ConnectOptions {
         tmux: tmux_path().unwrap_or_else(|e| panic!("{e}")),
         socket: sb.socket_args(),
         env: sb.env(),
+        wait: CONNECT_WAIT,
     }
 }
 

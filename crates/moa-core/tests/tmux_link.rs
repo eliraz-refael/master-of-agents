@@ -282,6 +282,22 @@ fn too_old_and_missing_tmux_answer_in_one_line() {
 }
 
 #[test]
+fn cant_link_says_so() {
+    let mut s = started();
+    let fx = ensure(&mut s);
+    assert!(replies(&fx).is_empty(), "the ensure waits");
+    let fx = feed(&mut s, TmuxIn::Down(Down::CantLink));
+    assert_eq!(
+        replies(&fx),
+        vec![(
+            ReqId(1),
+            refused("moa couldn't talk to its terminal; see moa's log")
+        )]
+    );
+    assert_eq!(s.tmux().link, Link::Down);
+}
+
+#[test]
 fn lost_keeps_the_waiters_and_connects_once() {
     let mut s = started();
     connected(&mut s, 1, generation(10));

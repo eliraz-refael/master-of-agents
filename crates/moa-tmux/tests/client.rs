@@ -5,7 +5,8 @@ use std::time::Duration;
 use moa_core::tmux::mailbox::Mailbox;
 use moa_testkit::{Sandbox, Terminal, tmux_path, wait_for};
 use moa_tmux::client::{
-    CmdError, ConnectError, ConnectOptions, ControlClient, Event, Events, ServerInfo, version_ok,
+    CONNECT_WAIT, CmdError, ConnectError, ConnectOptions, ControlClient, Event, Events, ServerInfo,
+    version_ok,
 };
 use moa_tmux::{Cmd, Notification};
 use proptest::prelude::*;
@@ -15,6 +16,7 @@ fn opts(sb: &Sandbox) -> ConnectOptions {
         tmux: tmux_path().unwrap_or_else(|e| panic!("{e}")),
         socket: sb.socket_args(),
         env: sb.env(),
+        wait: CONNECT_WAIT,
     }
 }
 

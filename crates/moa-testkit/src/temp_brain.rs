@@ -7,7 +7,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use moa_agents::claude::find_transcript;
@@ -138,6 +138,34 @@ impl TempBrain {
         Ok(String::from_utf8_lossy(&out.stdout)
             .trim_end_matches('\n')
             .to_string())
+    }
+
+    /// Starts a control client (`tmux -C attach`) on `brain`'s terminal server, with
+    /// [`TempBrain::env`] as its whole environment. Its stdin and stdout are piped; a caller
+    /// that leaves stdout unread and stdin open has a client that stays attached, as a stuck
+    /// link from an earlier daemon would.
+    pub fn control_client(&self, brain: &str) -> io::Result<std::process::Child> {
+        let socket = self
+            .paths()
+            .tmux_socket(brain)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Command::new("tmux")
+            .arg("-u")
+            .args(socket.args())
+            .args(["-C", "attach"])
+            .env_clear()
+            .envs(self.env())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND)
+                } else {
+                    e
+                }
+            })
     }
 
     /// Kills `brain`'s terminal server when its socket is there, and waits for it to exit.

@@ -490,6 +490,9 @@ Slice 4 is split into two plans, 4a (hooks and the live state) and 4b (the link,
 reconcile, sleep, adopt). The split table is in `2026-11-17-moa-v1-slice-4a-hooks.md`, under
 "Slice 4 is two plans".
 
+**Detailed plans:** `2026-11-17-moa-v1-slice-4a-hooks.md` (4a, done) and
+`2026-11-18-moa-v1-slice-4b-link-resume-sleep.md` (4b: items 6's rest, 7, 8, 9, 11 and 12).
+
 1. **`HookEnvelope`** (spec §6.7 fields).
    - `moa hook claude` is a std-only path:
      - stdin capped at 8 MiB, plus the env fields, `at` (ns), pid and `seq`;
@@ -648,7 +651,7 @@ reconcile, sleep, adopt). The split table is in `2026-11-17-moa-v1-slice-4a-hook
       - Hooks replayed after a failed commit have no retry limit, so a line that always
         breaks the store would loop.
       - `moactl open` makes the folder before picking the brain, so a refusal can follow a
-        "created" note.
+        "created" note: done (#46: `ctl.rs` now routes first).
 
 **Done when:**
 - Fake agents drive every display state.

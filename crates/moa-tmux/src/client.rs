@@ -27,10 +27,11 @@ pub const INFO_FORMAT: &str = "V #{version} #{pid} #{start_time} #{client_name}"
 /// How long `close` waits for the child to exit before it signals it.
 const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
-/// How long `connect` waits for the server's first reply. A bound on a hang, not a latency
-/// target: CI runners are slow and cold, and a loaded machine can take seconds to start
-/// tmux. It has no test of its own, because it would need a fake tmux and a wait this long.
-const CONNECT_WAIT: Duration = Duration::from_secs(20);
+/// How long `connect` usually waits for the server's first reply. A bound on a hang, not a
+/// latency target: CI runners are slow and cold, and a loaded machine can take seconds to
+/// start tmux. It stays below the front door's 10 s wait for an answer, so the front door
+/// hears that a hung server was given up on before it stops waiting.
+pub const CONNECT_WAIT: Duration = Duration::from_secs(8);
 
 pub struct ConnectOptions {
     /// The tmux program (an absolute path).
@@ -39,6 +40,8 @@ pub struct ConnectOptions {
     pub socket: Vec<OsString>,
     /// The whole environment of the child, which is cleared first.
     pub env: Vec<(OsString, OsString)>,
+    /// How long to wait for the server's first reply: [`CONNECT_WAIT`], or less in a test.
+    pub wait: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -249,7 +252,7 @@ impl ControlClient {
         // Limit: only while the late output fits in the pipe (16–64 KiB). With more unread
         // output when this process dies (a lagging reader, a large reply, a batch in
         // flight), tmux keeps the client attached anyway: 3.4 for good, 3.8 too with many
-        // unread replies. Reaping such a client on the next connect is for slice 4.
+        // unread replies. The daemon's link stops such a client on its next connect.
         let mut cmd = Command::new(&opts.tmux);
         cmd.args(ctl_argv(&opts.socket))
             .env_clear()
@@ -286,7 +289,7 @@ impl ControlClient {
         let mut parser = Parser::new();
         let mut buf = vec![0u8; 64 << 10];
         let mut leftover = Vec::new();
-        let deadline = tokio::time::Instant::now() + CONNECT_WAIT;
+        let deadline = tokio::time::Instant::now() + opts.wait;
         let reply = 'read: loop {
             let n = match tokio::time::timeout_at(deadline, stdout.read(&mut buf)).await {
                 Err(_) => {

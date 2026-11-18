@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use moa_core::effect::{Down, TmuxIn, TmuxToken};
 use moa_core::tmux::cmd::Cmd;
+use moa_core::tmux::ids::ClientName;
 use moa_core::tmux::notify::Notification;
 use moa_platform::{TmuxSocket, which};
 use moa_tmux::client::{
-    CmdError, ConnectError, ConnectOptions, ControlClient, Event, Events, ServerInfo,
+    CONNECT_WAIT, CmdError, ConnectError, ConnectOptions, ControlClient, Event, Events, ServerInfo,
 };
 use moa_tmux::conf::{hooks, unhooks};
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
@@ -35,6 +36,10 @@ const BACKOFF: [Duration; 6] = [
     Duration::from_millis(1600),
     Duration::from_millis(3200),
 ];
+
+/// How long each command of a connect's bootstrap, or of a stop's clean-up, may take. A
+/// server that hangs mid-way is treated as gone.
+const STEP_WAIT: Duration = Duration::from_secs(2);
 
 /// Which server the daemon links to, and how its control client is started.
 #[derive(Clone, Debug)]
@@ -88,11 +93,6 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
-/// How long a connection must stay up before a loss starts the backoff afresh: the longest
-/// wait. A client dropped sooner continues the backoff, so a server that keeps dropping
-/// it still costs at most 1 + 6 launches before the link gives up.
-const STEADY: Duration = BACKOFF[BACKOFF.len() - 1];
-
 /// What the link was doing, kept across a restart so the next run knows whether to
 /// reconnect.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,7 +100,27 @@ enum Doing {
     Idle,
     Connecting,
     Up,
-    BackingOff,
+    /// Waiting to try this backoff step.
+    BackingOff(usize),
+}
+
+/// What a restarted run does first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AfterRestart {
+    /// After a give-up or no server the link was idle, and stays so until asked.
+    StayIdle,
+    Connect,
+    /// Waits for this backoff step again and tries it: a restart doesn't start the backoff
+    /// over.
+    BackOff(usize),
+}
+
+fn after_restart(doing: Doing) -> AfterRestart {
+    match doing {
+        Doing::Idle => AfterRestart::StayIdle,
+        Doing::Connecting | Doing::Up => AfterRestart::Connect,
+        Doing::BackingOff(next) => AfterRestart::BackOff(next),
+    }
 }
 
 /// What outlives a restart: the inbox, the connection numbers, the tmux program the front
@@ -113,6 +133,51 @@ struct Shared {
     conns: AtomicU64,
     tmux: Mutex<Option<PathBuf>>,
     doing: Mutex<Doing>,
+    /// Tests only: how many times the actor has started, restarts included.
+    #[cfg(test)]
+    runs: Arc<std::sync::atomic::AtomicUsize>,
+    /// Tests only: the backoff's waits, `BACKOFF` unless a test sets its own.
+    #[cfg(test)]
+    backoff: [Duration; BACKOFF.len()],
+    /// Tests only: each backoff step as it is scheduled, with the run that scheduled it.
+    #[cfg(test)]
+    scheduled: Mutex<Vec<(usize, usize)>>,
+    /// Tests only: the next probe panics.
+    #[cfg(test)]
+    panic_probe: std::sync::atomic::AtomicBool,
+}
+
+impl Shared {
+    /// What a new link shares across its restarts, and the sender of its inbox.
+    fn new(
+        link: TmuxLink,
+        to_core: Box<dyn Fn(TmuxIn) + Send + Sync>,
+    ) -> (mpsc::UnboundedSender<TmuxCmd>, Shared) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let shared = Shared {
+            link,
+            to_core,
+            inbox: Arc::new(tokio::sync::Mutex::new(rx)),
+            conns: AtomicU64::new(0),
+            tmux: Mutex::new(None),
+            doing: Mutex::new(Doing::Idle),
+            #[cfg(test)]
+            runs: Arc::default(),
+            #[cfg(test)]
+            backoff: BACKOFF,
+            #[cfg(test)]
+            scheduled: Mutex::default(),
+            #[cfg(test)]
+            panic_probe: std::sync::atomic::AtomicBool::new(false),
+        };
+        (tx, shared)
+    }
+
+    /// Tests only: what the link is doing.
+    #[cfg(test)]
+    fn doing(&self) -> Doing {
+        *lock(&self.doing)
+    }
 }
 
 /// Starts the link under `supervise` as "the terminal link". It does nothing until it is
@@ -122,21 +187,37 @@ pub(crate) fn start(
     to_core: impl Fn(TmuxIn) + Send + Sync + 'static,
     failed: impl Fn(&'static str, String) + Send + 'static,
 ) -> mpsc::UnboundedSender<TmuxCmd> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let shared = Arc::new(Shared {
-        link,
-        to_core: Box::new(to_core),
-        inbox: Arc::new(tokio::sync::Mutex::new(rx)),
-        conns: AtomicU64::new(0),
-        tmux: Mutex::new(None),
-        doing: Mutex::new(Doing::Idle),
-    });
+    let (tx, shared) = Shared::new(link, Box::new(to_core));
+    supervised(Arc::new(shared), failed);
+    tx
+}
+
+/// Runs the actor on `shared` under `supervise`. A panic while a client is up is told to the
+/// core as a loss at once, before `failed` hears of it; the restart reconnects.
+fn supervised(shared: Arc<Shared>, failed: impl Fn(&'static str, String) + Send + 'static) {
+    let sh = shared.clone();
+    let failed = move |name, why| {
+        let was_up = {
+            let mut doing = lock(&sh.doing);
+            let was_up = *doing == Doing::Up;
+            if was_up {
+                *doing = Doing::Connecting;
+            }
+            was_up
+        };
+        if was_up {
+            (sh.to_core)(TmuxIn::Down(Down::Lost));
+        }
+        failed(name, why);
+    };
     let mut started = false;
     tokio::spawn(supervise(
         "the terminal link",
         move || {
             let restarted = std::mem::replace(&mut started, true);
             let shared = shared.clone();
+            #[cfg(test)]
+            shared.runs.fetch_add(1, Ordering::SeqCst);
             async move {
                 let inbox = shared.inbox.clone().lock_owned().await;
                 Actor {
@@ -149,7 +230,6 @@ pub(crate) fn start(
         },
         failed,
     ));
-    tx
 }
 
 /// A linked control client.
@@ -238,9 +318,10 @@ impl Actor {
                 // The core still thinks a client is up: it hears of the loss first.
                 self.tell(TmuxIn::Down(Down::Lost));
             }
-            // After a give-up or no server the link was idle, and stays so until asked.
-            if doing != Doing::Idle {
-                self.connect(None).await;
+            match after_restart(doing) {
+                AfterRestart::StayIdle => {}
+                AfterRestart::Connect => self.connect(None).await,
+                AfterRestart::BackOff(next) => self.schedule(next),
             }
         }
         loop {
@@ -267,8 +348,9 @@ impl Actor {
                 Step::Cmd(Some(TmuxCmd::Crash)) => panic!("a test crashed the terminal link"),
                 Step::Event(Some(ev)) => self.event(ev),
                 Step::Event(None) => {
+                    let steady = self.steady();
                     let after = match &self.state {
-                        State::Up(up) if up.since.elapsed() < STEADY => up.tried,
+                        State::Up(up) if up.since.elapsed() < steady => up.tried,
                         _ => None,
                     };
                     self.lost(after).await;
@@ -308,7 +390,7 @@ impl Actor {
         self.mark(match state {
             State::Idle => Doing::Idle,
             State::Up(_) => Doing::Up,
-            State::Backoff { .. } => Doing::BackingOff,
+            State::Backoff { next, .. } => Doing::BackingOff(next),
         });
         std::mem::replace(&mut self.state, state)
     }
@@ -318,17 +400,39 @@ impl Actor {
         self.tell(TmuxIn::Down(why));
     }
 
+    /// The backoff's waits.
+    #[cfg(not(test))]
+    fn waits(&self) -> [Duration; BACKOFF.len()] {
+        BACKOFF
+    }
+
+    /// The backoff's waits: a test can set its own.
+    #[cfg(test)]
+    fn waits(&self) -> [Duration; BACKOFF.len()] {
+        self.sh.backoff
+    }
+
+    /// How long a connection must stay up before a loss starts the backoff afresh: the
+    /// longest wait. A client dropped sooner continues the backoff, so a server that keeps
+    /// dropping it still costs at most 1 + 6 launches before the link gives up.
+    fn steady(&self) -> Duration {
+        self.waits()[BACKOFF.len() - 1]
+    }
+
+    /// Waits for backoff step `next`, then tries it.
+    fn schedule(&mut self, next: usize) {
+        #[cfg(test)]
+        lock(&self.sh.scheduled).push((self.sh.runs.load(Ordering::SeqCst), next));
+        let at = Instant::now() + self.waits()[next];
+        self.set(State::Backoff { next, at });
+    }
+
     /// Waits for the step after `tried` (the first, after a first try), or gives up when
     /// the steps have run out.
     fn back_off(&mut self, tried: Option<usize>) {
         let next = tried.map_or(0, |k| k + 1);
         match BACKOFF.get(next) {
-            Some(wait) => {
-                self.set(State::Backoff {
-                    next,
-                    at: Instant::now() + *wait,
-                });
-            }
+            Some(_) => self.schedule(next),
             None => {
                 tracing::warn!(
                     "the terminal link gave up after {} reconnects",
@@ -365,6 +469,10 @@ impl Actor {
     /// Whether a server answers on the socket: connecting is enough (T4). Only "not found"
     /// and "refused" mean there is none; anything else is left for tmux to explain.
     async fn probe(&self) -> bool {
+        #[cfg(test)]
+        if self.sh.panic_probe.swap(false, Ordering::SeqCst) {
+            panic!("a test crashed the terminal link's probe");
+        }
         let tmpdir = self.env("TMUX_TMPDIR").filter(|v| !v.is_empty());
         let path = self.sh.link.socket.path(
             tmpdir.as_deref().map(std::path::Path::new),
@@ -398,6 +506,7 @@ impl Actor {
             tmux,
             socket: self.sh.link.socket.args().to_vec(),
             env: self.sh.link.env.clone(),
+            wait: CONNECT_WAIT,
         };
         match ControlClient::connect(&opts).await {
             Ok((client, events, info)) => self.bootstrap(client, events, info, tried).await,
@@ -417,13 +526,15 @@ impl Actor {
             }
             Err(e @ ConnectError::Protocol(_)) => {
                 tracing::warn!("the terminal link couldn't connect: {e}");
-                self.down(Down::GaveUp);
+                self.down(Down::CantLink);
             }
         }
     }
 
-    /// Sources moa's config, names the client in `@moa_ctl` and sets the hooks, then tells
-    /// the core it is up. `tried` is the backoff step that connected it, if one did.
+    /// Sources moa's config, stops a stuck client from before, names the client in
+    /// `@moa_ctl` and sets the hooks, then tells the core it is up. `tried` is the backoff
+    /// step that connected it, if one did. A step that takes longer than `STEP_WAIT` counts
+    /// as a loss.
     async fn bootstrap(
         &mut self,
         client: ControlClient,
@@ -433,23 +544,16 @@ impl Actor {
     ) {
         let conn = self.sh.conns.fetch_add(1, Ordering::SeqCst) + 1;
         let moa_tmux = self.sh.link.moa_tmux.to_string_lossy().into_owned();
-        let steps = [
-            Cmd::new("source-file").arg(moa_tmux),
-            Cmd::new("set-option").args(["-g", "@moa_ctl", info.client.0.as_str()]),
-        ];
-        for cmd in &steps {
-            match client.run(cmd).await {
-                Ok(_) => {}
-                Err(CmdError::Gone) => {
-                    client.close().await;
-                    return self.lost(tried).await;
-                }
-                Err(e) => tracing::warn!(
-                    "{} failed while linking: {}",
-                    cmd.name(),
-                    first_line(&e.to_string())
-                ),
-            }
+        let source = Cmd::new("source-file").arg(moa_tmux);
+        let name = Cmd::new("set-option").args(["-g", "@moa_ctl", info.client.0.as_str()]);
+        let linked = async {
+            linking(&client, &source).await?;
+            reap_stale(&client, &info.client).await;
+            linking(&client, &name).await
+        };
+        if linked.await.is_err() {
+            client.close().await;
+            return self.lost(tried).await;
         }
         client.send(hooks(&info.client), None);
         let up = Up {
@@ -476,6 +580,8 @@ impl Actor {
         }
         tracing::info!("the terminal link lost its client");
         self.tell(TmuxIn::Down(Down::Lost));
+        // A panic in the probe still reconnects: the core is waiting for one.
+        self.mark(Doing::Connecting);
         if !self.probe().await {
             return self.down(Down::NoServer);
         }
@@ -522,14 +628,15 @@ impl Actor {
     }
 
     /// Takes down what the link put up, so keys say moa isn't running, and closes the
-    /// client.
+    /// client. A command that takes longer than `STEP_WAIT` ends it there.
     async fn clean_up(&mut self) {
         let State::Up(up) = self.set(State::Idle) else {
             return;
         };
         let unset = Cmd::new("set-option").args(["-gu", "@moa_ctl"]);
         for cmd in unhooks().iter().chain([&unset]) {
-            match up.client.run(cmd).await {
+            let ran = tokio::time::timeout(STEP_WAIT, up.client.run(cmd)).await;
+            match ran.unwrap_or(Err(CmdError::Gone)) {
                 Ok(_) => {}
                 Err(CmdError::Gone) => break,
                 Err(e) => tracing::warn!(
@@ -540,6 +647,55 @@ impl Actor {
             }
         }
         up.client.close().await;
+    }
+}
+
+/// One step of a connect's bootstrap. tmux refusing it is logged and the link goes on;
+/// `Err` when the client has gone, or the step took longer than `STEP_WAIT`.
+async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<(), CmdError> {
+    let ran = tokio::time::timeout(STEP_WAIT, client.run(cmd)).await;
+    match ran.unwrap_or(Err(CmdError::Gone)) {
+        Ok(_) => Ok(()),
+        Err(CmdError::Gone) => Err(CmdError::Gone),
+        Err(e) => {
+            tracing::warn!(
+                "{} failed while linking: {}",
+                cmd.name(),
+                first_line(&e.to_string())
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Stops the control client that `@moa_ctl` still names, when it isn't `ours` and is still
+/// attached: an earlier daemon's link that tmux kept (tmux 3.4 keeps a control client whose
+/// output it couldn't write, and 3.8 one with many unread replies). Left attached, it keeps
+/// the keys from saying moa isn't running, and `kill-server` waits on it. Each command waits
+/// at most `STEP_WAIT`; a failure leaves it be.
+async fn reap_stale(client: &ControlClient, ours: &ClientName) {
+    let run = async |cmd: Cmd| {
+        let ran = tokio::time::timeout(STEP_WAIT, client.run(&cmd)).await;
+        ran.ok().and_then(Result::ok).unwrap_or_default()
+    };
+    let shown = run(Cmd::new("show-options").args(["-gqv", "@moa_ctl"])).await;
+    let old = shown.first().map(String::as_str).unwrap_or("");
+    if old.is_empty() || old == ours.0 {
+        return;
+    }
+    let format = "#{client_control_mode} #{client_pid} #{client_name}";
+    let clients = run(Cmd::new("list-clients").args(["-F", format])).await;
+    for line in &clients {
+        let mut f = line.splitn(3, ' ');
+        let (Some("1"), Some(pid), Some(name)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        if name == old
+            && let Ok(pid) = pid.parse::<u32>()
+        {
+            moa_platform::kill_term(pid);
+            tracing::info!(pid, "a stuck terminal link from before was stopped");
+        }
     }
 }
 

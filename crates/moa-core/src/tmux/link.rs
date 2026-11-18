@@ -19,6 +19,7 @@ use crate::op::{ConnId, Done, OpError, ReqId};
 
 const NOT_TMUX: &str = "that isn't a tmux program";
 const GAVE_UP: &str = "moa lost its terminal server and couldn't reconnect; see the log";
+const CANT_LINK: &str = "moa couldn't talk to its terminal; see moa's log";
 const NO_TMUX: &str = "moa can't find tmux; install tmux 3.4 or newer";
 const DISABLED: &str = "moa v1 isn't switched over yet; try moa --sandbox";
 
@@ -460,6 +461,7 @@ impl TmuxState {
             Down::Lost => return fx,
             Down::NoServer => running(false),
             Down::GaveUp => Err(OpError(GAVE_UP.into())),
+            Down::CantLink => Err(OpError(CANT_LINK.into())),
             Down::TooOld(v) => Err(OpError(format!(
                 "moa needs tmux 3.4 or newer; this one is {v}"
             ))),
