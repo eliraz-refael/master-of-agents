@@ -334,6 +334,7 @@ impl CoreHandle {
             backups_dir: opts.backups,
             failures_in_row: 0,
             carry: VecDeque::new(),
+            start_drained_again: false,
             spool: spool.clone(),
             panic_next: panic_next.clone(),
             finished_tx,

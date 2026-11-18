@@ -45,9 +45,14 @@ fn hook_line(seq: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The kinds of inputs the core stepped by the time a start has settled. The link is a
-/// channel that is kept open, so `Startup`'s connect adds no input of its own.
-async fn stepped_at_start(brain: &TypicalBrain, spool: Option<PathBuf>) -> Vec<&'static str> {
+/// The kinds of inputs the core stepped by the time a start has settled, the first `panics`
+/// after `Startup` panicking. The link is a channel that is kept open, so `Startup`'s connect
+/// adds no input of its own.
+async fn stepped_at_start(
+    brain: &TypicalBrain,
+    spool: Option<PathBuf>,
+    panics: u32,
+) -> Vec<&'static str> {
     let time = FakeTime::new(brain.now().wall);
     let (link, _commands) = mpsc::unbounded_channel();
     let core = timeout(
@@ -57,7 +62,7 @@ async fn stepped_at_start(brain: &TypicalBrain, spool: Option<PathBuf>) -> Vec<&
             brain.store(),
             vec![],
             Some(link),
-            0,
+            panics,
         ),
     )
     .await
@@ -83,14 +88,27 @@ async fn start_drained_is_sent_after_the_drain() {
         spool::append(&spool, &hook_line(seq)).unwrap();
     }
     assert_eq!(
-        stepped_at_start(&brain, Some(spool.clone())).await,
+        stepped_at_start(&brain, Some(spool.clone()), 0).await,
         ["Startup", "Hook", "Hook", "Hook", "StartDrained"]
     );
     assert!(!spool::draining(&spool).exists(), "the drain was committed");
 
     let brain = TypicalBrain::new();
     assert_eq!(
-        stepped_at_start(&brain, None).await,
+        stepped_at_start(&brain, None, 0).await,
         ["Startup", "StartDrained"]
+    );
+}
+
+/// A `StartDrained` whose step panics is sent again after the reload, before anything that
+/// waited behind it: otherwise reconcile would wait for it until the next start.
+#[tokio::test]
+async fn a_start_drained_that_panics_is_sent_again() {
+    let brain = TypicalBrain::new();
+    // An empty spool: the panic falls on `StartDrained`.
+    let spool = brain.dir.path().join("spool").join("default.jsonl");
+    assert_eq!(
+        stepped_at_start(&brain, Some(spool), 1).await,
+        ["Startup", "StartDrained", "Reload", "StartDrained"]
     );
 }
