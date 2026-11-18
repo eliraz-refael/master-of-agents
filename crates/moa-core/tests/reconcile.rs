@@ -16,8 +16,8 @@ use moa_core::effect::{
 };
 use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent,
-    PaneBinding, Session, SessionId, SpikePane,
+    Activity, AgentKind, Conversation, ConversationReason, Inspected, Lifecycle, Location,
+    PaneAgent, PaneBinding, Session, SessionId, SpikePane,
 };
 use moa_core::op::{Op, OpError};
 use moa_core::state::{Deps, Snapshot, State};
@@ -168,8 +168,8 @@ fn claude(conversation: Option<String>, moa_session: Option<String>) -> PaneAgen
     }
 }
 
-fn no_agent(_: i64, _: &[String]) -> Option<PaneAgent> {
-    None
+fn no_agent(_: i64, _: &[String]) -> Inspected {
+    Inspected::from(None)
 }
 
 /// The typical brain with its own sessions ended and its spike panes gone, so that only
@@ -213,7 +213,7 @@ impl World {
     }
 
     /// The state, with `inspect` as its process reads; the start drain not yet run.
-    fn load(self, inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> Rig {
+    fn load(self, inspect: fn(i64, &[String]) -> Inspected) -> Rig {
         let deps = Deps {
             home: self.b.home.clone(),
             inspect,
@@ -228,7 +228,7 @@ impl World {
     }
 
     /// [`World::load`], then the start drain.
-    fn drained(self, inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> Rig {
+    fn drained(self, inspect: fn(i64, &[String]) -> Inspected) -> Rig {
         let mut r = self.load(inspect);
         r.input(Input::StartDrained);
         r
@@ -458,17 +458,17 @@ fn a_junk_tag_is_another_sessions() {
 }
 
 /// D's agent: its conversation, and `MOA_SESSION` naming D.
-fn d_with_moa_session(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 909).then(|| claude(Some(conv(D)), Some(tag(D))))
+fn d_with_moa_session(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 909).then(|| claude(Some(conv(D)), Some(tag(D)))))
 }
 
 /// D's agent, started outside moa: no `MOA_SESSION`.
-fn d_without_moa_session(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 909).then(|| claude(Some(conv(D)), None))
+fn d_without_moa_session(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 909).then(|| claude(Some(conv(D)), None)))
 }
 
 /// D ended by a lost `open` (no binding, not asleep), its agent running untagged in %9.
-fn with_d_in_9(inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> (Rig, Vec<Effect>) {
+fn with_d_in_9(inspect: fn(i64, &[String]) -> Inspected) -> (Rig, Vec<Effect>) {
     let mut w = World::new();
     w.add(D).lifecycle = Lifecycle::Ended;
     let mut r = w.drained(inspect);
@@ -534,39 +534,47 @@ fn a_kept_binding_whose_tab_lost_its_tag_is_tagged_again() {
 }
 
 /// U's agent, by its conversation, in %4.
-fn u_runs_in_4(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 404).then(|| claude(Some(conv(U)), None))
+fn u_runs_in_4(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 404).then(|| claude(Some(conv(U)), None)))
 }
 
 /// A plain `claude` in %4, started long after U went to sleep.
-fn a_later_claude_in_4(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 404).then(|| PaneAgent {
+fn a_later_claude_in_4(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 404).then(|| PaneAgent {
         started_at: Some(UtcMs(4_000_000_000_000)),
         ..claude(None, None)
-    })
+    }))
 }
 
 /// A plain `claude` in %4, started before U went to sleep: U's own (a sleep whose kill was
 /// lost).
-fn an_earlier_claude_in_4(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 404).then(|| PaneAgent {
+fn an_earlier_claude_in_4(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 404).then(|| PaneAgent {
         started_at: Some(UtcMs(1)),
         ..claude(None, None)
-    })
+    }))
+}
+
+/// U's agent in %4 by its `MOA_SESSION` alone: no conversation on its command line.
+fn u_by_moa_session_in_4(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 404).then(|| claude(None, Some(tag(U)))))
 }
 
 /// U went to sleep when its adopted agent left %4, and the untag that followed was lost:
-/// %4 still carries U's tags. With no agent of U's there (none, or a plain `claude` typed
-/// after U went to sleep), the next reconcile doesn't bind it, and takes the tags off, so
-/// the tab shows as one moa doesn't track (R23). A plain `claude` that started before U
-/// went to sleep is U's, and is bound again.
+/// %4 still carries U's tags. With no agent of U's there, the next reconcile doesn't bind
+/// it, and takes the tags off, so the tab shows as one moa doesn't track (R23). U isn't
+/// live, so only its conversation or its `MOA_SESSION` proves an agent there is U's: a
+/// plain `claude` proves nothing, whenever it started (one typed after U's agent left
+/// would otherwise be bound to U once the untag was lost).
 #[test]
 fn a_tab_still_tagged_for_an_asleep_adopted_session_is_untagged_unless_its_agent_runs() {
-    type Inspect = fn(i64, &[String]) -> Option<PaneAgent>;
-    let cases: [(Inspect, bool); 3] = [
+    type Inspect = fn(i64, &[String]) -> Inspected;
+    let cases: [(Inspect, bool); 5] = [
         (no_agent, false),
         (a_later_claude_in_4, false),
-        (an_earlier_claude_in_4, true),
+        (an_earlier_claude_in_4, false),
+        (u_runs_in_4, true),
+        (u_by_moa_session_in_4, true),
     ];
     for (inspect, runs) in cases {
         let mut w = World::new();
@@ -585,6 +593,101 @@ fn a_tab_still_tagged_for_an_asleep_adopted_session_is_untagged_unless_its_agent
     }
 }
 
+/// %4's process can't be read.
+fn unreadable_4(pid: i64, _: &[String]) -> Inspected {
+    if pid == 404 {
+        Inspected::Unknown
+    } else {
+        Inspected::Gone
+    }
+}
+
+/// %9's process can't be read.
+fn unreadable_9(pid: i64, _: &[String]) -> Inspected {
+    if pid == 909 {
+        Inspected::Unknown
+    } else {
+        Inspected::Gone
+    }
+}
+
+/// A read that fails proves nothing (R31): U's untracked binding whose tab can't be read is
+/// kept, U stays live, and its tab keeps its tags; the next look decides.
+#[test]
+fn an_untracked_binding_whose_tab_cant_be_read_is_kept() {
+    let mut w = World::new();
+    w.add(U);
+    w.snap.pane_bindings.push(binding(U, G1, 4, false));
+    let mut r = w.drained(unreadable_4);
+    r.connect(G1);
+    let mut lines = abc(&r.b);
+    lines.push(adopted(4, &tag(U), &cwd(&r.b, U)));
+    let fx = r.listed(&lines, &[]);
+    assert!(r.is_live(U));
+    assert_eq!(r.bound_to(U), Some(&binding(U, G1, 4, false)));
+    assert!(unsets(&fx).is_empty(), "{fx:?}");
+    assert!(
+        has_log(&fx, "reconciled the tabs: 4 kept, 0 bound, 0 put to sleep"),
+        "{fx:?}"
+    );
+    assert!(
+        has_log(
+            &fx,
+            "1 tabs couldn't be read; their sessions are left as they are"
+        ),
+        "{fx:?}"
+    );
+}
+
+/// A tab tagged for U, marked adopted, that can't be read: U isn't bound to it, its tags
+/// stay, and U is left as it was: live stays live, asleep stays asleep.
+#[test]
+fn a_tagged_tab_that_cant_be_read_leaves_its_session_as_it_is() {
+    for live in [true, false] {
+        let mut w = World::new();
+        let at = earlier(&w.b);
+        let u = w.add(U);
+        if !live {
+            u.lifecycle = Lifecycle::Ended;
+            u.asleep_at = Some(at);
+        }
+        let before = u.clone();
+        let mut r = w.drained(unreadable_4);
+        r.connect(G1);
+        let mut lines = abc(&r.b);
+        lines.push(adopted(4, &tag(U), &cwd(&r.b, U)));
+        let fx = r.listed(&lines, &[]);
+        assert_eq!(r.session(U), &before, "{fx:?}");
+        assert!(r.bound_to(U).is_none());
+        assert!(unsets(&fx).is_empty(), "{fx:?}");
+    }
+}
+
+/// A live session with no tab (D) may run in an untagged tab that can't be read: it isn't
+/// put to sleep. B, whose own tab is gone, still is.
+#[test]
+fn an_untagged_tab_that_cant_be_read_keeps_tabless_sessions_live() {
+    let mut w = World::new();
+    w.add(D);
+    let mut r = w.drained(unreadable_9);
+    r.connect(G1);
+    let b = &r.b;
+    let lines = [
+        pane(1, &tag(A), &cwd(b, A)),
+        dead(2, &tag(B), &cwd(b, B)),
+        pane(3, &tag(C), &cwd(b, C)),
+        pane(9, "", &cwd(b, D)),
+    ];
+    let fx = r.listed(&lines, &[]);
+    assert!(r.is_live(D), "{fx:?}");
+    assert!(r.bound_to(D).is_none());
+    assert!(r.is_asleep(B));
+    assert!(
+        has_log(&fx, "reconciled the tabs: 2 kept, 0 bound, 1 put to sleep"),
+        "{fx:?}"
+    );
+}
+
 /// A tab tagged for another session, whose agent isn't that session's, is never touched.
 #[test]
 fn a_tab_tagged_for_a_session_with_a_tab_keeps_its_tags() {
@@ -600,8 +703,8 @@ fn a_tab_tagged_for_a_session_with_a_tab_keeps_its_tags() {
 /// D's older conversation, which a hand-run `claude --resume` in %9 runs.
 const D_OLD: &str = "e0000000-0000-4000-8000-000000000004";
 
-fn d_old_in_9(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 909).then(|| claude(Some(D_OLD.into()), None))
+fn d_old_in_9(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 909).then(|| claude(Some(D_OLD.into()), None)))
 }
 
 /// R6 (b) by conversation: the conversation the tab runs becomes its session's current one,
@@ -632,7 +735,7 @@ fn a_rebind_by_an_older_conversation_makes_it_current() {
 }
 
 /// D ended by a lost `open`, its agent typed in terminal %9, untagged.
-fn with_d_in_terminal_9(inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> (Rig, Vec<Effect>) {
+fn with_d_in_terminal_9(inspect: fn(i64, &[String]) -> Inspected) -> (Rig, Vec<Effect>) {
     let mut w = World::new();
     w.add(D).lifecycle = Lifecycle::Ended;
     let mut r = w.drained(inspect);
@@ -666,6 +769,41 @@ fn an_agent_typed_in_a_terminal_rebinds_untracked() {
     }
 }
 
+/// D's agent in %9 by its `MOA_SESSION` alone, its start time unknown.
+fn d_by_moa_session_no_start(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 909).then(|| claude(None, Some(tag(D)))))
+}
+
+/// D's agent in %9 by its `MOA_SESSION` alone, started long ago.
+fn d_by_moa_session_started(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 909).then(|| PaneAgent {
+        started_at: Some(UtcMs(1)),
+        ..claude(None, Some(tag(D)))
+    }))
+}
+
+/// An untracked binding of an agent that names no conversation is proven at each later
+/// look by its start time (R31). With none to read, that look would let it go at once, so
+/// reconcile doesn't bind it; one whose start time is known is bound.
+#[test]
+fn an_untracked_rebind_needs_a_conversation_or_a_start_time() {
+    for (inspect, bound) in [
+        (
+            d_by_moa_session_no_start as fn(i64, &[String]) -> Inspected,
+            false,
+        ),
+        (d_by_moa_session_started, true),
+    ] {
+        let (r, fx) = with_d_in_terminal_9(inspect);
+        assert_eq!(
+            r.bound_to(D).map(|b| b.tracked),
+            bound.then_some(false),
+            "{fx:?}"
+        );
+        assert_eq!(r.is_live(D), bound);
+    }
+}
+
 /// A terminal with a session tag but no adopted mark (moa never leaves one so: something
 /// else set the tag) is bound by its tag only while its agent runs there, untracked, and
 /// marked then.
@@ -692,15 +830,15 @@ fn a_tagged_terminal_is_bound_only_while_its_agent_runs() {
 
 /// A Claude whose argv was retitled to plain `claude`: only its start command names the
 /// conversation.
-fn retitled(pid: i64, start: &[String]) -> Option<PaneAgent> {
+fn retitled(pid: i64, start: &[String]) -> Inspected {
     if pid != 909 {
-        return None;
+        return Inspected::Gone;
     }
     let conversation = start
         .windows(2)
         .find(|w| w[0] == "--resume")
         .map(|w| w[1].clone());
-    Some(claude(conversation, None))
+    Inspected::Agent(claude(conversation, None))
 }
 
 #[test]
@@ -742,11 +880,11 @@ fn an_adopted_agent_that_exits_in_its_shell_tab_shows_asleep() {
 
 /// An agent with no `CLAUDE_CONFIG_DIR` and no conversation on its command line, started
 /// before its tab was bound.
-fn default_store_agent(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 404).then(|| PaneAgent {
+fn default_store_agent(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 404).then(|| PaneAgent {
         started_at: Some(UtcMs(1)),
         ..claude(None, None)
-    })
+    }))
 }
 
 #[test]
@@ -770,13 +908,13 @@ fn a_default_folder_adopted_agent_still_runs() {
 }
 
 /// E's spike pane runs E's conversation, F's another one, and H's an agent naming none.
-fn spike_agents(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    match pid {
+fn spike_agents(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from(match pid {
         404 => Some(claude(Some(conv(E)), None)),
         505 => Some(claude(Some("not-a-known-conversation".into()), None)),
         707 => Some(claude(None, None)),
         _ => None,
-    }
+    })
 }
 
 #[test]
@@ -892,7 +1030,7 @@ fn a_refused_reconcile_is_asked_again() {
 }
 
 /// A process read that always panics (a malformed process entry, say).
-fn panicking_agent(_: i64, _: &[String]) -> Option<PaneAgent> {
+fn panicking_agent(_: i64, _: &[String]) -> Inspected {
     panic!("a process read that always panics")
 }
 
@@ -943,8 +1081,8 @@ thread_local! {
 }
 
 /// D's agent, started by hand in a shell tab: no `MOA_SESSION`, while it runs.
-fn d_in_a_shell(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 909 && D_RUNS.with(Cell::get)).then(|| claude(Some(conv(D)), None))
+fn d_in_a_shell(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 909 && D_RUNS.with(Cell::get)).then(|| claude(Some(conv(D)), None)))
 }
 
 #[test]

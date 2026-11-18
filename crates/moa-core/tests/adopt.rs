@@ -13,8 +13,8 @@ use moa_core::change::Change;
 use moa_core::effect::{Down, Effect, Input, TmuxIn, TmuxToken, handle_checked};
 use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{
-    Activity, ActivityWho, AgentKind, Conversation, ConversationReason, Lifecycle, Location,
-    PaneAgent, PaneBinding, Session, SessionId,
+    Activity, ActivityWho, AgentKind, Conversation, ConversationReason, Inspected, Lifecycle,
+    Location, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError};
 use moa_core::sleep::why_not;
@@ -91,15 +91,15 @@ fn started(b: &TypicalBrain) -> UtcMs {
 type NewestAsk = (PathBuf, PathBuf, Vec<String>, Option<UtcMs>);
 
 thread_local! {
-    /// The agent each pid runs.
-    static AGENTS: RefCell<BTreeMap<i64, PaneAgent>> = const { RefCell::new(BTreeMap::new()) };
+    /// What a read of each pid finds; a pid not in it runs no agent.
+    static AGENTS: RefCell<BTreeMap<i64, Inspected>> = const { RefCell::new(BTreeMap::new()) };
     /// What the newest-transcript lookup finds.
     static NEWEST: RefCell<Option<String>> = const { RefCell::new(None) };
     static NEWEST_ASKED: RefCell<Vec<NewestAsk>> = const { RefCell::new(Vec::new()) };
 }
 
-fn inspect(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    AGENTS.with(|a| a.borrow().get(&pid).cloned())
+fn inspect(pid: i64, _: &[String]) -> Inspected {
+    AGENTS.with(|a| a.borrow().get(&pid).cloned().unwrap_or(Inspected::Gone))
 }
 
 fn newest(store: &Path, cwd: &Path, held: &[String], since: Option<UtcMs>) -> Option<String> {
@@ -282,7 +282,12 @@ impl Rig {
 
     /// The agent `pid` runs, from now on.
     fn runs(&self, pid: i64, agent: PaneAgent) {
-        AGENTS.with(|a| a.borrow_mut().insert(pid, agent));
+        AGENTS.with(|a| a.borrow_mut().insert(pid, Inspected::Agent(agent)));
+    }
+
+    /// `pid`'s process can't be read, from now on.
+    fn unreadable(&self, pid: i64) {
+        AGENTS.with(|a| a.borrow_mut().insert(pid, Inspected::Unknown));
     }
 
     /// %5's agent: started by hand a minute ago, on `store`, running `conv`.
@@ -914,13 +919,57 @@ fn adopt_refuses_an_agent_whose_start_time_isnt_known() {
         "no conversation it wrote yet; ask it one thing first, or pass --id",
     );
     assert!(NEWEST_ASKED.with(|a| a.borrow().is_empty()));
-    // `--id` still adopts it.
+    // `--id` doesn't either: naming no conversation, with no start time, the agent could
+    // never be told from a later one in the tab, and the binding would be let go at the next
+    // look (R31).
     let fx = r.adopt_with("%5", None, None, Some(C9));
-    let new = adopted_id(&fx);
-    assert_eq!(
-        r.st.conversations_of(new).next().unwrap().conversation_id,
-        C9
+    refused(&fx, NO_START);
+}
+
+const NO_START: &str =
+    "moa can't read when that agent started, so it couldn't tell it from a later one in that tab";
+
+/// moa's own agent for Z, typed in a terminal (so its binding would be untracked), naming
+/// no conversation and with no start time: no later look could prove it, so it isn't bound.
+#[test]
+fn adopt_refuses_moas_own_agent_it_could_never_prove_again() {
+    let mut r = World::new().reconciled();
+    r.tabs[0] = r.tabs[0].replacen("\t50\t0\t\t", "\t50\t0\t1\t", 1);
+    let mut agent = claude(Some(&r.home().join(".claude-a")), None, started(&r.b));
+    agent.moa_session = Some(Z.into());
+    agent.started_at = None;
+    r.runs(50, agent);
+    let fx = r.adopt("%5");
+    refused(&fx, NO_START);
+    assert!(r.st.binding(id(Z)).is_none());
+}
+
+/// A tab whose process can't be read: adopt needs an agent, so it refuses, and says why.
+#[test]
+fn adopt_refuses_a_tab_it_cant_read() {
+    let mut r = World::new().reconciled();
+    r.unreadable(50);
+    let fx = r.adopt("%5");
+    refused(
+        &fx,
+        "moa couldn't read what runs in that tab; try again in a moment",
     );
+}
+
+/// An adopted tab whose process can't be read is still the adopted session's: adopt
+/// doesn't let it go, and refuses as for any held tab.
+#[test]
+fn adopt_keeps_an_adopted_tab_it_cant_read() {
+    let mut r = World::new().reconciled();
+    r.in_5(Some(&r.home().join(".claude-a")), Some(C9));
+    let old = adopted_id(&r.adopt("%5"));
+    r.unreadable(50);
+    r.tabs = tagged_tabs(&r, old);
+    let fx = r.adopt("%5");
+    refused(&fx, &format!("that tab is already {}", r.st.handle_of(old)));
+    assert!(unsets(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.st.session(old).unwrap().lifecycle, Lifecycle::Live);
+    assert!(r.st.binding(old).is_some());
 }
 
 /// An id moa couldn't resume later is refused now, from `--id` or from the agent's argv.
@@ -1340,6 +1389,26 @@ fn adopt_binds_moas_own_agent_whose_tab_wasnt_saved() {
     assert_eq!(b.bound_at, r.b.now().wall);
     // Tracked: tagged, not marked adopted.
     assert_eq!(set_options(&fx), vec![&tag("%5", "@moa_session", Z)]);
+    // `--id` naming another of Z's conversations makes that one current, as adopt does.
+    let mut w = World::new();
+    let mut older = conversation(&w.b, Z, "CZ-older");
+    older.first_seen_at = UtcMs(0);
+    older.last_seen_at = UtcMs(0);
+    w.conversations.push(older);
+    let mut r = w.reconciled();
+    let mut agent = claude(Some(&store), Some(CZ), started(&r.b));
+    agent.moa_session = Some(Z.into());
+    r.runs(50, agent);
+    assert_eq!(r.handle(Z), CZ[..8]);
+    let fx = r.adopt_with("%5", None, None, Some("CZ-older"));
+    assert_eq!(adopted_id(&fx), id(Z));
+    assert_eq!(r.handle(Z), "CZ-older");
+    assert!(
+        changes(&fx).iter().any(|c| matches!(c,
+            Change::Conversation(c) if c.conversation_id == "CZ-older"
+                && c.last_seen_at == r.b.now().wall)),
+        "{fx:?}"
+    );
     // `--id` naming a conversation that isn't Z's is refused.
     let mut r = World::new().reconciled();
     let mut agent = claude(Some(&store), Some(CZ), started(&r.b));

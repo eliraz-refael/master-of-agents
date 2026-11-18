@@ -4,7 +4,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime};
 
 use moa_platform::kill_term;
-use moa_platform::proc::{ENV_KEPT, Reader, children, started};
+use moa_platform::proc::{ENV_KEPT, Reader, Unread, children, started};
 
 /// Polls `f` every 20 ms for up to 10 s.
 fn wait_for<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
@@ -26,7 +26,7 @@ struct Guard(Child);
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        for kid in children(self.0.id()) {
+        for kid in children(self.0.id()).unwrap_or_default() {
             kill_term(kid);
         }
         let _ = self.0.kill();
@@ -54,6 +54,7 @@ fn args_reads_argv_and_only_the_kept_env() {
     let args = wait_for(|| {
         reader
             .args(pid)
+            .ok()
             .filter(|a| a.argv.first().is_some_and(|w| w == "sleep"))
     })
     .expect("sh never became sleep");
@@ -76,21 +77,21 @@ fn children_lists_a_shells_child() {
     let pid = sh.0.id();
     let mut reader = Reader::new();
     let kid = wait_for(|| {
-        children(pid).into_iter().find(|&k| {
+        children(pid).ok()?.into_iter().find(|&k| {
             reader
                 .args(k)
-                .is_some_and(|a| a.argv.first().is_some_and(|w| w == "sleep"))
+                .is_ok_and(|a| a.argv.first().is_some_and(|w| w == "sleep"))
         })
     });
     assert!(kid.is_some(), "the shell's sleep was never listed");
-    assert!(children(kid.unwrap()).is_empty());
+    assert_eq!(children(kid.unwrap()), Ok(Vec::new()));
 }
 
 #[test]
 fn children_lists_every_child() {
     let sh = spawn(Command::new("/bin/sh").args(["-c", "sleep 30 & sleep 30 & sleep 30; :"]));
     let pid = sh.0.id();
-    let kids = wait_for(|| Some(children(pid)).filter(|k| k.len() == 3));
+    let kids = wait_for(|| children(pid).ok().filter(|k| k.len() == 3));
     assert!(kids.is_some(), "{:?}", children(pid));
 }
 
@@ -107,14 +108,32 @@ fn started_is_close_to_the_spawn() {
 }
 
 #[test]
-fn args_of_a_gone_pid_is_none() {
+fn a_pid_that_doesnt_exist_reads_as_gone() {
     let mut child = Command::new("true").spawn().unwrap();
     let pid = child.id();
     child.wait().unwrap();
-    assert!(Reader::new().args(pid).is_none());
-    assert!(children(pid).is_empty());
+    assert_eq!(Reader::new().args(pid), Err(Unread::Gone));
+    assert_eq!(children(pid), Err(Unread::Gone));
     assert!(started(pid).is_none());
-    // Pid 0 is never read as a process.
-    assert!(Reader::new().args(0).is_none());
-    assert!(children(0).is_empty());
+    // A pid past any system's pid limit, and pid 0, are never a process.
+    for pid in [i32::MAX as u32, 0] {
+        assert_eq!(Reader::new().args(pid), Err(Unread::Gone));
+        assert_eq!(children(pid), Err(Unread::Gone));
+    }
+}
+
+#[test]
+fn another_users_process_reads_as_failed_not_gone() {
+    // Pid 1 is root's, and its environment is closed to anyone else.
+    if moa_platform::current_uid() == 0 {
+        return;
+    }
+    assert_eq!(Reader::new().args(1), Err(Unread::Failed));
+}
+
+#[test]
+fn a_live_process_reads_as_itself() {
+    let me = std::process::id();
+    assert!(Reader::new().args(me).is_ok_and(|a| !a.argv.is_empty()));
+    assert!(children(me).is_ok());
 }

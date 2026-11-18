@@ -17,7 +17,7 @@ use moa_core::effect::{
 use moa_core::live::{DisplayState, display_state, is_asleep};
 use moa_core::model::{
     Activity, ActivityWho, AgentKind, Ask, AskId, AskStatus, AskTarget, Conversation,
-    ConversationReason, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId,
+    ConversationReason, Inspected, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{Op, OpError, ReqId};
 use moa_core::publish::CoreEvent;
@@ -74,20 +74,27 @@ fn at(wall: UtcMs) -> Now {
 thread_local! {
     /// Whether S's adopted agent still runs in its shell tab.
     static AGENT_RUNS: Cell<bool> = const { Cell::new(true) };
+    /// Whether S's tab's process can't be read.
+    static UNREADABLE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// S's agent in its tab (pid 101), started by hand: no `MOA_SESSION`, while it runs.
-fn s_by_hand(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 101 && AGENT_RUNS.with(Cell::get)).then(|| PaneAgent {
-        kind: AgentKind::Claude,
-        store_dir: None,
-        conversation: Some(C.into()),
-        moa_session: None,
-        moa_brain: None,
-        title: None,
-        group: None,
-        started_at: None,
-    })
+fn s_by_hand(pid: i64, _: &[String]) -> Inspected {
+    if pid == 101 && UNREADABLE.with(Cell::get) {
+        return Inspected::Unknown;
+    }
+    Inspected::from(
+        (pid == 101 && AGENT_RUNS.with(Cell::get)).then(|| PaneAgent {
+            kind: AgentKind::Claude,
+            store_dir: None,
+            conversation: Some(C.into()),
+            moa_session: None,
+            moa_brain: None,
+            title: None,
+            group: None,
+            started_at: None,
+        }),
+    )
 }
 
 /// The cockpit `@1` (pane `%0`), which the user is looking at, and S's tab `%1` in `@2`
@@ -864,6 +871,27 @@ fn sleep_by_name() {
     };
     assert_eq!(done.data, json!({ "asleep": [S] }));
 
+    // One whose tab can't be read: nothing proves its agent is there or gone, so it is
+    // left as it is, and the reply says why.
+    let mut r = World::adopted().up();
+    UNREADABLE.with(|c| c.set(true));
+    let before = r.s().clone();
+    let fx = r.sleep_op(1, &[S], None, false);
+    UNREADABLE.with(|c| c.set(false));
+    assert_eq!(
+        reply_text(&fx),
+        format!("moa couldn't read what runs in {TITLE}'s tab; try again in a moment")
+    );
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(kills(&fx).is_empty(), "{fx:?}");
+    assert!(unsets(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.s(), &before);
+    assert!(r.st.binding(s_id()).is_some());
+    let [(_, Ok(done))] = &replies(&fx)[..] else {
+        panic!("{fx:?}");
+    };
+    assert_eq!(done.data, json!({ "asleep": [] }));
+
     // A name that matches nothing changes nothing.
     let mut r = World::new().up();
     let fx = r.sleep_op(1, &[S, "no-such-session"], None, false);
@@ -1081,8 +1109,8 @@ fn nth_conv(pid: i64) -> String {
 }
 
 /// Every session's agent runs in its tab: pid `200 + k` runs conversation `nth_conv`.
-fn agents(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (200..300).contains(&pid).then(|| PaneAgent {
+fn agents(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((200..300).contains(&pid).then(|| PaneAgent {
         kind: AgentKind::Claude,
         store_dir: None,
         conversation: Some(nth_conv(pid)),
@@ -1091,7 +1119,7 @@ fn agents(pid: i64, _: &[String]) -> Option<PaneAgent> {
         title: None,
         group: None,
         started_at: None,
-    })
+    }))
 }
 
 /// The property's world: no store, the default threshold, and tabs where the test says.

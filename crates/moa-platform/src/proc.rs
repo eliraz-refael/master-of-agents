@@ -15,6 +15,15 @@ pub const ENV_KEPT: [&str; 5] = [
     "MOA_GROUP",
 ];
 
+/// Why a process read came back empty: there is no such process (a pid that never was one,
+/// or one that exited and was reaped), or there is one and it couldn't be read (another
+/// user's, a zombie, a kernel that refused). Only the first says the process is gone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unread {
+    Gone,
+    Failed,
+}
+
 /// A process's argv and its `ENV_KEPT` entries, as lossy UTF-8.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ProcArgs {
@@ -41,15 +50,30 @@ impl Reader {
         Reader::default()
     }
 
-    /// `pid`'s argv and kept environment, or `None` when the process is gone or isn't ours.
-    pub fn args(&mut self, pid: u32) -> Option<ProcArgs> {
-        sys::read_args(pid, &mut self.buf)
+    /// `pid`'s argv and kept environment, or why they couldn't be read.
+    pub fn args(&mut self, pid: u32) -> Result<ProcArgs, Unread> {
+        sys::read_args(pid, &mut self.buf).ok_or_else(|| unread(pid))
     }
 }
 
-/// The pids of `pid`'s direct children; empty when it has none or is gone.
-pub fn children(pid: u32) -> Vec<u32> {
-    sys::child_pids(pid)
+/// The pids of `pid`'s direct children (empty when it has none), or why they couldn't be
+/// listed. macOS lists any pid's children by their parent, so a gone process has none: no
+/// children from a process that doesn't exist is that one gone.
+pub fn children(pid: u32) -> Result<Vec<u32>, Unread> {
+    match sys::child_pids(pid) {
+        Some(kids) if !kids.is_empty() || sys::pid_alive(pid) => Ok(kids),
+        _ => Err(unread(pid)),
+    }
+}
+
+/// Why a read of `pid` failed: a process that doesn't exist is gone; one that does (a
+/// zombie, another user's) just couldn't be read.
+fn unread(pid: u32) -> Unread {
+    if sys::pid_alive(pid) {
+        Unread::Failed
+    } else {
+        Unread::Gone
+    }
 }
 
 /// When `pid` started, or `None` when it is gone.

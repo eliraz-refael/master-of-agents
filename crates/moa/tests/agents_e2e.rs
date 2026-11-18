@@ -248,10 +248,11 @@ impl Rig {
         .parse()
         .unwrap();
         let mut reader = Reader::new();
-        let found = proc::children(shell).into_iter().find(|&kid| {
+        let kids = proc::children(shell).unwrap_or_default();
+        let found = kids.into_iter().find(|&kid| {
             reader
                 .args(kid)
-                .is_some_and(|a| a.argv.iter().any(|arg| arg == CONV))
+                .is_ok_and(|a| a.argv.iter().any(|arg| arg == CONV))
         });
         found.unwrap_or_else(|| {
             panic!(

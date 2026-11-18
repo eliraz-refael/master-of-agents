@@ -14,8 +14,8 @@ use moa_core::effect::{Effect, Input, TmuxIn, TmuxToken, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::is_asleep;
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent, Session,
-    SessionId, SpikePane, TranscriptCheck,
+    Activity, AgentKind, Conversation, ConversationReason, Inspected, Lifecycle, Location,
+    PaneAgent, Session, SessionId, SpikePane, TranscriptCheck,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{Deps, LoadNote, State};
@@ -583,8 +583,8 @@ fn two_resumes_in_flight_open_one_tab() {
     assert_eq!(to, [ReqId(1), ReqId(2)]);
 }
 
-fn runs_c(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 808).then(|| PaneAgent {
+fn runs_c(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 808).then(|| PaneAgent {
         kind: AgentKind::Claude,
         store_dir: None,
         conversation: Some(C.into()),
@@ -593,7 +593,7 @@ fn runs_c(pid: i64, _: &[String]) -> Option<PaneAgent> {
         title: None,
         group: None,
         started_at: None,
-    })
+    }))
 }
 
 /// Step 6: an agent started by hand on the conversation since the last reconcile.

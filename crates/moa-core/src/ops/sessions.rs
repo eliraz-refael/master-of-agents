@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{ConnId, Done, OpError, ReqId, SLEEP_USAGE};
-use crate::reconcile::{moa_session_of, tagged_for, untag_pane, untracked_agent_runs};
+use crate::reconcile::{Recheck, moa_session_of, tagged_for, untag_pane, untracked_agent_runs};
 use crate::sleep::{kill_pane, put_to_sleep, why_not};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
@@ -125,7 +125,8 @@ pub(crate) fn listed(
 /// `ls` against `panes`, the listing asked for it (R23). First the adopted sessions whose
 /// agent left its tab go to sleep, in one commit (R5, R31), and their tabs' tags come off;
 /// then the reply is `ls`'s, plus a row per agent moa doesn't track, each with the line that
-/// adopts it. While writes are refused nobody is put to sleep: a later `ls` does it. With the
+/// adopts it. While writes are refused nobody is put to sleep: a later `ls` does it. An
+/// adopted tab that can't be read proves nothing, and is left for the next `ls`. With the
 /// tabs not reconciled any more (a reload since it asked), the bindings can't be trusted:
 /// just `ls`.
 pub(crate) fn ls_with(
@@ -139,7 +140,13 @@ pub(crate) fn ls_with(
         _ => return (Vec::new(), ls(state, now, all)),
     };
     let mut fx = Vec::new();
-    let gone = agents_gone(state, generation, panes);
+    let (gone, unread) = agents_gone(state, generation, panes);
+    if unread > 0 {
+        fx.push(log(
+            LogLevel::Debug,
+            format!("{unread} adopted tabs couldn't be read; their sessions are left as they are"),
+        ));
+    }
     if !gone.is_empty() && !state.writes_refused(now.wall) {
         let mut tx = Tx::new(now);
         let changes: Vec<Change> = gone
@@ -202,7 +209,7 @@ pub(crate) fn untracked(state: &State, panes: &[PaneInfo]) -> Vec<(PaneInfo, Pan
         .filter(|p| !p.dead && p.tag == Tag::Unset && !held.contains(&p.pane))
         .filter(|p| brains_folder(state, &(deps.canonical)(Path::new(&p.cwd))))
         .filter_map(|p| {
-            let agent = (deps.inspect)(p.pid, &p.start).filter(|a| {
+            let agent = (deps.inspect)(p.pid, &p.start).into_agent().filter(|a| {
                 a.kind == AgentKind::Claude
                     && moa_session_of(state, a).is_none_or(|id| !has_tab(id))
             })?;
@@ -228,27 +235,40 @@ pub(crate) fn account_label(state: &State, dir: Option<&str>) -> String {
 /// The sessions whose untracked binding of this server (`generation`) has lost its agent, as
 /// `panes` shows it (R23, R31): its tab is gone, or no longer runs the session's agent there.
 /// Each with its tab when that is still there with the adoption's tags on it. Tracked
-/// bindings need no look: their tab dies with the agent.
+/// bindings need no look: their tab dies with the agent. Also how many tabs couldn't be
+/// read: their sessions aren't among them.
 fn agents_gone(
     state: &State,
     generation: Generation,
     panes: &[PaneInfo],
-) -> Vec<(SessionId, Option<PaneId>)> {
-    state
+) -> (Vec<(SessionId, Option<PaneId>)>, usize) {
+    let mut unread = 0;
+    let gone = state
         .pane_bindings()
         .filter(|b| {
             !b.tracked && b.server_pid == generation.pid && b.server_start == generation.start
         })
         .filter_map(|b| {
             let info = listed_pane(b, panes);
-            let runs = holds(b, generation, info)
-                && info.is_some_and(|i| untracked_agent_runs(state, b, Some(i)));
+            let check = match info.filter(|i| holds(b, generation, Some(i))) {
+                Some(i) => untracked_agent_runs(state, b, Some(i)),
+                None => Recheck::Gone,
+            };
+            match check {
+                Recheck::Runs => return None,
+                Recheck::Unknown => {
+                    unread += 1;
+                    return None;
+                }
+                Recheck::Gone => {}
+            }
             let tagged = info
                 .filter(|i| !i.dead && tagged_for(i, b.session_id))
                 .map(|i| i.pane);
-            (!runs).then_some((b.session_id, tagged))
+            Some((b.session_id, tagged))
         })
-        .collect()
+        .collect();
+    (gone, unread)
 }
 
 pub(crate) fn set(
@@ -370,7 +390,7 @@ pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Resul
     let data = json!({ "id": id });
     let pane = match kill_checked(state, id) {
         Ok(pane) => pane,
-        Err(left) => {
+        Err(NotKilled::Left(left)) => {
             // Saved, so the answer is success-shaped.
             agent_left(state, tx, id, left.pane)?;
             return Ok(Done {
@@ -378,6 +398,7 @@ pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Resul
                 data,
             });
         }
+        Err(NotKilled::Unread(said)) => return Err(OpError(said)),
     };
     let text = format!("closed {}", title_of(state, &s));
     let ended = Session {
@@ -495,9 +516,14 @@ pub(crate) fn sleep(
             }
             // An adopted agent that left its tab: asleep, and the tab left to the user,
             // without moa's tags.
-            Err(left) => {
+            Err(NotKilled::Left(left)) => {
                 said.push(left.said);
                 left_tabs.push(left.pane);
+            }
+            // Nothing is proven: it is left as it is.
+            Err(NotKilled::Unread(text)) => {
+                said.push(text);
+                continue;
             }
         }
         // Asleep either way, so `asleep` lists it.
@@ -540,44 +566,65 @@ pub(crate) fn sleep(
 /// running here. A tracked binding's pane is the agent's, since it dies with it. An
 /// untracked (adopted) one may be a shell the agent has left: its process is read again,
 /// and a pane that no longer runs the session's agent is refused. A kill has no listing, so
-/// no folder is compared. The caller puts a refused session to sleep and deletes its
-/// binding, in its own commit, then takes the tab's tags off ([`untag_pane`]).
-pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId>, AgentLeft> {
+/// no folder is compared. The caller puts a session whose agent left to sleep and deletes
+/// its binding, in its own commit, then takes the tab's tags off ([`untag_pane`]). One
+/// whose tab can't be read is left as it is, and the caller says so.
+pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId>, NotKilled> {
     let (Some(pane), Some(b)) = (bound_pane(state, id), state.binding(id)) else {
         return Ok(None);
     };
     if b.tracked {
         return Ok(Some(pane));
     }
-    if untracked_agent_runs(state, b, None) {
+    let check = untracked_agent_runs(state, b, None);
+    if check == Recheck::Runs {
         return Ok(Some(pane));
     }
     let title = state
         .session(id)
         .map(|s| title_of(state, s))
         .unwrap_or_else(|| state.handle_of(id));
-    Err(AgentLeft {
-        said: format!("{title}'s agent isn't running in that tab any more"),
-        pane,
+    Err(match check {
+        Recheck::Unknown => NotKilled::Unread(format!(
+            "moa couldn't read what runs in {title}'s tab; try again in a moment"
+        )),
+        _ => NotKilled::Left(AgentLeft {
+            said: format!("{title}'s agent isn't running in that tab any more"),
+            pane,
+        }),
     })
 }
 
 /// Session `id`'s tab when it runs here (a binding of this generation), with an untracked
 /// binding's agent read again first (R31): one that left its tab puts the session to sleep
-/// and frees the tab in `tx` ([`agent_left`]), and then it isn't running. Resume, focus
+/// and frees the tab in `tx` ([`agent_left`]), and then it isn't running. One whose tab
+/// can't be read is refused, changing nothing, with a debug line in `logs`. Resume, focus
 /// and adopt never trust an untracked binding without that look.
 pub(crate) fn running_pane(
     state: &mut State,
     tx: &mut Tx,
+    logs: &mut Vec<Effect>,
     id: SessionId,
 ) -> Result<Option<PaneId>, OpError> {
     match kill_checked(state, id) {
         Ok(pane) => Ok(pane),
-        Err(left) => {
+        Err(NotKilled::Left(left)) => {
             agent_left(state, tx, id, left.pane)?;
             Ok(None)
         }
+        Err(NotKilled::Unread(said)) => {
+            logs.push(unread_log(id));
+            Err(OpError(said))
+        }
     }
+}
+
+/// The debug line for session `id`'s tab that couldn't be read.
+pub(crate) fn unread_log(id: SessionId) -> Effect {
+    log(
+        LogLevel::Debug,
+        format!("the tab of session {id} couldn't be read; it is left as it is"),
+    )
 }
 
 /// The adopted agent of session `id` left its shell tab `pane` (R31), which stays the user's:
@@ -593,6 +640,14 @@ pub(crate) fn agent_left(
     tx.commit(state, changes)?;
     untag_pane(state, tx, pane);
     Ok(())
+}
+
+/// Why [`kill_checked`] gave no tab to kill for a running untracked binding.
+pub(crate) enum NotKilled {
+    /// The adopted agent left its tab (R31).
+    Left(AgentLeft),
+    /// What runs in the tab couldn't be read: nothing changes, and the user is told this.
+    Unread(String),
 }
 
 /// A kill [`kill_checked`] refused: the adopted agent left its tab (R31).

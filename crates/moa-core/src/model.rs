@@ -423,6 +423,45 @@ pub struct PaneAgent {
     pub started_at: Option<UtcMs>,
 }
 
+/// What a look at a tab's processes found (`Deps::inspect`). moa takes an agent for gone only
+/// when that is proven: a read that failed proves nothing, and the next look decides.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Inspected {
+    /// An agent runs in the tab.
+    Agent(PaneAgent),
+    /// No agent runs there: the tab's process and its children were all read and none is
+    /// one, or the tab's process doesn't exist.
+    Gone,
+    /// A read that mattered failed (a process mid-exit, another user's, a refused list).
+    Unknown,
+}
+
+impl Inspected {
+    /// The agent, when one was found.
+    pub fn agent(&self) -> Option<&PaneAgent> {
+        match self {
+            Inspected::Agent(a) => Some(a),
+            Inspected::Gone | Inspected::Unknown => None,
+        }
+    }
+
+    /// The agent, when one was found; `Unknown` counts as none, as a refusal that needs an
+    /// agent reads it.
+    pub fn into_agent(self) -> Option<PaneAgent> {
+        match self {
+            Inspected::Agent(a) => Some(a),
+            Inspected::Gone | Inspected::Unknown => None,
+        }
+    }
+}
+
+/// A read that found the agent, or proved there is none.
+impl From<Option<PaneAgent>> for Inspected {
+    fn from(agent: Option<PaneAgent>) -> Inspected {
+        agent.map_or(Inspected::Gone, Inspected::Agent)
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,

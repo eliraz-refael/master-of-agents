@@ -160,9 +160,9 @@ pub struct Deps {
     /// The Claude Code plugin sessions are started with, as an absolute path.
     pub session_plugin: PathBuf,
     /// The agent a pane runs, from its process (and children) and its start command
-    /// (the daemon reads them in-process). Called only where a pane is checked, never per
-    /// event.
-    pub inspect: fn(i64, &[String]) -> Option<PaneAgent>,
+    /// (the daemon reads them in-process), or that none does, or that the reads failed.
+    /// Called only where a pane is checked, never per event.
+    pub inspect: fn(i64, &[String]) -> Inspected,
     /// Looks for a conversation's transcript in a store (`moa_agents::claude::find_transcript`):
     /// directory reads only, before a resume (C11 rule 2).
     pub transcript: fn(&Path, &str) -> TranscriptCheck,
@@ -201,7 +201,7 @@ impl Default for Deps {
             home: PathBuf::new(),
             new_uuid: sequential_uuid,
             session_plugin: PathBuf::new(),
-            inspect: |_, _| None,
+            inspect: |_, _| Inspected::Gone,
             transcript: |_, _| TranscriptCheck::Present(PathBuf::new()),
             is_dir: |_| true,
             newest_conversation: |_, _, _, _| None,

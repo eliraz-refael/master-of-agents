@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::cut;
 use super::projects::project_for;
-use super::sessions::{agent_left, kill_checked, running_pane};
+use super::sessions::{NotKilled, agent_left, kill_checked, running_pane, unread_log};
 use crate::Now;
 use crate::change::Change;
 use crate::config::{AccountConfig, AccountName};
@@ -418,7 +418,7 @@ fn check(
         return Ok(Resume::Waiting(id));
     }
     if kind != LaunchKind::Restart
-        && let Some(pane) = running_pane(state, tx, id)?
+        && let Some(pane) = running_pane(state, tx, logs, id)?
     {
         return Ok(Resume::Running(id, pane));
     }
@@ -583,9 +583,13 @@ fn check_restart(
                 "{title} isn't running; resume it with moactl resume"
             )));
         }
-        Err(left) => {
+        Err(NotKilled::Left(left)) => {
             agent_left(state, tx, id, left.pane)?;
             return Err(OpError(left.said));
+        }
+        Err(NotKilled::Unread(said)) => {
+            logs.push(unread_log(id));
+            return Err(OpError(said));
         }
     };
     match check(state, tx, logs, id, LaunchKind::Restart)? {
@@ -740,7 +744,7 @@ pub(crate) fn resumed(
             let running = panes.iter().find(|p| {
                 !p.dead
                     && free(p)
-                    && inspect(p.pid, &p.start).is_some_and(|a| {
+                    && inspect(p.pid, &p.start).agent().is_some_and(|a| {
                         a.kind == AgentKind::Claude
                             && a.conversation.as_deref() == Some(checked.conv.as_str())
                     })
@@ -1100,9 +1104,11 @@ fn end_launch(
 }
 
 /// `focus Q`: once the tabs are reconciled, a running session's tab comes to the screen; a
-/// session whose tab is opening is brought there once it is bound, and answered then.
-/// Nothing is saved, so the commands go out on their own, before the reply. Any other
-/// session is resumed, and answered once its tab is there (R12).
+/// session whose tab is opening is brought there once it is bound, and answered then. A
+/// tracked tab is brought there with nothing saved, so the commands go out on their own,
+/// before the reply. An untracked tab goes through resume, whose look at its agent can
+/// save (an agent that left puts its session to sleep). Any other session is resumed, and
+/// answered once its tab is there (R12).
 pub(crate) fn focus(
     state: &mut State,
     now: &Now,

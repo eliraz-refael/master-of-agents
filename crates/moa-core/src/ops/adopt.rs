@@ -13,11 +13,13 @@ use crate::change::Change;
 use crate::core::{Tx, finish_op};
 use crate::effect::Effect;
 use crate::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
-    Session, SessionId, normalize_group_path, safe_id,
+    Activity, AgentKind, Conversation, ConversationReason, Group, Inspected, Lifecycle, Location,
+    PaneAgent, PaneBinding, Session, SessionId, normalize_group_path, safe_id,
 };
 use crate::op::{ADOPT_USAGE, ConnId, Done, OpError, ReqId};
-use crate::reconcile::{moa_session_of, tag_pane, tagged_for, untag_pane, untracked_agent_runs};
+use crate::reconcile::{
+    Recheck, moa_session_of, tag_pane, tagged_for, untag_pane, untracked_agent_runs,
+};
 use crate::route::{Route, route};
 use crate::sleep::put_to_sleep;
 use crate::state::State;
@@ -32,6 +34,9 @@ const NOT_AN_AGENT: &str = "that tab isn't running an agent moa recognizes";
 const NO_ACCOUNT: &str = "moa doesn't know the account that agent runs under; add it to moa.toml";
 const NO_CONVERSATION: &str = "no conversation it wrote yet; ask it one thing first, or pass --id";
 const LOST: &str = "moa lost that session; try again";
+const UNREAD: &str = "moa couldn't read what runs in that tab; try again in a moment";
+const NO_START: &str =
+    "moa can't read when that agent started, so it couldn't tell it from a later one in that tab";
 
 /// What `adopt` was asked.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -139,12 +144,14 @@ pub(crate) fn adopt(
         .iter()
         .find(|p| p.pane == pane && !p.dead)
         .ok_or_else(|| OpError(format!("there's no tab {pane}")))?;
-    // The bindings that hold their tab, an untracked one only while its agent still runs
-    // there (R31): one whose agent left is let go below, as `ls` would.
+    // The bindings that hold their tab, an untracked one unless its agent is proven gone
+    // (R31): one whose agent left is let go below, as `ls` would.
     let (kept, left): (Vec<&PaneBinding>, Vec<&PaneBinding>) =
         kept_bindings(state, generation, panes)
             .into_iter()
-            .partition(|b| b.tracked || untracked_agent_runs(state, b, listed(b, panes)));
+            .partition(|b| {
+                b.tracked || untracked_agent_runs(state, b, listed(b, panes)) != Recheck::Gone
+            });
     // The tabs of the session's own bindings that were let go, to take moa's tags off.
     let left: Vec<(SessionId, PaneId)> = left
         .iter()
@@ -172,11 +179,15 @@ pub(crate) fn adopt(
         .map(|b| b.session_id)
         .collect();
 
-    // Its agent. A terminal running none is just the user's shell.
+    // Its agent. A terminal running none is just the user's shell; one that can't be read
+    // proves nothing either way.
     let deps = state.deps().clone();
-    let agent = (deps.inspect)(info.pid, &info.start)
-        .filter(|a| a.kind == AgentKind::Claude)
-        .ok_or_else(|| OpError(if info.term { TERMINAL } else { NOT_AN_AGENT }.into()))?;
+    let agent = match (deps.inspect)(info.pid, &info.start) {
+        Inspected::Unknown => return Err(OpError(UNREAD.into())),
+        found => found.into_agent(),
+    }
+    .filter(|a| a.kind == AgentKind::Claude)
+    .ok_or_else(|| OpError(if info.term { TERMINAL } else { NOT_AN_AGENT }.into()))?;
     // An agent moa started for a session it knows is that session's, not one to adopt. Its
     // tab is on its way to being bound, or is bound already; or its binding was never saved,
     // and then the tab is bound to it as the next connection's reconcile would (R6 (b)).
@@ -197,13 +208,17 @@ pub(crate) fn adopt(
                 state.handle_of(own)
             )));
         }
+        let untracked = info.adopted || info.term;
+        if untracked && unprovable(&agent) {
+            return Err(OpError(NO_START.into()));
+        }
         let stale = stale.into_iter().filter(|s| *s != own).collect();
         let tab = Tab {
             pane,
             pid: info.pid,
             generation,
             socket,
-            untracked: info.adopted || info.term,
+            untracked,
             marked: info.adopted,
             stale,
             left,
@@ -253,11 +268,13 @@ pub(crate) fn adopt(
         .flat_map(|id| state.conversations_of(*id))
         .map(|c| c.conversation_id.clone())
         .collect();
-    let named = args
-        .id
-        .clone()
-        .filter(|c| !c.is_empty())
-        .or_else(|| agent.conversation.clone());
+    let given = args.id.clone().filter(|c| !c.is_empty());
+    // An agent naming no conversation is proven at each later look by its start time
+    // (R31): with none, the binding `--id` makes would be let go at once.
+    if given.is_some() && unprovable(&agent) {
+        return Err(OpError(NO_START.into()));
+    }
+    let named = given.or_else(|| agent.conversation.clone());
     if named.as_deref().is_some_and(|c| !safe_id(c)) {
         return Err(OpError(UNSAFE_ID.into()));
     }
@@ -445,6 +462,12 @@ pub(crate) fn adopt(
     })
 }
 
+/// Whether an untracked binding of `agent` could never be proven again (R31): it names no
+/// conversation, and its start time can't be read.
+fn unprovable(agent: &PaneAgent) -> bool {
+    agent.conversation.is_none() && agent.started_at.is_none()
+}
+
 /// The tab an adopt binds, as its listing showed it.
 struct Tab {
     pane: PaneId,
@@ -511,7 +534,9 @@ fn bind(
 
 /// The tab of moa's own agent for session `own`, whose binding was never saved (its commit
 /// was refused), bound to it as reconcile would (R6 (b)): tracked, unless the tab is marked
-/// adopted or is a terminal. The session is live here again; `--title` and `--group` apply.
+/// adopted or is a terminal. The session is live here again; `--title` and `--group` apply,
+/// and `--id`, one of the session's conversations, becomes its current one, as adopt makes
+/// it.
 fn bind_own(
     state: &mut State,
     tx: &mut Tx,
@@ -534,6 +559,17 @@ fn bind_own(
         location: Location::Here,
         ..s
     };
+    let current = args
+        .id
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .and_then(|c| state.conversations_of(own).find(|o| o.conversation_id == c))
+        .map(|c| {
+            Change::Conversation(Conversation {
+                last_seen_at: tx.wall,
+                ..c.clone()
+            })
+        });
     let title = title_of(state, &session);
     let pane = tab.pane;
     let tracks = if tab.untracked { "" } else { "; moa tracks it" };
@@ -541,7 +577,7 @@ fn bind_own(
         state,
         tx,
         &session,
-        Vec::new(),
+        current.into_iter().collect(),
         tab,
         format!("bound {title} to tab {pane}"),
     )?;

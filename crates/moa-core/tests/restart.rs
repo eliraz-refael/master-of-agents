@@ -17,8 +17,8 @@ use moa_core::effect::{Effect, Input, TmuxIn, TmuxToken, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::is_asleep;
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, EventKind, Lifecycle, Location,
-    PaneAgent, PaneBinding, Session, SessionId,
+    Activity, AgentKind, Conversation, ConversationReason, EventKind, Inspected, Lifecycle,
+    Location, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{Done, Op, OpError, ReqId};
 use moa_core::sleep::why_not;
@@ -58,22 +58,29 @@ fn shown(p: &Path) -> String {
 thread_local! {
     /// Whether S's agent still runs in its shell tab, %5.
     static AGENT_RUNS: Cell<bool> = const { Cell::new(true) };
+    /// Whether %5's process can't be read.
+    static UNREADABLE: Cell<bool> = const { Cell::new(false) };
     /// The store S's agent runs with: acct-a's.
     static STORE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// S's agent in %5 (pid 505), started by hand: no `MOA_SESSION`, while it runs.
-fn s_in_a_shell(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 505 && AGENT_RUNS.with(Cell::get)).then(|| PaneAgent {
-        kind: AgentKind::Claude,
-        store_dir: STORE.with(|s| s.borrow().clone()),
-        conversation: Some(C9.into()),
-        moa_session: None,
-        moa_brain: None,
-        title: None,
-        group: None,
-        started_at: None,
-    })
+fn s_in_a_shell(pid: i64, _: &[String]) -> Inspected {
+    if pid == 505 && UNREADABLE.with(Cell::get) {
+        return Inspected::Unknown;
+    }
+    Inspected::from(
+        (pid == 505 && AGENT_RUNS.with(Cell::get)).then(|| PaneAgent {
+            kind: AgentKind::Claude,
+            store_dir: STORE.with(|s| s.borrow().clone()),
+            conversation: Some(C9.into()),
+            moa_session: None,
+            moa_brain: None,
+            title: None,
+            group: None,
+            started_at: None,
+        }),
+    )
 }
 
 /// The world before loading: the typical brain plus S, live in `<home>/work/lantern` on
@@ -91,6 +98,7 @@ struct World {
 impl World {
     fn new() -> World {
         AGENT_RUNS.with(|r| r.set(true));
+        UNREADABLE.with(|r| r.set(false));
         let b = TypicalBrain::new();
         STORE.with(|s| *s.borrow_mut() = Some(shown(&b.home.join(".claude-a"))));
         let lantern = b.home.join("work/lantern");
@@ -695,6 +703,53 @@ fn restart_refuses_when_the_adopted_agent_is_gone() {
     assert!(is_asleep(r.s()), "{:?}", r.s());
     assert!(r.st.binding(s_id()).is_none());
     moa_core::effect::check_order(&fx).unwrap();
+}
+
+/// A read of the adopted tab that fails proves nothing (R31): restart, resume and focus
+/// refuse, and nothing is saved, killed, untagged, asked or launched.
+#[test]
+fn restart_resume_and_focus_refuse_when_the_tab_cant_be_read() {
+    let ops: [Op; 3] = [
+        Op::SessionRestart { q: S.into() },
+        Op::SessionResume {
+            q: S.into(),
+            bg: false,
+        },
+        Op::SessionFocus { q: S.into() },
+    ];
+    for op in ops {
+        let mut r = World::new().reconciled();
+        UNREADABLE.with(|a| a.set(true));
+        let before = r.s().clone();
+        let fx = send(&r.b, &mut r.st, 1, op.clone());
+        assert_eq!(
+            refusal(&fx),
+            format!("moa couldn't read what runs in {TITLE}'s tab; try again in a moment"),
+            "{op:?}"
+        );
+        assert!(sent(&fx).is_empty(), "{op:?}: {fx:?}");
+        assert!(changes(&fx).is_empty(), "{op:?}: {fx:?}");
+        assert_eq!(r.s(), &before, "{op:?}");
+        assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
+    }
+}
+
+/// The tab can't be read once the restart's listing answers: it refuses then, as above.
+#[test]
+fn restart_refuses_when_the_tab_cant_be_read_once_the_tabs_answer() {
+    let mut r = World::new().reconciled();
+    assert!(queried(&r.restart(1)));
+    UNREADABLE.with(|a| a.set(true));
+    let fx = r.listed();
+    assert_eq!(
+        refusal(&fx),
+        format!("moa couldn't read what runs in {TITLE}'s tab; try again in a moment")
+    );
+    assert!(kills(&fx).is_empty(), "{fx:?}");
+    assert!(windows(&fx).is_empty(), "{fx:?}");
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(r.st.binding(s_id()).is_some());
 }
 
 /// The agent leaves while the restart looks at the tabs: it is checked again then.

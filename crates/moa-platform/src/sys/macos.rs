@@ -216,8 +216,9 @@ fn arg_max() -> usize {
 }
 
 /// `pid`'s argv and kept environment through `sysctl([CTL_KERN, KERN_PROCARGS2, pid])`,
-/// read into `buf` (sized from `KERN_ARGMAX` on first use). The kernel refuses another
-/// user's process, which reads as `None`, like a gone one.
+/// read into `buf` (sized from `KERN_ARGMAX` on first use). `None` when the read fails: the
+/// process is gone, or the kernel refuses it (another user's, a zombie); the caller tells
+/// which.
 pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::ProcArgs> {
     let pid = proc_pid(pid)?;
     if buf.is_empty() {
@@ -245,30 +246,32 @@ pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::Proc
 
 /// `pid`'s direct children through `proc_listchildpids`, which answers a **count of pids**,
 /// not bytes. A buffer that comes back full may have cut the list short, so it grows once.
-pub(crate) fn child_pids(pid: u32) -> Vec<u32> {
+/// libproc answers any pid by looking for processes with that parent, so a gone one has no
+/// children rather than a failure; `None` when the pid can't be a process or libproc fails.
+pub(crate) fn child_pids(pid: u32) -> Option<Vec<u32>> {
     const ROOM: usize = 64;
-    let Some(pid) = proc_pid(pid) else {
-        return Vec::new();
-    };
-    let mut pids = list_children(pid, ROOM);
+    let pid = proc_pid(pid)?;
+    let mut pids = list_children(pid, ROOM)?;
     if pids.len() == ROOM {
-        pids = list_children(pid, ROOM * 16);
+        pids = list_children(pid, ROOM * 16)?;
     }
-    pids.into_iter()
-        .filter_map(|p| u32::try_from(p).ok().filter(|&p| p > 0))
-        .collect()
+    Some(
+        pids.into_iter()
+            .filter_map(|p| u32::try_from(p).ok().filter(|&p| p > 0))
+            .collect(),
+    )
 }
 
-/// Up to `room` of `pid`'s children; empty when libproc fails (the process is gone).
-fn list_children(pid: libc::pid_t, room: usize) -> Vec<libc::pid_t> {
+/// Up to `room` of `pid`'s children; `None` when libproc fails.
+fn list_children(pid: libc::pid_t, room: usize) -> Option<Vec<libc::pid_t>> {
     let mut pids: Vec<libc::pid_t> = vec![0; room];
     let bytes =
         libc::c_int::try_from(room * std::mem::size_of::<libc::pid_t>()).expect("a small buffer");
     // SAFETY: `pids` is live and writable for `bytes` bytes, and libproc writes at most
     // that many.
     let n = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), bytes) };
-    pids.truncate(usize::try_from(n).unwrap_or(0).min(room));
-    pids
+    pids.truncate(usize::try_from(n).ok()?.min(room));
+    Some(pids)
 }
 
 /// When `pid` started: `proc_pidinfo(PROC_PIDTBSDINFO)`'s `pbi_start_tvsec` and

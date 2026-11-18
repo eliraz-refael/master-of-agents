@@ -13,8 +13,8 @@ use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::effect::{Down, Effect, Input, LogLevel, LogLine, TmuxIn, TmuxToken, handle_checked};
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent,
-    PaneBinding, Session, SessionId,
+    Activity, AgentKind, Conversation, ConversationReason, Inspected, Lifecycle, Location,
+    PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError};
 use moa_core::state::{Deps, LoadNote, Snapshot, State};
@@ -59,20 +59,25 @@ fn shown(p: &Path) -> String {
 }
 
 thread_local! {
-    /// The agent each pid runs.
-    static AGENTS: RefCell<BTreeMap<i64, PaneAgent>> = const { RefCell::new(BTreeMap::new()) };
+    /// What a read of each pid finds; a pid not in it runs no agent.
+    static AGENTS: RefCell<BTreeMap<i64, Inspected>> = const { RefCell::new(BTreeMap::new()) };
 }
 
-fn inspect(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    AGENTS.with(|a| a.borrow().get(&pid).cloned())
+fn inspect(pid: i64, _: &[String]) -> Inspected {
+    AGENTS.with(|a| a.borrow().get(&pid).cloned().unwrap_or(Inspected::Gone))
 }
 
 /// The agent `pid` runs, from now on; `None` when it runs none.
 fn runs(pid: i64, agent: Option<PaneAgent>) {
     AGENTS.with(|a| match agent {
-        Some(agent) => a.borrow_mut().insert(pid, agent),
+        Some(agent) => a.borrow_mut().insert(pid, Inspected::Agent(agent)),
         None => a.borrow_mut().remove(&pid),
     });
+}
+
+/// `pid`'s process can't be read, from now on.
+fn unreadable(pid: i64) {
+    AGENTS.with(|a| a.borrow_mut().insert(pid, Inspected::Unknown));
 }
 
 /// A Claude on `store`, running `conv`.
@@ -491,6 +496,50 @@ fn an_adopted_agent_that_left_its_tab_shows_asleep_in_ls() {
         untracked_rows(&done),
         vec![json!({"untracked": "%5", "account": "acct-a", "cwd": shown(&lantern)})]
     );
+}
+
+/// A read of the adopted tab that fails proves nothing: `ls` leaves A live and bound, its
+/// tab tagged, and the next `ls` decides.
+#[test]
+fn an_adopted_tab_moa_cant_read_is_left_as_it_is_by_ls() {
+    let mut r = Rig::new();
+    unreadable(50);
+    let fx = r.ls();
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(unsets(&fx).is_empty(), "{fx:?}");
+    let a = r.st.session(id(A)).unwrap();
+    assert_eq!(a.lifecycle, Lifecycle::Live);
+    assert_eq!(a.asleep_at, None);
+    assert!(r.st.binding(id(A)).is_some_and(|b| !b.tracked));
+    let done = one_reply(&fx).unwrap();
+    assert_eq!(row(&done, A)["tracked"], json!(false));
+    assert!(untracked_rows(&done).is_empty());
+    assert!(
+        fx.iter().any(|e| matches!(
+            e,
+            Effect::Log(LogLine { level: LogLevel::Debug, message })
+                if message.contains("couldn't be read")
+        )),
+        "{fx:?}"
+    );
+
+    // Once it reads as gone, the next `ls` puts A to sleep.
+    runs(50, None);
+    let fx = r.ls();
+    assert!(!changes(&fx).is_empty(), "{fx:?}");
+    assert!(r.st.binding(id(A)).is_none());
+}
+
+/// A tab no binding holds whose process can't be read isn't listed: adopt needs an agent.
+#[test]
+fn a_tab_moa_cant_read_isnt_listed_as_untracked() {
+    let mut r = Rig::new();
+    r.tabs
+        .push(tab("%6", 60, "", false, false, &r.home().join("private/x")));
+    unreadable(60);
+    let fx = r.ls();
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(untracked_rows(&one_reply(&fx).unwrap()).is_empty());
 }
 
 /// The tabs were reloaded between the ask and the answer: the bindings can't be trusted
