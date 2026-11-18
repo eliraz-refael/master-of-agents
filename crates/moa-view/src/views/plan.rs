@@ -55,10 +55,7 @@ fn due_key(due: Option<Date>) -> Date {
 
 /// Open: not done, dropped or an idea.
 fn is_open(t: &Task) -> bool {
-    !matches!(
-        t.status,
-        TaskStatus::Done | TaskStatus::Dropped | TaskStatus::Idea
-    )
+    t.status.is_open() && t.status != TaskStatus::Idea
 }
 
 /// One project's share of the picture.
@@ -97,11 +94,11 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
     let midnight = start_of_next_day(ctx.today, &ctx.tz);
     let mut lines = vec![header(data, ctx, width, midnight)];
 
-    let mut by: BTreeMap<String, Share> = BTreeMap::new();
+    // By project name, `None` for no project: a project named like that heading stays apart.
+    let mut by: BTreeMap<Option<String>, Share> = BTreeMap::new();
     let project_name = |id| data.projects.get(&id).map(|p| clean(&p.name));
     for t in data.tasks.values().filter(|t| is_open(t)) {
         let name = t.project_id.and_then(project_name);
-        let name = name.unwrap_or_else(|| NO_PROJECT.to_string());
         by.entry(name).or_default().tasks.push(t);
     }
     let waiting = data
@@ -109,8 +106,9 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
         .values()
         .filter(|r| r.display_state == DisplayState::Waiting);
     for row in waiting {
-        let name = row.project.as_deref().map(clean);
-        let name = name.unwrap_or_else(|| NO_PROJECT.to_string());
+        // By its project's id, as tasks are, so the two meet under one heading.
+        let name = row.session.project_id.and_then(project_name);
+        let name = name.or_else(|| row.project.as_deref().map(clean));
         by.entry(name).or_default().waiting.push(row);
     }
 
@@ -123,8 +121,8 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
             Tone::Dim,
         ));
     }
-    let mut order: Vec<(&String, &Share)> = by.iter().collect();
-    order.sort_by_key(|(name, g)| (g.rank(), *name));
+    let mut order: Vec<(&Option<String>, &Share)> = by.iter().collect();
+    order.sort_by_cached_key(|(name, g)| (g.rank(), *name));
     let cx = Cx {
         data,
         ctx,
@@ -133,7 +131,11 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
     };
     for (name, g) in order {
         lines.push(Line::new(Vec::new()));
-        lines.push(project_head(name, g, width));
+        lines.push(project_head(
+            name.as_deref().unwrap_or(NO_PROJECT),
+            g,
+            width,
+        ));
         let mut waiting = g.waiting.clone();
         waiting.sort_by_key(|r| r.session.id);
         for row in waiting {
@@ -204,23 +206,14 @@ fn project_head(name: &str, g: &Share, width: usize) -> Line {
 }
 
 /// The projects active in the last 7 days with nothing open, and not listed above; the most
-/// recent first.
-fn quiet_projects(data: &Data, ctx: &Ctx, by: &BTreeMap<String, Share>) -> Vec<String> {
+/// recent first. A project with an open task is in `by`, so `by` rules it out.
+fn quiet_projects(data: &Data, ctx: &Ctx, by: &BTreeMap<Option<String>, Share>) -> Vec<String> {
     let mut quiet: Vec<(Date, String)> = data
         .projects
         .values()
-        .filter(|p| {
-            p.last_activity_on
-                .is_some_and(|d| days_left(d, ctx.today) >= -7)
-        })
-        .filter(|p| {
-            !data
-                .tasks
-                .values()
-                .any(|t| t.project_id == Some(p.id) && is_open(t))
-        })
         .filter_map(|p| Some((p.last_activity_on?, clean(&p.name))))
-        .filter(|(_, name)| !by.contains_key(name))
+        .filter(|(d, _)| days_left(*d, ctx.today) >= -7)
+        .filter(|(_, name)| !by.contains_key(&Some(name.clone())))
         .collect();
     quiet.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     quiet.into_iter().map(|(_, name)| name).collect()
@@ -334,7 +327,7 @@ impl Cx<'_> {
         if let Some(c) = &chip
             && self.width.saturating_sub(6 + text::width(&c.text)) < 16
         {
-            if c.text.starts_with(' ') {
+            if matches!(c.tone, Tone::Late | Tone::Today) {
                 look.tone = Tone::Warn;
                 look.bold = false;
             }

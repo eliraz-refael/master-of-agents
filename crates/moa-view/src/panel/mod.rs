@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 
 use moa_core::UtcMs;
-use moa_core::model::Project;
+use moa_core::model::{Project, TaskStatus};
 use moa_core::op::{Done, Op, TaskSet};
 use moa_core::panel::View;
 
@@ -514,13 +514,13 @@ impl Panel {
                     return None;
                 };
                 let status = if action == Action::Done {
-                    "done"
+                    TaskStatus::Done
                 } else {
-                    "dropped"
+                    TaskStatus::Dropped
                 };
                 return Some(vec![Out::Send(Op::TaskSet(TaskSet {
                     id: id.0,
-                    status: Some(status.to_string()),
+                    status: Some(status.as_str().to_string()),
                     ..TaskSet::default()
                 }))]);
             }
