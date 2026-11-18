@@ -433,20 +433,22 @@ async fn a_hung_server_is_given_up_on_within_the_wait() {
 
 /// Code review (b1): a connect that timed out was the final `CantLink`. It is tried again
 /// like a server that turned the link away, so a server that was only slow is linked once
-/// it answers.
+/// it answers. Connects wait 300 ms while the server is stopped, so the first one times out
+/// soon; once it is resumed they wait a roomy 3 s, so the retry that links isn't raced.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_that_answers_late_is_tried_again() {
     let tb = TempBrain::new(None);
     let link = server(&tb);
     let resume = stop_server(&tb);
     let (actor, mut heard, shared) = started_with(link, |sh| {
-        sh.connect_wait = Duration::from_millis(300);
+        *lock(&sh.connect_wait) = Duration::from_millis(300);
     });
     actor.send(connect()).unwrap();
     let retrying = moa_testkit::wait_for(PATIENCE, || {
         (!lock(&shared.scheduled).is_empty()).then_some(())
     });
     assert!(retrying.is_some(), "no retry: {:?}", shared.doing());
+    *lock(&shared.connect_wait) = Duration::from_secs(3);
     drop(resume);
     conn_of(&heard.next_state().await);
 }

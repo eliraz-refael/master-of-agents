@@ -42,8 +42,10 @@ const BACKOFF: [Duration; 6] = [
 const STEP_WAIT: Duration = Duration::from_secs(2);
 
 /// How long a connect's setup may take, all its steps together. With `CONNECT_WAIT` (6 s)
-/// before it, a connect is up or given up on within 8 s, under the front door's 10 s wait
-/// for an answer. A server that hangs mid-way is treated as gone.
+/// before it, each connect attempt is up or given up on within 8 s, under the front door's
+/// 10 s wait for an answer. A server that hangs mid-way is treated as gone. Attempts that
+/// time out back off and try again without telling the core, so for a server that stays
+/// hung the front door gives its own "didn't answer" at 10 s.
 const SETUP_WAIT: Duration = Duration::from_secs(2);
 
 /// Which server the daemon links to, and how its control client is started.
@@ -147,9 +149,9 @@ struct Shared {
     #[cfg(test)]
     backoff: [Duration; BACKOFF.len()],
     /// Tests only: how long a connect waits for the server, `CONNECT_WAIT` unless a test
-    /// sets its own.
+    /// sets its own; a test can change it while the link runs.
     #[cfg(test)]
-    connect_wait: Duration,
+    connect_wait: Mutex<Duration>,
     /// Tests only: each backoff step as it is scheduled, with the run that scheduled it.
     #[cfg(test)]
     scheduled: Mutex<Vec<(usize, usize)>>,
@@ -177,7 +179,7 @@ impl Shared {
             #[cfg(test)]
             backoff: BACKOFF,
             #[cfg(test)]
-            connect_wait: CONNECT_WAIT,
+            connect_wait: Mutex::new(CONNECT_WAIT),
             #[cfg(test)]
             scheduled: Mutex::default(),
             #[cfg(test)]
@@ -518,7 +520,7 @@ impl Actor {
         #[cfg(not(test))]
         let wait = CONNECT_WAIT;
         #[cfg(test)]
-        let wait = self.sh.connect_wait;
+        let wait = *lock(&self.sh.connect_wait);
         let opts = ConnectOptions {
             tmux,
             socket: self.sh.link.socket.args().to_vec(),
