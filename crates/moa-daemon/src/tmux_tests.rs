@@ -453,7 +453,7 @@ async fn a_server_that_answers_late_is_tried_again() {
     conn_of(&heard.next_state().await);
 }
 
-/// Review fix (Task 1): a reap step that times out is a loss, as every bootstrap step's is,
+/// A reap step that times out is a loss, as every bootstrap step's is,
 /// not "nothing to reap". The server stops after the connect, so the reap's first command
 /// is the one that waits.
 #[tokio::test(flavor = "multi_thread")]
