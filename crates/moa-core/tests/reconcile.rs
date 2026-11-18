@@ -506,6 +506,97 @@ fn an_agent_without_moa_session_rebinds_untracked() {
     assert!(after_persist(&fx, &set_tag(9, D)), "{fx:?}");
 }
 
+/// A tag lost when the link dropped (it is sent once) is sent again by the next reconcile:
+/// a kept binding's tab shows no tag, so it is tagged, and an untracked one marked adopted
+/// first. Otherwise R18's "tagged with this session" never holds and the session never
+/// sleeps on its own.
+#[test]
+fn a_kept_binding_whose_tab_lost_its_tag_is_tagged_again() {
+    let mut w = World::new();
+    w.add(U);
+    w.snap.pane_bindings.push(binding(U, G1, 4, false));
+    let mut r = w.drained(u_runs_in_4);
+    r.connect(G1);
+    let mut lines = abc(&r.b);
+    lines[0] = pane(1, "", &cwd(&r.b, A));
+    lines.push(pane(4, "", &cwd(&r.b, U)));
+    let fx = r.listed(&lines, &[]);
+    assert!(r.bound_to(A).is_some());
+    assert!(r.bound_to(U).is_some());
+    assert!(sent_at(&fx, &set_tag(1, A)).is_some(), "{fx:?}");
+    let mark = Cmd::new("set-option").args(["-p", "-t", "%4", "@moa_adopted", "1"]);
+    assert!(sent_at(&fx, &mark) < sent_at(&fx, &set_tag(4, U)), "{fx:?}");
+    // B's and C's tabs show their tags: nothing is sent for them.
+    assert!(sent_at(&fx, &set_tag(2, B)).is_none(), "{fx:?}");
+    assert!(sent_at(&fx, &set_tag(3, C)).is_none(), "{fx:?}");
+    let one = "%1".parse().unwrap();
+    assert_eq!(r.st.tmux().topology.moa_session(one), Some(id(A)));
+}
+
+/// U's agent, by its conversation, in %4.
+fn u_runs_in_4(pid: i64, _: &[String]) -> Option<PaneAgent> {
+    (pid == 404).then(|| claude(Some(conv(U)), None))
+}
+
+/// A plain `claude` in %4, started long after U went to sleep.
+fn a_later_claude_in_4(pid: i64, _: &[String]) -> Option<PaneAgent> {
+    (pid == 404).then(|| PaneAgent {
+        started_at: Some(UtcMs(4_000_000_000_000)),
+        ..claude(None, None)
+    })
+}
+
+/// A plain `claude` in %4, started before U went to sleep: U's own (a sleep whose kill was
+/// lost).
+fn an_earlier_claude_in_4(pid: i64, _: &[String]) -> Option<PaneAgent> {
+    (pid == 404).then(|| PaneAgent {
+        started_at: Some(UtcMs(1)),
+        ..claude(None, None)
+    })
+}
+
+/// U went to sleep when its adopted agent left %4, and the untag that followed was lost:
+/// %4 still carries U's tags. With no agent of U's there (none, or a plain `claude` typed
+/// after U went to sleep), the next reconcile doesn't bind it, and takes the tags off, so
+/// the tab shows as one moa doesn't track (R23). A plain `claude` that started before U
+/// went to sleep is U's, and is bound again.
+#[test]
+fn a_tab_still_tagged_for_an_asleep_adopted_session_is_untagged_unless_its_agent_runs() {
+    type Inspect = fn(i64, &[String]) -> Option<PaneAgent>;
+    let cases: [(Inspect, bool); 3] = [
+        (no_agent, false),
+        (a_later_claude_in_4, false),
+        (an_earlier_claude_in_4, true),
+    ];
+    for (inspect, runs) in cases {
+        let mut w = World::new();
+        let at = earlier(&w.b);
+        let u = w.add(U);
+        u.lifecycle = Lifecycle::Ended;
+        u.asleep_at = Some(at);
+        let mut r = w.drained(inspect);
+        r.connect(G1);
+        let mut lines = abc(&r.b);
+        lines.push(adopted(4, &tag(U), &cwd(&r.b, U)));
+        let fx = r.listed(&lines, &[]);
+        assert_eq!(r.bound_to(U).is_some(), runs, "{fx:?}");
+        let untags = if runs { Vec::new() } else { untagged("%4") };
+        assert_eq!(unsets(&fx), untags.iter().collect::<Vec<_>>(), "{fx:?}");
+    }
+}
+
+/// A tab tagged for another session, whose agent isn't that session's, is never touched.
+#[test]
+fn a_tab_tagged_for_a_session_with_a_tab_keeps_its_tags() {
+    let mut r = World::new().drained(no_agent);
+    r.connect(G1);
+    let mut lines = abc(&r.b);
+    // A is bound to %1 and kept; %4 says A too, its agent gone.
+    lines.push(adopted(4, &tag(A), &cwd(&r.b, A)));
+    let fx = r.listed(&lines, &[]);
+    assert!(unsets(&fx).is_empty(), "{fx:?}");
+}
+
 /// D's older conversation, which a hand-run `claude --resume` in %9 runs.
 const D_OLD: &str = "e0000000-0000-4000-8000-000000000004";
 
@@ -649,9 +740,13 @@ fn an_adopted_agent_that_exits_in_its_shell_tab_shows_asleep() {
     );
 }
 
-/// An agent with no `CLAUDE_CONFIG_DIR` and no conversation on its command line.
+/// An agent with no `CLAUDE_CONFIG_DIR` and no conversation on its command line, started
+/// before its tab was bound.
 fn default_store_agent(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 404).then(|| claude(None, None))
+    (pid == 404).then(|| PaneAgent {
+        started_at: Some(UtcMs(1)),
+        ..claude(None, None)
+    })
 }
 
 #[test]

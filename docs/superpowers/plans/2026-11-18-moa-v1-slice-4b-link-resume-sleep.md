@@ -978,8 +978,9 @@ Restart needed: nothing; the spike is untouched.
   - `Resume` and `Restart` put it back asleep with `asleep_at = now` and no `resume_failed`
     (R13a).
 - **A bind whose commit is refused** (roadmap 12): the reply is
-  `moa couldn't save which tab it runs in; it may show as untracked until moa restarts`, and
-  the pane isn't tagged. Reconcile's rule (b) binds it at the next connection.
+  `moa couldn't save which tab it runs in; moactl adopt %N binds it, or moa's next connection
+  does`, and the pane isn't tagged. `adopt` binds moa's own agent to its session (final
+  review M3), and reconcile's rule (b) does at the next connection.
 - **`focus Q`**, after `ready`:
   - running (a binding of this generation; after reconcile, every binding is) → `focus_cmds`,
     reply `went to <title>`. Nothing is committed here, so the commands go out as an

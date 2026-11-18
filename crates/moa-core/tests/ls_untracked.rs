@@ -324,15 +324,33 @@ fn ls_lists_untracked_tabs() {
     // %9: one typed in a terminal moa opened, the natural place to start one by hand.
     r.tabs.push(tab("%9", 90, "", false, true, &x));
     runs(90, Some(claude(&store_a, Some("C9"))));
-    // Not listed: a tab moa started (`MOA_SESSION`), a terminal running only its shell, a
-    // tab a binding holds though it isn't tagged, a tagged tab, one in another brain's
-    // folder, and a shell.
+    // %8: one carrying a `MOA_SESSION` this brain doesn't know (an `open` whose session was
+    // lost), and %16 one moa started for Z, which has no tab: adopt takes either.
     r.tabs.push(tab("%8", 80, "", false, false, &x));
     runs(
         80,
         Some(PaneAgent {
             moa_session: Some(Y.into()),
             ..claude(&store_a, Some("C8"))
+        }),
+    );
+    r.tabs.push(tab("%16", 160, "", false, false, &x));
+    runs(
+        160,
+        Some(PaneAgent {
+            moa_session: Some(Z.into()),
+            ..claude(&store_a, Some(CZ))
+        }),
+    );
+    // Not listed: a tab moa started for K, which runs in its own tab, a terminal running
+    // only its shell, a tab a binding holds though it isn't tagged, a tagged tab, one in
+    // another brain's folder, and a shell.
+    r.tabs.push(tab("%15", 150, "", false, false, &x));
+    runs(
+        150,
+        Some(PaneAgent {
+            moa_session: Some(K.into()),
+            ..claude(&store_a, Some("C15"))
         }),
     );
     r.tabs.push(tab("%14", 140, "", false, true, &x));
@@ -355,7 +373,9 @@ fn ls_lists_untracked_tabs() {
         done.text.ends_with(&format!(
             "UNTRACKED tab %6: acct-a in {shown_x}  → moactl adopt %6\n\
              UNTRACKED tab %13: .claude-q in {shown_q}  → moactl adopt %13\n\
-             UNTRACKED tab %9: acct-a in {shown_x}  → moactl adopt %9"
+             UNTRACKED tab %9: acct-a in {shown_x}  → moactl adopt %9\n\
+             UNTRACKED tab %8: acct-a in {shown_x}  → moactl adopt %8\n\
+             UNTRACKED tab %16: acct-a in {shown_x}  → moactl adopt %16"
         )),
         "{}",
         done.text
@@ -366,6 +386,8 @@ fn ls_lists_untracked_tabs() {
             json!({"untracked": "%6", "account": "acct-a", "cwd": shown_x}),
             json!({"untracked": "%13", "account": ".claude-q", "cwd": shown_q}),
             json!({"untracked": "%9", "account": "acct-a", "cwd": shown_x}),
+            json!({"untracked": "%8", "account": "acct-a", "cwd": shown_x}),
+            json!({"untracked": "%16", "account": "acct-a", "cwd": shown_x}),
         ]
     );
     // They go after the sessions.

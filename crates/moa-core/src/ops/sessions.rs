@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{ConnId, Done, OpError, ReqId, SLEEP_USAGE};
-use crate::reconcile::{agent_runs, tagged_for, untag_pane};
+use crate::reconcile::{moa_session_of, tagged_for, untag_pane, untracked_agent_runs};
 use crate::sleep::{kill_pane, put_to_sleep, why_not};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
@@ -182,26 +182,30 @@ pub(crate) fn ls_with(
 }
 
 /// The Claude agents in `panes` that moa doesn't track (R23): alive, held by no binding and
-/// not tagged, with no `MOA_SESSION`, in the brain's folders (R22). A terminal moa opened
-/// counts when Claude runs in it: that is where one is typed by hand. Each with
-/// its agent and its account: the listed account of its store (R32), else the store
-/// folder's name.
+/// not tagged, in the brain's folders (R22), and not the agent moa started for a session
+/// whose tab is known or opening, which `adopt` refuses (a `MOA_SESSION` this brain doesn't
+/// know, or naming a session with no tab, is listed: `adopt` takes it). A terminal moa
+/// opened counts when Claude runs in it: that is where one is typed by hand. Each with its
+/// agent and its account: the listed account of its store (R32), else the store folder's
+/// name.
 pub(crate) fn untracked(state: &State, panes: &[PaneInfo]) -> Vec<(PaneInfo, PaneAgent, String)> {
     let Link::Up { generation, .. } = state.tmux().link else {
         return Vec::new();
     };
-    let held: Vec<PaneId> = kept_bindings(state, generation, panes)
-        .iter()
-        .filter_map(|b| b.pane_id.parse().ok())
-        .collect();
+    let kept = kept_bindings(state, generation, panes);
+    let held: Vec<PaneId> = kept.iter().filter_map(|b| b.pane_id.parse().ok()).collect();
+    let has_tab =
+        |id: SessionId| kept.iter().any(|b| b.session_id == id) || state.tmux().opening(id);
     let deps = state.deps();
     panes
         .iter()
         .filter(|p| !p.dead && p.tag == Tag::Unset && !held.contains(&p.pane))
         .filter(|p| brains_folder(state, &(deps.canonical)(Path::new(&p.cwd))))
         .filter_map(|p| {
-            let agent = (deps.inspect)(p.pid, &p.start)
-                .filter(|a| a.kind == AgentKind::Claude && a.moa_session.is_none())?;
+            let agent = (deps.inspect)(p.pid, &p.start).filter(|a| {
+                a.kind == AgentKind::Claude
+                    && moa_session_of(state, a).is_none_or(|id| !has_tab(id))
+            })?;
             let account = account_label(state, agent.store_dir.as_deref());
             Some((p.clone(), agent, account))
         })
@@ -230,7 +234,6 @@ fn agents_gone(
     generation: Generation,
     panes: &[PaneInfo],
 ) -> Vec<(SessionId, Option<PaneId>)> {
-    let inspect = state.deps().inspect;
     state
         .pane_bindings()
         .filter(|b| {
@@ -239,10 +242,7 @@ fn agents_gone(
         .filter_map(|b| {
             let info = listed_pane(b, panes);
             let runs = holds(b, generation, info)
-                && info.is_some_and(|i| {
-                    let agent = inspect(i.pid, &i.start);
-                    agent_runs(state, b.session_id, agent.as_ref(), Some(&i.cwd))
-                });
+                && info.is_some_and(|i| untracked_agent_runs(state, b, Some(i)));
             let tagged = info
                 .filter(|i| !i.dead && tagged_for(i, b.session_id))
                 .map(|i| i.pane);
@@ -549,8 +549,7 @@ pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId
     if b.tracked {
         return Ok(Some(pane));
     }
-    let inspect = state.deps().inspect;
-    if agent_runs(state, id, inspect(b.pane_pid, &[]).as_ref(), None) {
+    if untracked_agent_runs(state, b, None) {
         return Ok(Some(pane));
     }
     let title = state
@@ -561,6 +560,24 @@ pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId
         said: format!("{title}'s agent isn't running in that tab any more"),
         pane,
     })
+}
+
+/// Session `id`'s tab when it runs here (a binding of this generation), with an untracked
+/// binding's agent read again first (R31): one that left its tab puts the session to sleep
+/// and frees the tab in `tx` ([`agent_left`]), and then it isn't running. Resume, focus
+/// and adopt never trust an untracked binding without that look.
+pub(crate) fn running_pane(
+    state: &mut State,
+    tx: &mut Tx,
+    id: SessionId,
+) -> Result<Option<PaneId>, OpError> {
+    match kill_checked(state, id) {
+        Ok(pane) => Ok(pane),
+        Err(left) => {
+            agent_left(state, tx, id, left.pane)?;
+            Ok(None)
+        }
+    }
 }
 
 /// The adopted agent of session `id` left its shell tab `pane` (R31), which stays the user's:

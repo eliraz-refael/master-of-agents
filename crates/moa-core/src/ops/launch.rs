@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::cut;
 use super::projects::project_for;
-use super::sessions::{agent_left, kill_checked};
+use super::sessions::{agent_left, kill_checked, running_pane};
 use crate::Now;
 use crate::change::Change;
 use crate::config::{AccountConfig, AccountName};
@@ -42,8 +42,6 @@ const NO_TAB: &str = "couldn't open a tab for it; see moa's log";
 const WENT_AWAY: &str = "moa's terminal went away before it opened";
 const NOT_SAVED: &str = "moa couldn't save that session; nothing was opened, try again";
 const LOST: &str = "moa lost that session; a tab may have opened for it, see moa's log";
-const UNTRACKED: &str =
-    "moa couldn't save which tab it runs in; it may show as untracked until moa restarts";
 const ELSEWHERE: &str = "it's running in another app right now; close it there first";
 const OTHER_TERMINAL: &str =
     "it's running in another moa terminal; use it there, or close it there first";
@@ -406,7 +404,8 @@ pub(crate) fn resume(
 }
 
 /// Steps 1–5 for session `id`, the link up and reconciled. A restart skips step 1: its own
-/// tab is the one it replaces.
+/// tab is the one it replaces. An untracked binding's agent is read again at step 1: one
+/// that left its tab puts the session to sleep (in `tx`), and the resume goes on.
 fn check(
     state: &mut State,
     tx: &mut Tx,
@@ -419,7 +418,7 @@ fn check(
         return Ok(Resume::Waiting(id));
     }
     if kind != LaunchKind::Restart
-        && let Some(pane) = bound_pane(state, id)
+        && let Some(pane) = running_pane(state, tx, id)?
     {
         return Ok(Resume::Running(id, pane));
     }
@@ -730,9 +729,17 @@ pub(crate) fn resumed(
     match panes {
         Ok(panes) => {
             let inspect = state.deps().inspect;
+            // A tab an untracked binding holds counts too: its agent may have left, and the
+            // user typed this conversation's there since. A restart's own tab is the one it
+            // replaces.
+            let free = |p: &PaneInfo| {
+                bound_session(state, p.pane)
+                    .is_none_or(|s| state.binding(s).is_some_and(|b| !b.tracked))
+                    && Some(p.pane) != checked.kill
+            };
             let running = panes.iter().find(|p| {
                 !p.dead
-                    && bound_session(state, p.pane).is_none()
+                    && free(p)
                     && inspect(p.pid, &p.start).is_some_and(|a| {
                         a.kind == AgentKind::Claude
                             && a.conversation.as_deref() == Some(checked.conv.as_str())
@@ -971,9 +978,13 @@ fn bind(
         .commit(state, vec![Change::PaneBinding(binding)])
         .is_err()
     {
-        // The tab runs, untagged: reconcile binds it by its agent at the next connection.
+        // The tab runs, untagged: `adopt` binds it to its session (its agent carries
+        // `MOA_SESSION`), and so does reconcile at the next connection.
         logs.push(warn(format!("the tab of session {id} was not saved")));
-        return (Err(OpError(UNTRACKED.into())), None);
+        let text = format!(
+            "moa couldn't save which tab it runs in; moactl adopt {pane} binds it, or moa's next connection does"
+        );
+        return (Err(OpError(text)), None);
     }
     let mut cmds = vec![set_pane_option(pane, "@moa_session", &id.to_string())];
     if launching.focus {
@@ -1079,7 +1090,10 @@ pub(crate) fn focus(
         launching.focus = true;
         return Vec::new();
     }
-    match (bound_pane(state, id), state.session(id)) {
+    // A tracked tab is the agent's (R18). An untracked one's agent is read again first, as
+    // a resume does ([`check`]), which focuses it while it runs.
+    let tracked = state.binding(id).is_some_and(|b| b.tracked);
+    match (bound_pane(state, id).filter(|_| tracked), state.session(id)) {
         (Some(pane), Some(s)) => vec![
             Effect::Tmux {
                 conn: link,

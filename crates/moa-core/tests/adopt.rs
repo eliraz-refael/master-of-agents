@@ -641,10 +641,7 @@ fn adopt_takes_the_given_id_over_the_agents_own() {
     assert!(s.title_locked);
     assert_eq!(s.group_path.as_deref(), Some("Work/Lantern"));
     assert!(r.st.groups().any(|g| g.path == "Work/Lantern"));
-    assert_eq!(
-        r.st.conversations_of(new).next().unwrap().conversation_id,
-        C9
-    );
+    assert_eq!(r.st.handle_of(new), C9);
     assert!(NEWEST_ASKED.with(|a| a.borrow().is_empty()));
 }
 
@@ -1098,4 +1095,262 @@ fn adopt_is_forgotten_when_its_caller_goes() {
     r.ask(adopt_op("%5", None, None, None));
     handle_checked(&mut r.st, Input::ClientGone(ConnId(1)), r.b.now());
     assert!(r.st.tmux().queries().next().is_none());
+}
+
+/// The tabs as a listing shows them once session `sid` adopted %5: %5 marked and tagged,
+/// and K's %7.
+fn tagged_tabs(r: &Rig, sid: SessionId) -> Vec<String> {
+    vec![
+        format!("I\t%5\t50\t0\t\t1\t{sid}\t{}", r.lantern().display()),
+        line("%7", 70, K, &r.home().join("private/web")),
+    ]
+}
+
+impl Rig {
+    /// Request `req`, `op`, whose one pane query is answered with `tabs`.
+    fn with_tabs(&mut self, req: u64, op: Op, tabs: &[String]) -> Vec<Effect> {
+        let fx = send(&self.b, &mut self.st, req, op);
+        assert!(replies(&fx).is_empty(), "{fx:?}");
+        let tabs: Vec<&str> = tabs.iter().map(String::as_str).collect();
+        listed(&mut self.st, &self.b, &tabs, &[])
+    }
+}
+
+/// The `kill-pane`s in `fx`.
+fn kills(fx: &[Effect]) -> Vec<&Cmd> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| c.name() == "kill-pane")
+        .collect()
+}
+
+/// The argument after `--resume` in the one launch in `fx`.
+fn resumed_conversation(fx: &[Effect]) -> String {
+    let (_, cmds) = the_open(fx);
+    let argv = cmds[0].argv();
+    let at = argv.iter().position(|a| a == "--resume").unwrap();
+    argv[at + 1].clone()
+}
+
+/// The agent was started on C8 and runs C9 now (a `/resume` or `/clear` inside it), and is
+/// adopted with `--id C9`. Its command line still says C8, so C8 is kept as one of the
+/// session's conversations too: the next look at the tab still finds the session's agent,
+/// and a restart resumes C9, the current one.
+#[test]
+fn adopt_with_another_id_keeps_its_agent() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    r.in_5(Some(&store), Some("C8"));
+    let new = adopted_id(&r.adopt_with("%5", None, None, Some(C9)));
+    assert_eq!(r.st.handle_of(new), C9);
+    let mut convs: Vec<&str> =
+        r.st.conversations_of(new)
+            .map(|c| c.conversation_id.as_str())
+            .collect();
+    convs.sort_unstable();
+    assert_eq!(convs, ["C8", C9]);
+
+    let tabs = tagged_tabs(&r, new);
+    let fx = r.with_tabs(2, Op::SessionLs { all: false }, &tabs);
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.st.session(new).unwrap().lifecycle, Lifecycle::Live);
+    assert!(r.st.binding(new).is_some());
+
+    let restart = Op::SessionRestart { q: new.to_string() };
+    let fx = r.with_tabs(3, restart, &tabs);
+    assert_eq!(kills(&fx).len(), 1, "{fx:?}");
+    assert_eq!(resumed_conversation(&fx), C9);
+}
+
+/// An agent started on another session's conversation is that session's: `--id` can't move
+/// it to a new one.
+#[test]
+fn adopt_refuses_an_id_for_an_agent_started_on_another_sessions_conversation() {
+    let mut r = World::new().reconciled();
+    r.in_5(Some(&r.home().join(".claude-a")), Some(CZ));
+    let fx = r.adopt_with("%5", None, None, Some(C9));
+    refused(
+        &fx,
+        &format!(
+            "that agent was started on {}; adopt it without --id",
+            r.handle(Z)
+        ),
+    );
+}
+
+/// The adopted agent named no conversation (a plain `claude`) and quit, and the user typed
+/// another plain `claude` in the same shell: the same store, the same folder, but started
+/// after the tab was bound, so it isn't the session's agent (R31). `ls` puts the session
+/// to sleep and frees the tab; `close`, `sleep` and `restart` kill nothing.
+#[test]
+fn a_later_plain_claude_in_the_adopted_tab_isnt_the_adopted_agent() {
+    // An agent whose start time can't be read proves nothing either.
+    for later in [true, false] {
+        let ops: [fn(SessionId) -> Op; 4] = [
+            |_| Op::SessionLs { all: false },
+            |s| Op::SessionClose { q: s.to_string() },
+            |s| Op::SessionSleep {
+                qs: vec![s.to_string()],
+                idle_ms: None,
+                dry_run: false,
+            },
+            |s| Op::SessionRestart { q: s.to_string() },
+        ];
+        for (n, op) in ops.into_iter().enumerate() {
+            let mut r = World::new().reconciled();
+            let store = r.home().join(".claude-a");
+            r.in_5(Some(&store), None);
+            NEWEST.with(|n| *n.borrow_mut() = Some(C9.into()));
+            let new = adopted_id(&r.adopt("%5"));
+            let mut agent = claude(Some(&store), None, UtcMs(r.b.now().wall.0 + 60_000));
+            if !later {
+                agent.started_at = None;
+            }
+            r.runs(50, agent);
+            let tabs = tagged_tabs(&r, new);
+            let fx = if n == 0 {
+                r.with_tabs(2, op(new), &tabs)
+            } else {
+                send(&r.b, &mut r.st, 2, op(new))
+            };
+            let case = format!("op {n}, later {later}");
+            assert!(kills(&fx).is_empty(), "{case}: {fx:?}");
+            assert!(r.st.binding(new).is_none(), "{case}");
+            let s = r.st.session(new).unwrap();
+            assert_eq!(s.lifecycle, Lifecycle::Ended, "{case}");
+            assert_eq!(s.asleep_at, Some(r.b.now().wall), "{case}");
+            assert_eq!(
+                unsets(&fx),
+                untagged("%5").iter().collect::<Vec<_>>(),
+                "{case}: {fx:?}"
+            );
+        }
+    }
+}
+
+/// The adopted agent quit and its shell stays open (U14's usual case): `resume` and `focus`
+/// find it gone, put the session to sleep and free the tab, then resume it in a tab of its
+/// own.
+#[test]
+fn resume_and_focus_after_the_adopted_agent_left_resume_it() {
+    let ops: [fn(SessionId) -> Op; 2] = [
+        |s| Op::SessionResume {
+            q: s.to_string(),
+            bg: false,
+        },
+        |s| Op::SessionFocus { q: s.to_string() },
+    ];
+    for op in ops {
+        let mut r = World::new().reconciled();
+        r.in_5(Some(&r.home().join(".claude-a")), Some(C9));
+        let new = adopted_id(&r.adopt("%5"));
+        AGENTS.with(|a| a.borrow_mut().remove(&50));
+        let fx = send(&r.b, &mut r.st, 2, op(new));
+        assert!(replies(&fx).is_empty(), "{fx:?}");
+        assert!(kills(&fx).is_empty(), "{fx:?}");
+        assert_eq!(
+            unsets(&fx),
+            untagged("%5").iter().collect::<Vec<_>>(),
+            "{fx:?}"
+        );
+        assert!(r.st.binding(new).is_none());
+        let shell = line("%5", 50, "", &r.lantern());
+        let k = line("%7", 70, K, &r.home().join("private/web"));
+        let fx = listed(&mut r.st, &r.b, &[&shell, &k], &[]);
+        assert_eq!(resumed_conversation(&fx), C9);
+    }
+}
+
+/// The adopted agent quit and another Claude was typed in its shell: adopting the tab again
+/// finds the old agent gone, puts its session to sleep, and takes the new one.
+#[test]
+fn adopt_of_a_tab_whose_adopted_agent_left_takes_the_new_agent() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    r.in_5(Some(&store), Some(C9));
+    let old = adopted_id(&r.adopt("%5"));
+    r.runs(50, claude(Some(&store), Some("C10"), r.b.now().wall));
+    r.tabs = tagged_tabs(&r, old);
+    let fx = r.adopt("%5");
+    let new = adopted_id(&fx);
+    assert_ne!(new, old);
+    assert_eq!(r.st.handle_of(new), "C10");
+    let s = r.st.session(old).unwrap();
+    assert_eq!(s.lifecycle, Lifecycle::Ended);
+    assert_eq!(s.asleep_at, Some(r.b.now().wall));
+    assert!(r.st.binding(old).is_none());
+    assert_eq!(r.st.binding(new).map(|b| b.pane_id.as_str()), Some("%5"));
+}
+
+/// The adopted agent quit, and the user resumed Z's conversation by hand in its shell. The
+/// tab is still bound to the adopted session, but its agent runs Z's: `resume Z` (step 6)
+/// refuses to start a second agent on it, and points at `adopt`, which takes the tab for Z.
+#[test]
+fn resume_refuses_a_conversation_typed_in_an_adopted_tab_and_adopt_takes_it() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    r.in_5(Some(&store), Some(C9));
+    let old = adopted_id(&r.adopt("%5"));
+    r.runs(50, claude(Some(&store), Some(CZ), r.b.now().wall));
+    r.tabs = tagged_tabs(&r, old);
+    let resume = Op::SessionResume {
+        q: Z.into(),
+        bg: true,
+    };
+    let tabs = r.tabs.clone();
+    let fx = r.with_tabs(2, resume, &tabs);
+    assert_eq!(
+        one_reply(&fx),
+        Err(OpError(
+            "it's already running in tab %5; adopt it with moactl adopt %5".into()
+        ))
+    );
+    assert!(kills(&fx).is_empty(), "{fx:?}");
+    let fx = r.adopt("%5");
+    assert_eq!(adopted_id(&fx), id(Z));
+    assert_eq!(r.st.binding(id(Z)).map(|b| b.pane_id.as_str()), Some("%5"));
+    assert!(r.st.binding(old).is_none());
+}
+
+/// moa's own agent for Z, whose tab's binding was never saved (its commit was refused): Z
+/// has no binding and isn't opening, so adopt binds the tab to Z, tracked, as the next
+/// connection's reconcile would.
+#[test]
+fn adopt_binds_moas_own_agent_whose_tab_wasnt_saved() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    let mut agent = claude(Some(&store), Some(CZ), started(&r.b));
+    agent.moa_session = Some(Z.into());
+    r.runs(50, agent);
+    let fx = r.adopt("%5");
+    assert_eq!(adopted_id(&fx), id(Z));
+    assert_eq!(
+        one_reply(&fx).unwrap().text,
+        "bound lantern to tab %5; moa tracks it"
+    );
+    let s = r.st.session(id(Z)).unwrap();
+    assert_eq!(s.lifecycle, Lifecycle::Live);
+    assert_eq!(s.asleep_at, None);
+    let b = r.st.binding(id(Z)).unwrap();
+    assert_eq!((b.pane_id.as_str(), b.tracked), ("%5", true));
+    assert_eq!(b.bound_at, r.b.now().wall);
+    // Tracked: tagged, not marked adopted.
+    assert_eq!(set_options(&fx), vec![&tag("%5", "@moa_session", Z)]);
+    // `--id` naming a conversation that isn't Z's is refused.
+    let mut r = World::new().reconciled();
+    let mut agent = claude(Some(&store), Some(CZ), started(&r.b));
+    agent.moa_session = Some(Z.into());
+    r.runs(50, agent);
+    let fx = r.adopt_with("%5", None, None, Some(C9));
+    refused(
+        &fx,
+        &format!(
+            "that agent was started for {}; adopt it without --id",
+            r.handle(Z)
+        ),
+    );
 }

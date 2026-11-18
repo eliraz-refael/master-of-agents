@@ -9,7 +9,6 @@ use serde_json::json;
 use super::launch::{UNSAFE_ID, title_of};
 use super::projects::project_for;
 use super::sessions::STILL_OPENING;
-use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, finish_op};
 use crate::effect::Effect;
@@ -18,13 +17,14 @@ use crate::model::{
     Session, SessionId, normalize_group_path, safe_id,
 };
 use crate::op::{ADOPT_USAGE, ConnId, Done, OpError, ReqId};
-use crate::reconcile::tag_pane;
+use crate::reconcile::{moa_session_of, tag_pane, tagged_for, untag_pane, untracked_agent_runs};
 use crate::route::{Route, route};
 use crate::sleep::put_to_sleep;
 use crate::state::State;
-use crate::tmux::ids::PaneId;
+use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Asked, Link, NO_TERMINAL, ready};
-use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes};
+use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes, listed};
+use crate::{Now, UtcMs};
 
 const WENT_AWAY: &str = "moa's terminal went away; try again";
 const TERMINAL: &str = "that tab is a terminal, not an agent";
@@ -139,10 +139,21 @@ pub(crate) fn adopt(
         .iter()
         .find(|p| p.pane == pane && !p.dead)
         .ok_or_else(|| OpError(format!("there's no tab {pane}")))?;
-    let kept: Vec<SessionId> = kept_bindings(state, generation, panes)
+    // The bindings that hold their tab, an untracked one only while its agent still runs
+    // there (R31): one whose agent left is let go below, as `ls` would.
+    let (kept, left): (Vec<&PaneBinding>, Vec<&PaneBinding>) =
+        kept_bindings(state, generation, panes)
+            .into_iter()
+            .partition(|b| b.tracked || untracked_agent_runs(state, b, listed(b, panes)));
+    // The tabs of the session's own bindings that were let go, to take moa's tags off.
+    let left: Vec<(SessionId, PaneId)> = left
         .iter()
-        .map(|b| b.session_id)
+        .filter_map(|b| {
+            let i = listed(b, panes)?;
+            (i.pane != pane && tagged_for(i, b.session_id)).then_some((b.session_id, i.pane))
+        })
         .collect();
+    let kept: Vec<SessionId> = kept.iter().map(|b| b.session_id).collect();
     if let Some(b) = state
         .pane_bindings()
         .find(|b| kept.contains(&b.session_id) && b.pane_id.parse() == Ok(pane))
@@ -166,21 +177,38 @@ pub(crate) fn adopt(
     let agent = (deps.inspect)(info.pid, &info.start)
         .filter(|a| a.kind == AgentKind::Claude)
         .ok_or_else(|| OpError(if info.term { TERMINAL } else { NOT_AN_AGENT }.into()))?;
-    // An agent moa started for a session it knows is that session's, not one to adopt: its
-    // tab is on its way to being bound, or is bound already.
-    if let Some(own) = agent
-        .moa_session
-        .as_deref()
-        .and_then(|s| s.parse::<SessionId>().ok())
-        .filter(|id| state.session(*id).is_some())
-    {
+    // An agent moa started for a session it knows is that session's, not one to adopt. Its
+    // tab is on its way to being bound, or is bound already; or its binding was never saved,
+    // and then the tab is bound to it as the next connection's reconcile would (R6 (b)).
+    if let Some(own) = moa_session_of(state, &agent) {
         if state.tmux().opening(own) {
             return Err(OpError(STILL_OPENING.into()));
         }
-        return Err(OpError(format!(
-            "that tab is already {}",
-            state.handle_of(own)
-        )));
+        if kept.contains(&own) {
+            return Err(OpError(format!(
+                "that tab is already {}",
+                state.handle_of(own)
+            )));
+        }
+        let given = args.id.as_deref().filter(|c| !c.is_empty());
+        if given.is_some_and(|c| !state.conversations_of(own).any(|o| o.conversation_id == c)) {
+            return Err(OpError(format!(
+                "that agent was started for {}; adopt it without --id",
+                state.handle_of(own)
+            )));
+        }
+        let stale = stale.into_iter().filter(|s| *s != own).collect();
+        let tab = Tab {
+            pane,
+            pid: info.pid,
+            generation,
+            socket,
+            untracked: info.adopted || info.term,
+            marked: info.adopted,
+            stale,
+            left,
+        };
+        return bind_own(state, tx, own, args, group_flag, tab);
     }
 
     // The brain's folder (R22), a listed account's store (R32), and this brain's route.
@@ -252,8 +280,33 @@ pub(crate) fn adopt(
     if known.is_some_and(|id| state.tmux().opening(id)) {
         return Err(OpError(STILL_OPENING.into()));
     }
+    // The conversation the agent was started on, when `--id` names another (a `/resume` or
+    // `/clear` inside it since): its command line still names that one, and every later look
+    // at the tab reads it, so it is kept as one of the session's conversations too (R31).
+    // One another session has is that session's agent: `--id` doesn't move it.
+    let started_on = agent
+        .conversation
+        .clone()
+        .filter(|c| *c != conv)
+        .map(|c| {
+            let owner = state
+                .conversation_of_agent(AgentKind::Claude, &c)
+                .map(|o| o.session_id);
+            match owner {
+                Some(o) if Some(o) != known => Err(OpError(format!(
+                    "that agent was started on {}; adopt it without --id",
+                    state.handle_of(o)
+                ))),
+                Some(_) => Ok(None),
+                None if !safe_id(&c) => Err(OpError(UNSAFE_ID.into())),
+                None => Ok(Some(c)),
+            }
+        })
+        .transpose()?
+        .flatten();
 
     // The session: the conversation's, woken here, or a new one.
+    let store_text = acct_store.clone();
     let title_flag = args.title.clone().filter(|t| !t.trim().is_empty());
     let mut changes = Vec::new();
     let session = match known {
@@ -348,33 +401,39 @@ pub(crate) fn adopt(
         }
     };
     let id = session.id;
-    let title = session.title.clone().filter(|t| !t.trim().is_empty());
-    let group = session.group_path.clone();
-    // The session goes first: the conversation and the binding point at it.
-    changes.insert(0, Change::Session(session.clone()));
-    if let Some(g) = group.clone().filter(|g| !state.groups.contains_key(g)) {
-        changes.push(Change::Group(Group {
-            path: g,
-            collapsed: false,
-            created_at: tx.wall,
+    if let Some(c) = started_on {
+        // Seen before the adopted one, so that one stays current.
+        let before = UtcMs(tx.wall.0.saturating_sub(1));
+        let at = agent.started_at.map_or(before, |t| t.min(before));
+        changes.push(Change::Conversation(Conversation {
+            agent_kind: AgentKind::Claude,
+            conversation_id: c,
+            session_id: id,
+            store_dir: Some(store_text),
+            spike_account: None,
+            reason: ConversationReason::Adopt,
+            first_seen_at: at,
+            last_seen_at: at,
+            transcript_path: None,
+            transcript_present: None,
+            transcript_checked_at: None,
         }));
     }
-    for other in stale.into_iter().filter(|s| *s != id) {
-        changes.extend(put_to_sleep(state, tx, other));
-    }
-    changes.push(Change::PaneBinding(PaneBinding {
-        session_id: id,
-        server_pid: generation.pid,
-        server_start: generation.start,
+    let title = session.title.clone().filter(|t| !t.trim().is_empty());
+    let group = session.group_path.clone();
+    let tab = Tab {
+        pane,
+        pid: info.pid,
+        generation,
         socket,
-        pane_id: pane.to_string(),
-        pane_pid: info.pid,
-        bound_at: tx.wall,
-        tracked: false,
-    }));
+        untracked: true,
+        marked: false,
+        stale,
+        left,
+    };
     let shown = title.clone().unwrap_or_else(|| state.handle_of(id));
-    tx.ui(state, changes, format!("adopted {shown} ({name}, {cwd})"))?;
-    tag_pane(state, tx, pane, id, true);
+    let row = format!("adopted {shown} ({name}, {cwd})");
+    bind(state, tx, &session, changes, tab, row)?;
 
     Ok(Done {
         text: format!(
@@ -383,5 +442,111 @@ pub(crate) fn adopt(
             group.as_deref().unwrap_or("-")
         ),
         data: json!({ "id": id, "title": title_of(state, &session) }),
+    })
+}
+
+/// The tab an adopt binds, as its listing showed it.
+struct Tab {
+    pane: PaneId,
+    pid: i64,
+    generation: Generation,
+    socket: String,
+    /// Its binding is untracked: an agent moa didn't start, or one in a tab marked adopted
+    /// or a terminal, which may outlive it (R7).
+    untracked: bool,
+    /// It carries the adopted mark already.
+    marked: bool,
+    /// The sessions of bindings that name the tab but no longer hold it, put to sleep.
+    stale: Vec<SessionId>,
+    /// Tabs of untracked bindings whose agent left, each with its session: the bound
+    /// session's lose moa's tags.
+    left: Vec<(SessionId, PaneId)>,
+}
+
+/// One commit: `session` first, then `changes`, its group when new, the stale bindings'
+/// sessions put to sleep, its binding to `tab` and the activity row `row`. Then the tab's
+/// tags (adopted first when untracked), and a tab the session's agent left loses them.
+fn bind(
+    state: &mut State,
+    tx: &mut Tx,
+    session: &Session,
+    mut changes: Vec<Change>,
+    tab: Tab,
+    row: String,
+) -> Result<(), OpError> {
+    let id = session.id;
+    // The session goes first: the conversation and the binding point at it.
+    changes.insert(0, Change::Session(session.clone()));
+    if let Some(g) = session
+        .group_path
+        .clone()
+        .filter(|g| !state.groups.contains_key(g))
+    {
+        changes.push(Change::Group(Group {
+            path: g,
+            collapsed: false,
+            created_at: tx.wall,
+        }));
+    }
+    for other in tab.stale.into_iter().filter(|s| *s != id) {
+        changes.extend(put_to_sleep(state, tx, other));
+    }
+    changes.push(Change::PaneBinding(PaneBinding {
+        session_id: id,
+        server_pid: tab.generation.pid,
+        server_start: tab.generation.start,
+        socket: tab.socket,
+        pane_id: tab.pane.to_string(),
+        pane_pid: tab.pid,
+        bound_at: tx.wall,
+        tracked: !tab.untracked,
+    }));
+    tx.ui(state, changes, row)?;
+    tag_pane(state, tx, tab.pane, id, tab.untracked && !tab.marked);
+    for (_, pane) in tab.left.into_iter().filter(|(s, _)| *s == id) {
+        untag_pane(state, tx, pane);
+    }
+    Ok(())
+}
+
+/// The tab of moa's own agent for session `own`, whose binding was never saved (its commit
+/// was refused), bound to it as reconcile would (R6 (b)): tracked, unless the tab is marked
+/// adopted or is a terminal. The session is live here again; `--title` and `--group` apply.
+fn bind_own(
+    state: &mut State,
+    tx: &mut Tx,
+    own: SessionId,
+    args: &AdoptArgs,
+    group_flag: Option<String>,
+    tab: Tab,
+) -> Result<Done, OpError> {
+    let s = state
+        .session(own)
+        .cloned()
+        .ok_or_else(|| OpError(LOST.into()))?;
+    let title_flag = args.title.clone().filter(|t| !t.trim().is_empty());
+    let session = Session {
+        title: title_flag.clone().or(s.title.clone()),
+        title_locked: s.title_locked || title_flag.is_some(),
+        group_path: group_flag.or(s.group_path.clone()),
+        lifecycle: Lifecycle::Live,
+        asleep_at: None,
+        location: Location::Here,
+        ..s
+    };
+    let title = title_of(state, &session);
+    let pane = tab.pane;
+    let tracks = if tab.untracked { "" } else { "; moa tracks it" };
+    bind(
+        state,
+        tx,
+        &session,
+        Vec::new(),
+        tab,
+        format!("bound {title} to tab {pane}"),
+    )?;
+    Ok(Done {
+        text: format!("bound {title} to tab {pane}{tracks}"),
+        data: json!({ "id": own, "title": title }),
     })
 }
