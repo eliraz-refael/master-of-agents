@@ -168,6 +168,21 @@ impl TempBrain {
             })
     }
 
+    /// The last `n` lines of `brain`'s daemon log and of its stderr log, for a failure
+    /// message: the daemon's lines carry ids and counts only, never a record's text.
+    pub fn log_tail(&self, brain: &str, n: usize) -> String {
+        let paths = self.paths();
+        [paths.log(brain), paths.stderr_log(brain)]
+            .iter()
+            .map(|path| {
+                let text = fs::read_to_string(path).unwrap_or_else(|e| format!("({e})\n"));
+                let lines: Vec<&str> = text.lines().collect();
+                let tail = lines[lines.len().saturating_sub(n)..].join("\n");
+                format!("--- {}:\n{tail}\n", path.display())
+            })
+            .collect()
+    }
+
     /// Kills `brain`'s terminal server when its socket is there, and waits for it to exit.
     fn kill_tmux(&self, brain: &str) {
         let Ok(socket) = self.paths().tmux_socket(brain) else {

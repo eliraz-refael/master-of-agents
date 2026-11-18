@@ -44,7 +44,9 @@ fn kill_server_brings_sessions_back_asleep() {
     let tb = TempBrain::new(None);
     let claude = fake_claude_named_claude(tb.root());
     moa_toml_with_launcher(&tb, &claude);
-    let first = open(&tb, &[], &[]);
+    // The daemon logs each request (method and ids only), so a failure's log tail shows
+    // when the second `moa` asked for its terminal.
+    let first = open(&tb, &[], &[("MOA_LOG", "debug")]);
     came_up(&tb, &first);
 
     let steps = [
@@ -64,6 +66,7 @@ fn kill_server_brings_sessions_back_asleep() {
 
     // A reboot, as far as moa can tell.
     tmux(&tb, &["kill-server"]);
+    eprintln!("kill-server returned at {}", jiff::Timestamp::now());
     let second = open(&tb, &[], &[]);
     came_up(&tb, &second);
 
