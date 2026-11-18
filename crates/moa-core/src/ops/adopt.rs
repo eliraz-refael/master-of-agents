@@ -25,7 +25,7 @@ use crate::sleep::put_to_sleep;
 use crate::state::State;
 use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Asked, Link, NO_TERMINAL, ready};
-use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes, listed};
+use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes, listed, of_server};
 use crate::{Now, UtcMs};
 
 const WENT_AWAY: &str = "moa's terminal went away; try again";
@@ -171,11 +171,9 @@ pub(crate) fn adopt(
         )));
     }
     // A binding of this server that names the tab but no longer holds it.
-    let this_server =
-        |b: &PaneBinding| b.server_pid == generation.pid && b.server_start == generation.start;
     let stale: Vec<SessionId> = state
         .pane_bindings()
-        .filter(|b| this_server(b) && b.pane_id.parse() == Ok(pane))
+        .filter(|b| of_server(b, generation) && b.pane_id.parse() == Ok(pane))
         .map(|b| b.session_id)
         .collect();
 
@@ -444,7 +442,7 @@ pub(crate) fn adopt(
         generation,
         socket,
         untracked: true,
-        marked: false,
+        marked: info.adopted,
         stale,
         left,
     };

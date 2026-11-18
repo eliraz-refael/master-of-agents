@@ -20,6 +20,7 @@ use crate::peers::peers_note;
 use crate::state::{State, Table};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::PaneId;
+use crate::tmux::link::LaunchKind;
 use crate::{Now, UtcMs};
 
 /// What [`apply`] did with an event.
@@ -148,6 +149,15 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     if state.recent_hook_set.contains(&key) {
         return Applied::Duplicate;
     }
+    // A start is a new agent: one an empty look at the tabs didn't see ([`crate::wake`]).
+    // One that doesn't name the session isn't the agent a restart killed, which can't start
+    // again: it lifts the restart's fence (R24), as adopting a hand-started agent does.
+    if matches!(env.kind, HookKind::SessionStarted { .. }) {
+        state.not_found.remove(&id);
+        if slot_of(env) != Some(id) {
+            state.restarted.remove(&id);
+        }
+    }
     let before = state
         .session(id)
         .expect("resolved to a known session")
@@ -199,7 +209,10 @@ enum After {
 /// agent is found running (M7: an asleep or ended session shows as it was left). Once a
 /// session is restarted (R24), an event that doesn't name it in `MOA_SESSION` isn't from
 /// an agent moa started for it, whenever it arrives: the killed agent's end is history
-/// only, and the new agent's own end, even before its tab is known, is applied.
+/// only, and so is any other of its events, until a start that doesn't name it (a new
+/// agent started by hand) lifts that fence ([`apply`]). While the restart's tab opens, any
+/// end is history only, whatever it names: tmux names the new tab long before the new
+/// agent could end, so only the killed agent (moa's own, when `adopt` bound it) ends then.
 fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) -> After {
     let older = before
         .activity_at
@@ -207,8 +220,13 @@ fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) 
         .is_some_and(|t| env.at < t);
     let ended = before.lifecycle == Lifecycle::Ended;
     let not_its_agent = state.restarted.contains(&id) && slot_of(env) != Some(id);
+    let restarting = state
+        .tmux()
+        .launches()
+        .any(|(i, l)| i == id && l.kind == LaunchKind::Restart);
     let after = match &env.kind {
         _ if not_its_agent => None,
+        HookKind::SessionEnded { .. } if restarting => None,
         HookKind::SessionEnded { reason } => match end_kind(reason) {
             EndKind::Clean if ended && before.asleep_at.is_some() => {
                 Some(woken_to_end(before, env))

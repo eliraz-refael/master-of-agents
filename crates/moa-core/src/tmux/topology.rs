@@ -197,6 +197,11 @@ impl Topology {
         self.windows.contains_key(&w)
     }
 
+    /// Every pane in the lists, in any window.
+    pub fn panes(&self) -> impl Iterator<Item = PaneId> + '_ {
+        self.windows.values().flat_map(|w| w.panes.iter().copied())
+    }
+
     pub fn has_pane(&self, p: PaneId) -> bool {
         self.window_of(p).is_some()
     }

@@ -339,6 +339,13 @@ fn close_of_an_adopted_session_whose_tab_cant_be_read_changes_nothing() {
     );
     assert_eq!(r.s(), &before);
     assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
+    // moa's log says so, as restart's and resume's do.
+    let said = format!("the tab of session {S} couldn't be read; it is left as it is");
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Log(l) if l.message == said)),
+        "{fx:?}"
+    );
 }
 
 /// A session that isn't running is still marked ended, as the spike did; there's no tab

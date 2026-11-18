@@ -891,6 +891,13 @@ fn sleep_by_name() {
         panic!("{fx:?}");
     };
     assert_eq!(done.data, json!({ "asleep": [] }));
+    // moa's log says so, as restart's and resume's do.
+    let said = format!("the tab of session {S} couldn't be read; it is left as it is");
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Log(l) if l.message == said)),
+        "{fx:?}"
+    );
 
     // A name that matches nothing changes nothing.
     let mut r = World::new().up();

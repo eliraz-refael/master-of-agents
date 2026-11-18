@@ -17,6 +17,7 @@ use crate::effect::RefuseWrites;
 use crate::model::*;
 use crate::op::Op;
 use crate::publish::{ACTIVITY_SHOWN, Model};
+use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Link, TmuxState};
 
 /// How many hook events' keys are remembered for deduplication.
@@ -264,10 +265,14 @@ pub struct State {
     pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
     pub(crate) recent_hook_set: HashSet<(u32, u32, i64)>,
     /// The sessions restarted under moa (R24) since moa last took on a hand-started agent for
-    /// them (an untracked binding). Every agent of theirs since carries `MOA_SESSION`, so a
+    /// them (an untracked binding, or a start that doesn't name them). Every agent of theirs since carries `MOA_SESSION`, so a
     /// hook without it is from the agent the restart killed, or another one moa didn't
     /// start: history only, whenever it arrives. Kept in memory: a daemon restart forgets it.
     pub(crate) restarted: BTreeSet<SessionId>,
+    /// The sessions a look at the tabs found no agent of ([`crate::wake`]), each with the
+    /// server and the panes that look listed. Their events ask no look again until they
+    /// start, or tmux shows a pane that look didn't. Kept in memory.
+    pub(crate) not_found: BTreeMap<SessionId, (Generation, BTreeSet<PaneId>)>,
 }
 
 impl State {
@@ -301,6 +306,7 @@ impl State {
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),
             restarted: BTreeSet::new(),
+            not_found: BTreeMap::new(),
         }
     }
 

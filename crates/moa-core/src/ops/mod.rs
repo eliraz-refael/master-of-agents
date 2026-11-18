@@ -12,15 +12,18 @@ pub mod tasks;
 
 use crate::Now;
 use crate::core::Tx;
+use crate::effect::Effect;
 use crate::op::{Done, Op, OpError};
 use crate::state::{Caller, State};
 
+/// Runs `op`. What moa's log is told besides goes in `logs`, whatever the answer.
 pub(crate) fn run(
     state: &mut State,
     tx: &mut Tx,
     caller: &Caller,
     op: Op,
     now: &Now,
+    logs: &mut Vec<Effect>,
 ) -> Result<Done, OpError> {
     match op {
         Op::GroupAdd { path } => groups::add(state, tx, now, &path),
@@ -31,12 +34,12 @@ pub(crate) fn run(
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())
         }
         Op::SessionArchive { qs } => sessions::archive(state, tx, now, &qs),
-        Op::SessionClose { q } => sessions::close(state, tx, now, &q),
+        Op::SessionClose { q } => sessions::close(state, tx, now, &q, logs),
         Op::SessionSleep {
             qs,
             idle_ms,
             dry_run,
-        } => sessions::sleep(state, tx, now, &qs, idle_ms, dry_run),
+        } => sessions::sleep(state, tx, now, &qs, idle_ms, dry_run, logs),
         Op::SessionFind { q } => read::find(state, now, &q),
         Op::TaskLs { project, all } => tasks::ls(state, now, project.as_deref(), all),
         Op::TaskAdd(a) => tasks::add(state, tx, now, &a),
@@ -56,7 +59,7 @@ pub(crate) fn run(
         Op::Attention(_) => read::attention(state, now),
         Op::Suggest { text, actions } => suggestions::suggest(state, tx, now, &text, &actions),
         Op::SuggestionAnswer { id, answer } => {
-            suggestions::answer(state, tx, caller, now, id, answer)
+            suggestions::answer(state, tx, caller, now, id, answer, logs)
         }
         Op::SuggestionLs(_) => suggestions::ls(state),
         // `handle` answers these with the link; they are never run as ops.

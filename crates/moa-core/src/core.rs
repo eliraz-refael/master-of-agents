@@ -365,8 +365,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         } => {
             let caller = state.caller(&caller);
             let mut tx = Tx::new(now);
-            let result = ops::run(state, &mut tx, &caller, op, now);
-            finish_op(state, tx, conn, req, result)
+            let mut fx = Vec::new();
+            let result = ops::run(state, &mut tx, &caller, op, now, &mut fx);
+            fx.extend(finish_op(state, tx, conn, req, result));
+            fx
         }
     }
 }

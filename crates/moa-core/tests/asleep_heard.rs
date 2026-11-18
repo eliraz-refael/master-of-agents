@@ -420,3 +420,82 @@ fn a_tab_still_tagged_for_it_wakes_it_tracked() {
     });
     assert!(!tagged, "{fx:?}");
 }
+
+/// tmux's lists, read again: one window, `@1`, holding `panes`.
+fn topology_shows(r: &mut Rig, panes: &[&str]) {
+    let lines = panes
+        .iter()
+        .map(|p| format!("P {p} @1 $1 0 1 0 0 "))
+        .collect();
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: vec![Ok(vec!["S $1 work".into()]), Ok(lines), Ok(Vec::new())],
+        },
+    );
+}
+
+/// A look that found no tab running Z's agent isn't asked again for each event Z sends:
+/// three more events ask nothing, so one listing in all.
+#[test]
+fn after_an_empty_look_more_events_ask_nothing() {
+    let mut r = Rig::new(false);
+    let before = r.z().clone();
+    let fx = r.heard(1, 1000, prompt("go on"));
+    let mut asked = queries(&fx).len();
+    let tab = r.tab_6();
+    listed(&mut r.st, &r.b, &[&tab], &[]);
+    for seq in 2..=4 {
+        let fx = r.heard(seq, i64::from(seq) * 1000, prompt("more"));
+        history_only(&fx);
+        asked += queries(&fx).len();
+    }
+    assert_eq!(asked, 1);
+    assert_eq!(r.z(), &before);
+}
+
+/// A tab the look didn't see may run Z's agent: once tmux shows one, the next event asks
+/// again.
+#[test]
+fn a_new_tab_since_the_empty_look_asks_again() {
+    let mut r = Rig::new(false);
+    r.heard(1, 1000, prompt("go on"));
+    let tab = r.tab_6();
+    listed(&mut r.st, &r.b, &[&tab], &[]);
+    topology_shows(&mut r, &["%6"]);
+    let fx = r.heard(2, 2000, prompt("more"));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    topology_shows(&mut r, &["%6", "%7"]);
+    let fx = r.heard(3, 3000, prompt("more"));
+    assert_eq!(queries(&fx).len(), 1, "{fx:?}");
+}
+
+/// A start from Z lifts the mark: once Z is asleep again, its next event asks again.
+#[test]
+fn a_start_since_the_empty_look_asks_again() {
+    let mut r = Rig::new(false);
+    r.heard(1, 1000, prompt("go on"));
+    let tab = r.tab_6();
+    listed(&mut r.st, &r.b, &[&tab], &[]);
+    r.heard(
+        2,
+        2000,
+        HookKind::SessionStarted {
+            source: StartSource::Resume,
+        },
+    );
+    assert_eq!(r.z().lifecycle, Lifecycle::Live);
+    r.heard(
+        3,
+        3000,
+        HookKind::SessionEnded {
+            reason: "other".into(),
+        },
+    );
+    assert_eq!(r.z().lifecycle, Lifecycle::Ended);
+    let fx = r.heard(4, 4000, prompt("more"));
+    assert_eq!(queries(&fx).len(), 1, "{fx:?}");
+}

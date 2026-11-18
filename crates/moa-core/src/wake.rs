@@ -27,7 +27,8 @@ const HELD: usize = 16;
 /// Session `id`, which isn't live and has no tab, sent `env`: one listing of the tabs is
 /// asked, unless one is already out for it, which `env` then waits with. Nothing is asked
 /// while the tabs aren't reconciled (the link is down, or a reconcile on its way will bind
-/// the tab itself): `env` stays history.
+/// the tab itself), nor after a look found no tab running its agent, until it starts or
+/// tmux shows a pane that look didn't list: `env` stays history.
 pub(crate) fn look(state: &mut State, id: SessionId, env: &HookEnvelope) -> Option<Effect> {
     ready(state).ok()?;
     if let Some(events) = state.tmux.looking(id) {
@@ -35,6 +36,15 @@ pub(crate) fn look(state: &mut State, id: SessionId, env: &HookEnvelope) -> Opti
             events.push(env.clone());
         }
         return None;
+    }
+    let Link::Up { generation, .. } = state.tmux().link else {
+        return None;
+    };
+    if let Some((on, seen)) = state.not_found.get(&id) {
+        if *on == generation && state.tmux().topology.panes().all(|p| seen.contains(&p)) {
+            return None;
+        }
+        state.not_found.remove(&id);
     }
     let asked = Asked::Look {
         id,
@@ -94,6 +104,9 @@ pub(crate) fn looked(
             },
         );
     let Some((info, tracked, tag, current)) = found else {
+        // Its later events don't ask again for these same tabs ([`look`]).
+        let seen = panes.iter().map(|p| p.pane).collect();
+        state.not_found.insert(id, (generation, seen));
         return Vec::new();
     };
     let woken = Session {

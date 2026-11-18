@@ -23,7 +23,9 @@ use crate::time::{days_ago, local_text};
 use crate::tmux::focus::bound_pane;
 use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Asked, Link, log, ready};
-use crate::tmux::panes::{PaneInfo, Tag, holds, kept_bindings, list_panes, listed as listed_pane};
+use crate::tmux::panes::{
+    PaneInfo, Tag, holds, kept_bindings, list_panes, listed as listed_pane, of_server,
+};
 
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
@@ -245,9 +247,7 @@ fn agents_gone(
     let mut unread = 0;
     let gone = state
         .pane_bindings()
-        .filter(|b| {
-            !b.tracked && b.server_pid == generation.pid && b.server_start == generation.start
-        })
+        .filter(|b| !b.tracked && of_server(b, generation))
         .filter_map(|b| {
             let info = listed_pane(b, panes);
             let check = match info.filter(|i| holds(b, generation, Some(i))) {
@@ -376,7 +376,14 @@ pub(crate) fn archive(
 /// `close Q`: the session ends (not asleep: the user meant it, R14), and its tab is killed
 /// once that is saved (R15), when moa can prove the tab is the session's (R31). A session
 /// that isn't running is still marked ended, as the spike did.
-pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Result<Done, OpError> {
+/// `close Q`. A tab that can't be read refuses it, with a debug line in `logs`.
+pub(crate) fn close(
+    state: &mut State,
+    tx: &mut Tx,
+    now: &Now,
+    q: &str,
+    logs: &mut Vec<Effect>,
+) -> Result<Done, OpError> {
     ready(state)?;
     let id = state.resolve(q)?;
     // Its pane isn't known yet, or a resume of it would launch it after this.
@@ -398,7 +405,10 @@ pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Resul
                 data,
             });
         }
-        Err(NotKilled::Unread(said)) => return Err(OpError(said)),
+        Err(NotKilled::Unread(said)) => {
+            logs.push(unread_log(id));
+            return Err(OpError(said));
+        }
     };
     let text = format!("closed {}", title_of(state, &s));
     let ended = Session {
@@ -432,6 +442,7 @@ pub(crate) fn sleep(
     qs: &[String],
     idle_ms: Option<i64>,
     dry_run: bool,
+    logs: &mut Vec<Effect>,
 ) -> Result<Done, OpError> {
     if qs.is_empty() && idle_ms.is_none_or(|ms| ms < 0) {
         return Err(OpError(SLEEP_USAGE.into()));
@@ -522,6 +533,7 @@ pub(crate) fn sleep(
             }
             // Nothing is proven: it is left as it is.
             Err(NotKilled::Unread(text)) => {
+                logs.push(unread_log(id));
                 said.push(text);
                 continue;
             }

@@ -186,8 +186,7 @@ pub fn holds(b: &PaneBinding, generation: Generation, info: Option<&PaneInfo>) -
     let Some(info) = info else {
         return false;
     };
-    b.server_pid == generation.pid
-        && b.server_start == generation.start
+    of_server(b, generation)
         && b.pane_id.parse() == Ok(info.pane)
         && !info.dead
         && match info.tag {
@@ -195,6 +194,11 @@ pub fn holds(b: &PaneBinding, generation: Generation, info: Option<&PaneInfo>) -
             Tag::Session(id) => id == b.session_id,
             Tag::Other => false,
         }
+}
+
+/// Whether `b` was bound on the server at `generation`.
+pub(crate) fn of_server(b: &PaneBinding, generation: Generation) -> bool {
+    b.server_pid == generation.pid && b.server_start == generation.start
 }
 
 /// The pane `b` names, as `panes` lists it.

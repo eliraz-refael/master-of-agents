@@ -62,6 +62,8 @@ thread_local! {
     static UNREADABLE: Cell<bool> = const { Cell::new(false) };
     /// The store S's agent runs with: acct-a's.
     static STORE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// S's agent in %5 is one moa started for S: it carries `MOA_SESSION` = S.
+    static MOA_STARTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// S's agent in %5 (pid 505), started by hand: no `MOA_SESSION`, while it runs.
@@ -74,7 +76,7 @@ fn s_in_a_shell(pid: i64, _: &[String]) -> Inspected {
             kind: AgentKind::Claude,
             store_dir: STORE.with(|s| s.borrow().clone()),
             conversation: Some(C9.into()),
-            moa_session: None,
+            moa_session: MOA_STARTED.with(Cell::get).then(|| S.to_string()),
             moa_brain: None,
             title: None,
             group: None,
@@ -99,6 +101,7 @@ impl World {
     fn new() -> World {
         AGENT_RUNS.with(|r| r.set(true));
         UNREADABLE.with(|r| r.set(false));
+        MOA_STARTED.with(|r| r.set(false));
         let b = TypicalBrain::new();
         STORE.with(|s| *s.borrow_mut() = Some(shown(&b.home.join(".claude-a"))));
         let lantern = b.home.join("work/lantern");
@@ -615,20 +618,110 @@ fn the_new_agents_own_end_still_counts() {
     assert!(is_asleep(r.s()), "{:?}", r.s());
 }
 
-/// The new agent can end before tmux says which tab it has: its end names S in
-/// `MOA_SESSION`, so it is applied (R14), not history only.
+/// While the restart's tab opens, any end of S's is history only, `MOA_SESSION` or not:
+/// tmux names the new tab within milliseconds, long before the new agent could end, so
+/// only the old agent ends then. Should the new agent's tab exit before tmux names it, the
+/// exit still puts S to sleep once it does (R14).
 #[test]
-fn the_new_agents_end_before_its_tab_is_known_counts() {
+fn an_end_before_the_new_tab_is_known_is_history_only() {
     let mut r = World::new().reconciled();
     r.committed(1);
     let fx = hook(&mut r, true, ended(), 1000, 700);
+    history_only(&fx);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(!is_asleep(r.s()));
+    r.pane_exited("%7");
+    r.bound("%7");
+    assert!(is_asleep(r.s()), "{:?}", r.s());
+    assert!(r.st.binding(s_id()).is_none());
+}
+
+/// `adopt` bound S to the agent moa started for it, in a terminal tab (`bind_own`): that
+/// agent carries `MOA_SESSION` = S. Restarted, its end while the new tab opens is history
+/// only: S stays live, its launch waiting, and the new tab answers the restart.
+#[test]
+fn the_old_moa_started_agents_end_while_restarting_is_history_only() {
+    let mut w = World::new();
+    w.binding = None;
+    MOA_STARTED.with(|m| m.set(true));
+    let mut r = w.reconciled();
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        1,
+        Op::SessionAdopt {
+            pane: "%5".into(),
+            title: None,
+            group: None,
+            id: None,
+        },
+    );
+    assert!(queried(&fx), "{fx:?}");
+    let lantern = shown(&r.b.home.join("work/lantern"));
+    let line = format!("I\t%5\t505\t0\t1\t\t\t{lantern}");
+    let fx = listed(&mut r.st, &r.b, &[&line], &[]);
     assert!(
-        changes(&fx)
-            .iter()
-            .any(|c| matches!(c, Change::Session(s) if s.id == s_id())),
+        matches!(replies(&fx).as_slice(), [(ReqId(1), Ok(d))] if d.text.starts_with("bound ")),
         "{fx:?}"
     );
-    assert!(is_asleep(r.s()), "{:?}", r.s());
+    assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
+
+    r.committed(2);
+    let fx = hook(&mut r, true, ended(), 1000, 900);
+    history_only(&fx);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(!is_asleep(r.s()));
+    assert!(r.st.binding(s_id()).is_none());
+    let fx = r.bound("%7");
+    assert_eq!(replies(&fx), [(ReqId(2), restarted())]);
+    assert!(r.st.binding(s_id()).is_some_and(|b| b.tracked));
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+}
+
+/// After a restart, a start that doesn't name S (C9 resumed by hand in another app) is a
+/// new agent of S's: the killed one can't start again. It lifts the fence and brings S
+/// back, as it would have before the restart: live, with no tab here, and its own later
+/// events apply.
+#[test]
+fn a_hand_resume_after_a_restart_brings_it_back() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        2,
+        Op::SessionSleep {
+            qs: vec![S.into()],
+            idle_ms: None,
+            dry_run: false,
+        },
+    );
+    assert_eq!(kills(&fx), [&kill("%7")]);
+    assert!(is_asleep(r.s()));
+
+    hook(
+        &mut r,
+        false,
+        HookKind::SessionStarted {
+            source: StartSource::Resume,
+        },
+        1000,
+        903,
+    );
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert_eq!(r.s().asleep_at, None);
+    assert!(r.st.binding(s_id()).is_none());
+    hook(
+        &mut r,
+        false,
+        HookKind::TurnStarted {
+            prompt: "go on".into(),
+        },
+        2000,
+        904,
+    );
+    assert_eq!(r.s().activity, Activity::Working);
 }
 
 /// Once moa takes on a hand-started agent for S again (adopt), that agent is S's own: its
