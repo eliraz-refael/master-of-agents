@@ -41,7 +41,7 @@ pub enum Op {
     #[serde(rename = "session.find")]
     SessionFind { q: String },
     /// A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes
-    /// once tmux says which pane the tab has.
+    /// once tmux says which pane the tab has. The tab comes to the screen unless `bg`.
     #[serde(rename = "session.open")]
     SessionOpen {
         path: PathBuf,
@@ -56,6 +56,9 @@ pub enum Op {
         #[serde(default)]
         bg: bool,
     },
+    /// Brings a session's tab to the screen. A write: a session not running is resumed.
+    #[serde(rename = "session.focus")]
+    SessionFocus { q: String },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -240,6 +243,7 @@ impl Op {
         "session.archive",
         "session.find",
         "session.open",
+        "session.focus",
         "task.ls",
         "task.add",
         "task.set",
@@ -264,6 +268,7 @@ impl Op {
             | Op::SessionSet { .. }
             | Op::SessionArchive { .. }
             | Op::SessionOpen { .. }
+            | Op::SessionFocus { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -293,6 +298,7 @@ impl Op {
             Op::SessionArchive { .. } => "session.archive",
             Op::SessionFind { .. } => "session.find",
             Op::SessionOpen { .. } => "session.open",
+            Op::SessionFocus { .. } => "session.focus",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",

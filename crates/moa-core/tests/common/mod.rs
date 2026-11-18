@@ -23,6 +23,7 @@ pub fn loaded(toml: &str) -> (TypicalBrain, State) {
     let b = TypicalBrain::new();
     let deps = Deps {
         session_plugin: PathBuf::from(PLUGIN),
+        home: b.home.clone(),
         ..Deps::default()
     };
     let snapshot = b.snapshot();

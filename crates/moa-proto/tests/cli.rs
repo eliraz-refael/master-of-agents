@@ -295,6 +295,16 @@ fn open_parses_to_session_open() {
 }
 
 #[test]
+fn focus_parses_to_session_focus() {
+    assert_eq!(
+        op(&["focus", "lantern"]),
+        Op::SessionFocus {
+            q: "lantern".into()
+        }
+    );
+}
+
+#[test]
 fn usage_errors_are_the_spikes() {
     assert_eq!(
         err(&["task", "set", "x"]),

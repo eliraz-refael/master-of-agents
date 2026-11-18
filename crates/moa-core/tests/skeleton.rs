@@ -435,6 +435,7 @@ fn op_methods_match_the_variants() {
             prompt: Some("p".into()),
             bg: true,
         },
+        Op::SessionFocus { q: "q".into() },
         Op::Brief(NoParams),
         Op::Attention(NoParams),
         Op::Suggest {
@@ -478,6 +479,7 @@ const WRITES: &[&str] = &[
     "session.set",
     "session.archive",
     "session.open",
+    "session.focus",
     "task.add",
     "task.set",
     "note.add",

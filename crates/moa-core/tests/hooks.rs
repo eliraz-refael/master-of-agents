@@ -17,7 +17,7 @@ use moa_core::model::{
     PaneBinding, Project, ProjectId, ProjectStatus, Session, SessionId,
 };
 use moa_core::op::{ConnId, ReqId};
-use moa_core::state::{Snapshot, State};
+use moa_core::state::{Deps, Snapshot, State};
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::status::counts_text;
@@ -46,6 +46,10 @@ fn seeded() -> State {
 }
 
 fn seeded_with(pane_bindings: Vec<PaneBinding>) -> State {
+    seeded_from(Deps::default(), pane_bindings)
+}
+
+fn seeded_from(deps: Deps, pane_bindings: Vec<PaneBinding>) -> State {
     let session = Session {
         id: sid(),
         agent_kind: AgentKind::Claude,
@@ -93,7 +97,7 @@ fn seeded_with(pane_bindings: Vec<PaneBinding>) -> State {
         created_at: UtcMs(1),
         updated_at: UtcMs(1),
     };
-    let mut st = State::new(BrainName::default_brain(), Config::default());
+    let mut st = State::new(BrainName::default_brain(), Config::default()).with_deps(deps);
     handle_checked(
         &mut st,
         Input::Startup(Box::new(Snapshot {
@@ -539,6 +543,29 @@ fn clear_rotates_the_conversation_and_stays_live() {
     assert_eq!(again.len(), 2);
     assert_eq!(again[0].last_seen_at, UtcMs(T0 + 2500));
     assert_eq!(again[1].last_seen_at, UtcMs(T0 + 1500));
+}
+
+/// R32: a session on Claude's own default store runs without `CLAUDE_CONFIG_DIR` (R11), so
+/// its hooks carry no store. A rotation still records the store it is in.
+#[test]
+fn a_rotation_without_the_variable_records_the_default_store() {
+    let deps = Deps {
+        home: "/h".into(),
+        ..Deps::default()
+    };
+    let mut st = seeded_from(deps, Vec::new());
+    feed(&mut st, ends(1, 1000, "clear"));
+    let mut start = started(2, 1500, StartSource::Clear);
+    start.conversation_id = "b2c3d4e5-0000-4000-8000-000000000002".into();
+    assert_eq!(start.store_dir, None);
+    feed(&mut st, start);
+    let cs = conversations(&st);
+    assert_eq!(cs.len(), 2);
+    assert_eq!(cs[1].store_dir.as_deref(), Some("/h/.claude"));
+    // A conversation already known, heard from again without the variable, gets it too.
+    feed(&mut st, started(3, 2500, StartSource::Resume));
+    let cs = conversations(&st);
+    assert_eq!(cs[0].store_dir.as_deref(), Some("/h/.claude"));
 }
 
 #[test]

@@ -257,7 +257,7 @@ expression: all
             "type": "object"
           },
           {
-            "description": "A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes\nonce tmux says which pane the tab has.",
+            "description": "A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes\nonce tmux says which pane the tab has. The tab comes to the screen unless `bg`.",
             "properties": {
               "method": {
                 "const": "session.open",
@@ -303,6 +303,31 @@ expression: all
                 },
                 "required": [
                   "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Brings a session's tab to the screen. A write: a session not running is resumed.",
+            "properties": {
+              "method": {
+                "const": "session.focus",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
                 ],
                 "type": "object"
               }

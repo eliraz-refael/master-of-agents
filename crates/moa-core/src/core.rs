@@ -16,7 +16,7 @@ use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
-use crate::tmux::link::{self, Link};
+use crate::tmux::link::{self, LaunchKind, Launching, Link};
 use crate::tmux::status;
 use crate::{Now, UtcMs};
 
@@ -87,7 +87,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
-            fx.extend(ops::sessions::lost_opens(state));
+            fx.extend(ops::launch::lost_opens(state));
             // The reload may have dropped a reconcile's changes: the panes are looked at again.
             fx.extend(reconcile::ask_if_due(state, now));
             fx
@@ -116,7 +116,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // a pane exit, so this commit is the input's only one.
             let settled = state.tmux.settle(&t);
             if !settled.is_empty() {
-                fx.extend(ops::sessions::opened(state, now, settled));
+                fx.extend(ops::launch::opened(state, now, settled));
             }
             let answers = state.tmux.answered(&t);
             let replied = matches!(t, TmuxIn::Replies { .. });
@@ -205,7 +205,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             ..
         } => state.tmux.ensure(conn, req, tmux),
         // Answered once tmux says how the new tab turned out. Every tab opens detached
-        // (`-d`) for now, so `bg` changes nothing yet.
+        // (`-d`); unless `bg`, it is brought to the screen once it is bound.
         Input::Client {
             conn,
             req,
@@ -216,33 +216,43 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     title,
                     group,
                     prompt,
-                    bg: _,
+                    bg,
                 },
             ..
         } => {
             let mut tx = Tx::new(now);
-            let asked = ops::sessions::OpenArgs {
+            let asked = ops::launch::OpenArgs {
                 path: &path,
                 account: account.as_deref(),
                 title: title.as_deref(),
                 group: group.as_deref(),
                 prompt: prompt.as_deref(),
             };
-            let result = ops::sessions::open(state, &mut tx, now, &asked);
-            let mut fx = post_commit(state, tx);
-            match result {
+            match ops::launch::open(state, &mut tx, now, &asked) {
                 Ok((id, new_window)) => {
-                    state.tmux.wait_open(id, conn, req);
+                    let launching = Launching {
+                        reply: Some((conn, req)),
+                        kind: LaunchKind::Open,
+                        focus: !bg,
+                        waiters: Vec::new(),
+                        launched_at: tx.wall,
+                    };
+                    state.tmux.wait_open(id, launching);
+                    let mut fx = post_commit(state, tx);
                     fx.push(new_window);
+                    fx
                 }
-                Err(e) => fx.push(Effect::Reply {
-                    conn,
-                    req,
-                    result: Err(e),
-                }),
+                // Nothing queued is said: the refusal is all there is.
+                Err(e) => finish_op(state, tx, conn, req, Err(e)),
             }
-            fx
         }
+        // Answered now, or once the tab it waits for is bound.
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionFocus { q },
+            ..
+        } => ops::launch::focus(state, conn, req, &q),
         Input::Client {
             conn,
             req,

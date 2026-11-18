@@ -109,11 +109,10 @@ pub struct TmuxState {
     pub(super) written: Written,
     /// When the status clock's timer fires, while it is armed.
     pub(super) clock_at: Option<UtcMs>,
-    /// The `open`s waiting for tmux to say which pane their tab has, with whom to answer:
-    /// nobody, once the caller's connection closed.
-    opens: BTreeMap<SessionId, Option<(ConnId, ReqId)>>,
+    /// The launches waiting for tmux to say which pane their tab has.
+    opens: BTreeMap<SessionId, Launching>,
     /// Panes of this server that exited with no session bound to them, oldest first, at
-    /// most [`EXITED_KEPT`]: an `open`'s answer naming one may still be on its way.
+    /// most [`EXITED_KEPT`]: a launch's answer naming one may still be on its way.
     exited: VecDeque<PaneId>,
     /// The pane queries waiting for their answer, by number, and what each was asked for.
     queries: BTreeMap<u64, Asked>,
@@ -146,7 +145,7 @@ pub(crate) type Answer = Result<Vec<Vec<String>>, ()>;
 /// How many unbound pane exits are remembered.
 const EXITED_KEPT: usize = 64;
 
-/// How an `open`'s new tab turned out.
+/// How a launch's new tab turned out.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum OpenEnd {
     /// The pane it runs in, and the pane's process.
@@ -157,12 +156,36 @@ pub(crate) enum OpenEnd {
     Gone,
 }
 
-/// An `open` that has its answer.
+/// What started an agent in a new tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LaunchKind {
+    Open,
+    // These come with `moactl resume` and restart.
+    #[allow(dead_code)]
+    Resume,
+    #[allow(dead_code)]
+    Restart,
+}
+
+/// A launch waiting for tmux to say which pane its tab has.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Launching {
+    /// Whom to answer: nobody, once the caller's connection closed.
+    pub reply: Option<(ConnId, ReqId)>,
+    pub kind: LaunchKind,
+    /// The tab is brought to the screen once it is bound.
+    pub focus: bool,
+    /// The `focus` callers waiting for the tab.
+    pub waiters: Vec<(ConnId, ReqId)>,
+    /// When the launch was committed: the binding's `bound_at`.
+    pub launched_at: UtcMs,
+}
+
+/// A launch that has its answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Settled {
     pub id: SessionId,
-    /// Whom to answer, unless the caller went.
-    pub reply: Option<(ConnId, ReqId)>,
+    pub launching: Launching,
     pub end: OpenEnd,
 }
 
@@ -195,10 +218,10 @@ impl Default for TmuxState {
     }
 }
 
-/// What an `open`'s `new-window -P` prints: the new pane and its process.
+/// What a launch's `new-window -P` prints: the new pane and its process.
 pub(crate) const OPENED_FORMAT: &str = "P #{pane_id} #{pane_pid}";
 
-/// What tmux said to an `open`'s new window, printed with [`OPENED_FORMAT`].
+/// What tmux said to a launch's new window, printed with [`OPENED_FORMAT`].
 fn open_end(results: &[Result<Vec<String>, String>]) -> OpenEnd {
     let line = match results {
         [Ok(lines)] => match lines.as_slice() {
@@ -412,33 +435,40 @@ impl TmuxState {
         }
     }
 
-    /// Holds `open`'s reply until tmux says how its tab turned out.
-    pub(crate) fn wait_open(&mut self, id: SessionId, conn: ConnId, req: ReqId) {
-        self.opens.insert(id, Some((conn, req)));
+    /// Holds a launch's answers until tmux says how its tab turned out.
+    pub(crate) fn wait_open(&mut self, id: SessionId, launching: Launching) {
+        self.opens.insert(id, launching);
     }
 
-    /// `conn` closed: its ensures are forgotten, and its opens go on with nobody to answer.
+    /// The launch of `id` waiting for its tab, if there is one.
+    pub(crate) fn launching(&mut self, id: SessionId) -> Option<&mut Launching> {
+        self.opens.get_mut(&id)
+    }
+
+    /// `conn` closed: its ensures and focus waiters are forgotten, and its launches go on
+    /// with nobody to answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
         self.waiters.retain(|(c, _)| *c != conn);
         self.pinged.retain(|(c, _)| *c != conn);
-        for reply in self.opens.values_mut() {
-            if matches!(reply, Some((c, _)) if *c == conn) {
-                *reply = None;
+        for launching in self.opens.values_mut() {
+            if matches!(launching.reply, Some((c, _)) if c == conn) {
+                launching.reply = None;
             }
+            launching.waiters.retain(|(c, _)| *c != conn);
         }
     }
 
-    /// The sessions whose `open` is waiting.
+    /// The sessions whose launch is waiting.
     pub(crate) fn waiting_opens(&self) -> impl Iterator<Item = SessionId> + '_ {
         self.opens.keys().copied()
     }
 
-    /// Stops waiting for `id`'s tab, and says whom to answer.
-    pub(crate) fn forget_open(&mut self, id: SessionId) -> Option<(ConnId, ReqId)> {
-        self.opens.remove(&id).flatten()
+    /// Stops waiting for `id`'s tab, and gives back its launch.
+    pub(crate) fn forget_open(&mut self, id: SessionId) -> Option<Launching> {
+        self.opens.remove(&id)
     }
 
-    /// The `open`s this input answers: the one whose tab tmux reports on, or every one
+    /// The launches this input answers: the one whose tab tmux reports on, or every one
     /// when the link goes down or a new connection replaces the one they were asked on.
     /// Run before [`TmuxState::input`], while the link is still as they knew it.
     pub(crate) fn settle(&mut self, input: &TmuxIn) -> Vec<Settled> {
@@ -450,9 +480,9 @@ impl TmuxState {
             } if self.conn() == Some(*conn) => self
                 .opens
                 .remove(id)
-                .map(|reply| Settled {
+                .map(|launching| Settled {
                     id: *id,
-                    reply,
+                    launching,
                     end: open_end(results),
                 })
                 .into_iter()
@@ -541,9 +571,9 @@ impl TmuxState {
     fn all_gone(&mut self) -> Vec<Settled> {
         std::mem::take(&mut self.opens)
             .into_iter()
-            .map(|(id, reply)| Settled {
+            .map(|(id, launching)| Settled {
                 id,
-                reply,
+                launching,
                 end: OpenEnd::Gone,
             })
             .collect()

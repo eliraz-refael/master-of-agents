@@ -5,9 +5,10 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use moa_core::UtcMs;
 use moa_core::change::Change;
-use moa_core::effect::{Down, Effect, Input, LogLine, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{
+    Down, Effect, Input, LogLine, Publish, RefuseWrites, TmuxIn, TmuxToken, handle_checked,
+};
 use moa_core::hook::{HookEnvelope, HookKind};
 use moa_core::live::{DisplayState, display_state, is_asleep};
 use moa_core::model::{
@@ -18,6 +19,7 @@ use moa_core::state::State;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
+use moa_core::{Now, UtcMs};
 use moa_testkit::brain::TypicalBrain;
 use serde_json::json;
 
@@ -25,7 +27,7 @@ use common::*;
 
 /// Brain `default` (folder `~/work`, opening with `acct-a`) and a `work` brain beside it.
 /// `acct-b` sends everything to `work`, `acct-c` has no launcher, `acct-d` is limited to
-/// `~/work`, `acct-x` is a Codex account.
+/// `~/work`, `acct-x` is a Codex account, and `mine` is on Claude's own default store.
 const TOML: &str = r#"
 [brains.default]
 folders = ["~/work"]
@@ -59,6 +61,11 @@ only = ["~/work"]
 kind = "codex"
 store = "~/.codex-x"
 launcher = "/opt/codex"
+
+[accounts.mine]
+kind = "claude"
+store = "~/.claude"
+launcher = "/opt/claude"
 "#;
 
 /// The typical brain under [`TOML`], linked.
@@ -613,11 +620,15 @@ fn a_closed_connections_open_still_binds() {
         tracked: true,
     };
     assert_eq!(changes(&fx), [&Change::PaneBinding(binding)]);
-    let set = Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()]);
+    // Tagged, and brought to the screen as the open asked.
+    let sent = [
+        Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()]),
+        Cmd::new("select-window").args(["-t", "%7"]),
+        Cmd::new("select-pane").args(["-t", "%7"]),
+    ];
     assert!(
-        fx.iter().any(
-            |e| matches!(e, Effect::Tmux { cmds, token: None, .. } if cmds == std::slice::from_ref(&set))
-        ),
+        fx.iter()
+            .any(|e| matches!(e, Effect::Tmux { cmds, token: None, .. } if cmds == &sent)),
         "the pane is tagged: {fx:?}"
     );
     assert!(replies(&fx).is_empty(), "{fx:?}");
@@ -887,4 +898,186 @@ fn a_pane_exit_for_an_older_generations_binding_is_ignored() {
     let fx = pane_exited(&b, &mut st, "%7");
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Live);
+}
+
+/// The commands of the untokened `Tmux` effect that tags `pane`, and where it is.
+fn tagged_at(fx: &[Effect], pane: &str) -> Option<(usize, Vec<Cmd>)> {
+    fx.iter().enumerate().find_map(|(at, e)| match e {
+        Effect::Tmux {
+            cmds, token: None, ..
+        } if cmds.iter().any(|c| {
+            c.name() == "set-option"
+                && c.argv().iter().any(|a| a == "@moa_session")
+                && c.argv().iter().any(|a| a == pane)
+        }) =>
+        {
+            Some((at, cmds.clone()))
+        }
+        _ => None,
+    })
+}
+
+fn selects(fx: &[Effect]) -> Vec<&Cmd> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| c.name().starts_with("select-"))
+        .collect()
+}
+
+/// An open brings its tab to the screen once the pane is bound, right after tagging it;
+/// `--bg` leaves the screen as it is.
+#[test]
+fn open_focuses_its_tab_unless_bg() {
+    for bg in [false, true] {
+        let (b, mut st) = typical();
+        let op = Op::SessionOpen {
+            path: lantern(&b),
+            account: None,
+            title: None,
+            group: None,
+            prompt: None,
+            bg,
+        };
+        let id = the_open(&send(&b, &mut st, 1, op)).0;
+        let fx = bound(&b, &mut st, id, "%7");
+        let (at, cmds) = tagged_at(&fx, "%7").expect("the pane is tagged");
+        let mut want =
+            vec![Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()])];
+        if !bg {
+            want.push(Cmd::new("select-window").args(["-t", "%7"]));
+            want.push(Cmd::new("select-pane").args(["-t", "%7"]));
+        }
+        assert_eq!(cmds, want, "bg {bg}");
+        assert!(cmds.iter().all(|c| c.check().is_ok()), "{cmds:?}");
+        assert_eq!(selects(&fx).len(), if bg { 0 } else { 2 }, "{fx:?}");
+        let at_reply = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Reply { .. }))
+            .expect("a reply");
+        assert!(at < at_reply, "{fx:?}");
+    }
+}
+
+/// R11: Claude's own default store gets no `CLAUDE_CONFIG_DIR`, and the variable is unset
+/// before the launcher, in case the terminal server's environment holds one.
+#[test]
+fn a_default_store_opens_with_the_variable_unset() {
+    let (b, mut st) = typical();
+    let fx = send(&b, &mut st, 1, with_account(&lantern(&b), "mine"));
+    let (id, cmds) = the_open(&fx);
+    let conv = nth(&b, 2);
+    let home = b.home.display();
+    assert_eq!(
+        cmds[0].line(),
+        format!(
+            "new-window -d -P -F 'P #{{pane_id}} #{{pane_pid}}' -n lantern -c {home}/private/lantern \
+             -t =moa: -e MOA_SESSION={id} -e MOA_BRAIN=default -e CLAUDE_CODE_PLUGIN_DIRS={PLUGIN} \
+             /usr/bin/env -u CLAUDE_CONFIG_DIR /opt/claude --session-id {conv} --name lantern"
+        )
+    );
+    assert!(!cmds[0].line().contains("CLAUDE_CONFIG_DIR="));
+    assert_eq!(cmds[0].check(), Ok(()));
+    // The store is still recorded: it is the folder the conversation is in.
+    let c = st.conversations_of(id).next().unwrap();
+    assert_eq!(
+        c.store_dir.as_deref(),
+        Some(b.home.join(".claude").to_str().unwrap())
+    );
+}
+
+/// Writes refused from the next minute on.
+fn refuse_writes(b: &TypicalBrain) -> Option<RefuseWrites> {
+    Some(RefuseWrites {
+        until: UtcMs(b.now().wall.0 + 60_000),
+        reason: "the disk is full".into(),
+    })
+}
+
+/// The session is saved, then writes are refused before its pane is bound: the tab runs,
+/// and the reply says moa may not know it. The pane isn't tagged, so reconcile binds it
+/// again by its agent.
+#[test]
+fn a_refused_bind_commit_says_the_tab_may_be_untracked() {
+    let (b, mut st) = typical();
+    let id = the_open(&send(&b, &mut st, 4, open_op(&lantern(&b)))).0;
+    let mut snapshot = b.snapshot();
+    snapshot.sessions.push(st.session(id).unwrap().clone());
+    snapshot
+        .conversations
+        .push(st.conversations_of(id).next().unwrap().clone());
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes: refuse_writes(&b),
+        },
+        b.now(),
+    );
+    let fx = bound(&b, &mut st, id, "%7");
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(st.binding(id).is_none());
+    assert_eq!(tagged_at(&fx, "%7"), None, "{fx:?}");
+    assert!(selects(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(4),
+            Err(OpError(
+                "moa couldn't save which tab it runs in; it may show as untracked until moa restarts"
+                    .into()
+            ))
+        )]
+    );
+}
+
+/// R13a, R18: a binding is stamped with its launch's commit, not with tmux's answer, so
+/// "heard from since bound" counts what the agent said while its tab opened.
+#[test]
+fn the_binding_is_stamped_with_the_launch_time() {
+    let (b, mut st) = typical();
+    let id = the_open(&send(&b, &mut st, 1, open_op(&lantern(&b)))).0;
+    let now = b.now();
+    let launched = now.wall;
+    let later = Now::at(UtcMs(launched.0 + 5_000), now.mono, now.tz);
+    handle_checked(
+        &mut st,
+        Input::Tmux(TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Open(id),
+            results: vec![Ok(vec!["P %7 4242".into()])],
+        }),
+        later,
+    );
+    assert_eq!(st.binding(id).map(|p| p.bound_at), Some(launched));
+}
+
+/// A refused open says only its refusal: nothing is saved, told or launched.
+#[test]
+fn a_refused_open_leaves_only_its_reply() {
+    let (b, mut st) = typical();
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(b.snapshot()),
+            refuse_writes: refuse_writes(&b),
+        },
+        b.now(),
+    );
+    let fx = send(&b, &mut st, 1, open_op(&lantern(&b)));
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(
+        !fx.iter().any(|e| matches!(
+            e,
+            Effect::Publish(Publish::Event(_)) | Effect::Tmux { token: Some(_), .. }
+        )),
+        "{fx:?}"
+    );
+    assert!(
+        matches!(replies(&fx).as_slice(), [(ReqId(1), Err(_))]),
+        "{fx:?}"
+    );
 }
