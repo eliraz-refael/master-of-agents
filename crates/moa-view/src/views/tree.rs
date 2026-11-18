@@ -22,6 +22,29 @@ pub fn tidy(path: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
+/// Whether `node` is `path` or lies under it.
+pub fn is_under(node: &str, path: &str) -> bool {
+    node == path
+        || node
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether the tree node at `path` is a real group: a `groups` row or a session's group is
+/// at or under it. A node made only from a project's name (or `Loose`) isn't.
+pub fn is_group(data: &Data, path: &str) -> bool {
+    let sessions = data
+        .sessions
+        .values()
+        .filter_map(|r| r.session.group_path.as_deref());
+    data.groups
+        .keys()
+        .map(String::as_str)
+        .chain(sessions)
+        .filter_map(tidy)
+        .any(|g| is_under(&g, path))
+}
+
 /// The tree path a session sits under: its group, else its project's name, else `Loose`.
 pub fn node_of(row: &SessionRow) -> String {
     [row.session.group_path.as_deref(), row.project.as_deref()]
@@ -112,10 +135,10 @@ struct Cx<'c> {
     folded: BTreeSet<&'c str>,
 }
 
-/// The tree's lines, `width` cells wide.
+/// The tree's lines, none wider than `width` cells (a cut never splits a wide character).
 pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
     let shown: Vec<&SessionRow> = listed(data).collect();
-    let mut lines = vec![header(&shown, ctx.tick)];
+    let mut lines = vec![header(&shown, ctx.tick, usize::from(width))];
 
     let mut root = Node::default();
     for row in &shown {
@@ -139,7 +162,7 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
 }
 
 /// `<n> sessions · <n> live`, then the asleep, working and waiting counts that aren't zero.
-fn header(shown: &[&SessionRow], tick: u64) -> Line {
+fn header(shown: &[&SessionRow], tick: u64, width: usize) -> Line {
     let count =
         |f: &dyn Fn(DisplayState) -> bool| shown.iter().filter(|r| f(r.display_state)).count();
     let live = count(&live);
@@ -156,7 +179,7 @@ fn header(shown: &[&SessionRow], tick: u64) -> Line {
     if waiting > 0 {
         head.push_str(&format!(" · {waiting} waiting on you"));
     }
-    let mut line = Line::plain(head, Tone::Dim);
+    let mut line = Line::plain(cut(&head, width), Tone::Dim);
     line.animated = working > 0;
     line
 }
@@ -212,8 +235,8 @@ fn walk(node: &Node, prefix: &str, path: &str, depth: usize, cx: &Cx, out: &mut 
             label.push_str(spinner(cx.ctx.tick));
         }
         let tone = if depth == 0 { Tone::Head } else { Tone::Group };
-        let mut line =
-            Line::new(vec![Span::bold(label, tone)]).with_item(Item::Group(here.clone()));
+        let mut line = Line::new(vec![Span::bold(cut(&label, cx.width), tone)])
+            .with_item(Item::Group(here.clone()));
         line.animated = sum.busy;
         out.push(line);
         if !folded {
@@ -226,6 +249,7 @@ fn walk(node: &Node, prefix: &str, path: &str, depth: usize, cx: &Cx, out: &mut 
             .width
             .saturating_sub(text::width(prefix) + text::width(branch));
         let text = format!("{prefix}{branch}{}", session_text(row, left, cx.ctx));
+        let text = cut(&text, cx.width);
         let (tone, bold) = session_tone(row.display_state);
         let span = Span { text, tone, bold };
         let mut line = Line::new(vec![span]).with_item(Item::Session(row.session.id));
@@ -245,6 +269,8 @@ fn session_tone(state: DisplayState) -> (Tone, bool) {
         DisplayState::Question => (Tone::Ask, true),
         DisplayState::Done => (Tone::Ok, true),
         DisplayState::Failed => (Tone::Fail, true),
+        // Quiet's ◌ is cyan only in the status panel (V16).
+        DisplayState::Quiet => (Tone::Dim, false),
         s if live(s) => (Tone::Ok, false),
         _ => (Tone::Dim, false),
     }

@@ -4,7 +4,7 @@ use moa_core::publish::Topic;
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
 use moa_view::fixture::{lantern, session};
-use moa_view::line::{Item, Line, debug_lines};
+use moa_view::line::{Item, Line, Tone, debug_lines};
 use moa_view::text;
 use moa_view::views::{self, ViewUi};
 
@@ -185,6 +185,40 @@ fn no_width_or_title_breaks_a_line() {
     for width in [0, 1, 5, 10, 33, 34, 75, 76, 200] {
         for line in tree(&data, &ctx, width) {
             assert!(!line.text().chars().any(char::is_control), "{line:?}");
+        }
+    }
+}
+
+#[test]
+fn quiet_is_dim_in_the_tree() {
+    let (data, ctx) = lantern();
+    let lines = tree(&data, &ctx, 80);
+    let quiet = &line_with(&lines, "Import the whole archive").spans[0];
+    assert_eq!((quiet.tone, quiet.bold), (Tone::Dim, false));
+    let idle = &line_with(&lines, "Hand started").spans[0];
+    assert_eq!((idle.tone, idle.bold), (Tone::Ok, false));
+}
+
+#[test]
+fn a_long_wide_group_name_is_cut_to_the_width() {
+    let (mut data, ctx) = lantern();
+    let mut row = serde_json::to_value(&data.sessions[&session(1)]).expect("a row");
+    row["key"] = serde_json::json!(session(1).to_string());
+    row["group_path"] = serde_json::json!(format!("Private/{}", "設計".repeat(40)));
+    data.upsert(Topic::Sessions, vec![row]);
+    for width in [10u16, 40, 77] {
+        let lines = tree(&data, &ctx, width);
+        let group = line_with(&lines, "▾ 設");
+        let w = text::width(&group.text());
+        // `├─ ▾ ` is 5 cells and each character 2: at an even width the cut ends a cell short
+        // rather than split one; at an odd width they fit exactly.
+        let want = usize::from(width) - usize::from(width % 2 == 0);
+        assert_eq!(w, want, "{width}: {:?}", group.text());
+        for line in &lines {
+            assert!(
+                text::width(&line.text()) <= usize::from(width),
+                "{width}: {line:?}"
+            );
         }
     }
 }

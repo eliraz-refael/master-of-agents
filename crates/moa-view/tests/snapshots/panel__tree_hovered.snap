@@ -7,7 +7,7 @@ expression: debug_screen(&screen)
   [group*]├─ ▾ Lantern  3 · 3 live ⠸  ‹group›
   [warn*]│  ├─ ! Fix login                                                  acct-   1m  ‹session›
   [ok]│  ├─ ⠸ Rust scaffold                                              acct-   1h  ‹session›
-  [ok]│  └─ ◌ Import the whole archive of old notes into the new format  acct-   6h  ‹session›
+  [dim]│  └─ ◌ Import the whole archive of old notes into the new format  acct-   6h  ‹session›
   [group*]├─ ▾ Kite  3 · 2 live  ‹group›
 ~ [ask*]│  ├─ ? Release notes                                              acct-   2h  ‹session›
   [ok*]│  ├─ ✓ 設計レビュー                                               acct-   3h  ‹session›

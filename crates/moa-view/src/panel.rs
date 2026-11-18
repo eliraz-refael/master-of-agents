@@ -17,7 +17,7 @@ use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
 use crate::text::clean;
-use crate::views::tree::{self, LOOSE};
+use crate::views::tree;
 use crate::views::{self, ViewUi};
 
 /// What a panel asks its loop to do.
@@ -222,13 +222,6 @@ fn default_account(data: &Data, want: Option<&str>) -> String {
         .or(brain.accounts.first().map(String::as_str))
         .unwrap_or_default()
         .to_string()
-}
-
-fn is_under(node: &str, path: &str) -> bool {
-    node == path
-        || node
-            .strip_prefix(path)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 impl Panel {
@@ -525,12 +518,12 @@ impl Panel {
         Vec::new()
     }
 
-    /// The tree group the selection is in: a node's own path (`Loose` is the top level), or
-    /// a session's group.
+    /// The group the selection is in: a node's own path when it is a real group, or a
+    /// session's group. A node made from a project's name, or `Loose`, is the top level: a new
+    /// session there must not make it a permanent group (V5).
     fn selected_group(&self, data: &Data) -> Option<String> {
         match self.selected()? {
-            Item::Group(path) if path == LOOSE => None,
-            Item::Group(path) => Some(path.clone()),
+            Item::Group(path) if tree::is_group(data, path) => Some(path.clone()),
             Item::Session(id) => data
                 .sessions
                 .get(id)?
@@ -653,21 +646,19 @@ impl Panel {
         let group = self.selected_group(data);
         let from = match self.selected() {
             Some(Item::Group(path)) => tree::listed(data)
-                .filter(|r| is_under(&tree::node_of(r), path))
+                .filter(|r| tree::is_under(&tree::node_of(r), path))
                 .max_by_key(|r| (r.session.last_seen_at, r.session.id)),
             Some(Item::Session(id)) => data.sessions.get(id),
             _ => None,
         };
-        let (folder, account) = match from {
-            Some(row) => (row.session.cwd.clone(), row.session.account.clone()),
-            None => {
-                let brain = data.brain.as_ref();
-                (
-                    brain.and_then(|b| b.folders.first().cloned()),
-                    brain.and_then(|b| b.open_account.clone()),
-                )
-            }
-        };
+        // Field by field: a session without a folder still lends its account.
+        let brain = data.brain.as_ref();
+        let folder = from
+            .and_then(|r| r.session.cwd.clone())
+            .or_else(|| brain.and_then(|b| b.folders.first().cloned()));
+        let account = from
+            .and_then(|r| r.session.account.clone())
+            .or_else(|| brain.and_then(|b| b.open_account.clone()));
         let folder = folder.map_or("~/".to_string(), |f| tilde(&f, &ctx.home));
         let label = format!(
             "new session in {} · folder:",

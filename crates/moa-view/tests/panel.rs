@@ -706,3 +706,67 @@ fn any_size_lays_out_inside_itself() {
         }
     }
 }
+
+// ---------- fix round 1 ----------
+
+/// Session `n`'s row, changed by `f`, upserted.
+fn reshape(t: &mut T, n: u8, f: impl FnOnce(&mut serde_json::Value)) {
+    let mut row = serde_json::to_value(&t.data.sessions[&session(n)]).expect("a row");
+    row["key"] = serde_json::json!(session(n).to_string());
+    f(&mut row);
+    t.data.upsert(Topic::Sessions, vec![row]);
+}
+
+#[test]
+fn n_on_a_project_node_opens_at_the_top_level() {
+    let mut t = T::new();
+    // Release notes (project Kite) loses its group: it sits under the project's node.
+    reshape(&mut t, RELEASE_NOTES, |row| {
+        row["group_path"] = serde_json::Value::Null;
+    });
+    t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert!(t.panel.select(&group("Kite")));
+    t.char('n');
+    assert_eq!(
+        t.footer(),
+        "new session in top level · folder: ~/private/kite"
+    );
+    let out = t.keys(&[Key::Enter, Key::Enter, Key::Enter]);
+    assert_eq!(
+        out,
+        send(Op::SessionOpen {
+            path: PathBuf::from("/h/private/kite"),
+            account: Some("acct-a".to_string()),
+            title: None,
+            group: None,
+            prompt: None,
+            bg: false,
+        })
+    );
+    // `+` there starts from the top level too.
+    t.char('+');
+    assert_eq!(t.footer(), "new group: ");
+}
+
+#[test]
+fn n_falls_back_to_the_brains_folder_when_the_session_has_none() {
+    let mut t = T::new();
+    reshape(&mut t, FIX_LOGIN, |row| {
+        row["cwd"] = serde_json::Value::Null
+    });
+    t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert!(t.panel.select(&on(FIX_LOGIN)));
+    t.char('n');
+    assert_eq!(
+        t.footer(),
+        "new session in Private/Lantern · folder: ~/private"
+    );
+    // The same for the newest session under a group.
+    t.key(Key::Esc);
+    assert!(t.panel.select(&group("Private/Lantern")));
+    t.char('n');
+    assert_eq!(
+        t.footer(),
+        "new session in Private/Lantern · folder: ~/private"
+    );
+}
