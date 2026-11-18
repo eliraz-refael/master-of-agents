@@ -1,0 +1,30 @@
+[package]
+name = "moa-view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+moa-core = { path = "../moa-core" }
+serde.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
+uuid.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+textwrap.workspace = true
+
+[features]
+# `fixture::lantern`: the data every view test draws from.
+fixture = []
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
+# Its own tests reach the fixture.
+moa-view = { path = ".", features = ["fixture"] }
+
+[lints]
+workspace = true
