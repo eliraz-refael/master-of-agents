@@ -355,6 +355,18 @@ fn activity_rows(fx: &[Effect]) -> Vec<String> {
 /// (`MOA_SESSION` = S) when `ours`, else from S's old agent, started by hand. `pid` is the
 /// hook process's, which also keeps the events apart.
 fn hook(r: &mut Rig, ours: bool, kind: HookKind, ms: i64, pid: u32) -> Vec<Effect> {
+    hook_in(r, ours, None, kind, ms, pid)
+}
+
+/// [`hook`], from an agent in tab `pane` (`TMUX_PANE`), when it says.
+fn hook_in(
+    r: &mut Rig,
+    ours: bool,
+    pane: Option<&str>,
+    kind: HookKind,
+    ms: i64,
+    pid: u32,
+) -> Vec<Effect> {
     let at = r.b.now().wall.0 + ms;
     handle_checked(
         &mut r.st,
@@ -363,6 +375,7 @@ fn hook(r: &mut Rig, ours: bool, kind: HookKind, ms: i64, pid: u32) -> Vec<Effec
             envelope: HookEnvelope {
                 agent: AgentKind::Claude,
                 slot: ours.then(|| S.to_string()),
+                pane: pane.map(str::to_string),
                 brain: Some("default".into()),
                 store_dir: Some(shown(&r.b.home.join(".claude-a"))),
                 conversation_id: C9.into(),
@@ -641,6 +654,20 @@ fn an_end_before_the_new_tab_is_known_is_history_only() {
 /// only: S stays live, its launch waiting, and the new tab answers the restart.
 #[test]
 fn the_old_moa_started_agents_end_while_restarting_is_history_only() {
+    let mut r = restarted_from_a_moa_started_agent();
+    let fx = hook(&mut r, true, ended(), 1000, 900);
+    history_only(&fx);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(!is_asleep(r.s()));
+    assert!(r.st.binding(s_id()).is_none());
+    let fx = r.bound("%7");
+    assert_eq!(replies(&fx), [(ReqId(2), restarted())]);
+    assert!(r.st.binding(s_id()).is_some_and(|b| b.tracked));
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+}
+
+/// S bound by `adopt` to the agent moa started for it, in terminal tab %5: S restarted.
+fn restarted_from_a_moa_started_agent() -> Rig {
     let mut w = World::new();
     w.binding = None;
     MOA_STARTED.with(|m| m.set(true));
@@ -665,17 +692,58 @@ fn the_old_moa_started_agents_end_while_restarting_is_history_only() {
         "{fx:?}"
     );
     assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
-
     r.committed(2);
-    let fx = hook(&mut r, true, ended(), 1000, 900);
+    r
+}
+
+/// The likely order for an old agent moa started (it carries `MOA_SESSION` = S): the new
+/// tab is bound first, and the old agent's end comes after. Its tab (%5) isn't S's tab any
+/// more, so the end is history only; the new agent's own events, from %7, apply.
+#[test]
+fn the_old_moa_started_agents_end_after_the_bind_is_history_only() {
+    let mut r = restarted_from_a_moa_started_agent();
+    r.bound("%7");
+    let fx = hook_in(&mut r, true, Some("%5"), ended(), 1000, 900);
     history_only(&fx);
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
     assert!(!is_asleep(r.s()));
-    assert!(r.st.binding(s_id()).is_none());
-    let fx = r.bound("%7");
-    assert_eq!(replies(&fx), [(ReqId(2), restarted())]);
-    assert!(r.st.binding(s_id()).is_some_and(|b| b.tracked));
+    assert!(r.st.binding(s_id()).is_some_and(|b| b.pane_id == "%7"));
+    hook_in(
+        &mut r,
+        true,
+        Some("%7"),
+        HookKind::TurnStarted {
+            prompt: "go on".into(),
+        },
+        2000,
+        700,
+    );
+    assert_eq!(r.s().activity, Activity::Working);
+    hook_in(&mut r, true, Some("%7"), ended(), 3000, 700);
+    assert!(is_asleep(r.s()), "{:?}", r.s());
+}
+
+/// A start the old agent sent before the restart, arriving after it (a late `/clear`), is
+/// that agent's, not a new one's: it doesn't lift the fence, and the old agent's end that
+/// follows is still history only.
+#[test]
+fn a_late_start_from_before_the_restart_keeps_the_fence() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    hook(
+        &mut r,
+        false,
+        HookKind::SessionStarted {
+            source: StartSource::Clear,
+        },
+        -1000,
+        905,
+    );
+    let fx = old_agent_ended(&mut r, 500);
+    history_only(&fx);
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(!is_asleep(r.s()));
 }
 
 /// After a restart, a start that doesn't name S (C9 resumed by hand in another app) is a

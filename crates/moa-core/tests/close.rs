@@ -535,6 +535,7 @@ fn the_agents_end_after_close_is_history_only() {
             envelope: HookEnvelope {
                 agent: AgentKind::Claude,
                 slot: Some(S.into()),
+                pane: None,
                 brain: Some("default".into()),
                 store_dir: Some(shown(&r.b.home.join(".claude-a"))),
                 conversation_id: C.into(),

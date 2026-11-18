@@ -943,6 +943,7 @@ fn the_resumed_agents_start_is_its_own() {
             envelope: HookEnvelope {
                 agent: AgentKind::Claude,
                 slot: Some(S.into()),
+                pane: None,
                 brain: Some("default".into()),
                 store_dir: Some(store),
                 conversation_id: C.into(),
@@ -1007,6 +1008,7 @@ fn a_resume_inside_claude_to_an_older_conversation_is_what_resumes() {
         envelope: HookEnvelope {
             agent: AgentKind::Claude,
             slot: Some(S.into()),
+            pane: None,
             brain: Some("default".into()),
             store_dir: Some(shown(&home.join(".claude-a"))),
             conversation_id: C.into(),

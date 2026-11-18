@@ -212,6 +212,7 @@ fn env_fields_fill_the_envelope() {
         moa_brain: Some("work".into()),
         claude_config_dir: Some("/acct-a".into()),
         claude_session_id: Some("env-conv".into()),
+        tmux_pane: Some("%5".into()),
         ..HookEnv::default()
     };
     let got = normalize(&l, &no_tail).unwrap();
@@ -220,6 +221,7 @@ fn env_fields_fill_the_envelope() {
         HookEnvelope {
             agent: AgentKind::Claude,
             slot: Some("slot-1".into()),
+            pane: Some("%5".into()),
             brain: Some("work".into()),
             store_dir: Some("/acct-a".into()),
             conversation_id: "conv-1".into(),

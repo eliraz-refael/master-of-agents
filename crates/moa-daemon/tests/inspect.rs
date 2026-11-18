@@ -116,8 +116,15 @@ fn another_users_process() -> Option<u32> {
         .chain(proc::children(1).unwrap_or_default())
         .find(|&p| proc::owned_by_another(p) == Some(true) && proc::children(p) == Ok(Vec::new()));
     if found.is_none() {
+        // Only a Nix build sandbox's pid namespace holds none (`nix develop` sets
+        // `NIX_BUILD_TOP` too, and `IN_NIX_SHELL` with it).
+        assert!(
+            std::env::var_os("NIX_BUILD_TOP").is_some()
+                && std::env::var_os("IN_NIX_SHELL").is_none(),
+            "no other user's childless process is visible: can moa read who owns one?"
+        );
         eprintln!(
-            "no other user's childless process is visible here; \
+            "in a Nix build, no other user's childless process is visible; \
              `inspect::tests::another_users_processes_are_no_agent_of_ours` covers the rule"
         );
     }

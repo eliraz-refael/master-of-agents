@@ -810,7 +810,7 @@ pub(crate) fn resumed(
     // Saved: the old agent's hooks are history only from now on, however late they come, and
     // its tab goes before the new one opens, on the same connection (R15).
     if let Some(pane) = checked.kill {
-        state.restarted.insert(id);
+        state.restarted.insert(id, tx.wall);
         tx.tmux(kill_pane(pane));
     }
     let (answer, waiters) = if via_focus {

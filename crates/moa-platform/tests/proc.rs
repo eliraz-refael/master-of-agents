@@ -130,13 +130,26 @@ fn another_users_process() -> Option<u32> {
         .find(|&p| owned_by_another(p) == Some(true))
 }
 
+/// Whether this runs in a Nix build sandbox, whose pid namespace holds only the build
+/// user's processes. `nix develop` sets `NIX_BUILD_TOP` too, and `IN_NIX_SHELL` with it.
+fn in_nix_build() -> bool {
+    std::env::var_os("NIX_BUILD_TOP").is_some() && std::env::var_os("IN_NIX_SHELL").is_none()
+}
+
 /// Another user's process is never "couldn't read" nor gone: its arguments are closed to us
-/// (foreign), or open (we are root). Where no such process exists (a build sandbox), the
-/// rule is `proc`'s `why_a_read_failed`, with made-up owners.
+/// (foreign), or open (we are root). Every machine shows one (pid 1 is root's) except a Nix
+/// build sandbox: only there is the rule left to `proc`'s `why_a_read_failed`, with made-up
+/// owners. Anywhere else, finding none means owners can't be read, and fails.
 #[test]
 fn another_users_process_reads_as_foreign_not_failed() {
     let Some(pid) = another_users_process() else {
-        eprintln!("no other user's process is visible here; `why_a_read_failed` covers the rule");
+        assert!(
+            in_nix_build(),
+            "no other user's process is visible: can moa read who owns one?"
+        );
+        eprintln!(
+            "in a Nix build, no other user's process is visible; `why_a_read_failed` covers the rule"
+        );
         return;
     };
     let read = Reader::new().args(pid);
@@ -154,6 +167,8 @@ fn who_owns_a_process_is_read_for_any_user() {
     assert_eq!(owned_by_another(std::process::id()), Some(false));
     let child = spawn(Command::new("sleep").arg("30"));
     assert_eq!(owned_by_another(child.0.id()), Some(false));
+    // Pid 1 exists everywhere (a sandbox's is the build user's), and its owner reads.
+    assert!(owned_by_another(1).is_some());
     for pid in [i32::MAX as u32, 0] {
         assert_eq!(owned_by_another(pid), None);
     }

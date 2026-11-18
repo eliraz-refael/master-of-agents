@@ -149,15 +149,6 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     if state.recent_hook_set.contains(&key) {
         return Applied::Duplicate;
     }
-    // A start is a new agent: one an empty look at the tabs didn't see ([`crate::wake`]).
-    // One that doesn't name the session isn't the agent a restart killed, which can't start
-    // again: it lifts the restart's fence (R24), as adopting a hand-started agent does.
-    if matches!(env.kind, HookKind::SessionStarted { .. }) {
-        state.not_found.remove(&id);
-        if slot_of(env) != Some(id) {
-            state.restarted.remove(&id);
-        }
-    }
     let before = state
         .session(id)
         .expect("resolved to a known session")
@@ -168,7 +159,7 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         changes.push(row);
     }
 
-    match after_of(state, id, &before, env) {
+    let applied = match after_of(state, id, &before, env) {
         After::History => commit(state, tx, key, changes, Applied::HistoryOnly),
         After::Unproven => {
             let applied = if state.binding(id).is_none() {
@@ -183,7 +174,40 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
             changes.insert(0, Change::Session(*after));
             commit(state, tx, key, changes, Applied::Applied)
         }
+    };
+    // Saved: a start is a new agent, one an empty look at the tabs didn't see
+    // ([`crate::wake`]); and one that lifts the restart's fence lifts it now. Like the key,
+    // these are kept only once the event is.
+    if !matches!(applied, Applied::Dropped(_))
+        && matches!(env.kind, HookKind::SessionStarted { .. })
+    {
+        state.not_found.remove(&id);
+        if lifts_fence(state, id, env) {
+            state.restarted.remove(&id);
+        }
     }
+    applied
+}
+
+/// Whether `env` lifts session `id`'s restart fence (R24): a start that doesn't name it,
+/// sent after the restart was saved. That is a new agent started by hand (the killed one
+/// can't start again), as adopting one is; an older start is the killed agent's own.
+fn lifts_fence(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
+    matches!(env.kind, HookKind::SessionStarted { .. })
+        && slot_of(env) != Some(id)
+        && state.restarted.get(&id).is_some_and(|at| env.at >= *at)
+}
+
+/// Whether end `env` comes from a tab that isn't session `id`'s since its restart (R24):
+/// the killed agent's, which may carry `MOA_SESSION` (`adopt` bound moa's own agent). An
+/// end that doesn't say its tab goes by the other rules.
+fn from_an_old_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
+    let Some(pane) = env.pane.as_deref().and_then(|p| p.parse::<PaneId>().ok()) else {
+        return false;
+    };
+    state.restarted.contains_key(&id)
+        && matches!(env.kind, HookKind::SessionEnded { .. })
+        && state.binding(id).and_then(|b| b.pane_id.parse().ok()) != Some(pane)
 }
 
 /// What an event does to its session past its history row.
@@ -209,24 +233,28 @@ enum After {
 /// agent is found running (M7: an asleep or ended session shows as it was left). Once a
 /// session is restarted (R24), an event that doesn't name it in `MOA_SESSION` isn't from
 /// an agent moa started for it, whenever it arrives: the killed agent's end is history
-/// only, and so is any other of its events, until a start that doesn't name it (a new
-/// agent started by hand) lifts that fence ([`apply`]). While the restart's tab opens, any
-/// end is history only, whatever it names: tmux names the new tab long before the new
-/// agent could end, so only the killed agent (moa's own, when `adopt` bound it) ends then.
+/// only, and so is any other of its events, until a start sent after the restart that
+/// doesn't name it (a new agent started by hand) lifts that fence ([`lifts_fence`]). An
+/// end from a tab that isn't the session's (the killed agent's, `MOA_SESSION` or not) is
+/// history only too. While the restart's tab opens, any end is history only, whatever it
+/// names: tmux names the new tab long before the new agent could end, so only the killed
+/// agent ends then.
 fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) -> After {
     let older = before
         .activity_at
         .max(before.asleep_at)
         .is_some_and(|t| env.at < t);
     let ended = before.lifecycle == Lifecycle::Ended;
-    let not_its_agent = state.restarted.contains(&id) && slot_of(env) != Some(id);
+    let not_its_agent = state.restarted.contains_key(&id)
+        && slot_of(env) != Some(id)
+        && !lifts_fence(state, id, env);
     let restarting = state
         .tmux()
         .launches()
         .any(|(i, l)| i == id && l.kind == LaunchKind::Restart);
     let after = match &env.kind {
         _ if not_its_agent => None,
-        HookKind::SessionEnded { .. } if restarting => None,
+        HookKind::SessionEnded { .. } if restarting || from_an_old_tab(state, id, env) => None,
         HookKind::SessionEnded { reason } => match end_kind(reason) {
             EndKind::Clean if ended && before.asleep_at.is_some() => {
                 Some(woken_to_end(before, env))

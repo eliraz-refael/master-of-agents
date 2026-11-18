@@ -116,6 +116,7 @@ fn envelope(seq: u32, plus_ms: i64, kind: HookKind) -> HookEnvelope {
     HookEnvelope {
         agent: AgentKind::Claude,
         slot: Some(S.into()),
+        pane: None,
         brain: Some("default".into()),
         store_dir: None,
         conversation_id: C.into(),

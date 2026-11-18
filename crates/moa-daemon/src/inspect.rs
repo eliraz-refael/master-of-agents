@@ -1,6 +1,8 @@
 //! `Deps::inspect`: the agent a tab runs, read in-process (C22) from the tab's process, its
 //! direct children and the start command tmux kept (R8, R9). Nothing read here is logged.
 
+use std::collections::VecDeque;
+
 use moa_agents::claude;
 use moa_core::model::{Inspected, PaneAgent};
 use moa_platform::proc::{self, Reader, Unread};
@@ -36,8 +38,9 @@ fn combine(start_view: Option<PaneAgent>, process_view: Inspected) -> Inspected 
 
 /// The tab's process, or else the first of its direct children, that runs Claude. A child
 /// that exited mid-look isn't one, nor is another user's process: an agent moa takes on runs
-/// as its user, and one moa can't read it couldn't adopt anyway. A read that failed leaves
-/// the answer `Unknown` unless an agent turns up after it.
+/// as its user, and one moa can't read it couldn't adopt anyway. What runs under another
+/// user's process is looked at too, as it may be an agent of ours. A read that failed
+/// leaves the answer `Unknown` unless an agent turns up after it.
 fn process_agent(pid: u32) -> Inspected {
     let mut reader = Reader::new();
     let agent_of = |p: u32| -> Result<Option<PaneAgent>, Unread> {
@@ -49,6 +52,10 @@ fn process_agent(pid: u32) -> Inspected {
     };
     process_agent_with(pid, agent_of, proc::children)
 }
+
+/// How deep a look goes below the tab's process through other users' processes: a `sudo`
+/// and its monitor, with room to spare. One still another user's there proves nothing.
+const FOREIGN_DEPTH: usize = 4;
 
 /// [`process_agent`], with each process's agent read by `agent_of` and its children listed
 /// by `children`.
@@ -64,16 +71,25 @@ fn process_agent_with(
         Err(Unread::Gone) => return Inspected::Gone,
         Err(Unread::Failed) => failed = true,
     }
-    let kids = match children(pid) {
-        Ok(kids) => kids,
+    // A child list fails only as gone or unread: `children` never says whose a process is.
+    let mut todo: VecDeque<(u32, usize)> = match children(pid) {
+        Ok(kids) => kids.into_iter().map(|k| (k, 1)).collect(),
         Err(Unread::Gone) => return Inspected::Gone,
-        Err(Unread::Foreign | Unread::Failed) => return Inspected::Unknown,
+        Err(_) => return Inspected::Unknown,
     };
-    for kid in kids {
-        match agent_of(kid) {
+    while let Some((p, depth)) = todo.pop_front() {
+        match agent_of(p) {
             Ok(Some(agent)) => return Inspected::Agent(agent),
-            Ok(None) | Err(Unread::Gone | Unread::Foreign) => {}
+            Ok(None) | Err(Unread::Gone) => {}
             Err(Unread::Failed) => failed = true,
+            // Another user's process (`sudo -u $USER claude`, a setuid wrapper) isn't an
+            // agent, but one of ours may run under it.
+            Err(Unread::Foreign) if depth < FOREIGN_DEPTH => match children(p) {
+                Ok(kids) => todo.extend(kids.into_iter().map(|k| (k, depth + 1))),
+                Err(Unread::Gone) => {}
+                Err(_) => failed = true,
+            },
+            Err(Unread::Foreign) => failed = true,
         }
     }
     if failed {
@@ -124,6 +140,75 @@ mod tests {
             reads(foreign(), foreign(), Ok(Some(agent.clone()))),
             Inspected::Agent(agent)
         );
+    }
+
+    type Read = Result<Option<PaneAgent>, Unread>;
+    type Kids = Result<Vec<u32>, Unread>;
+
+    /// The tab whose process is pid 10, over made-up processes: what each pid reads as
+    /// (any other is gone), and the children each lists (any other has none).
+    fn tree(reads: Vec<(u32, Read)>, kids: Vec<(u32, Kids)>) -> Inspected {
+        let mut reads = reads;
+        process_agent_with(
+            10,
+            |p| match reads.iter().position(|(q, _)| *q == p) {
+                Some(i) => reads.remove(i).1,
+                None => Err(Unread::Gone),
+            },
+            |p| {
+                kids.iter()
+                    .find(|(q, _)| *q == p)
+                    .map_or(Ok(Vec::new()), |(_, k)| k.clone())
+            },
+        )
+    }
+
+    /// Another user's process between the tab's shell and the agent (`sudo -u $USER claude`,
+    /// a setuid wrapper) isn't an agent, but what runs under it is looked at: an agent there
+    /// is the answer, and a list of its children that fails proves nothing.
+    #[test]
+    fn what_runs_under_another_users_process_is_looked_at() {
+        let agent = started_claude().unwrap();
+        let foreign = || Err(Unread::Foreign);
+        // shell 10 → sudo 11 → claude 13.
+        let found = tree(
+            vec![
+                (10, Ok(None)),
+                (11, foreign()),
+                (13, Ok(Some(agent.clone()))),
+            ],
+            vec![(10, Ok(vec![11])), (11, Ok(vec![13]))],
+        );
+        assert_eq!(found, Inspected::Agent(agent.clone()));
+        // shell 10 → sudo 11 → sudo's monitor 12 → claude 13.
+        let found = tree(
+            vec![
+                (10, Ok(None)),
+                (11, foreign()),
+                (12, foreign()),
+                (13, Ok(Some(agent.clone()))),
+            ],
+            vec![(10, Ok(vec![11])), (11, Ok(vec![12])), (12, Ok(vec![13]))],
+        );
+        assert_eq!(found, Inspected::Agent(agent.clone()));
+        // sudo's children can't be listed.
+        let found = tree(
+            vec![(10, Ok(None)), (11, foreign())],
+            vec![(10, Ok(vec![11])), (11, Err(Unread::Failed))],
+        );
+        assert_eq!(found, Inspected::Unknown);
+        // sudo exited while it was looked at; nothing else runs.
+        let found = tree(
+            vec![(10, Ok(None)), (11, foreign())],
+            vec![(10, Ok(vec![11])), (11, Err(Unread::Gone))],
+        );
+        assert_eq!(found, Inspected::Gone);
+        // A process of ours that isn't an agent is as deep as a look goes, as before.
+        let found = tree(
+            vec![(10, Ok(None)), (11, Ok(None)), (13, Ok(Some(agent)))],
+            vec![(10, Ok(vec![11])), (11, Ok(vec![13]))],
+        );
+        assert_eq!(found, Inspected::Gone);
     }
 
     /// A start command that runs Claude, naming no conversation.

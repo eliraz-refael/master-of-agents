@@ -278,6 +278,7 @@ fn an_opened_sessions_first_turn_ends_as_done() {
     let envelope = HookEnvelope {
         agent: AgentKind::Claude,
         slot: Some(id.to_string()),
+        pane: None,
         brain: Some("default".into()),
         store_dir: None,
         conversation_id: nth(&b, 2).to_string(),
@@ -322,6 +323,7 @@ fn opened_hook(
         envelope: HookEnvelope {
             agent: AgentKind::Claude,
             slot: Some(id.to_string()),
+            pane: None,
             brain: Some("default".into()),
             store_dir: None,
             conversation_id: conv.into(),

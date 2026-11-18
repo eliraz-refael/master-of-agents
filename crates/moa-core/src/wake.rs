@@ -89,6 +89,7 @@ pub(crate) fn looked(
         .iter()
         .filter_map(|b| b.pane_id.parse().ok())
         .collect();
+    let mut unread = false;
     let found = panes
         .iter()
         .filter(|p| !p.dead && !held.contains(&p.pane))
@@ -100,13 +101,20 @@ pub(crate) fn looked(
                     current,
                     ..
                 } => Some((info, tracked, tag, current)),
-                TabMatch::Nobody | TabMatch::Stale | TabMatch::Unread(_) => None,
+                TabMatch::Unread(_) => {
+                    unread = true;
+                    None
+                }
+                TabMatch::Nobody | TabMatch::Stale => None,
             },
         );
     let Some((info, tracked, tag, current)) = found else {
-        // Its later events don't ask again for these same tabs ([`look`]).
-        let seen = panes.iter().map(|p| p.pane).collect();
-        state.not_found.insert(id, (generation, seen));
+        // Its later events don't ask again for these same tabs ([`look`]), unless one of
+        // them couldn't be read: that proves nothing, and the next look decides.
+        if !unread {
+            let seen = panes.iter().map(|p| p.pane).collect();
+            state.not_found.insert(id, (generation, seen));
+        }
         return Vec::new();
     };
     let woken = Session {

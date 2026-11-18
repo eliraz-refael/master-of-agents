@@ -147,6 +147,7 @@ impl Rig {
         let envelope = HookEnvelope {
             agent: AgentKind::Claude,
             slot: None,
+            pane: None,
             brain: Some("default".into()),
             store_dir: Some(shown(&self.b.home.join(".claude-a"))),
             conversation_id: CZ.into(),
@@ -497,5 +498,18 @@ fn a_start_since_the_empty_look_asks_again() {
     );
     assert_eq!(r.z().lifecycle, Lifecycle::Ended);
     let fx = r.heard(4, 4000, prompt("more"));
+    assert_eq!(queries(&fx).len(), 1, "{fx:?}");
+}
+
+/// A look whose tab couldn't be read proves nothing: Z isn't marked, and its next event
+/// asks again.
+#[test]
+fn a_look_that_couldnt_read_a_tab_asks_again() {
+    let mut r = Rig::new(false);
+    AGENTS.with(|a| a.borrow_mut().insert(60, Inspected::Unknown));
+    r.heard(1, 1000, prompt("go on"));
+    let tab = r.tab_6();
+    listed(&mut r.st, &r.b, &[&tab], &[]);
+    let fx = r.heard(2, 2000, prompt("more"));
     assert_eq!(queries(&fx).len(), 1, "{fx:?}");
 }
