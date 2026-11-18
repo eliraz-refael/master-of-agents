@@ -26,32 +26,42 @@ const PATIENCE: Duration = Duration::from_secs(10);
 // The launch counts read the process-wide `spawn::launches()`; they are exact only because
 // nextest runs each test in a process of its own.
 
-/// What the link told the core.
-struct Heard(mpsc::UnboundedReceiver<TmuxIn>);
+/// What the link told the core, each with the number of the actor's run that was going when
+/// the core heard it (1 before any restart).
+struct Heard(mpsc::UnboundedReceiver<(TmuxIn, usize)>);
 
 impl Heard {
-    async fn next(&mut self) -> TmuxIn {
+    async fn next_run(&mut self) -> (TmuxIn, usize) {
         timeout(PATIENCE, self.0.recv())
             .await
             .expect("the link said something in time")
             .expect("the link is still there")
     }
 
-    /// The next thing it said about being up or down, skipping events and answers.
-    async fn next_state(&mut self) -> TmuxIn {
+    async fn next(&mut self) -> TmuxIn {
+        self.next_run().await.0
+    }
+
+    /// The next thing it said about being up or down, skipping events and answers, with
+    /// the run it was heard in.
+    async fn next_state_run(&mut self) -> (TmuxIn, usize) {
         loop {
-            match self.next().await {
-                TmuxIn::Notification(_) | TmuxIn::Replies { .. } => {}
+            match self.next_run().await {
+                (TmuxIn::Notification(_) | TmuxIn::Replies { .. }, _) => {}
                 other => return other,
             }
         }
+    }
+
+    async fn next_state(&mut self) -> TmuxIn {
+        self.next_state_run().await.0
     }
 
     /// Whether it says nothing about its state for `d`.
     async fn quiet_for(&mut self, d: Duration) -> Option<TmuxIn> {
         timeout(d, async {
             loop {
-                match self.0.recv().await {
+                match self.0.recv().await.map(|(input, _)| input) {
                     Some(TmuxIn::Notification(_) | TmuxIn::Replies { .. }) => {}
                     other => return other,
                 }
@@ -64,15 +74,30 @@ impl Heard {
 }
 
 fn started(link: TmuxLink) -> (mpsc::UnboundedSender<TmuxCmd>, Heard) {
+    let (actor, heard, _) = started_with(link, |_| {});
+    (actor, heard)
+}
+
+/// The link started with `tweak` applied to what it shares across restarts, which the test
+/// keeps a hold of.
+fn started_with(
+    link: TmuxLink,
+    tweak: impl FnOnce(&mut Shared),
+) -> (mpsc::UnboundedSender<TmuxCmd>, Heard, Arc<Shared>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let actor = start(
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let heard_in = runs.clone();
+    let (actor, mut shared) = Shared::new(
         link,
-        move |input| {
-            let _ = tx.send(input);
-        },
-        |_, _| {},
+        Box::new(move |input| {
+            let _ = tx.send((input, heard_in.load(Ordering::SeqCst)));
+        }),
     );
-    (actor, Heard(rx))
+    shared.runs = runs;
+    tweak(&mut shared);
+    let shared = Arc::new(shared);
+    supervised(shared.clone(), |_, _| {});
+    (actor, Heard(rx), shared)
 }
 
 /// The control client's environment, with the root as its home.
@@ -144,6 +169,41 @@ fn ctl_option(tb: &TempBrain) -> String {
 
 fn sessions() -> Vec<Cmd> {
     vec![Cmd::new("list-sessions").args(["-F", "S #{session_name}"])]
+}
+
+/// The server's control clients, by pid and name.
+fn control_clients(tb: &TempBrain) -> Vec<(u32, String)> {
+    let list = tb
+        .tmux(
+            B,
+            &[
+                "list-clients",
+                "-F",
+                "#{client_control_mode} #{client_pid} #{client_name}",
+            ],
+        )
+        .unwrap_or_default();
+    list.lines()
+        .filter_map(|line| {
+            let mut f = line.splitn(3, ' ');
+            if f.next()? != "1" {
+                return None;
+            }
+            Some((f.next()?.parse().ok()?, f.next()?.to_string()))
+        })
+        .collect()
+}
+
+/// Kills the process of the control client that `connected` names.
+fn kill_client(tb: &TempBrain, connected: &TmuxIn) {
+    let TmuxIn::Connected { ctl, .. } = connected else {
+        panic!("not connected: {connected:?}");
+    };
+    let clients = control_clients(tb);
+    let Some((pid, _)) = clients.iter().find(|(_, name)| *name == ctl.0) else {
+        panic!("{ctl:?} isn't attached: {clients:?}");
+    };
+    moa_platform::kill_term(*pid);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -227,6 +287,237 @@ async fn a_restart_is_reported_as_lost_before_it_reconnects() {
     assert!(wait.is_some(), "one control client");
 }
 
+/// A control client left attached by an earlier daemon, and still named in `@moa_ctl`, is
+/// stopped when the link connects.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stuck_link_from_before_is_reaped_on_connect() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let mut stuck = tb.control_client(B).expect("a control client starts");
+    let pid = stuck.id();
+    let name = moa_testkit::wait_for(PATIENCE, || {
+        let clients = control_clients(&tb);
+        clients.into_iter().find(|(p, _)| *p == pid).map(|(_, n)| n)
+    })
+    .expect("the stuck client attached");
+    tb.tmux(B, &["set-option", "-g", "@moa_ctl", &name])
+        .unwrap();
+    let (actor, mut heard) = started(link);
+    actor.send(connect()).unwrap();
+    let ctl = match heard.next_state().await {
+        TmuxIn::Connected { ctl, .. } => ctl,
+        other => panic!("not connected: {other:?}"),
+    };
+    let exited = moa_testkit::wait_for(PATIENCE, || stuck.try_wait().ok().flatten());
+    assert!(exited.is_some(), "the stuck client is still running");
+    let gone = moa_testkit::wait_for(PATIENCE, || {
+        let clients = control_clients(&tb);
+        (!clients.iter().any(|(p, _)| *p == pid)).then_some(())
+    });
+    assert!(gone.is_some(), "{:?}", control_clients(&tb));
+    assert_eq!(ctl_option(&tb), ctl.0);
+}
+
+/// Carry-forward (roadmap 11): the core heard of a panic only at the restart, a second or
+/// more later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panic_while_up_says_lost_at_once() {
+    let tb = TempBrain::new(None);
+    let (actor, mut heard) = started(server(&tb));
+    actor.send(connect()).unwrap();
+    let first = conn_of(&heard.next_state().await);
+    actor.send(TmuxCmd::Crash).unwrap();
+    let (lost, run) = heard.next_state_run().await;
+    assert_eq!(lost, TmuxIn::Down(Down::Lost));
+    assert_eq!(run, 1, "the loss waited for the restart");
+    let (up, run) = heard.next_state_run().await;
+    assert!(conn_of(&up) > first);
+    assert_eq!(run, 2);
+}
+
+/// Carry-forward (roadmap 11): `lost()` marked the link idle before it probed, so a panic
+/// there left the core at Lost with no reconnect.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panic_while_probing_still_reconnects() {
+    let tb = TempBrain::new(None);
+    let (actor, mut heard, shared) = started_with(server(&tb), |_| {});
+    actor.send(connect()).unwrap();
+    let up = heard.next_state().await;
+    shared.panic_probe.store(true, Ordering::SeqCst);
+    kill_client(&tb, &up);
+    assert_eq!(heard.next_state().await, TmuxIn::Down(Down::Lost));
+    let second = conn_of(&heard.next_state().await);
+    assert!(second > conn_of(&up));
+}
+
+/// Carry-forward (roadmap 11): a restart during the backoff started over at step 0. Step 1
+/// is 30 s here, so the restarted run scheduling it again is seen long before it is tried.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_during_backoff_resumes_its_step() {
+    let tb = TempBrain::new(None);
+    let mut waits = BACKOFF;
+    waits[1..].fill(Duration::from_secs(30));
+    let (actor, mut heard, shared) = started_with(server(&tb), |sh| sh.backoff = waits);
+    actor.send(connect()).unwrap();
+    // Up after step 0, then dropped again, so step 1 is next.
+    for _ in 0..2 {
+        let up = heard.next_state().await;
+        kill_client(&tb, &up);
+        assert_eq!(heard.next_state().await, TmuxIn::Down(Down::Lost));
+    }
+    let backing_off = moa_testkit::wait_for(PATIENCE, || {
+        (shared.doing() == Doing::BackingOff(1)).then_some(())
+    });
+    assert!(backing_off.is_some(), "{:?}", shared.doing());
+    actor.send(TmuxCmd::Crash).unwrap();
+    let resumed = moa_testkit::wait_for(PATIENCE, || {
+        let scheduled = lock(&shared.scheduled).clone();
+        (scheduled.len() == 3).then_some(scheduled)
+    });
+    assert_eq!(resumed, Some(vec![(1, 0), (1, 1), (2, 1)]));
+}
+
+/// Sends `signal` to `pid` with the shell's own `kill`, which a build sandbox has even
+/// where no `kill` program is installed. `moa_platform` has only `kill_term`, no stop or
+/// continue, and this crate allows no `unsafe` to call libc itself.
+fn signal(pid: &str, signal: &str) -> bool {
+    std::process::Command::new("/bin/sh")
+        .args(["-c", "kill -s \"$1\" \"$2\"", "sh", signal, pid])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Sends SIGCONT to a stopped process when dropped.
+struct Resume(String);
+
+impl Drop for Resume {
+    fn drop(&mut self) {
+        signal(&self.0, "CONT");
+    }
+}
+
+/// Stops the brain's server; it continues when the guard drops. Declare the guard after
+/// the brain, so it drops first: the brain's own drop talks to tmux.
+fn stop_server(tb: &TempBrain) -> Resume {
+    let pid = tb.tmux(B, &["display-message", "-p", "#{pid}"]).unwrap();
+    assert!(signal(&pid, "STOP"), "the server stops");
+    Resume(pid)
+}
+
+fn connect_options(link: &TmuxLink, wait: Duration) -> ConnectOptions {
+    ConnectOptions {
+        tmux: moa_testkit::tmux_path().unwrap_or_else(|e| panic!("{e}")),
+        socket: link.socket.args().to_vec(),
+        env: link.env.clone(),
+        wait,
+    }
+}
+
+/// A server that never answers (here, stopped) is given up on after `wait`, and says so as
+/// a timeout, not as something tmux said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_server_is_given_up_on_within_the_wait() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let _resume = stop_server(&tb);
+    let opts = connect_options(&link, Duration::from_millis(300));
+    let result = timeout(PATIENCE, ControlClient::connect(&opts))
+        .await
+        .expect("connect gave up in time");
+    match result {
+        Err(ConnectError::TimedOut) => {}
+        Err(e) => panic!("{e:?}"),
+        Ok((_, _, info)) => panic!("a stopped server answered: {info:?}"),
+    }
+}
+
+/// Code review (b1): a connect that timed out was the final `CantLink`. It is tried again
+/// like a server that turned the link away, so a server that was only slow is linked once
+/// it answers. Connects wait 300 ms while the server is stopped, so the first one times out
+/// soon; once it is resumed they wait a roomy 3 s, so the retry that links isn't raced.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_answers_late_is_tried_again() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let resume = stop_server(&tb);
+    let (actor, mut heard, shared) = started_with(link, |sh| {
+        *lock(&sh.connect_wait) = Duration::from_millis(300);
+    });
+    actor.send(connect()).unwrap();
+    let retrying = moa_testkit::wait_for(PATIENCE, || {
+        (!lock(&shared.scheduled).is_empty()).then_some(())
+    });
+    assert!(retrying.is_some(), "no retry: {:?}", shared.doing());
+    *lock(&shared.connect_wait) = Duration::from_secs(3);
+    drop(resume);
+    conn_of(&heard.next_state().await);
+}
+
+/// Review fix (Task 1): a reap step that times out is a loss, as every bootstrap step's is,
+/// not "nothing to reap". The server stops after the connect, so the reap's first command
+/// is the one that waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reap_on_a_hung_server_is_a_loss() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let (client, _events, info) = connected_client(&link).await;
+    let resume = stop_server(&tb);
+    let by = Instant::now() + SETUP_WAIT;
+    let reaped = timeout(PATIENCE, reap_stale(&client, &info.client, by))
+        .await
+        .expect("the reap gave up in time");
+    assert_eq!(reaped, Err(CmdError::Gone));
+    drop(resume);
+    client.close().await;
+}
+
+/// A connected client on the brain's server, as the link has it before its setup.
+async fn connected_client(link: &TmuxLink) -> (ControlClient, Events, ServerInfo) {
+    timeout(
+        PATIENCE,
+        ControlClient::connect(&connect_options(link, CONNECT_WAIT)),
+    )
+    .await
+    .expect("connected in time")
+    .unwrap_or_else(|e| panic!("connect failed: {e}"))
+}
+
+/// Code review (b1): a server that stalls during the setup is a loss, given up on at the
+/// setup's deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_stalls_during_setup_is_a_loss() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let (client, _events, info) = connected_client(&link).await;
+    let resume = stop_server(&tb);
+    let by = Instant::now() + SETUP_WAIT;
+    let set = timeout(PATIENCE, set_up(&client, &info, &link.moa_tmux, by))
+        .await
+        .expect("the setup gave up in time");
+    assert_eq!(set, Err(CmdError::Gone));
+    drop(resume);
+    client.close().await;
+}
+
+/// Code review (b1): the setup's steps share one deadline, so connect and setup together
+/// stay under the front door's 10 s; no step starts a wait of its own. With the deadline
+/// already passed, a healthy server's setup is cut short, and the client is never named.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_setup_steps_share_one_deadline() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let (client, _events, info) = connected_client(&link).await;
+    let set = timeout(
+        PATIENCE,
+        set_up(&client, &info, &link.moa_tmux, Instant::now()),
+    )
+    .await
+    .expect("the setup ended in time");
+    assert_eq!(set, Err(CmdError::Gone));
+    assert_eq!(ctl_option(&tb), "", "the client was named");
+    client.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn no_server_and_no_tmux_launch_nothing() {
     let tb = TempBrain::new(None);
@@ -301,24 +592,33 @@ async fn dropped_after_each_attach(hook: impl FnOnce(&TempBrain) -> String) -> u
     actor.send(connect()).unwrap();
     let mut ups = 0;
     let mut lost_since_up = true;
+    // Everything the link said, for a failure's message (roadmap 11: this failed once
+    // under load, and its text was lost).
+    let mut seen = Vec::new();
     // The backoff's waits add up to 6.3 s, plus a drop per connect.
     let gave_up = timeout(Duration::from_secs(30), async {
-        loop {
-            match heard.next_state().await {
+        while let Some((input, _)) = heard.0.recv().await {
+            seen.push(input.clone());
+            match input {
+                TmuxIn::Notification(_) | TmuxIn::Replies { .. } => {}
                 TmuxIn::Connected { .. } => {
-                    assert!(lost_since_up, "a reconnect came before Lost");
+                    assert!(lost_since_up, "a reconnect came before Lost: {seen:?}");
                     ups += 1;
-                    assert!(ups <= 1 + BACKOFF.len(), "more than 1 + 6 connects");
+                    assert!(
+                        ups <= 1 + BACKOFF.len(),
+                        "more than 1 + 6 connects: {seen:?}"
+                    );
                     lost_since_up = false;
                 }
                 TmuxIn::Down(Down::Lost) => lost_since_up = true,
-                TmuxIn::Down(Down::GaveUp) => break,
-                other => panic!("{other:?}"),
+                TmuxIn::Down(Down::GaveUp) => return,
+                _ => panic!("{seen:?}"),
             }
         }
+        panic!("the link went away: {seen:?}");
     })
     .await;
-    assert!(gave_up.is_ok(), "the link never gave up");
+    assert!(gave_up.is_ok(), "the link never gave up: {seen:?}");
     let launched = spawn::launches() - before;
     assert!(launched <= 1 + BACKOFF.len() as u64, "{launched} launches");
     // It stays given up: nothing more is launched.
@@ -380,6 +680,8 @@ async fn a_stop_queued_before_a_restart_is_answered_without_a_reconnect() {
         .expect("the stop is answered in time")
         .expect("the stop is answered");
     assert_eq!(spawn::launches(), before, "a restart reconnected");
+    // The panic said Lost; the stop says nothing more.
+    assert_eq!(heard.next_state().await, TmuxIn::Down(Down::Lost));
     assert_eq!(heard.quiet_for(Duration::from_millis(300)).await, None);
 }
 

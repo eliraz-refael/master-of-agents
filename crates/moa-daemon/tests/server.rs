@@ -10,7 +10,7 @@ use moa_core::op::{Op, ReqId};
 use moa_core::state::{CallerInfo, Deps};
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, CoreOptions, DaemonError, Ready, run, serve};
-use moa_platform::{Paths, PathsError};
+use moa_platform::Paths;
 use moa_proto::code;
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
 use serde_json::{Value, json};
@@ -289,25 +289,21 @@ async fn the_socket_dir_is_private() {
         .mode();
     assert_eq!(mode & 0o777, 0o700);
 
-    let root = short_root();
-    let paths = Paths::with_root(root.path());
-    let brain = TypicalBrain::new();
-    place_db(&paths, &brain);
-    std::fs::create_dir_all(paths.run_dir()).unwrap();
-    std::fs::set_permissions(paths.run_dir(), std::fs::Permissions::from_mode(0o777)).unwrap();
-    let time = FakeTime::new(UtcMs(0));
-    let err = run(options(&paths, &brain, &time, Ready::Nothing))
-        .await
-        .expect_err("an open run dir is refused");
-    assert!(
-        matches!(err, DaemonError::Paths(PathsError::UnsafeDir(..))),
-        "{err:?}"
-    );
-    let line = err.to_string();
-    assert!(
-        line.contains("is open to other users; moa won't use it (chmod 700 "),
-        "{line}"
-    );
+    // An open run dir of ours is closed to others, and the daemon starts.
+    let d = boot_with(
+        |paths| {
+            std::fs::create_dir_all(paths.run_dir()).unwrap();
+            std::fs::set_permissions(paths.run_dir(), std::fs::Permissions::from_mode(0o777))
+                .unwrap();
+        },
+        |_| {},
+    )
+    .await;
+    let mode = std::fs::metadata(d.paths.run_dir())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
 }
 
 async fn stops_cleanly(method: &str) {

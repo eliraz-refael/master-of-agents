@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,12 +113,9 @@ fn remove_socket(sock: &Path) {
 }
 
 /// Writes the brain's two tmux config files when their text changed (T6), and says where
-/// its server is.
+/// its server is. The brain's folder is checked like the other private folders.
 fn tmux_link(paths: &Paths, b: &str) -> Result<TmuxLink, DaemonError> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(paths.brain_dir(b))?;
+    ensure_private_dir(&paths.brain_dir(b))?;
     let moa_tmux = paths.moa_tmux(b);
     write_if_changed(&moa_tmux, &conf::moa_tmux(b))?;
     write_if_changed(&paths.tmux_conf(b), &conf::tmux_conf(&moa_tmux))?;

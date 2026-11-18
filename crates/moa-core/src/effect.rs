@@ -48,6 +48,8 @@ pub enum Input {
         caller: CallerInfo,
         op: Op,
     },
+    /// A client's connection closed: nothing is answered on it any more.
+    ClientGone(ConnId),
     Timer(TimerKey),
     ZoneChanged,
     ActorFailed {
@@ -95,6 +97,9 @@ pub enum Down {
     NoServer,
     /// The reconnects ran out.
     GaveUp,
+    /// tmux answered the control client with something it couldn't follow. A server that
+    /// doesn't answer in time isn't this: the link backs off and tries it again.
+    CantLink,
     /// The server's tmux is older than moa needs; its version.
     TooOld(String),
     /// tmux couldn't be started.

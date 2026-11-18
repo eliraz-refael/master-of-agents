@@ -7,7 +7,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use moa_agents::claude::find_transcript;
@@ -140,6 +140,34 @@ impl TempBrain {
             .to_string())
     }
 
+    /// Starts a control client (`tmux -C attach`) on `brain`'s terminal server, with
+    /// [`TempBrain::env`] as its whole environment. Its stdin and stdout are piped; a caller
+    /// that leaves stdout unread and stdin open has a client that stays attached, as a stuck
+    /// link from an earlier daemon would.
+    pub fn control_client(&self, brain: &str) -> io::Result<std::process::Child> {
+        let socket = self
+            .paths()
+            .tmux_socket(brain)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Command::new("tmux")
+            .arg("-u")
+            .args(socket.args())
+            .args(["-C", "attach"])
+            .env_clear()
+            .envs(self.env())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND)
+                } else {
+                    e
+                }
+            })
+    }
+
     /// Kills `brain`'s terminal server when its socket is there, and waits for it to exit.
     fn kill_tmux(&self, brain: &str) {
         let Ok(socket) = self.paths().tmux_socket(brain) else {
@@ -160,14 +188,15 @@ impl TempBrain {
     }
 
     /// The Typical spike fixture under `<root>/spike-home`, imported into `db(brain)` with
-    /// derived ids (so a test knows the ids it will see).
+    /// derived ids (so a test knows the ids it will see). The brain's folder is made
+    /// private, as `moa adopt` makes it.
     pub fn adopt_typical(&self, brain: &str) {
         let home = self.root().join("spike-home");
         fs::create_dir_all(&home).expect("the spike home");
         let spike = self.root().join("spike.db");
         SpikeFixture::write(&spike, Scenario::Typical, &home).expect("the fixture writes");
         let db = self.db(brain);
-        fs::create_dir_all(db.parent().expect("a brain dir")).expect("the brain dir");
+        ensure_private_dir(db.parent().expect("a brain dir")).expect("the brain dir");
         let mut store = Store::open(&db, &self.paths().backups(brain)).expect("a new store");
         let env = ImportEnv {
             tz: tz(),

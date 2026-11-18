@@ -282,6 +282,22 @@ fn too_old_and_missing_tmux_answer_in_one_line() {
 }
 
 #[test]
+fn cant_link_says_so() {
+    let mut s = started();
+    let fx = ensure(&mut s);
+    assert!(replies(&fx).is_empty(), "the ensure waits");
+    let fx = feed(&mut s, TmuxIn::Down(Down::CantLink));
+    assert_eq!(
+        replies(&fx),
+        vec![(
+            ReqId(1),
+            refused("moa couldn't talk to its terminal; see moa's log")
+        )]
+    );
+    assert_eq!(s.tmux().link, Link::Down);
+}
+
+#[test]
 fn lost_keeps_the_waiters_and_connects_once() {
     let mut s = started();
     connected(&mut s, 1, generation(10));
@@ -300,6 +316,36 @@ fn lost_keeps_the_waiters_and_connects_once() {
         replies(&fx),
         vec![(ReqId(1), running(true)), (ReqId(2), running(true))]
     );
+}
+
+/// A connection that closed while its ensure waited is never answered; another
+/// connection's ensure still is.
+#[test]
+fn a_closed_connections_ensure_is_forgotten() {
+    let mut s = started();
+    assert_eq!(s.tmux().link, Link::Connecting);
+    ensure(&mut s);
+    handle_checked(
+        &mut s,
+        Input::Client {
+            conn: ConnId(8),
+            req: ReqId(2),
+            caller: CallerInfo::default(),
+            op: Op::TmuxEnsure { tmux: None },
+        },
+        now(),
+    );
+    let fx = handle_checked(&mut s, Input::ClientGone(ConnId(7)), now());
+    assert!(fx.is_empty(), "{fx:?}");
+    let fx = connected(&mut s, 1, generation(10));
+    let to: Vec<ConnId> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Reply { conn, .. } => Some(*conn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(to, [ConnId(8)]);
 }
 
 #[test]

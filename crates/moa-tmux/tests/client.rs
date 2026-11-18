@@ -5,7 +5,8 @@ use std::time::Duration;
 use moa_core::tmux::mailbox::Mailbox;
 use moa_testkit::{Sandbox, Terminal, tmux_path, wait_for};
 use moa_tmux::client::{
-    CmdError, ConnectError, ConnectOptions, ControlClient, Event, Events, ServerInfo, version_ok,
+    CONNECT_WAIT, CmdError, ConnectError, ConnectOptions, ControlClient, Event, Events, ServerInfo,
+    version_ok,
 };
 use moa_tmux::{Cmd, Notification};
 use proptest::prelude::*;
@@ -15,6 +16,7 @@ fn opts(sb: &Sandbox) -> ConnectOptions {
         tmux: tmux_path().unwrap_or_else(|e| panic!("{e}")),
         socket: sb.socket_args(),
         env: sb.env(),
+        wait: CONNECT_WAIT,
     }
 }
 
@@ -116,7 +118,7 @@ async fn after_hook_blocks_are_skipped() {
         "set-hook",
         "-g",
         "after-new-session[91]",
-        "display-message -p from-hook",
+        "display-message -p from-hook ; set -g @after_ran 1",
     ])
     .unwrap();
     let (client, _events, _) = connect(&sb).await;
@@ -125,6 +127,8 @@ async fn after_hook_blocks_are_skipped() {
         .await
         .unwrap();
     assert_eq!(client.run(&display("next")).await, Ok(vec!["next".into()]));
+    // The hook ran, so its block was sent and skipped, not never sent.
+    assert_eq!(sb.tmux(&["show", "-gv", "@after_ran"]).unwrap().trim(), "1");
     client.close().await;
 }
 

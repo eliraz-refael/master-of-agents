@@ -209,3 +209,33 @@ impl Topology {
         self.windows.get(w)?.active
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A line that looks like a list's: a kind letter, then words of ids, digits, flags and
+    /// `@moa_session` values, with spaces doubled or missing; or any text at all.
+    fn line() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[SPC]?( {0,2}[%@$]?[0-9a-f-]{0,40}){0,9} ?",
+            "[ %@$SPC0-9]{0,30}",
+            ".*",
+        ]
+    }
+
+    proptest! {
+        /// Whatever tmux prints, the lists build a topology (R27). A panic here would reload
+        /// the core, and the reload's refresh would read the same lines again.
+        #[test]
+        fn from_lists_never_panics(
+            sessions in prop::collection::vec(line(), 0..8),
+            panes in prop::collection::vec(line(), 0..8),
+            clients in prop::collection::vec(line(), 0..8),
+        ) {
+            let t = Topology::from_lists(&sessions, &panes, &clients);
+            let _ = t.visible();
+        }
+    }
+}

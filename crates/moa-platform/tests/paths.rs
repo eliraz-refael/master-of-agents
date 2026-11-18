@@ -121,7 +121,7 @@ fn read_config_is_none_when_missing_and_text_when_present() {
 }
 
 #[test]
-fn private_dirs_are_made_0700_and_open_ones_refused() {
+fn private_dirs_are_made_0700_and_open_ones_tightened() {
     let t = tmp();
     let root = t.path();
     ensure_private_dir(&root.join("a/b")).unwrap();
@@ -137,12 +137,10 @@ fn private_dirs_are_made_0700_and_open_ones_refused() {
     let c = root.join("c");
     std::fs::create_dir(&c).unwrap();
     std::fs::set_permissions(&c, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let err = ensure_private_dir(&c).unwrap_err();
-    let c = c.display();
-    assert_eq!(
-        err.to_string(),
-        format!("{c} is open to other users; moa won't use it (chmod 700 {c})")
-    );
+    // Ours and a real folder: only its mode was wrong, so it is closed to others.
+    ensure_private_dir(&c).unwrap();
+    let mode = std::fs::metadata(&c).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
 
     let d = root.join("d");
     symlink(root.join("a/b"), &d).unwrap();
@@ -270,6 +268,25 @@ fn a_dangling_symlink_is_refused_as_a_symlink() {
         err.to_string(),
         format!("{} is a symlink; moa won't use it", link.display())
     );
+}
+
+/// Only a real folder is tightened: a link to an open folder is refused, and the folder it
+/// points at is left as it was.
+#[test]
+fn a_symlink_to_an_open_folder_is_refused_and_not_tightened() {
+    let t = tmp();
+    let open = t.path().join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = t.path().join("link");
+    symlink(&open, &link).unwrap();
+    let err = ensure_private_dir(&link).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{} is a symlink; moa won't use it", link.display())
+    );
+    let mode = std::fs::metadata(&open).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
 }
 
 #[test]

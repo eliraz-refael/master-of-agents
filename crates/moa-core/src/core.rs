@@ -143,6 +143,11 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.push(quiet_timer(state, now.wall));
             fx
         }
+        // Its waiters are dropped; a launch it asked for goes on (R26).
+        Input::ClientGone(conn) => {
+            state.tmux.client_gone(conn);
+            Vec::new()
+        }
         Input::ZoneChanged => vec![backup_timer(now)],
         Input::ActorFailed { actor, message: _ } => {
             // The message may carry contents; it stays with the executor.

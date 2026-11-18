@@ -359,7 +359,7 @@ pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec
     let mut tx = Tx::new(now);
     let mut logs = Vec::new();
     let mut after = Vec::new();
-    for Settled { id, conn, req, end } in settled {
+    for Settled { id, reply, end } in settled {
         let result = match end {
             OpenEnd::Bound { pane, pid } => {
                 bind(state, &mut tx, id, pane, pid, &mut logs, &mut after)
@@ -378,7 +378,10 @@ pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec
                 Err(OpError(WENT_AWAY.into()))
             }
         };
-        after.push(Effect::Reply { conn, req, result });
+        // A caller that went has nobody to tell; its tab was still bound or ended above.
+        if let Some((conn, req)) = reply {
+            after.push(Effect::Reply { conn, req, result });
+        }
     }
     let mut fx = logs;
     fx.extend(post_commit(state, tx));

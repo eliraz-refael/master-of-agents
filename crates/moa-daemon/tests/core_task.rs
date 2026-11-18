@@ -109,6 +109,19 @@ async fn the_reply_waits_for_the_commit() {
     assert!(model.borrow().topics[&Topic::Groups].contains_key("Work"));
 }
 
+/// A closed connection is one input for the core: its waiters are dropped there.
+#[tokio::test]
+async fn close_conn_sends_client_gone() {
+    let rig = rig().await;
+    let stats = rig.core.stats();
+    let (c, _rx) = rig.core.open_conn();
+    within(rig.core.barrier()).await;
+    let inputs = stats.inputs.load(Ordering::SeqCst);
+    rig.core.close_conn(c);
+    within(rig.core.barrier()).await;
+    assert_eq!(stats.inputs.load(Ordering::SeqCst), inputs + 1);
+}
+
 #[tokio::test]
 async fn a_read_during_a_pending_commit_waits_for_it() {
     let rig = rig().await;

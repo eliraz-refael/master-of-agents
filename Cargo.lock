@@ -702,6 +702,7 @@ dependencies = [
  "libc",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

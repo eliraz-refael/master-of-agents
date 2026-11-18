@@ -13,7 +13,7 @@ use std::time::Duration;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
-use moa_platform::{Spawner, kill_term};
+use moa_platform::{Spawner, kill_term, wait_exited};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::pipe;
 use tokio::process::{ChildStderr, ChildStdin};
@@ -27,10 +27,13 @@ pub const INFO_FORMAT: &str = "V #{version} #{pid} #{start_time} #{client_name}"
 /// How long `close` waits for the child to exit before it signals it.
 const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
-/// How long `connect` waits for the server's first reply. A bound on a hang, not a latency
-/// target: CI runners are slow and cold, and a loaded machine can take seconds to start
-/// tmux. It has no test of its own, because it would need a fake tmux and a wait this long.
-const CONNECT_WAIT: Duration = Duration::from_secs(20);
+/// How long `connect` usually waits for the server's first reply. A bound on a hang, not a
+/// latency target: CI runners are slow and cold, and a loaded machine can take seconds to
+/// start tmux. With the daemon's 2 s for its setup after it, each connect attempt is up or
+/// given up on within 8 s, under the front door's 10 s wait for an answer. A timed-out
+/// attempt is backed off from and tried again without telling the core, so for a server
+/// that stays hung the front door gives its own "didn't answer" at 10 s.
+pub const CONNECT_WAIT: Duration = Duration::from_secs(6);
 
 pub struct ConnectOptions {
     /// The tmux program (an absolute path).
@@ -39,6 +42,8 @@ pub struct ConnectOptions {
     pub socket: Vec<OsString>,
     /// The whole environment of the child, which is cleared first.
     pub env: Vec<(OsString, OsString)>,
+    /// How long to wait for the server's first reply: [`CONNECT_WAIT`], or less in a test.
+    pub wait: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,6 +65,9 @@ pub enum ConnectError {
     TooOld(String),
     #[error("tmux said something unexpected: {0}")]
     Protocol(&'static str),
+    /// The server didn't answer within `wait`, and tmux said nothing on stderr.
+    #[error("tmux didn't answer in time")]
+    TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -90,7 +98,8 @@ pub enum Event {
 pub type Events = mpsc::UnboundedReceiver<Event>;
 
 /// The arguments after the tmux program. `-u` because a daemon started at login may have no
-/// `LANG`, and `-N` so that it never starts a server.
+/// `LANG`, and `-N` so that it never starts a server. `_moa`'s shell is two words, so tmux
+/// execs it itself instead of handing it to the user's login shell.
 pub fn ctl_argv(socket: &[OsString]) -> Vec<OsString> {
     let mut v: Vec<OsString> = vec!["-u".into(), "-N".into()];
     v.extend(socket.iter().cloned());
@@ -108,6 +117,7 @@ pub fn ctl_argv(socket: &[OsString]) -> Vec<OsString> {
             "-y",
             "3",
             "/bin/sh",
+            "-s",
         ]
         .map(OsString::from),
     );
@@ -249,7 +259,7 @@ impl ControlClient {
         // Limit: only while the late output fits in the pipe (16–64 KiB). With more unread
         // output when this process dies (a lagging reader, a large reply, a batch in
         // flight), tmux keeps the client attached anyway: 3.4 for good, 3.8 too with many
-        // unread replies. Reaping such a client on the next connect is for slice 4.
+        // unread replies. The daemon's link stops such a client on its next connect.
         let mut cmd = Command::new(&opts.tmux);
         cmd.args(ctl_argv(&opts.socket))
             .env_clear()
@@ -264,11 +274,17 @@ impl ControlClient {
         let stdout = pipe::Receiver::from_owned_fd(OwnedFd::from(out_r)).map(Some);
         let stderr = child.stderr.take().map(ChildStderr::from_std).transpose();
         // The reaper reports the exit, so `close` can wait for it and nothing signals a pid
-        // that is gone.
+        // that is gone. It sees the exit without reaping, so the pid stays the child's
+        // (a zombie) until the flag is up, and only then reaps.
         let (exit_tx, exited) = watch::channel(false);
         std::thread::spawn(move || {
-            drop(child.wait());
-            let _ = exit_tx.send(true);
+            after_wait(
+                wait_exited(pid),
+                || {
+                    let _ = exit_tx.send(true);
+                },
+                || drop(child.wait()),
+            );
         });
         let (Ok(Some(mut stdin)), Ok(Some(mut stdout)), Ok(Some(stderr))) = (stdin, stdout, stderr)
         else {
@@ -286,7 +302,7 @@ impl ControlClient {
         let mut parser = Parser::new();
         let mut buf = vec![0u8; 64 << 10];
         let mut leftover = Vec::new();
-        let deadline = tokio::time::Instant::now() + CONNECT_WAIT;
+        let deadline = tokio::time::Instant::now() + opts.wait;
         let reply = 'read: loop {
             let n = match tokio::time::timeout_at(deadline, stdout.read(&mut buf)).await {
                 Err(_) => {
@@ -294,7 +310,7 @@ impl ControlClient {
                     // If tmux said why on stderr, that is the better error.
                     return Err(match stderr_line(first_line).await {
                         Some(line) => ConnectError::Exited(line),
-                        None => ConnectError::Protocol("tmux didn't answer"),
+                        None => ConnectError::TimedOut,
                     });
                 }
                 Ok(Ok(0)) => return Err(exited_error(first_line).await),
@@ -407,12 +423,38 @@ impl ControlClient {
     }
 }
 
+/// The reaper's steps once `wait_exited` has returned (it retries an interrupted wait
+/// itself): `flag` raises the exited flag, `reap` reaps the child.
+/// - Seen exited: the flag goes up while the pid is still the child's (a zombie), then the
+///   child is reaped.
+/// - The wait failed: nothing says the child has exited. It is reaped first (a blocking
+///   wait), and only then is the flag raised, so the flag never says "exited" of a child
+///   that still runs. A pid reused in between would be the one gap, as before `WNOWAIT`.
+fn after_wait(waited: io::Result<()>, flag: impl FnOnce(), reap: impl FnOnce()) {
+    match waited {
+        Ok(()) => {
+            flag();
+            reap();
+        }
+        Err(e) => {
+            tracing::warn!("tmux's reaper couldn't watch for its exit: {}", e.kind());
+            reap();
+            flag();
+        }
+    }
+}
+
 /// Signals `pid` only while its reaper has not reported the exit, so a reused pid is
 /// never signalled.
 fn kill_unless_exited(pid: u32, exited: &watch::Receiver<bool>) {
-    if !*exited.borrow() {
+    // The read guard is held across the kill (R28): the reaper's `send(true)` waits for it,
+    // and so does the reap after that, so the pid can't be reaped and reused between the
+    // look and the signal.
+    let seen = exited.borrow();
+    if !*seen {
         kill_term(pid);
     }
+    drop(seen);
 }
 
 /// Reads stderr to its end, handing back the first line and discarding the rest.
@@ -662,6 +704,30 @@ fn file_error(shared: &Mutex<Shared>) {
 mod tests {
     use super::*;
 
+    /// The order of the reaper's steps after a wait that came back with `waited`.
+    fn reaper_steps(waited: io::Result<()>) -> Vec<&'static str> {
+        let steps = std::cell::RefCell::new(Vec::new());
+        after_wait(
+            waited,
+            || steps.borrow_mut().push("flag"),
+            || steps.borrow_mut().push("reap"),
+        );
+        steps.into_inner()
+    }
+
+    #[test]
+    fn a_seen_exit_is_flagged_before_the_reap() {
+        assert_eq!(reaper_steps(Ok(())), ["flag", "reap"]);
+    }
+
+    /// Code review (b1): a wait that failed says nothing about the child, so the flag waits
+    /// for the reap: never a false "exited" for a child that still runs.
+    #[test]
+    fn a_failed_wait_reaps_before_it_flags() {
+        let failed = io::Error::from(io::ErrorKind::InvalidInput);
+        assert_eq!(reaper_steps(Err(failed)), ["reap", "flag"]);
+    }
+
     #[test]
     fn version_ok_table() {
         for v in ["3.4", "3.4a", "3.8", "3.10", "4.0", "next-3.9", "master"] {
@@ -687,6 +753,11 @@ mod tests {
         let argv = ctl_argv(&["-L".into(), "x".into()]);
         assert_eq!(&argv[..4], ["-u", "-N", "-L", "x"].map(OsString::from));
         assert!(argv.iter().any(|a| a == "-C"));
+        // Two words, so tmux execs the shell itself and not through the user's.
+        assert_eq!(
+            argv[argv.len() - 2..],
+            ["/bin/sh", "-s"].map(OsString::from)
+        );
     }
 
     #[test]
