@@ -276,9 +276,13 @@ impl ControlClient {
         // (a zombie) until the flag is up, and only then reaps.
         let (exit_tx, exited) = watch::channel(false);
         std::thread::spawn(move || {
-            let _ = wait_exited(pid);
-            let _ = exit_tx.send(true);
-            drop(child.wait());
+            after_wait(
+                wait_exited(pid),
+                || {
+                    let _ = exit_tx.send(true);
+                },
+                || drop(child.wait()),
+            );
         });
         let (Ok(Some(mut stdin)), Ok(Some(mut stdout)), Ok(Some(stderr))) = (stdin, stdout, stderr)
         else {
@@ -414,6 +418,27 @@ impl ControlClient {
     #[doc(hidden)]
     pub fn child_pid(&self) -> u32 {
         self.pid
+    }
+}
+
+/// The reaper's steps once `wait_exited` has returned (it retries an interrupted wait
+/// itself): `flag` raises the exited flag, `reap` reaps the child.
+/// - Seen exited: the flag goes up while the pid is still the child's (a zombie), then the
+///   child is reaped.
+/// - The wait failed: nothing says the child has exited. It is reaped first (a blocking
+///   wait), and only then is the flag raised, so the flag never says "exited" of a child
+///   that still runs. A pid reused in between would be the one gap, as before `WNOWAIT`.
+fn after_wait(waited: io::Result<()>, flag: impl FnOnce(), reap: impl FnOnce()) {
+    match waited {
+        Ok(()) => {
+            flag();
+            reap();
+        }
+        Err(e) => {
+            tracing::warn!("tmux's reaper couldn't watch for its exit: {}", e.kind());
+            reap();
+            flag();
+        }
     }
 }
 
@@ -676,6 +701,30 @@ fn file_error(shared: &Mutex<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The order of the reaper's steps after a wait that came back with `waited`.
+    fn reaper_steps(waited: io::Result<()>) -> Vec<&'static str> {
+        let steps = std::cell::RefCell::new(Vec::new());
+        after_wait(
+            waited,
+            || steps.borrow_mut().push("flag"),
+            || steps.borrow_mut().push("reap"),
+        );
+        steps.into_inner()
+    }
+
+    #[test]
+    fn a_seen_exit_is_flagged_before_the_reap() {
+        assert_eq!(reaper_steps(Ok(())), ["flag", "reap"]);
+    }
+
+    /// Code review (b1): a wait that failed says nothing about the child, so the flag waits
+    /// for the reap: never a false "exited" for a child that still runs.
+    #[test]
+    fn a_failed_wait_reaps_before_it_flags() {
+        let failed = io::Error::from(io::ErrorKind::InvalidInput);
+        assert_eq!(reaper_steps(Err(failed)), ["reap", "flag"]);
+    }
 
     #[test]
     fn version_ok_table() {
