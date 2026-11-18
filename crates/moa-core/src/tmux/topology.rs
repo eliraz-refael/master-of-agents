@@ -212,6 +212,11 @@ impl Topology {
         self.cockpits.contains(&w)
     }
 
+    /// Records that `p` is tagged with session `id`, as moa just set it.
+    pub fn tag(&mut self, p: PaneId, id: SessionId) {
+        self.moa_sessions.insert(p, id);
+    }
+
     /// The moa session a pane was tagged with (`@moa_session`), if any.
     pub fn moa_session(&self, p: PaneId) -> Option<SessionId> {
         self.moa_sessions.get(&p).copied()

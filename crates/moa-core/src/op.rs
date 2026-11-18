@@ -360,6 +360,9 @@ pub struct Done {
     pub data: serde_json::Value,
 }
 
+/// What `sleep` is for, said when it is given neither names nor `--idle`.
+pub const SLEEP_USAGE: &str = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
+
 /// A refusal, as one human line.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OpError(pub String);

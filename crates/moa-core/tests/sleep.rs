@@ -24,7 +24,7 @@ use moa_core::publish::CoreEvent;
 use moa_core::sleep::why_not;
 use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
-use moa_core::tmux::ids::{ClientName, Generation, TmuxSessionId, WindowId};
+use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
 use moa_core::{Now, UtcMs};
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
@@ -631,9 +631,29 @@ fn an_idle_session_sleeps_at_its_deadline() {
     assert!(is_asleep(r.s()));
     assert!(r.st.binding(s_id()).is_none());
 
-    // Nothing more happens later.
+    // Nothing more happens later; a fired timer is never taken for an armed one.
     let fx = r.input(UtcMs(due.0 + HOUR), Input::Timer(TimerKey::Sleep));
     assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(sleep_timers(&fx), [&Effect::CancelTimer(TimerKey::Sleep)]);
+}
+
+/// The scheduler forgets a deadline when it fires. Should the core's clock read earlier than
+/// the deadline (a step back), the same deadline is armed again, not taken as still armed.
+#[test]
+fn a_timer_that_fires_early_is_armed_again() {
+    let mut r = World::new().up();
+    let due = r.due;
+    let fx = r.input(UtcMs(due.0 - 60_000), Input::Timer(TimerKey::Sleep));
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        sleep_timers(&fx),
+        [&Effect::SetTimer {
+            key: TimerKey::Sleep,
+            at: due
+        }]
+    );
+    // Any other input leaves an unchanged deadline alone.
+    let fx = r.input(UtcMs(due.0 - 30_000), Input::Timer(TimerKey::Clock));
     assert!(sleep_timers(&fx).is_empty(), "{fx:?}");
 }
 
@@ -826,6 +846,11 @@ fn sleep_by_name() {
     assert!(kills(&fx).is_empty(), "{fx:?}");
     assert!(is_asleep(r.s()));
     assert!(r.st.binding(s_id()).is_none());
+    // It is asleep, so a script reading `asleep` sees it.
+    let [(_, Ok(done))] = &replies(&fx)[..] else {
+        panic!("{fx:?}");
+    };
+    assert_eq!(done.data, json!({ "asleep": [S] }));
 
     // A name that matches nothing changes nothing.
     let mut r = World::new().up();
@@ -887,10 +912,12 @@ fn sleep_by_name_refuses_while_opening() {
     );
 }
 
-/// R18 reads a tab's tag from the topology, so a new tab is listed again after moa tags it,
-/// whatever listing was already on its way.
+/// R18 reads a tab's tag from the topology. The daemon sends a listing at once but holds the
+/// tag until the commit is released, so a listing can be older than the tag: the tag moa
+/// sent stays until a listing shows it, then the listings speak for it. A tag for a commit
+/// that wasn't saved is neither sent nor assumed (R15).
 #[test]
-fn a_new_tab_is_listed_again_once_tagged() {
+fn a_tag_moa_sent_outlives_an_older_listing() {
     let mut r = World::asleep().up();
     let op = Op::SessionOpen {
         path: r.b.home.join("work/lantern"),
@@ -901,35 +928,64 @@ fn a_new_tab_is_listed_again_once_tagged() {
         bg: true,
     };
     let id = the_open(&send(&r.b, &mut r.st, 1, op)).0;
-    let fx = feed(
-        &r.b,
+    let opened = |id| TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Open(id),
+        results: vec![Ok(vec!["P %7 4242".into()])],
+    };
+    feed(&r.b, &mut r.st, opened(id));
+    let later = UtcMs(r.b.now().wall.0 + 7 * HOUR);
+    let why = |r: &Rig| why_not(&r.st, id, later, SIX);
+    // A listing asked before the tag went out: the tab, untagged.
+    let mut panes = base_panes();
+    panes.truncate(1);
+    panes.push("P %7 @3 $0 1 0 0 0 ".into());
+    feed(&r.b, &mut r.st, lists(&panes));
+    // Tagged and listed: only its silence keeps it awake.
+    assert_eq!(why(&r), Some("never heard from"));
+    // A listing that shows the tag confirms it; from then on the listings say.
+    panes[1] = format!("P %7 @3 $0 1 0 0 0 {id}");
+    feed(&r.b, &mut r.st, lists(&panes));
+    assert_eq!(why(&r), Some("never heard from"));
+    panes[1] = "P %7 @3 $0 1 0 0 0 ".into();
+    feed(&r.b, &mut r.st, lists(&panes));
+    assert_eq!(why(&r), Some("not tagged"));
+
+    // The binding's commit is refused: no tag goes out, and none is assumed.
+    let mut r = World::asleep().up();
+    let op = Op::SessionOpen {
+        path: r.b.home.join("work/lantern"),
+        account: None,
+        title: None,
+        group: None,
+        prompt: None,
+        bg: true,
+    };
+    let id = the_open(&send(&r.b, &mut r.st, 1, op)).0;
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(r.st.session(id).unwrap().clone());
+    snap.conversations
+        .extend(r.st.conversations_of(id).cloned());
+    handle_checked(
         &mut r.st,
-        TmuxIn::Replies {
-            conn: 1,
-            token: TmuxToken::Open(id),
-            results: vec![Ok(vec!["P %7 4242".into()])],
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: Some(RefuseWrites {
+                until: UtcMs(later.0 + HOUR),
+                reason: "disk full".into(),
+            }),
         },
+        r.b.now(),
     );
-    let tagged = fx
-        .iter()
-        .position(|e| {
-            matches!(e, Effect::Tmux { token: None, cmds, .. }
-                if cmds.iter().any(|c| c.argv().iter().any(|a| a == "@moa_session")))
-        })
-        .unwrap_or_else(|| panic!("tagged: {fx:?}"));
-    let listed = fx
-        .iter()
-        .position(|e| {
-            matches!(
-                e,
-                Effect::Tmux {
-                    token: Some(TmuxToken::Refresh),
-                    ..
-                }
-            )
-        })
-        .unwrap_or_else(|| panic!("listed again: {fx:?}"));
-    assert!(tagged < listed, "{fx:?}");
+    let fx = feed(&r.b, &mut r.st, opened(id));
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(
+        !sent(&fx)
+            .iter()
+            .any(|c| c.argv().iter().any(|a| a == "@moa_session")),
+        "{fx:?}"
+    );
+    assert_eq!(r.st.tmux().topology.moa_session(PaneId(7)), None);
 }
 
 // --- the property ---

@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
-use moa_core::op::{Answer, NoParams, Op, TaskAdd, TaskSet};
+use moa_core::op::{Answer, NoParams, Op, SLEEP_USAGE, TaskAdd, TaskSet};
 
 /// What `moactl` parses: a global `--json` and one verb.
 #[derive(Parser, Debug)]
@@ -295,7 +295,6 @@ impl std::error::Error for VerbError {}
 
 const GROUP_USAGE: &str = "moactl group add PATH | group rename OLD NEW | group rm PATH";
 const TASK_ADD_USAGE: &str = "moactl task add PROJECT TITLE… [--who you|agent|other] [--due DATE] [--session ID] [--status S]";
-const SLEEP_USAGE: &str = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
 const TASK_SET_USAGE: &str = "moactl task set ID [--status S] [--title T] [--who W] [--due D] [--priority P] [--session ID] [--note N]";
 
 fn usage<T>(s: &str) -> Result<T, VerbError> {

@@ -80,7 +80,7 @@ pub fn why_not(state: &State, id: SessionId, now: UtcMs, after_ms: i64) -> Optio
 /// The earliest moment after `now` a session could be due (R19): among live, idle sessions
 /// with a tracked tab on this server, `activity_at` (else `created_at`) plus the threshold.
 /// `None` when there is none, or the brain never sleeps.
-pub fn deadline(state: &State, now: UtcMs) -> Option<UtcMs> {
+pub(crate) fn deadline(state: &State, now: UtcMs) -> Option<UtcMs> {
     let after = threshold(state)?;
     state
         .sessions()
@@ -100,8 +100,12 @@ pub fn deadline(state: &State, now: UtcMs) -> Option<UtcMs> {
 
 /// Puts every due, eligible session to sleep in one commit, with one line about it from the
 /// brain, then kills their tabs (R15, R20). Then arms the timer at the next deadline, or
-/// cancels it, when that changed. `handle` runs it at the end of every input.
-pub(crate) fn run(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+/// cancels it, when that changed or when this input is the timer firing (`fired`: the
+/// scheduler has forgotten it). `handle` runs it at the end of every input.
+pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect>) {
+    if fired {
+        state.sleep_at = None;
+    }
     let Some(after) = threshold(state) else {
         return;
     };
@@ -117,7 +121,7 @@ pub(crate) fn run(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
         }
     }
     let next = deadline(state, now.wall);
-    if next != state.sleep_at {
+    if next != state.sleep_at || fired {
         state.sleep_at = next;
         fx.push(match next {
             Some(at) => Effect::SetTimer {
@@ -162,6 +166,14 @@ fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effec
         .ui_by(state, changes, vec![text], ActivityWho::Brain)
         .is_err()
     {
+        // Unsaved: nothing is killed, and the next input tries again.
+        fx.push(Effect::Log(LogLine {
+            level: LogLevel::Warn,
+            message: format!(
+                "putting {} idle sessions to sleep wasn't saved; moa tries again",
+                names.len()
+            ),
+        }));
         return;
     }
     for pane in panes {

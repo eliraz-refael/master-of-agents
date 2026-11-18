@@ -25,11 +25,12 @@ use crate::{Now, UtcMs};
 /// The effects of one input. Persist first, then what people hear about it.
 pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     state.set_now(now.wall);
+    let sleep_fired = matches!(input, Input::Timer(TimerKey::Sleep));
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
     // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
-    sleep::run(state, &now, &mut fx);
+    sleep::run(state, &now, sleep_fired, &mut fx);
     // Last, so the status line shows what this input saved, after its `Persist`.
     status::run(state, &now, &mut fx);
     fx

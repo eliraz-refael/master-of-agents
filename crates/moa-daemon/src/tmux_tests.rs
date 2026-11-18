@@ -1053,6 +1053,83 @@ async fn an_open_whose_commit_fails_starts_no_tab() {
     core.stop().await;
 }
 
+/// R15 for a new tab's tag: the `set-option @moa_session` waits for the binding's commit, so
+/// when the store refuses that commit, no tag reaches the link (the listings it asked for at
+/// once may still go: they change nothing).
+#[tokio::test]
+async fn a_binding_whose_commit_fails_tags_nothing() {
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let (core, mut rx) = opening_core(&brain, &time).await;
+    let (c, mut replies) = core.open_conn();
+    core.send(
+        c,
+        moa_core::op::ReqId(1),
+        CallerInfo::default(),
+        open_lantern(&brain),
+    );
+    let id = timeout(PATIENCE, async {
+        loop {
+            if let Some(id) = opened_id(&rx.recv().await.expect("the link is held")) {
+                return id;
+            }
+        }
+    })
+    .await
+    .expect("the new window is sent");
+    core.barrier().await;
+    core.store_fault(Fault::FailNextCommit);
+    core.tmux_input(TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Open(id),
+        results: vec![Ok(vec!["P %7 4242".into()])],
+    });
+    let (req, _) = timeout(PATIENCE, replies.recv()).await.unwrap().unwrap();
+    assert_eq!(req, moa_core::op::ReqId(1));
+    core.barrier().await;
+    let tags = |cmd: &TmuxCmd| match cmd {
+        TmuxCmd::Send { cmds, .. } => cmds
+            .iter()
+            .any(|c| c.name() == "set-option" && c.argv().iter().any(|a| a == "@moa_session")),
+        _ => false,
+    };
+    assert!(
+        !sent(&mut rx).iter().any(tags),
+        "a tab was tagged for a binding that wasn't saved"
+    );
+    assert_eq!(core.stats().commit_failures.load(Ordering::SeqCst), 1);
+
+    // Saved, the same answer tags the tab.
+    core.send(
+        c,
+        moa_core::op::ReqId(2),
+        CallerInfo::default(),
+        open_lantern(&brain),
+    );
+    let id = timeout(PATIENCE, async {
+        loop {
+            if let Some(id) = opened_id(&rx.recv().await.expect("the link is held")) {
+                return id;
+            }
+        }
+    })
+    .await
+    .expect("the new window is sent");
+    core.tmux_input(TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Open(id),
+        results: vec![Ok(vec!["P %8 4343".into()])],
+    });
+    let (req, result) = timeout(PATIENCE, replies.recv()).await.unwrap().unwrap();
+    assert_eq!(req, moa_core::op::ReqId(2));
+    assert!(result.is_ok(), "{result:?}");
+    core.barrier().await;
+    assert!(sent(&mut rx).iter().any(tags), "the saved tab is tagged");
+    // The link is a channel, which never answers its stop: closing it skips the wait.
+    drop(rx);
+    core.stop().await;
+}
+
 /// `tmux.ensure` on a core with a real link, answered with whether the server runs.
 async fn ensure_running(
     core: &CoreHandle,

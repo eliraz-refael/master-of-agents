@@ -9,7 +9,7 @@ use crate::core::Tx;
 use crate::live::{display_state, is_asleep, spike_state};
 use crate::model::{Group, Lifecycle, Session, SessionId, normalize_group_path};
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
-use crate::op::{Done, OpError};
+use crate::op::{Done, OpError, SLEEP_USAGE};
 use crate::reconcile::agent_runs;
 use crate::sleep::{kill_pane, put_to_sleep, why_not};
 use crate::state::State;
@@ -22,8 +22,6 @@ use crate::tmux::link::ready;
 const TITLE_CUT: usize = 40;
 
 const STILL_OPENING: &str = "it's still opening; try again in a moment";
-
-const SLEEP_USAGE: &str = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
 
 pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
     let recent = days_ago(now, 2);
@@ -310,7 +308,6 @@ pub(crate) fn sleep(
         match kill_checked(state, id) {
             Ok(pane) => {
                 panes.extend(pane);
-                slept.push(id);
                 if let Some(s) = state.session(id) {
                     names.push(title_of(state, s));
                 }
@@ -318,6 +315,8 @@ pub(crate) fn sleep(
             // An adopted agent that left its tab: asleep, and the tab left to the user.
             Err(gone) => said.push(gone.0),
         }
+        // Asleep either way, so `asleep` lists it.
+        slept.push(id);
         changes.extend(put_to_sleep(state, tx, id));
     }
     // One commit: a refusal leaves every session as it was.

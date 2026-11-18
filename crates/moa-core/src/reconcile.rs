@@ -266,6 +266,7 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
             tx.tmux(set_pane_option(pane, "@moa_adopted", "1"));
         }
         tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
+        state.tmux.tag_sent(pane, id);
     }
     state.tmux.set_reconciled();
     let mut fx = vec![log(

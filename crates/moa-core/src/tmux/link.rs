@@ -131,6 +131,11 @@ pub struct TmuxState {
     pub(crate) unfinished_reconciles: u32,
     /// This connection's reconciles were given up on, and the log said so.
     pub(crate) reconcile_given_up: bool,
+    /// The `@moa_session` tags moa sent after a saved commit that no listing has shown yet,
+    /// by pane. The daemon sends a listing at once but holds the tag until the commit is
+    /// released, so a listing can predate the tag: these stay in the topology until one
+    /// shows it (R18 reads the tag).
+    sent_tags: BTreeMap<PaneId, SessionId>,
 }
 
 /// What a pane query was asked for: who reads its answer.
@@ -226,6 +231,7 @@ impl Default for TmuxState {
             reconciled: false,
             unfinished_reconciles: 0,
             reconcile_given_up: false,
+            sent_tags: BTreeMap::new(),
         }
     }
 }
@@ -408,6 +414,8 @@ impl TmuxState {
     /// among those the reload dropped, so its flag goes too.
     pub(crate) fn reload(&mut self) -> Vec<Effect> {
         self.refresh = Refresh::Idle;
+        // A failed commit's held tags were never sent; the refresh below shows the rest.
+        self.sent_tags.clear();
         self.written.reset();
         self.reconciled = false;
         // The ping out may have been lost with the handling that sent it: its callers wait
@@ -662,10 +670,11 @@ impl TmuxState {
         fx
     }
 
-    /// Reads the lists again, after the commands already sent: a tab moa just tagged shows
-    /// its tag in the topology (R18 reads it).
-    pub(crate) fn refresh_after_tagging(&mut self) -> Vec<Effect> {
-        self.refresh()
+    /// Moa tagged `pane` with session `id`, after a saved commit: the topology knows it at
+    /// once, and keeps it through listings that don't show it yet.
+    pub(crate) fn tag_sent(&mut self, pane: PaneId, id: SessionId) {
+        self.sent_tags.insert(pane, id);
+        self.topology.tag(pane, id);
     }
 
     /// Reads the lists again, at most one in flight and one more after it.
@@ -705,6 +714,7 @@ impl TmuxState {
             self.refresh = Refresh::Idle;
             self.unping();
             self.reconciled = false;
+            self.sent_tags.clear();
             self.unfinished_reconciles = 0;
             self.reconcile_given_up = false;
         }
@@ -750,6 +760,7 @@ impl TmuxState {
             _ => Link::Down,
         };
         self.topology = Topology::default();
+        self.sent_tags.clear();
         self.written.reset();
         self.refresh = Refresh::Idle;
         // Nobody is known to be attached any more: the status clock stops.
@@ -819,6 +830,17 @@ impl TmuxState {
         match results {
             [Ok(sessions), Ok(panes), Ok(clients)] => {
                 self.topology = Topology::from_lists(sessions, panes, clients);
+                // A tag the listing shows (or another one it shows instead) is the listing's
+                // from now on; one it doesn't show yet may have been sent after it was asked.
+                let topology = &mut self.topology;
+                self.sent_tags
+                    .retain(|pane, id| match topology.moa_session(*pane) {
+                        Some(_) => false,
+                        None => {
+                            topology.tag(*pane, *id);
+                            true
+                        }
+                    });
             }
             // No information: what was known stays.
             _ => fx.push(log(
