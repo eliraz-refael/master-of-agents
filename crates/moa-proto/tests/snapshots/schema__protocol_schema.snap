@@ -431,6 +431,52 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Takes on the agent running in tab `pane` (`%N`), started outside moa, as a session moa\ndoesn't track: it shows alive or not, and never sleeps on its own. Its conversation is\n`id`, else the one its command names, else the newest it wrote.",
+            "properties": {
+              "method": {
+                "const": "session.adopt",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "group": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "pane": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "pane"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is\nnamed after `title`, else the folder.",
             "properties": {
               "method": {

@@ -16,6 +16,7 @@ use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::ops::adopt::AdoptArgs;
 use crate::ops::launch::ResumeAsk;
 use crate::state::State;
 
@@ -145,6 +146,12 @@ pub(crate) enum Asked {
     /// A resume whose checks passed, looking for a tab that already runs its conversation
     /// (R13 step 6).
     Resume(ResumeAsk),
+    /// An adopt, looking at the tabs before it takes one on (R21).
+    Adopt {
+        conn: ConnId,
+        req: ReqId,
+        args: AdoptArgs,
+    },
     /// A terminal's new window (R16), named `name` and opened in `path`: its tab is tagged
     /// and brought to the screen once tmux says which pane it has. `reply` is whom to
     /// answer: nobody, once the caller's connection closed, though the tab still gets its
@@ -480,13 +487,16 @@ impl TmuxState {
                 .any(|a| matches!(a, Asked::Resume(r) if r.checked.id == id))
     }
 
-    /// `conn` closed: its ensures, resumes still looking at the tabs and focus waiters are
-    /// forgotten, and its launches and terminals go on with nobody to answer.
+    /// `conn` closed: its ensures, resumes and adopts still looking at the tabs and focus
+    /// waiters are forgotten, and its launches and terminals go on with nobody to answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
         self.waiters.retain(|(c, _)| *c != conn);
         self.pinged.retain(|(c, _)| *c != conn);
-        self.queries
-            .retain(|_, a| !matches!(a, Asked::Resume(r) if r.conn == conn));
+        self.queries.retain(|_, a| match a {
+            Asked::Resume(r) => r.conn != conn,
+            Asked::Adopt { conn: c, .. } => *c != conn,
+            Asked::Reconcile | Asked::Term { .. } => true,
+        });
         for asked in self.queries.values_mut() {
             if let Asked::Term { reply, .. } = asked
                 && matches!(reply, Some((c, _)) if *c == conn)

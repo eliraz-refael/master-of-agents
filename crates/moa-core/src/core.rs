@@ -132,23 +132,37 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
             fx.extend(state.tmux.input(t));
-            // Reconcile reads its listing, a resume its own and a terminal its new tab, once
-            // the link is as the input left it.
+            // Reconcile reads its listing, a resume or an adopt its own and a terminal its
+            // new tab, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
+            let mut adopts = Vec::new();
             for (asked, answer) in answers {
                 match asked {
                     Asked::Reconcile => reconciles.push(answer),
                     Asked::Resume(ask) => resumes.push((ask, answer)),
+                    Asked::Adopt { conn, req, args } => adopts.push((conn, req, args, answer)),
                     Asked::Term { reply, name, path } => terms.push((reply, name, path, answer)),
                 }
             }
-            let mut more = reconcile::answered(state, now, reconciles, replied);
-            for (ask, answer) in resumes {
-                let panes = answer.and_then(|lists| match lists.as_slice() {
+            let panes_of = |answer: link::Answer| {
+                answer.and_then(|lists| match lists.as_slice() {
                     [info, start] => Ok(parse_panes(info, start)),
                     _ => Err(()),
-                });
-                more.extend(ops::launch::resumed(state, now, ask, panes));
+                })
+            };
+            let mut more = reconcile::answered(state, now, reconciles, replied);
+            for (ask, answer) in resumes {
+                more.extend(ops::launch::resumed(state, now, ask, panes_of(answer)));
+            }
+            for (conn, req, args, answer) in adopts {
+                more.extend(ops::adopt::adopted(
+                    state,
+                    now,
+                    conn,
+                    req,
+                    &args,
+                    panes_of(answer),
+                ));
             }
             for (reply, name, path, answer) in terms {
                 more.extend(ops::launch::term_opened(
@@ -299,6 +313,19 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::SessionResume { q, bg },
             ..
         } => ops::launch::start_resume(state, now, conn, req, &q, !bg, false),
+        // Answered at once, or after one pane query (R21).
+        Input::Client {
+            conn,
+            req,
+            op:
+                Op::SessionAdopt {
+                    pane,
+                    title,
+                    group,
+                    id,
+                },
+            ..
+        } => ops::adopt::start(state, conn, req, &pane, title, group, id),
         Input::Client {
             conn,
             req,

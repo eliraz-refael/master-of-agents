@@ -153,7 +153,8 @@ str_enum!(AskStatus, ask_status_round_trips, "ask status", {
 str_enum!(ActivityWho, activity_who_round_trips, "activity who",
     { Brain => "brain", Session => "session", You => "you" });
 str_enum!(ConversationReason, conversation_reason_round_trips, "conversation reason", {
-    Start => "start", Clear => "clear", Fork => "fork", Resume => "resume", Import => "import" });
+    Start => "start", Clear => "clear", Fork => "fork", Resume => "resume", Import => "import",
+    Adopt => "adopt" });
 str_enum!(ThreadKind, thread_kind_round_trips, "thread kind", { Daily => "daily", Manual => "manual" });
 
 // ---------- group paths ----------

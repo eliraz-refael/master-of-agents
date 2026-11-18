@@ -168,6 +168,11 @@ pub struct Deps {
     pub transcript: fn(&Path, &str) -> TranscriptCheck,
     /// Whether a folder exists (`Path::is_dir`): a resume refuses one that is gone.
     pub is_dir: fn(&Path) -> bool,
+    /// The newest conversation an agent in a folder wrote in a store, leaving out the ids
+    /// given and any transcript last written before a moment
+    /// (`moa_agents::claude::newest_conversation`): directory reads only, for `adopt` when the
+    /// agent's argv names none (R21).
+    pub newest_conversation: fn(&Path, &Path, &[String], Option<UtcMs>) -> Option<String>,
 }
 
 fn identity(p: &Path) -> PathBuf {
@@ -199,6 +204,7 @@ impl Default for Deps {
             inspect: |_, _| None,
             transcript: |_, _| TranscriptCheck::Present(PathBuf::new()),
             is_dir: |_| true,
+            newest_conversation: |_, _, _, _| None,
         }
     }
 }

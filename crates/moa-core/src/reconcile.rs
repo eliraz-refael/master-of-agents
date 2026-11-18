@@ -258,15 +258,9 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
             "reconciling the tabs wasn't saved; moa asks again".to_string(),
         )];
     }
-    // A new binding's tab is tagged with its session, so the next reconcile knows it. An
-    // adopted tab is marked first: a link lost between the two then leaves an adopted tab
-    // with no session, never one that looks tracked.
+    // A new binding's tab is tagged with its session, so the next reconcile knows it.
     for (pane, id, adopted) in to_tag {
-        if adopted {
-            tx.tmux(set_pane_option(pane, "@moa_adopted", "1"));
-        }
-        tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
-        state.tmux.tag_sent(pane, id);
+        tag_pane(state, &mut tx, pane, id, adopted);
     }
     state.tmux.set_reconciled();
     let mut fx = vec![log(
@@ -275,6 +269,17 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     )];
     fx.extend(post_commit(state, tx));
     fx
+}
+
+/// Tags `pane` with session `id` once `tx`'s commit is saved (R15), and marks it adopted
+/// first when `adopted`: a link lost between the two then leaves an adopted tab with no
+/// session, never one that looks tracked. The topology knows the tag at once (R18 reads it).
+pub(crate) fn tag_pane(state: &mut State, tx: &mut Tx, pane: PaneId, id: SessionId, adopted: bool) {
+    if adopted {
+        tx.tmux(set_pane_option(pane, "@moa_adopted", "1"));
+    }
+    tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
+    state.tmux.tag_sent(pane, id);
 }
 
 /// The link found no server (R2, R4): no pane is left, so every binding goes, and every

@@ -1,6 +1,7 @@
 //! One handler per verb. Every handler validates its input, builds its changes, then makes
 //! one `tx.commit`: an `Err` has applied nothing.
 
+pub mod adopt;
 pub mod groups;
 pub mod launch;
 pub mod projects;
@@ -63,6 +64,7 @@ pub(crate) fn run(
         | Op::SessionOpen { .. }
         | Op::SessionFocus { .. }
         | Op::SessionResume { .. }
+        | Op::SessionAdopt { .. }
         | Op::TermOpen { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),

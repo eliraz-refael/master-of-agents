@@ -9,7 +9,8 @@ use std::path::{Component, Path, PathBuf};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
-use moa_core::op::{Answer, NoParams, Op, SLEEP_USAGE, TaskAdd, TaskSet};
+use moa_core::op::{ADOPT_USAGE, Answer, NoParams, Op, SLEEP_USAGE, TaskAdd, TaskSet};
+use moa_core::tmux::ids::PaneId;
 
 /// What `moactl` parses: a global `--json` and one verb.
 #[derive(Parser, Debug)]
@@ -193,7 +194,7 @@ pub enum Verb {
         #[arg(long)]
         pane: Option<String>,
     },
-    /// Adopt a running pane as a session.
+    /// Adopt an agent running in a tab.
     Adopt {
         pane: String,
         #[arg(long)]
@@ -523,9 +524,24 @@ impl Verb {
                 path: resolve_path(path.as_deref().unwrap_or("."), ctx)?,
                 title: title.clone(),
             },
+            Verb::Adopt {
+                pane,
+                title,
+                group,
+                id,
+            } => {
+                if pane.parse::<PaneId>().is_err() {
+                    return usage(ADOPT_USAGE);
+                }
+                Op::SessionAdopt {
+                    pane: pane.clone(),
+                    title: title.clone(),
+                    group: group.clone(),
+                    id: id.clone(),
+                }
+            }
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Adopt { .. }
-            | Verb::Goto { .. }
+            Verb::Goto { .. }
             | Verb::Layout { .. }
             | Verb::Peers
             | Verb::Ask { .. }
