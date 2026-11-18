@@ -158,9 +158,9 @@ fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effec
     if changes.is_empty() {
         return;
     }
+    let (n, s) = (names.len(), if names.len() > 1 { "s" } else { "" });
     let text = format!(
-        "💤 put {} idle sessions to sleep: {} · resume from the tree",
-        names.len(),
+        "💤 put {n} idle session{s} to sleep: {} · resume from the tree",
         names.join(", ")
     );
     if tx
@@ -170,10 +170,7 @@ fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effec
         // Unsaved: nothing is killed, and the next input tries again.
         fx.push(log(
             LogLevel::Warn,
-            format!(
-                "putting {} idle sessions to sleep wasn't saved; moa tries again",
-                names.len()
-            ),
+            format!("putting {n} idle session{s} to sleep wasn't saved; moa tries again"),
         ));
         return;
     }
@@ -182,7 +179,7 @@ fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effec
     }
     let mut more = vec![log(
         LogLevel::Info,
-        format!("{} idle sessions went to sleep", names.len()),
+        format!("{n} idle session{s} went to sleep"),
     )];
     more.extend(post_commit(state, tx));
     fold_in(fx, more);

@@ -151,7 +151,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 more.extend(ops::launch::resumed(state, now, ask, panes));
             }
             for (reply, name, path, answer) in terms {
-                more.extend(ops::launch::term_opened(state, reply, &name, &path, answer));
+                more.extend(ops::launch::term_opened(
+                    state, reply, &name, &path, answer, replied,
+                ));
             }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));

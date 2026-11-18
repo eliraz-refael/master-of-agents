@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use moa_core::UtcMs;
 use moa_core::change::Change;
-use moa_core::effect::{Effect, Input, Publish, RefuseWrites, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{
+    Down, Effect, Input, Publish, RefuseWrites, TmuxIn, TmuxToken, handle_checked,
+};
 use moa_core::hook::{HookEnvelope, HookKind};
 use moa_core::live::is_asleep;
 use moa_core::model::{
@@ -686,6 +688,64 @@ fn a_term_tmux_refuses_says_so() {
             Err(OpError("couldn't open a terminal; see moa's log".into()))
         )]
     );
+}
+
+fn logs(fx: &[Effect]) -> Vec<String> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(l.message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// tmux refusing the window is logged as a refusal, not as an answer that didn't parse.
+#[test]
+fn a_term_tmux_refuses_is_logged_as_refused() {
+    let (b, mut st) = linked();
+    let fx = send(&b, &mut st, 1, term_op(b.home.join("work"), None));
+    let (n, _) = the_query(&fx);
+    let fx = feed(
+        &b,
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: vec![Err("create window failed".into())],
+        },
+    );
+    let logs = logs(&fx);
+    assert!(
+        logs.iter()
+            .any(|l| l == "tmux couldn't open a terminal's tab"),
+        "{logs:?}"
+    );
+    assert!(!logs.iter().any(|l| l.contains("parse")), "{logs:?}");
+}
+
+/// The link going down before tmux answers is said as a launch says it, and logged as what
+/// happened.
+#[test]
+fn a_term_whose_terminal_went_away_says_so() {
+    let (b, mut st) = linked();
+    let fx = send(&b, &mut st, 1, term_op(b.home.join("work"), None));
+    the_query(&fx);
+    let fx = feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Err(OpError("moa's terminal went away before it opened".into()))
+        )]
+    );
+    let logs = logs(&fx);
+    assert!(
+        logs.iter()
+            .any(|l| l == "moa's terminal went away before a terminal's tab opened"),
+        "{logs:?}"
+    );
+    assert!(!logs.iter().any(|l| l.contains("parse")), "{logs:?}");
 }
 
 #[test]

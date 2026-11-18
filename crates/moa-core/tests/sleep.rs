@@ -601,7 +601,7 @@ fn an_idle_session_sleeps_at_its_deadline() {
             .any(|c| matches!(c, Change::DeletePaneBinding(id) if *id == s_id())),
         "{fx:?}"
     );
-    let line = format!("💤 put 1 idle sessions to sleep: {TITLE} · resume from the tree");
+    let line = format!("💤 put 1 idle session to sleep: {TITLE} · resume from the tree");
     let rows: Vec<_> = saved
         .iter()
         .filter_map(|c| match c {

@@ -1032,14 +1032,31 @@ pub(crate) fn term(
 /// tmux answered a terminal's new window: its tab is tagged as a terminal with its label
 /// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen.
 /// Nothing is saved, so the commands go out on their own, before the reply. A caller that
-/// went has nobody to tell, and the tab is still tagged.
+/// went has nobody to tell, and the tab is still tagged. `replied` is whether tmux answered:
+/// otherwise the link went before it did, and the answer says so as a launch's does.
 pub(crate) fn term_opened(
     state: &State,
     reply: Option<(ConnId, ReqId)>,
     name: &str,
     path: &str,
     answer: Answer,
+    replied: bool,
 ) -> Vec<Effect> {
+    if !replied {
+        let mut fx = vec![log(
+            LogLevel::Info,
+            "moa's terminal went away before a terminal's tab opened".into(),
+        )];
+        if let Some((conn, req)) = reply {
+            fx.push(Effect::Reply {
+                conn,
+                req,
+                result: Err(OpError(WENT_AWAY.into())),
+            });
+        }
+        return fx;
+    }
+    let refused = answer.is_err();
     let pane = answer.ok().and_then(|lists| match lists.as_slice() {
         [lines] => match lines.as_slice() {
             [line] => opened_pane(line),
@@ -1070,9 +1087,11 @@ pub(crate) fn term_opened(
             })
         }
         _ => {
-            fx.push(warn(
-                "tmux didn't open a terminal's tab, or its answer didn't parse".into(),
-            ));
+            fx.push(warn(if refused {
+                "tmux couldn't open a terminal's tab".into()
+            } else {
+                "tmux's answer about a terminal's tab didn't parse".into()
+            }));
             Err(OpError(NO_SHELL.into()))
         }
     };

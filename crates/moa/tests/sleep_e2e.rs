@@ -83,7 +83,7 @@ fn an_idle_session_goes_to_sleep_on_its_own() {
     let rows = activity(&tb);
     assert!(
         rows.lines()
-            .any(|l| l.starts_with("💤 put 1 idle sessions to sleep: ")
+            .any(|l| l.starts_with("💤 put 1 idle session to sleep: ")
                 && l.ends_with(" · resume from the tree")),
         "{rows}"
     );
