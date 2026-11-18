@@ -8,6 +8,8 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use moa_platform::pid_alive;
+use moa_platform::proc::{self, Reader};
 use moa_testkit::{
     FakeStep, TempBrain, Terminal, fake_claude_named_claude, wait_for, write_script,
 };
@@ -235,6 +237,30 @@ impl Rig {
         assert_eq!(t.label, "⌨ b", "{t:?}");
     }
 
+    /// The pid of the fake-claude typed in tab `pane`: the child of its shell that runs
+    /// [`CONV`], read in-process as moa reads it.
+    #[track_caller]
+    fn agent_in(&self, pane: &str) -> u32 {
+        let shell: u32 = tmux(
+            &self.tb,
+            &["display-message", "-p", "-t", pane, "#{pane_pid}"],
+        )
+        .parse()
+        .unwrap();
+        let mut reader = Reader::new();
+        let found = proc::children(shell).into_iter().find(|&kid| {
+            reader
+                .args(kid)
+                .is_some_and(|a| a.argv.iter().any(|arg| arg == CONV))
+        });
+        found.unwrap_or_else(|| {
+            panic!(
+                "no fake-claude under {shell}\n{}",
+                tab_shows(&self.tb, pane)
+            )
+        })
+    }
+
     fn launches(&self) -> u64 {
         status_json(&self.tb)["launches"].as_u64().unwrap()
     }
@@ -257,6 +283,8 @@ fn an_agent_typed_in_a_shell_can_be_adopted_and_restarted() {
         .and_then(|rest| rest.strip_suffix(" tracks it"))
         .unwrap_or_else(|| panic!("no restart line: {ls}"))
         .to_string();
+
+    let typed = r.agent_in(&pane);
 
     // fake-claude reads its script from its folder at each launch.
     write_script(&dir, &[start("resume"), FakeStep::Hang]);
@@ -281,6 +309,13 @@ fn an_agent_typed_in_a_shell_can_be_adopted_and_restarted() {
         )
     });
     assert_ne!(new, pane);
+    // The typed fake-claude went with its tab. Its shell's parent or init reaps it, so
+    // the wait covers that too.
+    let ended = wait_for(SHOWS, || (!pid_alive(typed)).then_some(()));
+    assert!(
+        ended.is_some(),
+        "the typed fake-claude ({typed}) still runs"
+    );
 
     // Its SessionStart came through moa's hooks: tracked, and idle.
     let context = dir.join(".fake-claude.context");

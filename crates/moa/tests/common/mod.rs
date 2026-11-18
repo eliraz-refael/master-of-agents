@@ -9,7 +9,7 @@ use std::process::Output;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use moa_testkit::{TempBrain, Terminal, fake_claude, fake_claude_named_claude, wait_for};
+use moa_testkit::{TempBrain, Terminal, fake_claude, wait_for};
 use serde_json::Value;
 
 pub const MOA: &str = env!("CARGO_BIN_EXE_moa");
@@ -193,7 +193,8 @@ pub fn clients_become(tb: &TempBrain, want: &[&str]) {
 /// conversation `conv`, as a user starts an agent by hand: `CLAUDE_CONFIG_DIR` set to
 /// `acct-a`'s store, `--resume conv`, and no moa environment, so it sends no hooks. Its
 /// script is `dir`'s. Returns the tab's `%N` once the agent has written its transcript (R34),
-/// so it is running.
+/// so it is running. The root's `bin/claude` must already be fake-claude
+/// (`moa_testkit::fake_claude_named_claude`), as the launcher of a root these tests use is.
 ///
 /// The tab runs the server's `default-shell`, `/bin/sh` here ([`TempBrain::env`]), with
 /// `HOME` the root, so no developer's shell config takes part; the typed line is plain POSIX.
@@ -202,9 +203,7 @@ pub fn fake_shell_agent(tb: &TempBrain, dir: &Path, conv: &str) -> String {
     let shell = tmux(tb, &["show-options", "-gv", "default-shell"]);
     assert_eq!(shell, "/bin/sh", "a terminal tab would run another shell");
     let claude = tb.root().join("bin/claude");
-    if !claude.exists() {
-        fake_claude_named_claude(tb.root());
-    }
+    assert!(claude.exists(), "no fake-claude named claude in the root");
     let o = run_exe(
         tb,
         &moactl(tb),
@@ -254,7 +253,7 @@ pub fn tab_shows(tb: &TempBrain, pane: &str) -> String {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{pane_id} dead=#{pane_dead} #{pane_current_command} \
+                "#{pane_id} pid=#{pane_pid} dead=#{pane_dead} #{pane_current_command} \
                  session=#{@moa_session} term=#{@moa_term}",
             ],
         )

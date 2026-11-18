@@ -172,8 +172,8 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
                         continue;
                     }
                 }
-                // A terminal not marked adopted yet (a link lost between the two tags) is
-                // marked now.
+                // A terminal with a session tag but no adopted mark (one moa didn't set:
+                // `tag_pane` marks first, `untag_pane` unmarks last) is marked now.
                 if info.term && !info.adopted {
                     to_tag.push((info.pane, id, true));
                 }

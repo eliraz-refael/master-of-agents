@@ -507,15 +507,20 @@ fn an_agent_without_moa_session_rebinds_untracked() {
 }
 
 /// D ended by a lost `open`, its agent typed in terminal %9, untagged.
-fn with_d_in_terminal_9(inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> Rig {
+fn with_d_in_terminal_9(inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> (Rig, Vec<Effect>) {
     let mut w = World::new();
     w.add(D).lifecycle = Lifecycle::Ended;
     let mut r = w.drained(inspect);
     r.connect(G1);
     let mut lines = abc(&r.b);
     lines.push(terminal(9, "", &cwd(&r.b, D)));
-    r.listed(&lines, &[]);
-    r
+    let fx = r.listed(&lines, &[]);
+    (r, fx)
+}
+
+/// `@moa_adopted 1` on `%9`.
+fn mark_9() -> Cmd {
+    Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_adopted", "1"])
 }
 
 /// A terminal moa opened is where an agent is typed by hand: one running a conversation moa
@@ -525,16 +530,20 @@ fn with_d_in_terminal_9(inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> Rig
 #[test]
 fn an_agent_typed_in_a_terminal_rebinds_untracked() {
     for inspect in [d_without_moa_session, d_with_moa_session] {
-        let r = with_d_in_terminal_9(inspect);
+        let (r, fx) = with_d_in_terminal_9(inspect);
         assert!(r.is_live(D));
         let b = r.bound_to(D).unwrap();
         assert_eq!(b.pane_id, "%9");
         assert!(!b.tracked);
+        // Marked adopted and tagged, as a shell tab's untracked rebind is.
+        assert!(after_persist(&fx, &mark_9()), "{fx:?}");
+        assert!(after_persist(&fx, &set_tag(9, D)), "{fx:?}");
     }
 }
 
-/// A terminal tagged with a session but not marked adopted (a link lost between the two
-/// tags) is bound by its tag only while its agent runs there, untracked, and marked then.
+/// A terminal with a session tag but no adopted mark (moa never leaves one so: something
+/// else set the tag) is bound by its tag only while its agent runs there, untracked, and
+/// marked then.
 #[test]
 fn a_tagged_terminal_is_bound_only_while_its_agent_runs() {
     for runs in [false, true] {
@@ -552,8 +561,7 @@ fn a_tagged_terminal_is_bound_only_while_its_agent_runs() {
         let fx = r.listed(&lines, &[]);
         assert_eq!(r.is_live(D), runs);
         assert_eq!(r.bound_to(D).map(|b| b.tracked), runs.then_some(false));
-        let mark = Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_adopted", "1"]);
-        assert_eq!(after_persist(&fx, &mark), runs, "{fx:?}");
+        assert_eq!(after_persist(&fx, &mark_9()), runs, "{fx:?}");
     }
 }
 
