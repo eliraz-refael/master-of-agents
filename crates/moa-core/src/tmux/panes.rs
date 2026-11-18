@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use super::cmd::Cmd;
 use super::ids::{Generation, PaneId};
 use crate::model::{PaneBinding, SessionId};
+use crate::state::State;
 
 /// One line per pane: its id, process, whether it is dead, moa's tags on it, and its folder.
 /// The folder is last, so a tab in it stays in it.
@@ -194,4 +195,23 @@ pub fn holds(b: &PaneBinding, generation: Generation, info: Option<&PaneInfo>) -
             Tag::Session(id) => id == b.session_id,
             Tag::Other => false,
         }
+}
+
+/// The pane `b` names, as `panes` lists it.
+pub fn listed<'p>(b: &PaneBinding, panes: &'p [PaneInfo]) -> Option<&'p PaneInfo> {
+    let pane: PaneId = b.pane_id.parse().ok()?;
+    panes.iter().find(|p| p.pane == pane)
+}
+
+/// The bindings that still hold their pane in `panes`, a listing of the server at
+/// `generation` ([`holds`]).
+pub(crate) fn kept_bindings<'s>(
+    state: &'s State,
+    generation: Generation,
+    panes: &[PaneInfo],
+) -> Vec<&'s PaneBinding> {
+    state
+        .pane_bindings()
+        .filter(|b| holds(b, generation, listed(b, panes)))
+        .collect()
 }

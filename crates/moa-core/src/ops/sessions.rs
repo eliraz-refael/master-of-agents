@@ -1,22 +1,29 @@
 //! `session ls|set|archive|close|sleep`. `open` is in [`super::launch`].
 
+use std::path::Path;
+
 use serde_json::json;
 
+use super::adopt::brains_folder;
 use super::launch::title_of;
 use crate::Now;
 use crate::change::Change;
-use crate::core::Tx;
+use crate::core::{Tx, post_commit};
+use crate::effect::{Effect, LogLevel};
 use crate::live::{display_state, is_asleep, spike_state};
-use crate::model::{Group, Lifecycle, Session, SessionId, normalize_group_path};
+use crate::model::{
+    AgentKind, Group, Lifecycle, PaneAgent, Session, SessionId, normalize_group_path,
+};
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
-use crate::op::{Done, OpError, SLEEP_USAGE};
+use crate::op::{ConnId, Done, OpError, ReqId, SLEEP_USAGE};
 use crate::reconcile::agent_runs;
 use crate::sleep::{kill_pane, put_to_sleep, why_not};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
 use crate::tmux::focus::bound_pane;
-use crate::tmux::ids::PaneId;
-use crate::tmux::link::ready;
+use crate::tmux::ids::{Generation, PaneId};
+use crate::tmux::link::{Asked, Link, log, ready};
+use crate::tmux::panes::{PaneInfo, Tag, holds, kept_bindings, list_panes, listed as listed_pane};
 
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
@@ -47,10 +54,16 @@ pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
         let cwd = s.cwd.as_deref().unwrap_or("-");
         let last = s.last_seen_at.map(|t| local_text(t, &now.tz));
         let (display, why) = display_state(s, now.wall);
-        lines.push(format!(
+        // Adopted: moa sees only whether its agent runs (U14).
+        let tracked = state.binding(s.id).is_none_or(|b| b.tracked);
+        let mut line = format!(
             "{handle}  {alive:<9} {account:<12} {group:<22} {title:<34} {cwd}  last {}",
             last.as_deref().unwrap_or("-")
-        ));
+        );
+        if !tracked && s.lifecycle == Lifecycle::Live {
+            line.push_str(&format!("  adopted: moactl restart {handle} tracks it"));
+        }
+        lines.push(line);
         data.push(json!({
             "id": s.id,
             "conversation": state.current_conversation(s.id).map(|c| &c.conversation_id),
@@ -63,12 +76,160 @@ pub(crate) fn ls(state: &State, now: &Now, all: bool) -> Result<Done, OpError> {
             "title": title,
             "cwd": s.cwd,
             "last": last,
+            "tracked": tracked,
         }));
     }
     Ok(Done {
         text: lines.join("\n"),
         data: serde_json::Value::Array(data),
     })
+}
+
+/// `ls` with the tabs reconciled (R10): one listing of them is asked first; [`listed`]
+/// answers with it.
+pub(crate) fn start_ls(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    all: bool,
+) -> Vec<Effect> {
+    match state.tmux.ask(Asked::Ls { conn, req, all }, list_panes()) {
+        Some(query) => vec![query],
+        None => vec![Effect::Reply {
+            conn,
+            req,
+            result: ls(state, now, all),
+        }],
+    }
+}
+
+/// An `ls`'s listing came back, or failed (tmux refused it, or the link went before it
+/// answered): then the sessions are answered without the untracked list.
+pub(crate) fn listed(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    all: bool,
+    panes: Result<Vec<PaneInfo>, ()>,
+) -> Vec<Effect> {
+    let (mut fx, result) = match panes {
+        Ok(panes) => ls_with(state, now, all, &panes),
+        Err(()) => (Vec::new(), ls(state, now, all)),
+    };
+    fx.push(Effect::Reply { conn, req, result });
+    fx
+}
+
+/// `ls` against `panes`, the listing asked for it (R23). First the adopted sessions whose
+/// agent left its tab go to sleep, in one commit (R5, R31); then the reply is `ls`'s, plus a
+/// row per agent moa doesn't track, each with the line that adopts it. With the tabs not
+/// reconciled any more (a reload since it asked), the bindings can't be trusted: just `ls`.
+pub(crate) fn ls_with(
+    state: &mut State,
+    now: &Now,
+    all: bool,
+    panes: &[PaneInfo],
+) -> (Vec<Effect>, Result<Done, OpError>) {
+    let generation = match (ready(state), &state.tmux().link) {
+        (Ok(_), Link::Up { generation, .. }) => *generation,
+        _ => return (Vec::new(), ls(state, now, all)),
+    };
+    let mut fx = Vec::new();
+    let gone = agents_gone(state, generation, panes);
+    if !gone.is_empty() {
+        let mut tx = Tx::new(now);
+        let changes: Vec<Change> = gone
+            .iter()
+            .flat_map(|id| put_to_sleep(state, &tx, *id))
+            .collect();
+        match tx.commit(state, changes) {
+            Ok(()) => fx.extend(post_commit(state, tx)),
+            Err(_) => fx.push(log(
+                LogLevel::Warn,
+                format!(
+                    "{} adopted sessions whose agent left weren't put to sleep: nothing was saved",
+                    gone.len()
+                ),
+            )),
+        }
+    }
+    let rows = untracked(state, panes);
+    let result = ls(state, now, all).map(|mut done| {
+        for (info, _, account) in &rows {
+            let (pane, cwd) = (info.pane, &info.cwd);
+            if !done.text.is_empty() {
+                done.text.push('\n');
+            }
+            done.text.push_str(&format!(
+                "UNTRACKED tab {pane}: {account} in {cwd}  → moactl adopt {pane}"
+            ));
+            if let Some(data) = done.data.as_array_mut() {
+                data.push(json!({ "untracked": pane.to_string(), "account": account, "cwd": cwd }));
+            }
+        }
+        done
+    });
+    (fx, result)
+}
+
+/// The Claude agents in `panes` that moa doesn't track (R23): alive, not a terminal, held by
+/// no binding and not tagged, with no `MOA_SESSION`, in the brain's folders (R22). Each with
+/// its agent and its account: the listed account of its store (R32), else the store
+/// folder's name.
+pub(crate) fn untracked(state: &State, panes: &[PaneInfo]) -> Vec<(PaneInfo, PaneAgent, String)> {
+    let Link::Up { generation, .. } = state.tmux().link else {
+        return Vec::new();
+    };
+    let held: Vec<PaneId> = kept_bindings(state, generation, panes)
+        .iter()
+        .filter_map(|b| b.pane_id.parse().ok())
+        .collect();
+    let deps = state.deps();
+    panes
+        .iter()
+        .filter(|p| !p.dead && !p.term && p.tag == Tag::Unset && !held.contains(&p.pane))
+        .filter(|p| brains_folder(state, &(deps.canonical)(Path::new(&p.cwd))))
+        .filter_map(|p| {
+            let agent = (deps.inspect)(p.pid, &p.start)
+                .filter(|a| a.kind == AgentKind::Claude && a.moa_session.is_none())?;
+            let store = state.store_of(agent.store_dir.as_deref());
+            let account = state.account_of_store(&store).map_or_else(
+                || {
+                    store.file_name().map_or_else(
+                        || store.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    )
+                },
+                |a| a.to_string(),
+            );
+            Some((p.clone(), agent, account))
+        })
+        .collect()
+}
+
+/// The sessions whose untracked binding of this server (`generation`) has lost its agent, as
+/// `panes` shows it (R23, R31): its tab is gone, or no longer runs the session's agent there.
+/// Tracked bindings need no look: their tab dies with the agent.
+fn agents_gone(state: &State, generation: Generation, panes: &[PaneInfo]) -> Vec<SessionId> {
+    let inspect = state.deps().inspect;
+    state
+        .pane_bindings()
+        .filter(|b| {
+            !b.tracked && b.server_pid == generation.pid && b.server_start == generation.start
+        })
+        .filter(|b| {
+            let info = listed_pane(b, panes);
+            let runs = holds(b, generation, info)
+                && info.is_some_and(|i| {
+                    let agent = inspect(i.pid, &i.start);
+                    agent_runs(state, b.session_id, agent.as_ref(), Some(&i.cwd))
+                });
+            !runs
+        })
+        .map(|b| b.session_id)
+        .collect()
 }
 
 pub(crate) fn set(

@@ -132,15 +132,16 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
             fx.extend(state.tmux.input(t));
-            // Reconcile reads its listing, a resume or an adopt its own and a terminal its
-            // new tab, once the link is as the input left it.
+            // Reconcile reads its listing, a resume, an adopt or an `ls` its own and a
+            // terminal its new tab, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
-            let mut adopts = Vec::new();
+            let (mut adopts, mut lists) = (Vec::new(), Vec::new());
             for (asked, answer) in answers {
                 match asked {
                     Asked::Reconcile => reconciles.push(answer),
                     Asked::Resume(ask) => resumes.push((ask, answer)),
                     Asked::Adopt { conn, req, args } => adopts.push((conn, req, args, answer)),
+                    Asked::Ls { conn, req, all } => lists.push((conn, req, all, answer)),
                     Asked::Term { reply, name, path } => terms.push((reply, name, path, answer)),
                 }
             }
@@ -161,6 +162,16 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     conn,
                     req,
                     &args,
+                    panes_of(answer),
+                ));
+            }
+            for (conn, req, all, answer) in lists {
+                more.extend(ops::sessions::listed(
+                    state,
+                    now,
+                    conn,
+                    req,
+                    all,
                     panes_of(answer),
                 ));
             }
@@ -326,6 +337,14 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 },
             ..
         } => ops::adopt::start(state, conn, req, &pane, title, group, id),
+        // With the tabs reconciled, answered after one listing of them (R23); otherwise at
+        // once, below, without the agents moa doesn't track.
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionLs { all },
+            ..
+        } if link::ready(state).is_ok() => ops::sessions::start_ls(state, now, conn, req, all),
         Input::Client {
             conn,
             req,

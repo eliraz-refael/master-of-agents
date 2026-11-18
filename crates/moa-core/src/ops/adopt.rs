@@ -23,7 +23,7 @@ use crate::sleep::put_to_sleep;
 use crate::state::State;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Asked, Link, NO_TERMINAL, ready};
-use crate::tmux::panes::{PaneInfo, holds, list_panes};
+use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes};
 
 const WENT_AWAY: &str = "moa's terminal went away; try again";
 const TERMINAL: &str = "that tab is a terminal, not an agent";
@@ -147,13 +147,8 @@ pub(crate) fn adopt(
     if info.term {
         return Err(OpError(TERMINAL.into()));
     }
-    let listed = |b: &PaneBinding| {
-        let p: PaneId = b.pane_id.parse().ok()?;
-        panes.iter().find(|i| i.pane == p)
-    };
-    let kept: Vec<SessionId> = state
-        .pane_bindings()
-        .filter(|b| holds(b, generation, listed(b)))
+    let kept: Vec<SessionId> = kept_bindings(state, generation, panes)
+        .iter()
         .map(|b| b.session_id)
         .collect();
     if let Some(b) = state

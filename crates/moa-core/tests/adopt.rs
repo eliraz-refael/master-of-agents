@@ -496,7 +496,8 @@ fn adopt_reads_no_variable_as_the_default_store() {
 }
 
 /// N1: an agent on the default store whose argv names no conversation, adopted by its newest
-/// transcript, is still its session's agent the next time the tabs are read: it stays live.
+/// transcript, is still its session's agent the next time the tabs are read, by `ls` (R23)
+/// and by a new connection's reconcile: it stays live, and nothing is saved.
 #[test]
 fn a_default_folder_adoption_stays_live_in_ls() {
     let mut r = World::new().reconciled();
@@ -510,6 +511,32 @@ fn a_default_folder_adoption_stays_live_in_ls() {
     let lantern = r.lantern();
     let tagged = format!("I\t%5\t50\t0\t\t1\t{new}\t{}", lantern.display());
     let k = line("%7", 70, K, &r.home().join("private/web"));
+    let still_live = |r: &mut Rig, req: u64| {
+        let fx = send(&r.b, &mut r.st, req, Op::SessionLs { all: false });
+        assert!(replies(&fx).is_empty(), "{fx:?}");
+        let fx = listed(&mut r.st, &r.b, &[&tagged, &k], &[]);
+        assert!(changes(&fx).is_empty(), "{fx:?}");
+        assert!(r.st.binding(new).is_some());
+        let s = r.st.session(new).unwrap();
+        assert_eq!(s.lifecycle, Lifecycle::Live);
+        assert_eq!(s.asleep_at, None);
+        let done = one_reply(&fx).unwrap();
+        let row = done
+            .data
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == json!(new))
+            .unwrap()
+            .clone();
+        assert_eq!(row["alive"], "idle", "{row}");
+        assert_eq!(row["display"], "idle", "{row}");
+        assert_eq!(row["tracked"], false, "{row}");
+        // Its tab is the session's, not an agent moa doesn't track.
+        assert!(!done.text.contains("UNTRACKED"), "{}", done.text);
+    };
+    still_live(&mut r, 2);
+
     feed(
         &r.b,
         &mut r.st,
@@ -525,24 +552,7 @@ fn a_default_folder_adoption_stays_live_in_ls() {
     let fx = listed(&mut r.st, &r.b, &[&tagged, &k], &[]);
     assert!(r.st.tmux().reconciled());
     assert!(changes(&fx).is_empty(), "{fx:?}");
-    assert!(r.st.binding(new).is_some());
-    let s = r.st.session(new).unwrap();
-    assert_eq!(s.lifecycle, Lifecycle::Live);
-    assert_eq!(s.asleep_at, None);
-
-    let fx = send(&r.b, &mut r.st, 2, Op::SessionLs { all: false });
-    assert!(changes(&fx).is_empty(), "{fx:?}");
-    let done = one_reply(&fx).unwrap();
-    let row = done
-        .data
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["id"] == json!(new))
-        .unwrap()
-        .clone();
-    assert_eq!(row["alive"], "idle", "{row}");
-    assert_eq!(row["display"], "idle", "{row}");
+    still_live(&mut r, 3);
 }
 
 #[test]

@@ -378,7 +378,9 @@ fn ls_matches_the_spike_layout() {
     );
     let rows = all.data.as_array().unwrap();
     assert_eq!(rows.len(), 9);
-    assert!(rows.iter().all(|r| r.as_object().unwrap().len() == 11));
+    assert!(rows.iter().all(|r| r.as_object().unwrap().len() == 12));
+    // No session here is adopted.
+    assert!(rows.iter().all(|r| r["tracked"] == true));
     let first = &rows[0];
     assert_eq!(first["id"], sid(&st, S1_WORKING).to_string());
     assert_eq!(first["conversation"], S1_WORKING);
