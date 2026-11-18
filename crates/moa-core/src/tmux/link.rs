@@ -21,7 +21,7 @@ use crate::state::State;
 /// An op that needs a tab, while moa's terminal isn't linked.
 pub(crate) const NO_TERMINAL: &str = "moa isn't open in a terminal yet; run moa first";
 /// An op that acts on bindings, before this connection's reconcile (R10).
-pub(crate) const NOT_READY: &str = "moa is still looking at its tabs; try again in a moment";
+pub const NOT_READY: &str = "moa is still looking at its tabs; try again in a moment";
 const NOT_TMUX: &str = "that isn't a tmux program";
 const GAVE_UP: &str = "moa lost its terminal server and couldn't reconnect; see the log";
 const CANT_LINK: &str = "moa couldn't talk to its terminal; see moa's log";
@@ -118,6 +118,12 @@ pub struct TmuxState {
     pub last_down: Option<Down>,
     /// This connection's panes have been reconciled: the bindings can be trusted (R10).
     reconciled: bool,
+    /// This connection's reconciles that started and never finished (one that panicked):
+    /// kept across a reload, so a reconcile that always panics is tried a bounded number of
+    /// times, not again after every reload.
+    pub(crate) unfinished_reconciles: u32,
+    /// This connection's reconciles were given up on, and the log said so.
+    pub(crate) reconcile_given_up: bool,
 }
 
 /// What a pane query was asked for: who reads its answer.
@@ -173,6 +179,8 @@ impl Default for TmuxState {
             drained: false,
             last_down: None,
             reconciled: false,
+            unfinished_reconciles: 0,
+            reconcile_given_up: false,
         }
     }
 }
@@ -230,11 +238,7 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
 
 /// The link's connection, for an op that acts on bindings: up, and this connection's panes
 /// reconciled.
-#[allow(
-    dead_code,
-    reason = "focus, the first op on bindings, uses it (Task 8)"
-)]
-pub(crate) fn ready(state: &State) -> Result<u64, OpError> {
+pub fn ready(state: &State) -> Result<u64, OpError> {
     let tmux = state.tmux();
     match tmux.link {
         Link::Up { conn, .. } if tmux.reconciled => Ok(conn),
@@ -554,9 +558,11 @@ impl TmuxState {
         let mut fx = Vec::new();
         if self.conn() != Some(conn) {
             // A new connection: nothing asked on another one will be answered, and its
-            // panes are yet to be reconciled.
+            // panes are yet to be reconciled, with a fresh count of tries.
             self.refresh = Refresh::Idle;
             self.reconciled = false;
+            self.unfinished_reconciles = 0;
+            self.reconcile_given_up = false;
         }
         if self.generation.is_some_and(|g| g != generation) {
             self.restarts += 1;

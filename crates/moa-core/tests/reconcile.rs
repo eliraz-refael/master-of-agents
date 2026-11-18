@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::cell::Cell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
 use moa_core::change::Change;
@@ -17,11 +19,11 @@ use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent,
     PaneBinding, Session, SessionId, SpikePane,
 };
-use moa_core::op::Op;
+use moa_core::op::{Op, OpError};
 use moa_core::state::{Deps, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId};
-use moa_core::tmux::link::Link;
+use moa_core::tmux::link::{Link, NOT_READY, ready};
 use moa_core::tmux::panes::list_panes;
 use moa_core::{Now, UtcMs};
 use moa_testkit::brain::TypicalBrain;
@@ -245,8 +247,13 @@ impl Rig {
     }
 
     fn connect(&mut self, generation: Generation) -> Vec<Effect> {
+        self.connect_on(1, generation)
+    }
+
+    /// The link comes up on connection `conn`.
+    fn connect_on(&mut self, conn: u64, generation: Generation) -> Vec<Effect> {
         self.input(Input::Tmux(TmuxIn::Connected {
-            conn: 1,
+            conn,
             generation,
             version: "3.5a".into(),
             ctl: ClientName("client-9".into()),
@@ -664,7 +671,7 @@ fn a_refused_reconcile_is_asked_again() {
         assert!(r.is_live(n));
         assert!(r.bound_to(n).is_some());
     }
-    assert!(!r.st.tmux().reconciled());
+    assert_eq!(ready(&r.st), Err(OpError(NOT_READY.into())));
 
     // Not while writes are refused.
     let soon = r.later(1_000);
@@ -673,6 +680,90 @@ fn a_refused_reconcile_is_asked_again() {
     let then = r.later(60_000);
     let fx = handle_checked(&mut r.st, Input::Timer(TimerKey::Clock), then);
     assert_eq!(queries(&fx), [list_panes().as_slice()]);
+}
+
+/// A process read that always panics (a malformed process entry, say).
+fn panicking_agent(_: i64, _: &[String]) -> Option<PaneAgent> {
+    panic!("a process read that always panics")
+}
+
+#[test]
+fn a_reconcile_that_always_panics_is_tried_a_bounded_number_of_times() {
+    let mut r = World::new().drained(panicking_agent);
+    r.connect(G1);
+    let mut lines = abc(&r.b);
+    lines.push(pane(9, "", &cwd(&r.b, D)));
+    let reload = |r: &mut Rig| {
+        r.input(Input::Reload {
+            snapshot: Box::new(r.snap.clone()),
+            refuse_writes: None,
+        })
+    };
+    for attempt in 1..=3 {
+        let run = catch_unwind(AssertUnwindSafe(|| r.listed(&lines, &[])));
+        assert!(run.is_err(), "attempt {attempt} didn't panic");
+        // As the daemon does after a panic: the core reloads.
+        let fx = reload(&mut r);
+        if attempt < 3 {
+            assert_eq!(queries(&fx), [list_panes().as_slice()], "{fx:?}");
+        } else {
+            assert!(queries(&fx).is_empty(), "{fx:?}");
+            let warned =
+                "reconciling the tabs failed 3 times; moa tries again at the next connection";
+            assert!(has_log(&fx, warned), "{fx:?}");
+        }
+    }
+    // Said once; the ops on tabs keep waiting.
+    let fx = r.input(Input::Timer(TimerKey::Clock));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert!(
+        logs(&fx).iter().all(|l| !l.starts_with("reconciling")),
+        "{fx:?}"
+    );
+    assert_eq!(ready(&r.st), Err(OpError(NOT_READY.into())));
+
+    // The next connection tries again, from a fresh count.
+    r.input(Input::Tmux(TmuxIn::Down(Down::Lost)));
+    let fx = r.connect_on(2, G1);
+    assert_eq!(queries(&fx), [list_panes().as_slice()], "{fx:?}");
+}
+
+thread_local! {
+    /// Whether D's agent still runs in its shell tab, %9.
+    static D_RUNS: Cell<bool> = const { Cell::new(true) };
+}
+
+/// D's agent, started by hand in a shell tab: no `MOA_SESSION`, while it runs.
+fn d_in_a_shell(pid: i64, _: &[String]) -> Option<PaneAgent> {
+    (pid == 909 && D_RUNS.with(Cell::get)).then(|| claude(Some(conv(D)), None))
+}
+
+#[test]
+fn an_untracked_rebind_is_marked_adopted_and_checked_again() {
+    let mut w = World::new();
+    w.add(D).lifecycle = Lifecycle::Ended;
+    let mut r = w.drained(d_in_a_shell);
+    r.connect(G1);
+    let mut lines = abc(&r.b);
+    lines.push(pane(9, "", &cwd(&r.b, D)));
+    let fx = r.listed(&lines, &[]);
+    assert!(!r.bound_to(D).unwrap().tracked);
+    let adopt = Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_adopted", "1"]);
+    assert!(after_persist(&fx, &set_tag(9, D)), "{fx:?}");
+    assert!(after_persist(&fx, &adopt), "{fx:?}");
+
+    // The agent leaves; its shell tab stays, tagged as moa left it. Two later connections to
+    // the same server: the first puts D to sleep, and the second doesn't bind the shell.
+    D_RUNS.with(|c| c.set(false));
+    let mut lines = abc(&r.b);
+    lines.push(adopted(9, &tag(D), &cwd(&r.b, D)));
+    for conn in [2, 3] {
+        r.input(Input::Tmux(TmuxIn::Down(Down::Lost)));
+        r.connect_on(conn, G1);
+        r.listed(&lines, &[]);
+        assert!(r.is_asleep(D), "connection {conn}: {:?}", r.session(D));
+        assert!(r.bound_to(D).is_none(), "connection {conn}");
+    }
 }
 
 #[test]

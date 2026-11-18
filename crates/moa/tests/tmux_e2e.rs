@@ -93,9 +93,9 @@ fn counted(text: &str) -> usize {
         .sum()
 }
 
-/// Waits (2 s) for `@moa_status` to be `want`.
+/// Waits (10 s) for `@moa_status` to be `want`: it may wait for the connection's reconcile.
 fn status_becomes(tb: &TempBrain, want: &str) {
-    let seen = wait_for(QUICK, || (option(tb, "@moa_status") == want).then_some(()));
+    let seen = wait_for(SHOWS, || (option(tb, "@moa_status") == want).then_some(()));
     assert!(
         seen.is_some(),
         "@moa_status is {:?}, not {want:?}",

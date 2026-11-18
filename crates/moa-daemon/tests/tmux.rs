@@ -164,6 +164,19 @@ fn within_2s(what: &str, mut ok: impl FnMut() -> bool) {
     assert!(done.is_some(), "{what} within 2 s");
 }
 
+/// Waits (up to 10 s) for `@moa_status` to be `want`: the counts may wait for the
+/// connection's reconcile.
+fn status_shows(rig: &Rig, what: &str, want: &str) {
+    let done = wait_for(Duration::from_secs(10), || {
+        (rig.option("@moa_status") == want).then_some(())
+    });
+    assert!(
+        done.is_some(),
+        "{what}: @moa_status is {:?}",
+        rig.option("@moa_status")
+    );
+}
+
 /// A daemon adopting a server the test created: ensure says running.
 async fn adopted() -> (Rig, Client) {
     let rig = start().await;
@@ -202,9 +215,7 @@ async fn the_daemon_never_makes_the_users_session() {
     let mut c = rig.client();
     assert_eq!(ensure(&mut c)["result"]["data"], json!({"running": true}));
     let want = rig.counts_text();
-    within_2s("@moa_status shows the counts", || {
-        rig.option("@moa_status") == want
-    });
+    status_shows(&rig, "@moa_status shows the counts", &want);
     assert_eq!(ensure(&mut c)["result"]["data"], json!({"running": true}));
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -237,9 +248,7 @@ async fn the_daemon_adopts_a_running_server() {
 
     let want = rig.counts_text();
     assert!(!want.is_empty());
-    within_2s("@moa_status shows the counts", || {
-        rig.option("@moa_status") == want
-    });
+    status_shows(&rig, "@moa_status shows the counts", &want);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -312,9 +321,7 @@ async fn real_brains_stay_off_tmux() {
 async fn a_failed_commit_keeps_the_link_working() {
     let (rig, mut c) = adopted().await;
     let want = rig.counts_text();
-    within_2s("@moa_status shows the counts", || {
-        rig.option("@moa_status") == want
-    });
+    status_shows(&rig, "@moa_status shows the counts", &want);
     rig.tmux(&["set-option", "-g", "@moa_status", "junk"]);
     rig.core.store_fault(Fault::FailNextCommit);
     let r = c.call("session.archive", json!({"qs": [ids::S2_IDLE]}));
@@ -323,9 +330,7 @@ async fn a_failed_commit_keeps_the_link_working() {
         .unwrap_or_default()
         .to_string();
     assert!(line.starts_with("moa couldn't save that ("), "{r}");
-    within_2s("the reload writes @moa_status again", || {
-        rig.option("@moa_status") == want
-    });
+    status_shows(&rig, "the reload writes @moa_status again", &want);
     assert_eq!(ensure(&mut c)["result"]["data"], json!({"running": true}));
 }
 

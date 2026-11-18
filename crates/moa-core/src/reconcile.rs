@@ -20,10 +20,18 @@ use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Answer, Asked, Link};
 use crate::tmux::panes::{PaneInfo, Tag, holds, list_panes, parse_panes};
 
+/// How many reconciles of one connection may start and never finish (a panic) before moa
+/// stops asking until the next connection.
+pub(crate) const UNFINISHED_KEPT: u32 = 3;
+
 /// Asks for this connection's listing when a reconcile is owed: the start drain has run,
 /// the link is up, its panes aren't reconciled, no listing is on its way, and writes are
 /// accepted. Run as each input starts, so a refused or failed reconcile is asked again by
 /// the first input after it (R10), never by the input that failed it.
+///
+/// A reconcile that panicked [`UNFINISHED_KEPT`] times on this connection isn't asked
+/// again: each panic reloads the core, and the reload would ask at once. One warn says so;
+/// the ops on tabs keep refusing until the next connection.
 pub(crate) fn ask_if_due(state: &mut State, now: &Now) -> Option<Effect> {
     let tmux = state.tmux();
     if !tmux.drained
@@ -33,6 +41,18 @@ pub(crate) fn ask_if_due(state: &mut State, now: &Now) -> Option<Effect> {
         || state.writes_refused(now.wall)
     {
         return None;
+    }
+    if tmux.unfinished_reconciles >= UNFINISHED_KEPT {
+        if tmux.reconcile_given_up {
+            return None;
+        }
+        state.tmux.reconcile_given_up = true;
+        return Some(log(
+            LogLevel::Warn,
+            format!(
+                "reconciling the tabs failed {UNFINISHED_KEPT} times; moa tries again at the next connection"
+            ),
+        ));
     }
     state.tmux.ask(Asked::Reconcile, list_panes())
 }
@@ -68,8 +88,16 @@ pub(crate) fn answered(
 /// 5. a live session left without a binding goes to sleep (R5), except one somewhere else,
 ///    one whose launch is waiting, and one whose spike pane is on another server.
 ///
-/// A refused commit leaves the panes unreconciled, to be asked again (R10).
+/// A refused commit leaves the panes unreconciled, to be asked again (R10). A run that
+/// panics is counted, as one that never finished ([`ask_if_due`]).
 pub(crate) fn run(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
+    state.tmux.unfinished_reconciles += 1;
+    let fx = reconcile(state, now, panes);
+    state.tmux.unfinished_reconciles = 0;
+    fx
+}
+
+fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     let Link::Up {
         generation, socket, ..
     } = &state.tmux().link
@@ -111,7 +139,8 @@ pub(crate) fn run(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effec
     // 3. Rebinding, in listing order.
     let waiting: BTreeSet<SessionId> = state.tmux().waiting_opens().collect();
     let mut bound: BTreeMap<SessionId, PaneBinding> = BTreeMap::new();
-    let mut to_tag: Vec<(PaneId, SessionId)> = Vec::new();
+    // Each new binding's tab, its session, and whether it is marked adopted too.
+    let mut to_tag: Vec<(PaneId, SessionId, bool)> = Vec::new();
     for info in panes {
         if info.dead || info.term || held.contains(&info.pane) {
             continue;
@@ -168,7 +197,10 @@ pub(crate) fn run(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effec
                 }
                 let has_moa_session = agent.as_ref().is_some_and(|a| a.moa_session.is_some());
                 let tracked = !info.adopted && (has_moa_session || spike == Some(id));
-                to_tag.push((info.pane, id));
+                // An untracked binding's tab is marked adopted, as `adopt` marks one: its
+                // agent may leave it open, so the next reconcile checks the agent before
+                // binding it again by its tag (R7, R31).
+                to_tag.push((info.pane, id, !tracked && !info.adopted));
                 (id, tracked)
             }
         };
@@ -230,14 +262,11 @@ pub(crate) fn run(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effec
         )];
     }
     // A new binding's tab is tagged with its session, so the next reconcile knows it.
-    for (pane, id) in to_tag {
-        tx.tmux(Cmd::new("set-option").args([
-            "-p".to_string(),
-            "-t".to_string(),
-            pane.to_string(),
-            "@moa_session".to_string(),
-            id.to_string(),
-        ]));
+    for (pane, id, adopted) in to_tag {
+        tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
+        if adopted {
+            tx.tmux(set_pane_option(pane, "@moa_adopted", "1"));
+        }
     }
     state.tmux.set_reconciled();
     let mut fx = vec![log(
@@ -378,6 +407,16 @@ fn related(a: &Path, b: &Path) -> bool {
     let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
     let inside = |x: &str, y: &str| x.strip_prefix(y).is_some_and(|r| r.starts_with('/'));
     !a.is_empty() && !b.is_empty() && (a == b || inside(a, b) || inside(b, a))
+}
+
+fn set_pane_option(pane: PaneId, name: &str, value: &str) -> Cmd {
+    Cmd::new("set-option").args([
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        name.to_string(),
+        value.to_string(),
+    ])
 }
 
 fn log(level: LogLevel, message: String) -> Effect {
