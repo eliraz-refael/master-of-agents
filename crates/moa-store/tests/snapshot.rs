@@ -173,6 +173,7 @@ fn pane_binding() -> PaneBinding {
         pane_id: "%1".into(),
         pane_pid: 102,
         bound_at: UtcMs(70),
+        tracked: true,
     }
 }
 
@@ -407,6 +408,42 @@ fn every_change_round_trips() {
     assert!(s.meta.is_empty());
     assert_eq!(s.sessions, vec![session(1)]);
     assert_eq!(s.threads, vec![thread()]);
+}
+
+/// An adopted agent's binding is untracked, and stays so through a write and a load. A row
+/// written without the column is tracked.
+#[test]
+fn bindings_round_trip_tracked() {
+    let mut rig = empty();
+    let untracked = PaneBinding {
+        tracked: false,
+        ..pane_binding()
+    };
+    rig.store
+        .apply(&[
+            Change::Project(project(1, "Lantern")),
+            Change::Session(session(1)),
+            Change::Session(session(2)),
+            Change::PaneBinding(untracked.clone()),
+        ])
+        .unwrap();
+    rig.store
+        .conn()
+        .execute(
+            "INSERT INTO pane_bindings (session_id, server_pid, server_start, socket, pane_id, \
+             pane_pid, bound_at) VALUES (?1, 100, 101, '/tmp/s', '%2', 103, 70)",
+            [sid(2).to_string()],
+        )
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    let tracked = PaneBinding {
+        session_id: sid(2),
+        pane_id: "%2".into(),
+        pane_pid: 103,
+        ..pane_binding()
+    };
+    assert_eq!(s.pane_bindings, vec![untracked, tracked]);
+    assert!(s.unknown.is_empty(), "{:?}", s.unknown);
 }
 
 #[test]

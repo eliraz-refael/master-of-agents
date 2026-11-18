@@ -8,7 +8,9 @@ use super::notify::Notification;
 use crate::model::SessionId;
 
 pub const LIST_SESSIONS: &str = "S #{session_id} #{session_name}";
-pub const LIST_PANES: &str = "P #{pane_id} #{window_id} #{session_id} #{pane_active} #{window_active} #{window_zoomed_flag} #{@moa_session}";
+/// The flag before `@moa_session` is the cockpit's: the window named `moa` in the session
+/// named `moa`, as tmux sees it (its index depends on `base-index`).
+pub const LIST_PANES: &str = "P #{pane_id} #{window_id} #{session_id} #{pane_active} #{window_active} #{window_zoomed_flag} #{&&:#{==:#{session_name},moa},#{==:#{window_name},moa}} #{@moa_session}";
 pub const LIST_CLIENTS: &str = "C #{client_control_mode} #{session_id} #{client_name}";
 
 /// The three queries that rebuild a `Topology`, in the order `from_lists` takes them.
@@ -43,6 +45,7 @@ pub struct Topology {
     windows: BTreeMap<WindowId, Window>,
     clients: BTreeMap<ClientName, TmuxSessionId>,
     moa_sessions: BTreeMap<PaneId, SessionId>,
+    cockpits: BTreeSet<WindowId>,
 }
 
 /// Replace a value, saying whether it differed.
@@ -88,7 +91,8 @@ impl Topology {
         else {
             return;
         };
-        let (Some(active), Some(window_active), Some(zoomed)) = (f.next(), f.next(), f.next())
+        let (Some(active), Some(window_active), Some(zoomed), Some(cockpit)) =
+            (f.next(), f.next(), f.next(), f.next())
         else {
             return;
         };
@@ -106,6 +110,9 @@ impl Topology {
         }
         if window_active == "1" {
             self.current.insert(session, window);
+        }
+        if cockpit == "1" {
+            self.cockpits.insert(window);
         }
         if let Some(m) = moa {
             self.moa_sessions.insert(pane, m);
@@ -195,6 +202,11 @@ impl Topology {
         self.windows
             .iter()
             .find_map(|(id, w)| w.panes.contains(&p).then_some(*id))
+    }
+
+    /// Whether `w` is the cockpit: the window named `moa` in the session named `moa`.
+    pub fn is_cockpit(&self, w: WindowId) -> bool {
+        self.cockpits.contains(&w)
     }
 
     /// The moa session a pane was tagged with (`@moa_session`), if any.

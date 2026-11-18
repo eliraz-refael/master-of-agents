@@ -15,6 +15,9 @@ pub const ALLOWED: &[&str] = &[
     "source-file",
     "command-prompt",
     "new-window",
+    "kill-pane",
+    "select-window",
+    "select-pane",
 ];
 
 /// A command that must not be sent, with the reason.
@@ -27,6 +30,8 @@ const NEEDS_B: &str = "command-prompt needs -b";
 const OWN_CONFIG: &str = "moa only sources its own config";
 const NEEDS_D_P: &str = "new-window needs -d and -P";
 const ENV_NEWLINE: &str = "a new window's environment can't hold a newline";
+const ONE_PANE: &str = "kill-pane needs exactly one tab id";
+const NEEDS_T: &str = "select-window and select-pane need -t";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Cmd {
@@ -93,6 +98,19 @@ impl Cmd {
                 }
             }
             "new-window" => check_new_window(&self.args),
+            // One pane, named by its id: never `-a`, never a target tmux would resolve.
+            "kill-pane" => match self.args.as_slice() {
+                [t, pane] if t == "-t" && is_pane_id(pane) => Ok(()),
+                _ => Err(Refused(ONE_PANE)),
+            },
+            "select-window" | "select-pane" => {
+                let mut it = self.args.iter();
+                if it.any(|a| a == "-t") && it.next().is_some() {
+                    Ok(())
+                } else {
+                    Err(Refused(NEEDS_T))
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -100,7 +118,8 @@ impl Cmd {
 
 /// `new-window`'s flags, read up to the command it runs: `-d` (the user's view stays put)
 /// and `-P` (it says which pane) are both there, and no `-e` value holds a newline. The
-/// command's own arguments are quoted like any other.
+/// command's own arguments are quoted like any other. With no command the window runs the
+/// user's shell: a terminal.
 fn check_new_window(args: &[String]) -> Result<(), Refused> {
     let (mut detached, mut prints) = (false, false);
     let mut it = args.iter();
@@ -126,6 +145,12 @@ fn check_new_window(args: &[String]) -> Result<(), Refused> {
     } else {
         Err(Refused(NEEDS_D_P))
     }
+}
+
+/// A pane id as tmux prints it: `%` and digits.
+fn is_pane_id(s: &str) -> bool {
+    s.strip_prefix('%')
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// An absolute path to a file named exactly `moa.tmux`, with no glob characters.
@@ -229,5 +254,47 @@ mod tests {
             "{}",
             cmd.line()
         );
+    }
+
+    #[test]
+    fn kill_pane_needs_one_pane_id() {
+        let kill = |args: &[&str]| Cmd::new("kill-pane").args(args.iter().copied()).check();
+        assert_eq!(kill(&["-t", "%3"]), Ok(()));
+        for args in [
+            &[][..],
+            &["-t", "moa"],
+            &["-a", "-t", "%3"],
+            &["-t", "%3x"],
+            &["-t", "%"],
+            &["-t", "%3", "-a"],
+        ] {
+            assert_eq!(
+                kill(args),
+                Err(Refused("kill-pane needs exactly one tab id")),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_needs_a_target() {
+        for name in ["select-window", "select-pane"] {
+            assert_eq!(Cmd::new(name).args(["-t", "%3"]).check(), Ok(()), "{name}");
+            for args in [&[][..], &["-t"], &["-Z"]] {
+                assert_eq!(
+                    Cmd::new(name).args(args.iter().copied()).check(),
+                    Err(Refused("select-window and select-pane need -t")),
+                    "{name} {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_terminal_window_has_no_command() {
+        let cmd = Cmd::new("new-window").args(["-d", "-P", "-F", "x", "-n", "t", "-c", "/w"]);
+        assert_eq!(cmd.check(), Ok(()));
+        let cmd = Cmd::new("new-window").args(["-d", "-P", "-c", "/w", "-t", "=moa:"]);
+        assert_eq!(cmd.check(), Ok(()));
     }
 }

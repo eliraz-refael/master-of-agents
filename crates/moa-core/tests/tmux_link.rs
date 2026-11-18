@@ -89,7 +89,7 @@ fn lines(l: &[&str]) -> Result<Vec<String>, String> {
 fn lists(sessions: &[&str]) -> Vec<Result<Vec<String>, String>> {
     vec![
         lines(sessions),
-        lines(&["P %1 @1 $0 1 1 0 "]),
+        lines(&["P %1 @1 $0 1 1 0 0 "]),
         lines(&["C 0 $0 /dev/ttys1"]),
     ]
 }

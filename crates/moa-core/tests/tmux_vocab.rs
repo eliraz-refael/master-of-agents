@@ -61,7 +61,16 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
         "that isn't a command moa sends"
     );
     for name in ALLOWED {
-        if !["command-prompt", "source-file", "new-window"].contains(name) {
+        // These have rules of their own, tested in `cmd.rs`.
+        let ruled = [
+            "command-prompt",
+            "source-file",
+            "new-window",
+            "kill-pane",
+            "select-window",
+            "select-pane",
+        ];
+        if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");
         }
     }
@@ -238,9 +247,9 @@ fn lists(zoomed: bool) -> Topology {
     let z = u8::from(zoomed);
     let sessions = vec!["S $0 work".to_string(), "S $1 ctl".to_string()];
     let panes = vec![
-        format!("P %0 @0 $0 1 0 0 {MOA_SESSION}"),
-        format!("P %2 @2 $0 0 1 {z} "),
-        format!("P %3 @2 $0 1 1 {z} "),
+        format!("P %0 @0 $0 1 0 0 0 {MOA_SESSION}"),
+        format!("P %2 @2 $0 0 1 {z} 0 "),
+        format!("P %3 @2 $0 1 1 {z} 0 "),
         "P garbage".to_string(),
     ];
     let clients = vec![
@@ -280,7 +289,7 @@ fn topology_from_lists_and_visible() {
 
     let none = Topology::from_lists(
         &["S $0 work".to_string()],
-        &["P %2 @2 $0 1 1 0 ".to_string()],
+        &["P %2 @2 $0 1 1 0 0 ".to_string()],
         &["C 1 $0 control-client".to_string()],
     );
     assert!(none.visible().is_empty());

@@ -2,6 +2,7 @@
 //! store by [`Change`]s and published as a [`Model`].
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::UtcMs;
 use crate::change::Change;
-use crate::config::{BrainName, Config};
+use crate::config::{AccountName, BrainName, Config, caller_store};
 use crate::effect::RefuseWrites;
 use crate::model::*;
 use crate::op::Action;
@@ -157,6 +158,10 @@ pub struct Deps {
     pub new_uuid: fn(UtcMs) -> uuid::Uuid,
     /// The Claude Code plugin sessions are started with, as an absolute path.
     pub session_plugin: PathBuf,
+    /// The agent a pane runs, from its process (and children) and its start command
+    /// (the daemon reads them in-process). Called only where a pane is checked, never per
+    /// event.
+    pub inspect: fn(i64, &[String]) -> Option<PaneAgent>,
 }
 
 fn identity(p: &Path) -> PathBuf {
@@ -185,6 +190,7 @@ impl Default for Deps {
             home: PathBuf::new(),
             new_uuid: sequential_uuid,
             session_plugin: PathBuf::new(),
+            inspect: |_, _| None,
         }
     }
 }
@@ -352,6 +358,35 @@ impl State {
 
     pub(crate) fn pane_bindings(&self) -> impl Iterator<Item = &PaneBinding> {
         self.pane_bindings.values()
+    }
+
+    /// The session's pane binding, of whichever server.
+    #[allow(dead_code, reason = "reconcile uses it (4b)")]
+    pub(crate) fn binding(&self, id: SessionId) -> Option<&PaneBinding> {
+        self.pane_bindings.get(&id)
+    }
+
+    #[allow(dead_code, reason = "reconcile uses it (4b)")]
+    pub(crate) fn spike_panes(&self) -> impl Iterator<Item = &SpikePane> {
+        self.spike_panes.values()
+    }
+
+    /// The agent store a `CLAUDE_CONFIG_DIR` value names, canonical: no value (or an empty
+    /// one) is `<home>/.claude`, Claude's own default (R32).
+    pub fn store_of(&self, dir: Option<&str>) -> PathBuf {
+        let store = caller_store(dir.map(OsStr::new), &self.deps.home);
+        (self.deps.canonical)(&store)
+    }
+
+    /// The listed account whose store is `store`, comparing canonical folders.
+    pub fn account_of_store(&self, store: &Path) -> Option<AccountName> {
+        let canonical = self.deps.canonical;
+        let store = canonical(store);
+        self.config
+            .accounts
+            .iter()
+            .find(|(_, a)| canonical(&a.store) == store)
+            .map(|(name, _)| name.clone())
     }
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {

@@ -77,6 +77,7 @@ fn binding(pid: i64, start: i64) -> PaneBinding {
         pane_id: "%3".into(),
         pane_pid: 99,
         bound_at: UtcMs(1),
+        tracked: true,
     }
 }
 
@@ -139,7 +140,7 @@ fn lists(panes: &[&str], clients: &[&str]) -> TmuxIn {
 }
 
 /// `%3` is on screen for a user client.
-const SEEN: &[&str] = &["P %3 @1 $0 1 1 0 "];
+const SEEN: &[&str] = &["P %3 @1 $0 1 1 0 0 "];
 const USER: &[&str] = &["C 0 $0 /dev/ttys1"];
 
 fn persisted(fx: &[Effect]) -> Vec<&Vec<Change>> {
@@ -204,10 +205,42 @@ fn a_visible_done_session_becomes_seen() {
     assert_eq!(state_of(&s), DisplayState::Idle);
 }
 
+/// tmux says which window is the cockpit: the one named `moa` in the session named `moa`,
+/// whatever its index (`base-index 1` makes it 1).
+#[test]
+fn the_cockpit_is_the_window_named_moa() {
+    let mut s = started();
+    up(
+        &mut s,
+        &[
+            "P %1 @1 $0 1 1 0 1 ",
+            &format!("P %3 @2 $0 1 0 0 0 {SID}"),
+            "P %4 @3 $1 1 1 0 0 ",
+        ],
+        USER,
+    );
+    let t = &s.tmux().topology;
+    assert!(t.is_cockpit(WindowId(1)));
+    assert!(!t.is_cockpit(WindowId(2)));
+    assert!(!t.is_cockpit(WindowId(3)));
+    assert!(!t.is_cockpit(WindowId(9)));
+    // The tag still reads after the flag.
+    assert_eq!(t.moa_session(PaneId(3)), Some(sid()));
+    assert_eq!(t.moa_session(PaneId(1)), None);
+    assert!(
+        moa_core::tmux::topology::LIST_PANES
+            .contains(" #{&&:#{==:#{session_name},moa},#{==:#{window_name},moa}} #{@moa_session}")
+    );
+}
+
 #[test]
 fn zoom_hides_the_other_panes() {
     let mut s = started();
-    let fx = up(&mut s, &["P %3 @1 $0 0 1 1 ", "P %4 @1 $0 1 1 1 "], USER);
+    let fx = up(
+        &mut s,
+        &["P %3 @1 $0 0 1 1 0 ", "P %4 @1 $0 1 1 1 0 "],
+        USER,
+    );
     assert!(persisted(&fx).is_empty());
     assert_eq!(state_of(&s), DisplayState::Done);
 }
@@ -224,7 +257,7 @@ fn a_binding_from_another_generation_is_not_trusted() {
 #[test]
 fn a_binding_for_a_pane_that_is_gone_is_not_trusted() {
     let mut s = started();
-    let fx = up(&mut s, &["P %9 @1 $0 1 1 0 "], USER);
+    let fx = up(&mut s, &["P %9 @1 $0 1 1 0 0 "], USER);
     assert!(persisted(&fx).is_empty());
 }
 
@@ -232,7 +265,11 @@ fn a_binding_for_a_pane_that_is_gone_is_not_trusted() {
 fn focus_notifications_move_visibility() {
     // %3 starts in a background window.
     let mut s = started();
-    let fx = up(&mut s, &["P %5 @1 $0 1 1 0 ", "P %3 @2 $0 1 0 0 "], USER);
+    let fx = up(
+        &mut s,
+        &["P %5 @1 $0 1 1 0 0 ", "P %3 @2 $0 1 0 0 0 "],
+        USER,
+    );
     assert!(persisted(&fx).is_empty());
     let fx = feed(&mut s, window_changed(2));
     assert_eq!(persisted(&fx).len(), 1);
@@ -240,7 +277,11 @@ fn focus_notifications_move_visibility() {
 
     // %3 is behind the zoomed %4 until the pane change brings it forward.
     let mut s = started();
-    let fx = up(&mut s, &["P %3 @2 $0 0 1 1 ", "P %4 @2 $0 1 1 1 "], USER);
+    let fx = up(
+        &mut s,
+        &["P %3 @2 $0 0 1 1 0 ", "P %4 @2 $0 1 1 1 0 "],
+        USER,
+    );
     assert!(persisted(&fx).is_empty());
     let fx = feed(
         &mut s,
@@ -269,7 +310,11 @@ fn a_detached_user_sees_nothing() {
     // Attached to another window, then detached, then that session moves to the pane's
     // window: nobody is looking.
     let mut s = started();
-    up(&mut s, &["P %3 @1 $0 1 0 0 ", "P %5 @2 $0 1 1 0 "], USER);
+    up(
+        &mut s,
+        &["P %3 @1 $0 1 0 0 0 ", "P %5 @2 $0 1 1 0 0 "],
+        USER,
+    );
     feed(
         &mut s,
         TmuxIn::Notification(Notification::ClientDetached {
@@ -364,7 +409,7 @@ fn seen_respects_the_write_guards() {
 #[test]
 fn structural_changes_refresh() {
     let mut s = started();
-    up(&mut s, &["P %5 @1 $0 1 1 0 "], &[]);
+    up(&mut s, &["P %5 @1 $0 1 1 0 0 "], &[]);
     // %4 is no session's pane: an exit of a bound one would also end its session.
     let hooks = [
         "moa:hook pane-exited %4",
@@ -390,7 +435,7 @@ fn structural_changes_refresh() {
             other => panic!("{other:?}"),
         };
         assert_eq!(cmds, refresh_cmds());
-        feed(&mut s, lists(&["P %5 @1 $0 1 1 0 "], &[]));
+        feed(&mut s, lists(&["P %5 @1 $0 1 1 0 0 "], &[]));
     }
     // Other mailbox lines and unknown hooks don't.
     for m in ["moa:prompt 1 hi", "moa:hook nope x", "hello"] {

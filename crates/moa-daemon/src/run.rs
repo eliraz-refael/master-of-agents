@@ -218,6 +218,8 @@ async fn bring_up(
             home: paths.home().to_path_buf(),
             new_uuid: moa_store::new_uuid,
             session_plugin,
+            // Process reads come with reconcile (4b); until then no pane shows an agent.
+            inspect: |_, _| None,
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

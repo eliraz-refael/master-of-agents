@@ -8,6 +8,9 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use moa_core::tmux::ids::{PaneId, WindowId};
+use moa_core::tmux::panes::{PANE_INFO, PANE_START, Tag, parse_panes};
+use moa_core::tmux::topology::{self, Topology};
 use moa_daemon::{CoreHandle, Ready, run};
 use moa_platform::Paths;
 use moa_store::actor::Fault;
@@ -351,4 +354,112 @@ async fn a_second_connect_never_starts_a_second_client() {
     });
     let grew = launches(&mut c) - before;
     assert!((1..=BACKOFF_CONNECTS).contains(&grew), "{grew} launches");
+}
+
+/// R3: tmux prints a tab's start command on one line, quoted and escaped, and
+/// `split_start_command` gives back exactly its arguments; `PANE_INFO` reads the tab too.
+#[test]
+fn start_commands_parse_as_tmux_prints_them() {
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "moa",
+        "-n",
+        "moa",
+        "-x",
+        "10",
+        "-y",
+        "3",
+        "/bin/sh",
+    ]);
+    let argv = [
+        "/bin/sh", "-c", "sleep 30", "x", "a b", "it's", "#c", "one\ntwo",
+    ];
+    let mut args = vec!["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=moa:"];
+    args.extend(argv);
+    let pane: PaneId = tmux(&args).parse().expect("a pane id");
+
+    let start = tmux(&["list-panes", "-a", "-F", PANE_START]);
+    let start: Vec<String> = start.lines().map(str::to_string).collect();
+    let mine = format!("S\t{pane}\t");
+    assert_eq!(
+        start.iter().filter(|l| l.starts_with(&mine)).count(),
+        1,
+        "{start:?}"
+    );
+    let info = tmux(&["list-panes", "-a", "-F", PANE_INFO]);
+    let info: Vec<String> = info.lines().map(str::to_string).collect();
+    let panes = parse_panes(&info, &start);
+    assert_eq!(panes.len(), 2, "{info:?}");
+    let p = panes
+        .iter()
+        .find(|p| p.pane == pane)
+        .expect("the new tab is listed");
+    assert_eq!(p.start, argv);
+    assert!(p.pid > 0 && !p.dead && !p.term && !p.adopted, "{p:?}");
+    assert_eq!(p.tag, Tag::Unset);
+    assert!(!p.cwd.is_empty());
+}
+
+/// The cockpit flag in `LIST_PANES` is tmux's own reading: the window named `moa` in the
+/// session named `moa`, and no other.
+#[test]
+fn the_cockpit_flag_names_the_moa_window() {
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "moa",
+        "-n",
+        "moa",
+        "-x",
+        "10",
+        "-y",
+        "3",
+        "/bin/sh",
+    ]);
+    tmux(&["new-session", "-d", "-s", "_moa", "-n", "moa", "/bin/sh"]);
+    let other = tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{window_id}",
+        "-t",
+        "=moa:",
+        "/bin/sh",
+    ]);
+    let cockpit = tmux(&["display-message", "-p", "-t", "=moa:moa", "#{window_id}"]);
+    let lines = |format: &str, list: &str| -> Vec<String> {
+        tmux(&[list, "-a", "-F", format])
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let sessions: Vec<String> = tmux(&["list-sessions", "-F", topology::LIST_SESSIONS])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let panes = lines(topology::LIST_PANES, "list-panes");
+    let t = Topology::from_lists(&sessions, &panes, &[]);
+    let windows: Vec<WindowId> = t.window_ids().collect();
+    assert_eq!(windows.len(), 3, "{panes:?}");
+    for w in windows {
+        assert_eq!(
+            t.is_cockpit(w),
+            w.to_string() == cockpit,
+            "{w} ({other} is another tab): {panes:?}"
+        );
+    }
 }

@@ -86,6 +86,7 @@ fn binding(n: u32, pane: &str) -> PaneBinding {
         pane_id: pane.into(),
         pane_pid: 99,
         bound_at: UtcMs(1),
+        tracked: true,
     }
 }
 
@@ -287,7 +288,7 @@ fn the_status_is_written_once_per_change() {
 #[test]
 fn a_reconnect_writes_everything_again() {
     let mut s = started(vec![live(1, Activity::Working)], vec![binding(1, "%1")]);
-    let panes = ["P %1 @1 $0 1 1 0 "];
+    let panes = ["P %1 @1 $0 1 1 0 0 "];
     up_at(&mut s, &panes, USER, now());
     let fx = feed(&mut s, TmuxIn::Down(Down::Lost));
     assert_eq!(untokened(&fx), 0);
@@ -305,19 +306,19 @@ fn a_window_the_server_still_marks_is_unset_after_a_reset() {
     // A window with no trusted pane, found by the first lists: whatever an earlier run
     // left on it goes.
     let mut s = started(vec![live(1, Activity::Working)], vec![]);
-    let fx = up_at(&mut s, &["P %7 @1 $0 1 1 0 "], CONTROL_ONLY, now());
+    let fx = up_at(&mut s, &["P %7 @1 $0 1 1 0 0 "], CONTROL_ONLY, now());
     assert_eq!(
         writes_of(&fx, "@moa_state"),
         vec!["set-option -w -u -t @1 @moa_state"]
     );
     // Once.
-    let fx = feed(&mut s, lists(&["P %7 @1 $0 1 1 0 "], CONTROL_ONLY));
+    let fx = feed(&mut s, lists(&["P %7 @1 $0 1 1 0 0 "], CONTROL_ONLY));
     assert!(writes_of(&fx, "@moa_state").is_empty());
 
     // A window marked, then a reload after it lost its binding: the reload forgot what
     // was written, so it clears the mark again.
     let mut s = started(vec![live(1, Activity::Working)], vec![binding(1, "%1")]);
-    let panes = ["P %1 @1 $0 1 1 0 "];
+    let panes = ["P %1 @1 $0 1 1 0 0 "];
     let fx = up_at(&mut s, &panes, CONTROL_ONLY, now());
     assert_eq!(
         writes_of(&fx, "@moa_state"),
@@ -360,9 +361,9 @@ fn only_counted_states_mark_a_window() {
     let fx = up_at(
         &mut s,
         &[
-            "P %1 @1 $0 1 1 0 ",
-            "P %2 @2 $0 1 0 0 ",
-            "P %3 @3 $0 1 0 0 ",
+            "P %1 @1 $0 1 1 0 0 ",
+            "P %2 @2 $0 1 0 0 0 ",
+            "P %3 @3 $0 1 0 0 0 ",
         ],
         CONTROL_ONLY,
         now(),
@@ -419,10 +420,10 @@ fn window_states_follow_trusted_panes_and_are_unset_when_gone() {
         ],
     );
     let panes = [
-        "P %1 @1 $0 1 1 0 ",
-        "P %2 @1 $0 0 1 0 ",
-        "P %3 @2 $0 1 0 0 ",
-        "P %5 @3 $0 1 0 0 ",
+        "P %1 @1 $0 1 1 0 0 ",
+        "P %2 @1 $0 0 1 0 0 ",
+        "P %3 @2 $0 1 0 0 0 ",
+        "P %5 @3 $0 1 0 0 0 ",
     ];
     let fx = up_at(&mut s, &panes, CONTROL_ONLY, now());
     check_order(&fx).unwrap();
@@ -446,10 +447,10 @@ fn window_states_follow_trusted_panes_and_are_unset_when_gone() {
         &mut s,
         lists(
             &[
-                "P %1 @1 $0 1 1 0 ",
-                "P %2 @1 $0 0 1 0 ",
-                "P %7 @2 $0 1 0 0 ",
-                "P %5 @3 $0 1 0 0 ",
+                "P %1 @1 $0 1 1 0 0 ",
+                "P %2 @1 $0 0 1 0 0 ",
+                "P %7 @2 $0 1 0 0 0 ",
+                "P %5 @3 $0 1 0 0 0 ",
             ],
             CONTROL_ONLY,
         ),
@@ -462,7 +463,10 @@ fn window_states_follow_trusted_panes_and_are_unset_when_gone() {
     // The whole window goes: forgotten, nothing to unset.
     let fx = feed(
         &mut s,
-        lists(&["P %1 @1 $0 1 1 0 ", "P %2 @1 $0 0 1 0 "], CONTROL_ONLY),
+        lists(
+            &["P %1 @1 $0 1 1 0 0 ", "P %2 @1 $0 0 1 0 0 "],
+            CONTROL_ONLY,
+        ),
     );
     assert!(writes_of(&fx, "@moa_state").is_empty());
     // And a window that comes back unset isn't unset twice.
@@ -470,9 +474,9 @@ fn window_states_follow_trusted_panes_and_are_unset_when_gone() {
         &mut s,
         lists(
             &[
-                "P %1 @1 $0 1 1 0 ",
-                "P %2 @1 $0 0 1 0 ",
-                "P %7 @2 $0 1 0 0 ",
+                "P %1 @1 $0 1 1 0 0 ",
+                "P %2 @1 $0 0 1 0 0 ",
+                "P %7 @2 $0 1 0 0 0 ",
             ],
             CONTROL_ONLY,
         ),

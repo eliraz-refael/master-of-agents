@@ -457,6 +457,7 @@ fn bind(
         pane_id: pane.to_string(),
         pane_pid: pid,
         bound_at: tx.wall,
+        tracked: true,
     };
     if let Err(e) = tx.commit(state, vec![Change::PaneBinding(binding)]) {
         logs.push(warn(format!("the tab of session {id} was not saved")));

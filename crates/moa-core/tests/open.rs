@@ -306,6 +306,7 @@ fn open_replies_after_the_pane_is_bound() {
         pane_id: "%7".into(),
         pane_pid: 4242,
         bound_at: b.now().wall,
+        tracked: true,
     };
     assert_eq!(changes(&fx), [&Change::PaneBinding(binding)]);
     let set = Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()]);
@@ -695,6 +696,7 @@ fn a_closed_connections_open_still_binds() {
         pane_id: "%7".into(),
         pane_pid: 4242,
         bound_at: b.now().wall,
+        tracked: true,
     };
     assert_eq!(changes(&fx), [&Change::PaneBinding(binding)]);
     let set = Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()]);
@@ -963,7 +965,7 @@ fn a_pane_exit_for_an_older_generations_binding_is_ignored() {
             token: TmuxToken::Refresh,
             results: vec![
                 lines(&["S $0 moa"]),
-                lines(&["P %7 @1 $0 1 1 0 "]),
+                lines(&["P %7 @1 $0 1 1 0 0 "]),
                 lines(&["C 0 $0 /dev/ttys1"]),
             ],
         },

@@ -67,7 +67,7 @@ fn up() -> State {
             token: TmuxToken::Refresh,
             results: vec![
                 Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
-                Ok(vec!["P %3 @1 $0 1 1 0 ".into()]),
+                Ok(vec!["P %3 @1 $0 1 1 0 0 ".into()]),
                 Ok(vec!["C 0 $0 /dev/ttys1".into()]),
             ],
         },

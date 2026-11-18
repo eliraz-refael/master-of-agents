@@ -814,6 +814,7 @@ fn pane_binding(pid: i64) -> PaneBinding {
         pane_id: "%5".into(),
         pane_pid: 99,
         bound_at: UtcMs(1),
+        tracked: true,
     }
 }
 
@@ -836,7 +837,7 @@ fn link_up(st: &mut State) {
         token: TmuxToken::Refresh,
         results: vec![
             lines(&["S $0 moa", "S $1 _moa"]),
-            lines(&["P %5 @1 $0 1 1 0 "]),
+            lines(&["P %5 @1 $0 1 1 0 0 "]),
             lines(&["C 0 $0 /dev/ttys1"]),
         ],
     };
