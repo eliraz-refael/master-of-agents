@@ -23,10 +23,13 @@ fn assignment(word: &str) -> Option<(&str, &str)> {
 /// The conversation an argv names: `--resume X`, `--resume=X`, `-r X`, `--session-id X` or
 /// `--session-id=X`. A flag followed by another flag, or by nothing, names none.
 fn conversation(args: &[String]) -> Option<String> {
-    let mut words = args.iter();
+    let mut words = args.iter().peekable();
     while let Some(word) = words.next() {
         let value = match word.as_str() {
-            "--resume" | "-r" | "--session-id" => words.next().map(String::as_str),
+            // A following flag is left to be read in its turn (`-r --session-id X`).
+            "--resume" | "-r" | "--session-id" => {
+                words.next_if(|w| !w.starts_with('-')).map(String::as_str)
+            }
             w => w
                 .strip_prefix("--resume=")
                 .or_else(|| w.strip_prefix("--session-id=")),

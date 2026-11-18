@@ -24,7 +24,7 @@ use crate::state::State;
 use crate::time::{days_ago, local_text};
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::{Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled};
+use crate::tmux::link::{Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled, set_pane_option};
 
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
@@ -465,13 +465,7 @@ fn bind(
     }
     after.push(Effect::Tmux {
         conn,
-        cmds: vec![Cmd::new("set-option").args([
-            "-p".to_string(),
-            "-t".to_string(),
-            pane.to_string(),
-            "@moa_session".to_string(),
-            id.to_string(),
-        ])],
+        cmds: vec![set_pane_option(pane, "@moa_session", &id.to_string())],
         token: None,
     });
     Ok(opened_reply(s))

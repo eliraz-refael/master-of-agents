@@ -11,13 +11,12 @@ use std::path::Path;
 use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
-use crate::effect::{Effect, LogLevel, LogLine};
+use crate::effect::{Effect, LogLevel};
 use crate::hooks::asleep;
 use crate::model::{AgentKind, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId};
 use crate::state::State;
-use crate::tmux::cmd::Cmd;
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::{Answer, Asked, Link};
+use crate::tmux::link::{Answer, Asked, Link, log, set_pane_option};
 use crate::tmux::panes::{PaneInfo, Tag, holds, list_panes, parse_panes};
 
 /// How many reconciles of one connection may start and never finish (a panic) before moa
@@ -409,20 +408,6 @@ fn related(a: &Path, b: &Path) -> bool {
     let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
     let inside = |x: &str, y: &str| x.strip_prefix(y).is_some_and(|r| r.starts_with('/'));
     !a.is_empty() && !b.is_empty() && (a == b || inside(a, b) || inside(b, a))
-}
-
-fn set_pane_option(pane: PaneId, name: &str, value: &str) -> Cmd {
-    Cmd::new("set-option").args([
-        "-p".to_string(),
-        "-t".to_string(),
-        pane.to_string(),
-        name.to_string(),
-        value.to_string(),
-    ])
-}
-
-fn log(level: LogLevel, message: String) -> Effect {
-    Effect::Log(LogLine { level, message })
 }
 
 #[cfg(test)]

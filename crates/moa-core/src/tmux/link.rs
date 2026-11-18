@@ -236,6 +236,17 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
         .arg(format!("moa: {text}"))
 }
 
+/// Sets one of moa's options (`@moa_session`, `@moa_adopted`) on one pane.
+pub(crate) fn set_pane_option(pane: PaneId, name: &str, value: &str) -> Cmd {
+    Cmd::new("set-option").args([
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        name.to_string(),
+        value.to_string(),
+    ])
+}
+
 /// The link's connection, for an op that acts on bindings: up, and this connection's panes
 /// reconciled.
 pub fn ready(state: &State) -> Result<u64, OpError> {
@@ -247,7 +258,7 @@ pub fn ready(state: &State) -> Result<u64, OpError> {
     }
 }
 
-fn log(level: LogLevel, message: String) -> Effect {
+pub(crate) fn log(level: LogLevel, message: String) -> Effect {
     Effect::Log(LogLine { level, message })
 }
 

@@ -37,6 +37,11 @@ fn claude_is_recognised() {
     );
     assert_eq!(conversation("claude --resume=W").as_deref(), Some("W"));
     assert_eq!(conversation("claude").as_deref(), None);
+    // A bare `--resume` (the picker) doesn't swallow the flag after it.
+    assert_eq!(
+        conversation("claude --resume --session-id V").as_deref(),
+        Some("V")
+    );
 
     let a = agent("env CLAUDE_CONFIG_DIR=/s claude").unwrap();
     assert_eq!(a.kind, AgentKind::Claude);
