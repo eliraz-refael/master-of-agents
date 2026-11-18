@@ -288,6 +288,11 @@ The roadmap's, 2a's, 2b's, 3's and 4a's Global Constraints apply. Also:
    - in `clean_up`, a timeout ends the loop and closes the client.
 6. **`ConnectError::Protocol`** gives `Down::CantLink`, not `GaveUp`.
 
+**Changed by PR b1's `/code-review`** (these supersede the numbers above): `CONNECT_WAIT` is
+6 s, and all bootstrap steps share one 2 s deadline, so connect plus setup fits in 8 s, under
+the front door's 10 s. A first reply that times out is `ConnectError::TimedOut`, which backs off
+and tries again; only a real protocol error is the final `CantLink`.
+
 - [ ] **Step 1: Write the failing tests** in `tmux_tests.rs`, with `Sandbox`:
   - `a_stuck_link_from_before_is_reaped_on_connect`:
     - `tb.control_client(b)`, with its name read back through `list-clients`, and `@moa_ctl` set
