@@ -179,8 +179,8 @@ pub(crate) fn archive(
 pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Result<Done, OpError> {
     ready(state)?;
     let id = state.resolve(q)?;
-    // Its pane isn't known yet.
-    if state.tmux.launching(id).is_some() {
+    // Its pane isn't known yet, or a resume of it would launch it after this.
+    if state.tmux().opening(id) {
         return Err(OpError(STILL_OPENING.into()));
     }
     let s = state
@@ -251,8 +251,8 @@ pub(crate) fn sleep(
                     ids.push(id);
                 }
             }
-            // Its pane isn't known yet.
-            if ids.iter().any(|id| state.tmux.launching(*id).is_some()) {
+            // Its pane isn't known yet, or a resume of it would launch it after this.
+            if ids.iter().any(|id| state.tmux().opening(*id)) {
                 return Err(OpError(STILL_OPENING.into()));
             }
             ids

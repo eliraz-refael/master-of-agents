@@ -6,7 +6,7 @@
 use crate::change::Change;
 use crate::config::SleepAfter;
 use crate::core::{Tx, fold_in, post_commit};
-use crate::effect::{Effect, LogLevel, LogLine, TimerKey};
+use crate::effect::{Effect, LogLevel, TimerKey};
 use crate::hooks::asleep;
 use crate::live::{DisplayState, display_state};
 use crate::model::{ActivityWho, AskStatus, AskTarget, Lifecycle, Location, Session, SessionId};
@@ -15,6 +15,7 @@ use crate::state::State;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::bound_pane;
 use crate::tmux::ids::PaneId;
+use crate::tmux::link::log;
 use crate::{Now, UtcMs};
 
 /// Why session `id` can't go to sleep at `now` after `after_ms` idle, or `None` when it can
@@ -167,22 +168,22 @@ fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effec
         .is_err()
     {
         // Unsaved: nothing is killed, and the next input tries again.
-        fx.push(Effect::Log(LogLine {
-            level: LogLevel::Warn,
-            message: format!(
+        fx.push(log(
+            LogLevel::Warn,
+            format!(
                 "putting {} idle sessions to sleep wasn't saved; moa tries again",
                 names.len()
             ),
-        }));
+        ));
         return;
     }
     for pane in panes {
         tx.tmux(kill_pane(pane));
     }
-    let mut more = vec![Effect::Log(LogLine {
-        level: LogLevel::Info,
-        message: format!("{} idle sessions went to sleep", names.len()),
-    })];
+    let mut more = vec![log(
+        LogLevel::Info,
+        format!("{} idle sessions went to sleep", names.len()),
+    )];
     more.extend(post_commit(state, tx));
     fold_in(fx, more);
 }

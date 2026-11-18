@@ -11,7 +11,7 @@ use crate::Now;
 use crate::change::Change;
 use crate::config::{AccountConfig, AccountName};
 use crate::core::{Tx, post_commit};
-use crate::effect::{Effect, LogLevel, LogLine, TmuxToken};
+use crate::effect::{Effect, LogLevel, TmuxToken};
 use crate::hooks::{asleep, lost_agent};
 use crate::model::{
     Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
@@ -25,7 +25,7 @@ use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_pane, bound_session};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{
-    Answer, Asked, LaunchKind, Launching, Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled,
+    Answer, Asked, LaunchKind, Launching, Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled, log,
     opened_pane, ready, set_pane_option,
 };
 use crate::tmux::panes::{PaneInfo, list_panes};
@@ -723,10 +723,7 @@ pub(crate) fn resumed(
 }
 
 fn warn(message: String) -> Effect {
-    Effect::Log(LogLine {
-        level: LogLevel::Warn,
-        message,
-    })
+    log(LogLevel::Warn, message)
 }
 
 /// The answers to launches whose tab tmux reported on, or that the link went away from:

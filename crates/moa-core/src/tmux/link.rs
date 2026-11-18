@@ -470,6 +470,16 @@ impl TmuxState {
         self.opens.get_mut(&id)
     }
 
+    /// Whether `id` is on its way to a tab: its launch waits for its pane, or a resume of it
+    /// is still looking at the tabs (and will launch it unless they show it running).
+    pub(crate) fn opening(&self, id: SessionId) -> bool {
+        self.opens.contains_key(&id)
+            || self
+                .queries
+                .values()
+                .any(|a| matches!(a, Asked::Resume(r) if r.checked.id == id))
+    }
+
     /// `conn` closed: its ensures, resumes still looking at the tabs and focus waiters are
     /// forgotten, and its launches and terminals go on with nobody to answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
@@ -832,15 +842,16 @@ impl TmuxState {
                 self.topology = Topology::from_lists(sessions, panes, clients);
                 // A tag the listing shows (or another one it shows instead) is the listing's
                 // from now on; one it doesn't show yet may have been sent after it was asked.
+                // A tag is sent only once tmux has answered with its pane, so a listing
+                // without the pane was asked after it was gone: its tag goes too.
                 let topology = &mut self.topology;
-                self.sent_tags
-                    .retain(|pane, id| match topology.moa_session(*pane) {
-                        Some(_) => false,
-                        None => {
-                            topology.tag(*pane, *id);
-                            true
-                        }
-                    });
+                self.sent_tags.retain(|pane, id| {
+                    let keep = topology.moa_session(*pane).is_none() && topology.has_pane(*pane);
+                    if keep {
+                        topology.tag(*pane, *id);
+                    }
+                    keep
+                });
             }
             // No information: what was known stays.
             _ => fx.push(log(

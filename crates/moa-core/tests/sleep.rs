@@ -951,6 +951,27 @@ fn a_tag_moa_sent_outlives_an_older_listing() {
     feed(&r.b, &mut r.st, lists(&panes));
     assert_eq!(why(&r), Some("not tagged"));
 
+    // A tag sent for a tab that is gone before any listing shows it isn't kept.
+    let mut r = World::asleep().up();
+    let op = Op::SessionOpen {
+        path: r.b.home.join("work/lantern"),
+        account: None,
+        title: None,
+        group: None,
+        prompt: None,
+        bg: true,
+    };
+    let id = the_open(&send(&r.b, &mut r.st, 1, op)).0;
+    feed(&r.b, &mut r.st, opened(id));
+    assert_eq!(r.st.tmux().topology.moa_session(PaneId(7)), Some(id));
+    let mut panes = base_panes();
+    panes.truncate(1);
+    feed(&r.b, &mut r.st, lists(&panes));
+    assert_eq!(r.st.tmux().topology.moa_session(PaneId(7)), None);
+    panes.push("P %7 @3 $0 1 0 0 0 ".into());
+    feed(&r.b, &mut r.st, lists(&panes));
+    assert_eq!(r.st.tmux().topology.moa_session(PaneId(7)), None);
+
     // The binding's commit is refused: no tag goes out, and none is assumed.
     let mut r = World::asleep().up();
     let op = Op::SessionOpen {

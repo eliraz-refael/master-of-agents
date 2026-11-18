@@ -348,6 +348,33 @@ fn close_refuses_while_opening() {
     );
 }
 
+/// A resume still looking at the tabs launches the session once they answer: a close before
+/// then would be undone by that launch, so it is refused the same way.
+#[test]
+fn close_refuses_while_a_resume_looks_at_the_tabs() {
+    let mut r = World::asleep().reconciled();
+    let op = Op::SessionResume {
+        q: S.into(),
+        bg: true,
+    };
+    let fx = send(&r.b, &mut r.st, 1, op);
+    assert!(
+        replies(&fx).is_empty(),
+        "the resume waits for its pane query: {fx:?}"
+    );
+    assert_eq!(r.st.tmux().queries().count(), 1, "{fx:?}");
+    let fx = r.close(2);
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(2),
+            Err(OpError("it's still opening; try again in a moment".into()))
+        )]
+    );
+    assert!(is_asleep(r.s()));
+}
+
 /// A close the store refuses kills nothing (R15): the pane would die while the brain still
 /// says live.
 #[test]
