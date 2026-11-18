@@ -178,15 +178,15 @@ async fn a_line_spooled_during_start_is_drained_once_the_daemon_accepts() {
         let empty = std::fs::read_to_string(&live)
             .unwrap_or_default()
             .is_empty();
-        (empty && !draining.exists()).then_some(())
-    });
-    assert!(drained.is_some(), "the line waits for the next start");
-    assert!(
-        core.stats()
+        // The drain counts itself after it empties the spool, so wait for the count too.
+        let counted = core
+            .stats()
             .spool_drains
             .load(std::sync::atomic::Ordering::SeqCst)
-            >= 2
-    );
+            >= 2;
+        (empty && !draining.exists() && counted).then_some(())
+    });
+    assert!(drained.is_some(), "the line waits for the next start");
     core.stop().await;
     let ended = tokio::time::timeout(Duration::from_secs(10), daemon)
         .await
