@@ -8,11 +8,13 @@ use moa_core::model::ProjectId;
 use moa_core::panel::View;
 
 use crate::ctx::Ctx;
-use crate::data::Data;
+use crate::data::{Data, SessionRow};
 use crate::line::Line;
-use crate::text::SPIN;
+use crate::text::{SPIN, clean};
 
 pub mod plan;
+pub mod status;
+pub mod today;
 pub mod tree;
 
 /// What a view keeps in the panel rather than in the brain: the projects opened in the
@@ -28,9 +30,27 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
     match view {
         View::Tree => tree::build(data, ctx, ui, width),
         View::Plan => plan::build(data, ctx, ui, width),
+        View::Status => status::build(data, ctx, ui, width),
+        View::Today => today::build(data, ctx, ui, width),
         // The other views come with their builders.
         _ => Vec::new(),
     }
+}
+
+/// What a status or today line calls a session (the spike's): its title, else its project's
+/// name, else its folder's last part, else its handle; cleaned.
+pub fn label(row: &SessionRow) -> String {
+    let s = &row.session;
+    let folder = s
+        .cwd
+        .as_deref()
+        .and_then(|c| c.rsplit('/').find(|p| !p.is_empty()));
+    let name = [s.title.as_deref(), row.project.as_deref(), folder]
+        .into_iter()
+        .flatten()
+        .find(|n| !n.is_empty())
+        .unwrap_or(&row.handle);
+    clean(name)
 }
 
 /// The spinner's frame at `tick`.

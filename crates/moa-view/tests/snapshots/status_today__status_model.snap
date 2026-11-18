@@ -1,0 +1,19 @@
+---
+source: crates/moa-view/tests/status_today.rs
+expression: "debug_lines(&status(&data, &ctx, 80))"
+---
+[warn*]needs you ─────────────────────────────────────────────────────────────────── 1
+[warn*]! Fix login                  Lantern         1m  Bash: cargo test ⚠  ‹session›
+[ask*]asks you ──────────────────────────────────────────────────────────────────── 1
+[ask*]? Release notes              Kite            2h  Ship it today?  ‹session›
+[fail*]failed ────────────────────────────────────────────────────────────────────── 1
+[fail*]✗ Migrate DB                 Harbor          5h  API error  ‹session›
+[ok*]done ──────────────────────────────────────────────────────────────────────── 1
+[ok*]✓ 設計レビュー               Kite            3h  ‹session›
+[work]working ───────────────────────────────────────────────────────────────────── 1
+[work]⠸ Rust scaffold              Lantern         2m  ‹session›
+[quiet]quiet ─────────────────────────────────────────────────────────────────────── 1
+[quiet]◌ Import the whole archive o Lantern         6h  quiet 361m  ‹session›
+[head*]idle ──────────────────────────────────────────────────────────────────────── 2
+[dim]● Dev server 👍              Harbor          4h  ‹session›
+[dim]● Hand started               Harbor          7h  ‹session›
