@@ -936,7 +936,14 @@ fn adopt_refuses_an_id_moa_cant_resume() {
     let fx = r.adopt("%5");
     refused(&fx, text);
     r.in_5(Some(&store), Some(C9));
-    for bad in ["bad id", "a/b", &"a".repeat(65)] {
+    // A leading `-` would read as a flag on the resume's command line.
+    for bad in [
+        "bad id",
+        "a/b",
+        &"a".repeat(65),
+        "--dangerously-skip-permissions",
+        "-x",
+    ] {
         let fx = r.adopt_with("%5", None, None, Some(bad));
         refused(&fx, text);
     }

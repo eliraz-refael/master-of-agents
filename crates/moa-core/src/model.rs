@@ -218,9 +218,12 @@ pub enum TranscriptCheck {
 }
 
 /// Whether a conversation id is one moa can resume, and safe as a file name:
-/// `^[A-Za-z0-9-]{1,64}$` (the rule `moa_agents::claude::find_transcript` checks by).
+/// `^[A-Za-z0-9][A-Za-z0-9-]{0,63}$` (the rule `moa_agents::claude::find_transcript` checks
+/// by). A leading `-` would read as a flag after `--resume` (R13 rule 5).
 pub fn safe_id(id: &str) -> bool {
-    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    (1..=64).contains(&id.len())
+        && !id.starts_with('-')
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Claude's project folder name for a cwd: every character that isn't ASCII alphanumeric

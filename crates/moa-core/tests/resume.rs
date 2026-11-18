@@ -788,6 +788,26 @@ fn resume_refuses_an_unsafe_conversation_id() {
     );
 }
 
+/// An id that starts with `-` would read as a flag after `--resume` (R13 rule 5): refused,
+/// even when a transcript of that name is found.
+#[test]
+fn resume_refuses_an_id_that_reads_as_a_flag() {
+    for bad in ["--dangerously-skip-permissions", "-x"] {
+        for found in [false, true] {
+            let mut w = World::new();
+            w.conv().conversation_id = bad.into();
+            if found {
+                w.deps.transcript = |_, _| TranscriptCheck::Present(PathBuf::from("/t.jsonl"));
+            }
+            assert_eq!(
+                refused_unsaved(w),
+                "that conversation's id isn't one moa can resume",
+                "{bad} {found}"
+            );
+        }
+    }
+}
+
 /// tmux reads `-c` as a format: a `#` in the folder is doubled.
 #[test]
 fn resume_doubles_hashes_in_the_folder() {

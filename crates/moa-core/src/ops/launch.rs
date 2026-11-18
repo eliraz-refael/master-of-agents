@@ -16,7 +16,7 @@ use crate::effect::{Effect, LogLevel, TmuxToken};
 use crate::hooks::{asleep, lost_agent};
 use crate::model::{
     Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
-    Session, SessionId, TranscriptCheck, normalize_group_path, project_slot,
+    Session, SessionId, TranscriptCheck, normalize_group_path, project_slot, safe_id,
 };
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::reconcile::on_this_server;
@@ -469,7 +469,11 @@ fn check(
             return Err(OpError(format!("{name} can't run sessions in that folder")));
         }
     }
-    // 5. Its transcript, in that account's store.
+    // 5. Its transcript, in that account's store. An id that isn't safe is refused here too,
+    // whatever the lookup says: it goes on the command line after `--resume`.
+    if !safe_id(&conv.conversation_id) {
+        return Err(OpError(UNSAFE_ID.into()));
+    }
     match (deps.transcript)(&acct.store, &conv.conversation_id) {
         TranscriptCheck::Present(_) => {}
         TranscriptCheck::UnsafeId => return Err(OpError(UNSAFE_ID.into())),

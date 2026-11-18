@@ -9,6 +9,7 @@ use serde_json::json;
 use super::launch::{UNSAFE_ID, title_of};
 use super::projects::project_for;
 use super::sessions::STILL_OPENING;
+use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, finish_op};
 use crate::effect::Effect;
@@ -24,7 +25,6 @@ use crate::state::State;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Asked, Link, NO_TERMINAL, ready};
 use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes};
-use crate::Now;
 
 const WENT_AWAY: &str = "moa's terminal went away; try again";
 const TERMINAL: &str = "that tab is a terminal, not an agent";
