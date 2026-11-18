@@ -3,6 +3,9 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
+
+use moa_core::UtcMs;
 
 pub mod agent;
 pub mod normalize;
@@ -37,6 +40,39 @@ pub fn find_transcript(store: &Path, conversation_id: &str) -> TranscriptCheck {
         }
     }
     TranscriptCheck::Missing
+}
+
+/// The conversation an agent in `cwd` most likely runs when its argv names none (R21): the
+/// newest `*.jsonl` (by modification time) in `<store>/projects/<project_slot(cwd)>/` whose
+/// name is a safe id, isn't in `skip`, and was modified at or after `since`. Directory reads
+/// only; no transcript is opened. Two equally new ones go to the greater id, so the answer
+/// doesn't depend on the order the directory lists them in.
+pub fn newest_conversation(
+    store: &Path,
+    cwd: &Path,
+    skip: &[String],
+    since: Option<UtcMs>,
+) -> Option<String> {
+    let dir = store.join("projects").join(project_slot(cwd));
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()? != "jsonl" {
+                return None;
+            }
+            let id = path.file_stem()?.to_str()?;
+            if !safe_id(id) || skip.iter().any(|s| s == id) {
+                return None;
+            }
+            let meta = fs::metadata(&path).ok().filter(fs::Metadata::is_file)?;
+            let at = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+            let at = UtcMs(i64::try_from(at.as_millis()).ok()?);
+            since.is_none_or(|s| at >= s).then(|| (at, id.to_string()))
+        })
+        .max()
+        .map(|(_, id)| id)
 }
 
 #[cfg(test)]
