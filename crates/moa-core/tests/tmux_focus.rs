@@ -410,7 +410,7 @@ fn seen_respects_the_write_guards() {
 fn structural_changes_refresh() {
     let mut s = started();
     up(&mut s, &["P %5 @1 $0 1 1 0 0 "], &[]);
-    // %4 is no session's pane: an exit of a bound one would also end its session.
+    // %4 is no session's pane: an exit of a bound one would also put its session to sleep.
     let hooks = [
         "moa:hook pane-exited %4",
         "moa:hook pane-died %4",

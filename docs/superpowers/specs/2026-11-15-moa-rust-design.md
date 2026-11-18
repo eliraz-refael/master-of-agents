@@ -540,10 +540,13 @@ status line and moa read this one model (lesson 44).
 
 **Rotation and lifecycle.** SessionEnd with reason `clear` followed by SessionStart with a new
 id and the same `MOA_SESSION` (or, for spike-launched sessions with no `MOA_SESSION`, the same
-pane binding) adds a `conversations` row (reason `clear`); the session stays live. Other
-SessionEnds set `ended` unless the pane is still running the agent. A pane exit with no
-SessionEnd sets ended too (lesson 3). moa's own ACP session carries `MOA_SESSION=moa` and is
-never listed as a worker (lesson 31).
+pane binding) adds a `conversations` row (reason `clear`); the session stays live. A clean
+quit (SessionEnd reason `prompt_input_exit` or `logout`) sets `ended`, whichever of it and the
+pane's exit arrives first. An unexpected end (any other reason, or a pane exit with no
+SessionEnd) puts the session to sleep (asleep, U7): moa can't tell a crash, a kill or a reboot
+from a choice, and both resume. Liveness still comes from pane events, never from a hook's
+last event (lesson 3). moa's own ACP session carries `MOA_SESSION=moa` and is never listed as
+a worker (lesson 31).
 
 **Multi-account resume [C11]** (R5 §8.3):
 1. Resume uses the launcher of the store the current conversation was **recorded** in, never

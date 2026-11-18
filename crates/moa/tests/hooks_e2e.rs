@@ -3,8 +3,8 @@
 //! injected plugin runs `moa hook claude`, which reaches the daemon (or the spool), whose
 //! core changes the session that `moa ls` shows. Payloads are made up.
 //!
-//! Quiet, idle after the turn is seen and asleep aren't driven here: Task 5's core tests
-//! cover the first two (`crates/moa-core/tests/hooks.rs`), and asleep arrives in 4b.
+//! Quiet and idle after the turn is seen aren't driven here: Task 5's core tests cover them
+//! (`crates/moa-core/tests/hooks.rs`).
 
 mod common;
 
@@ -353,8 +353,13 @@ fn fake_agents_drive_every_display_state() {
     // takes, so the daemon may publish that or not. They have no gate after them, as the
     // brief's script has none; the assertion doesn't need one, since the gates already make
     // every state that matters published.
+    //
+    // `Exit` sends its clean SessionEnd and then exits, and its pane's exit can reach the
+    // daemon first: the session is asleep until the SessionEnd ends it (R14).
     let flicker = |i: usize| {
-        all[i] == "working" && matches!(all.get(i + 1).map(String::as_str), Some("failed" | "done"))
+        let next = all.get(i + 1).map(String::as_str);
+        (all[i] == "working" && matches!(next, Some("failed" | "done")))
+            || (all[i] == "asleep" && next == Some("ended"))
     };
     let shown: Vec<&str> = (0..all.len())
         .filter(|&i| !(i == 0 && all[i] == "idle") && !flicker(i))
@@ -369,12 +374,12 @@ fn fake_agents_drive_every_display_state() {
     );
 }
 
-/// No SessionEnd: the pane's exit ends it (H18).
+/// No SessionEnd: the pane's exit puts it to sleep (H18, R14).
 #[test]
-fn a_dying_agent_ends_its_session() {
+fn a_dying_agent_sleeps() {
     let r = rig();
     let s = r.open("b", &[hook("SessionStart", json!({})), FakeStep::Die]);
-    r.shows(&s.id, "ended");
+    r.shows(&s.id, "asleep");
     assert_eq!(r.events(&s.id, "session.ended"), 0);
 }
 

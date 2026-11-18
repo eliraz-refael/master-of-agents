@@ -9,7 +9,7 @@ use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::effect::{Down, Effect, Input, LogLine, TmuxIn, TmuxToken, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind};
-use moa_core::live::{DisplayState, display_state};
+use moa_core::live::{DisplayState, display_state, is_asleep};
 use moa_core::model::{
     Activity, AgentKind, ConversationReason, Lifecycle, Location, PaneBinding, ProjectId, SessionId,
 };
@@ -790,30 +790,30 @@ fn activity_rows(fx: &[Effect]) -> Vec<String> {
 }
 
 /// An agent that exits at once (a bad launcher, a refused flag) dies before the link's
-/// topology has its pane: the exit still ends the session, trusted on the binding's
-/// generation alone.
+/// topology has its pane: the exit, with no `SessionEnd` before it, still puts the session
+/// to sleep, trusted on the binding's generation alone.
 #[test]
-fn a_pane_that_exits_before_the_topology_has_it_ends_its_session() {
+fn a_pane_that_exits_before_the_topology_has_it_puts_its_session_to_sleep() {
     let (b, mut st) = typical();
     let id = the_open(&send(&b, &mut st, 1, open_op(&lantern(&b)))).0;
     bound(&b, &mut st, id, "%7");
     // No refresh in between: the topology has never listed %7.
     let fx = pane_exited(&b, &mut st, "%7");
-    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
+    assert!(is_asleep(st.session(id).unwrap()));
     assert!(
         changes(&fx)
             .iter()
             .any(|c| matches!(c, Change::DeletePaneBinding(s) if *s == id)),
         "{fx:?}"
     );
-    assert_eq!(activity_rows(&fx), ["lantern ○ ended"]);
+    assert!(activity_rows(&fx).is_empty(), "{fx:?}");
 }
 
 /// The other order: the exit is seen before the open's answer binds the pane. The answer
-/// ends the session instead of binding it, and the reply is the same as when the exit comes
-/// after it.
+/// puts the session to sleep instead of binding it, and the reply is the same as when the
+/// exit comes after it.
 #[test]
-fn a_pane_that_exits_before_the_open_is_answered_ends_its_session() {
+fn a_pane_that_exits_before_the_open_is_answered_puts_its_session_to_sleep() {
     let (b, mut st) = typical();
     let path = lantern(&b);
     let id = the_open(&send(&b, &mut st, 6, open_op(&path))).0;
@@ -822,13 +822,13 @@ fn a_pane_that_exits_before_the_open_is_answered_ends_its_session() {
     assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Live);
 
     let fx = bound(&b, &mut st, id, "%7");
-    assert_eq!(st.session(id).unwrap().lifecycle, Lifecycle::Ended);
+    assert!(is_asleep(st.session(id).unwrap()));
     let saved = changes(&fx);
     assert!(
         !saved.iter().any(|c| matches!(c, Change::PaneBinding(_))),
         "{fx:?}"
     );
-    assert_eq!(activity_rows(&fx), ["lantern ○ ended"]);
+    assert!(activity_rows(&fx).is_empty(), "{fx:?}");
     assert!(
         !fx.iter()
             .any(|e| matches!(e, Effect::Tmux { token: None, cmds, .. }

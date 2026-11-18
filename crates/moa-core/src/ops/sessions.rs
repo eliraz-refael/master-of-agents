@@ -11,7 +11,7 @@ use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine, TmuxToken};
-use crate::hooks::end_exited;
+use crate::hooks::lost_agent;
 use crate::live::{display_state, is_asleep, spike_state};
 use crate::model::{
     Activity, AgentKind, Conversation, ConversationReason, Group, Lifecycle, Location, PaneBinding,
@@ -439,11 +439,12 @@ fn bind(
         return Err(OpError(LOST.into()));
     };
     if state.tmux.take_exited(pane) {
-        // Its agent exited before this answer came: it ends as `pane_gone` would end it,
-        // and no binding is made. The tab did open, so the reply is the one an exit right
-        // after this answer would have got; the session shows as ended. A refused write
-        // leaves it live with no binding at all: reconcile (4b) ends such sessions.
-        if !end_exited(state, tx, id, Vec::new()) {
+        // Its agent exited before this answer came: it goes to sleep as `pane_gone` would
+        // put it, and no binding is made. The tab did open, so the reply is the one an exit
+        // right after this answer would have got; the session shows as asleep, or ended if
+        // its clean quit came first. A refused write leaves it live with no binding at all:
+        // reconcile puts such sessions to sleep.
+        if !lost_agent(state, tx, id, Vec::new()) {
             logs.push(warn(format!("the end of session {id} was not saved")));
         }
         return Ok(opened_reply(s));
