@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::launch::title_of;
+use super::launch::{UNSAFE_ID, title_of};
 use super::projects::project_for;
 use crate::Now;
 use crate::change::Change;
@@ -32,6 +32,12 @@ const NO_ACCOUNT: &str = "moa doesn't know the account that agent runs under; ad
 const NO_CONVERSATION: &str = "no conversation it wrote yet; ask it one thing first, or pass --id";
 const STILL_OPENING: &str = "it's still opening; try again in a moment";
 const LOST: &str = "moa lost that session; try again";
+
+/// Whether `id` is one moa can resume: `^[A-Za-z0-9-]{1,64}$`, the rule a transcript's file
+/// name is checked by (`moa_agents::claude::find_transcript`).
+fn safe_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
 
 /// What `adopt` was asked.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -181,16 +187,21 @@ pub(crate) fn adopt(
         return Err(OpError(format!("{cwd} isn't in this brain's folders")));
     }
     let store = state.store_of(agent.store_dir.as_deref());
-    let account = state
+    // The account, and its store as moa.toml spells it (`open` records it so).
+    let (account, acct_store) = state
         .account_of_store(&store)
+        .and_then(|name| {
+            let acct_store = state
+                .config()
+                .accounts
+                .get(&name)?
+                .store
+                .display()
+                .to_string();
+            Some((name, acct_store))
+        })
         .ok_or_else(|| OpError(NO_ACCOUNT.into()))?;
     let name = account.to_string();
-    let acct_store = state
-        .config()
-        .accounts
-        .get(&account)
-        .map(|a| a.store.display().to_string())
-        .ok_or_else(|| OpError(NO_ACCOUNT.into()))?;
     match route(state.config(), Some(&account), &folder, Some(state.brain())) {
         Route::Brain(b) if b != *state.brain() => {
             return Err(OpError(format!(
@@ -204,18 +215,26 @@ pub(crate) fn adopt(
     }
 
     // The conversation: given, else the agent's own, else the newest it wrote since it
-    // started that no kept tab's session holds.
+    // started that no kept tab's session holds. With no start time, "since it started" can't
+    // be told, and an older free conversation would be taken for its own: none is looked for.
     let held: Vec<String> = kept
         .iter()
         .flat_map(|id| state.conversations_of(*id))
         .map(|c| c.conversation_id.clone())
         .collect();
-    let conv = args
+    let named = args
         .id
         .clone()
         .filter(|c| !c.is_empty())
-        .or_else(|| agent.conversation.clone())
-        .or_else(|| (deps.newest_conversation)(&store, &folder, &held, agent.started_at))
+        .or_else(|| agent.conversation.clone());
+    if named.as_deref().is_some_and(|c| !safe_id(c)) {
+        return Err(OpError(UNSAFE_ID.into()));
+    }
+    let conv = named
+        .or_else(|| {
+            let since = agent.started_at?;
+            (deps.newest_conversation)(&store, &folder, &held, Some(since))
+        })
         .ok_or_else(|| OpError(NO_CONVERSATION.into()))?;
     let known = state
         .conversation_of_agent(AgentKind::Claude, &conv)

@@ -27,7 +27,8 @@ use serde_json::json;
 use common::*;
 
 /// Brain `default` owns `~/private`, the `work` brain `~/office`. `acct-w` sends its
-/// sessions to `work`; `mine` is Claude's own default store.
+/// sessions to `work`, `acct-d` runs only in `~/private/boards`, and `mine` is Claude's own
+/// default store.
 const TOML: &str = r#"
 [brains.default]
 folders = ["~/private"]
@@ -46,6 +47,12 @@ kind = "claude"
 store = "~/.claude-w"
 launcher = "/opt/claude"
 brain = "work"
+
+[accounts.acct-d]
+kind = "claude"
+store = "~/.claude-d"
+launcher = "/opt/claude"
+only = ["~/private/boards"]
 
 [accounts.mine]
 kind = "claude"
@@ -713,6 +720,89 @@ fn adopt_refuses_an_agent_with_no_conversation_yet() {
         "no conversation it wrote yet; ask it one thing first, or pass --id",
     );
     assert_eq!(NEWEST_ASKED.with(|a| a.borrow().len()), 1);
+}
+
+/// With no start time, which transcripts were written since the agent started can't be
+/// told: no transcript is looked for, so an older free one is never taken for its own.
+#[test]
+fn adopt_refuses_an_agent_whose_start_time_isnt_known() {
+    let mut r = World::new().reconciled();
+    let mut agent = claude(Some(&r.home().join(".claude-a")), None, started(&r.b));
+    agent.started_at = None;
+    r.runs(50, agent);
+    NEWEST.with(|n| *n.borrow_mut() = Some(C9.into()));
+    let fx = r.adopt("%5");
+    refused(
+        &fx,
+        "no conversation it wrote yet; ask it one thing first, or pass --id",
+    );
+    assert!(NEWEST_ASKED.with(|a| a.borrow().is_empty()));
+    // `--id` still adopts it.
+    let fx = r.adopt_with("%5", None, None, Some(C9));
+    let new = adopted_id(&fx);
+    assert_eq!(
+        r.st.conversations_of(new).next().unwrap().conversation_id,
+        C9
+    );
+}
+
+/// An id moa couldn't resume later is refused now, from `--id` or from the agent's argv.
+#[test]
+fn adopt_refuses_an_id_moa_cant_resume() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    let text = "that conversation's id isn't one moa can resume";
+    r.in_5(Some(&store), Some("../x"));
+    let fx = r.adopt("%5");
+    refused(&fx, text);
+    r.in_5(Some(&store), Some(C9));
+    for bad in ["bad id", "a/b", &"a".repeat(65)] {
+        let fx = r.adopt_with("%5", None, None, Some(bad));
+        refused(&fx, text);
+    }
+    assert!(NEWEST_ASKED.with(|a| a.borrow().is_empty()));
+}
+
+/// An account limited to other folders can't take a session here.
+#[test]
+fn adopt_refuses_an_account_limited_to_other_folders() {
+    let mut r = World::new().reconciled();
+    r.in_5(Some(&r.home().join(".claude-d")), Some(C9));
+    let fx = r.adopt("%5");
+    refused(&fx, "acct-d can't run sessions in that folder");
+}
+
+/// Z's resume is looking at the tabs, about to open it in a tab of its own: adopting the
+/// agent that runs Z's conversation waits for it.
+#[test]
+fn adopt_refuses_a_session_that_is_opening() {
+    let mut r = World::new().reconciled();
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        7,
+        Op::SessionResume {
+            q: Z.into(),
+            bg: true,
+        },
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    r.in_5(Some(&r.home().join(".claude-a")), Some(CZ));
+    r.ask(adopt_op("%5", None, None, None));
+    // The adopt's listing is the newest query; the resume's is still out.
+    let n = r.st.tmux().queries().max().unwrap();
+    let tabs: Vec<String> = r.tabs.clone();
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: vec![Ok(tabs), Ok(Vec::new())],
+        },
+    );
+    refused(&fx, "it's still opening; try again in a moment");
+    assert!(r.st.binding(id(Z)).is_none());
 }
 
 #[test]

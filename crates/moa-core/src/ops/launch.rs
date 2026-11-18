@@ -50,7 +50,7 @@ const NO_CONVERSATION: &str =
 const NOT_LISTED: &str =
     "the account its conversation was recorded in isn't in moa.toml; add it there to resume";
 const NO_FOLDER: &str = "moa doesn't know which folder it ran in; start it fresh with moactl open";
-const UNSAFE_ID: &str = "that conversation's id isn't one moa can resume";
+pub(crate) const UNSAFE_ID: &str = "that conversation's id isn't one moa can resume";
 const TERM_NOT_FULL: &str = "term needs a full path";
 const NO_SHELL: &str = "couldn't open a terminal; see moa's log";
 
