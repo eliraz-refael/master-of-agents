@@ -63,6 +63,9 @@ pub enum Input {
         reply: Option<(ConnId, ReqId)>,
         envelope: HookEnvelope,
     },
+    /// The daemon's start drain of the hook spool has run, whether its commit landed or its
+    /// `.draining` file was kept for later (or there was no spool). Sent once per start.
+    StartDrained,
 }
 
 /// What the tmux link reports. `conn` numbers the link's connections; anything from an
@@ -115,6 +118,8 @@ pub enum TmuxToken {
     Refresh,
     /// The new window an `open` asked for, and the session in it.
     Open(SessionId),
+    /// A question about the server's panes (`TmuxState::ask`), by number.
+    Query(u64),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -125,6 +130,7 @@ pub enum Publish {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LogLevel {
+    Debug,
     Info,
     Warn,
     Error,
@@ -158,9 +164,9 @@ pub enum Effect {
     Log(LogLine),
     /// Commands for the link's connection `conn`. Untokened, they show saved state (the
     /// status line, notices) and wait for the commit. Tokened, their answers come back as
-    /// [`TmuxIn::Replies`]: a `Refresh` is the link's own plumbing, and runs at once; an
-    /// `Open` starts an agent that reports on its session, and waits for the commit that
-    /// saves it.
+    /// [`TmuxIn::Replies`]: a `Refresh` or a `Query` is the link's own plumbing, and runs at
+    /// once; an `Open` starts an agent that reports on its session, and waits for the commit
+    /// that saves it.
     Tmux {
         conn: u64,
         cmds: Vec<Cmd>,
@@ -186,7 +192,7 @@ impl Effect {
                 | Effect::Log(_)
                 | Effect::TmuxConnect { .. }
                 | Effect::Tmux {
-                    token: Some(TmuxToken::Refresh),
+                    token: Some(TmuxToken::Refresh | TmuxToken::Query(_)),
                     ..
                 }
         )

@@ -294,6 +294,8 @@ impl Core {
         };
         let now = Now::at(self.clock.wall(), self.clock.mono(), self.tz.clone());
         self.stats.inputs.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
+        lock(&self.stats.stepped).push(kind(&input));
         let panic_next = &self.panic_next;
         let state = &mut self.state;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -355,6 +357,7 @@ impl Core {
                 let _ = self.sched.send(SchedCmd::Cancel(Wake::Core(key)));
             }
             Effect::Log(LogLine { level, message }) => match level {
+                LogLevel::Debug => tracing::debug!("{message}"),
                 LogLevel::Info => tracing::info!("{message}"),
                 LogLevel::Warn => tracing::warn!("{message}"),
                 LogLevel::Error => tracing::error!("{message}"),
@@ -508,4 +511,21 @@ fn take_drain(
         }
     }
     work
+}
+
+/// An input's kind, for the tests' record of what was stepped.
+#[cfg(test)]
+fn kind(input: &Input) -> &'static str {
+    match input {
+        Input::Startup(_) => "Startup",
+        Input::Reload { .. } => "Reload",
+        Input::Client { .. } => "Client",
+        Input::ClientGone(_) => "ClientGone",
+        Input::Timer(_) => "Timer",
+        Input::ZoneChanged => "ZoneChanged",
+        Input::ActorFailed { .. } => "ActorFailed",
+        Input::Tmux(_) => "Tmux",
+        Input::Hook { .. } => "Hook",
+        Input::StartDrained => "StartDrained",
+    }
 }

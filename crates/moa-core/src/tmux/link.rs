@@ -16,7 +16,12 @@ use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::state::State;
 
+/// An op that needs a tab, while moa's terminal isn't linked.
+pub(crate) const NO_TERMINAL: &str = "moa isn't open in a terminal yet; run moa first";
+/// An op that acts on bindings, before this connection's reconcile (R10).
+pub(crate) const NOT_READY: &str = "moa is still looking at its tabs; try again in a moment";
 const NOT_TMUX: &str = "that isn't a tmux program";
 const GAVE_UP: &str = "moa lost its terminal server and couldn't reconnect; see the log";
 const CANT_LINK: &str = "moa couldn't talk to its terminal; see moa's log";
@@ -100,7 +105,28 @@ pub struct TmuxState {
     /// Panes of this server that exited with no session bound to them, oldest first, at
     /// most [`EXITED_KEPT`]: an `open`'s answer naming one may still be on its way.
     exited: VecDeque<PaneId>,
+    /// The pane queries waiting for their answer, by number, and what each was asked for.
+    queries: BTreeMap<u64, Asked>,
+    next_query: u64,
+    /// The start drain of the hook spool has run (`Input::StartDrained`). Set once per
+    /// daemon start, never reset: reconcile waits for it (R2).
+    pub drained: bool,
+    /// Why the link last went down, whatever happened since.
+    pub last_down: Option<Down>,
+    /// This connection's panes have been reconciled: the bindings can be trusted (R10).
+    reconciled: bool,
 }
+
+/// What a pane query was asked for: who reads its answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code, reason = "reconcile asks it (4b)")]
+pub(crate) enum Asked {
+    Reconcile,
+}
+
+/// A pane query's answer: each command's lines, or `Err` when any command failed or the
+/// link went before tmux answered.
+pub(crate) type Answer = Result<Vec<Vec<String>>, ()>;
 
 /// How many unbound pane exits are remembered.
 const EXITED_KEPT: usize = 64;
@@ -139,6 +165,11 @@ impl Default for TmuxState {
             clock_at: None,
             opens: BTreeMap::new(),
             exited: VecDeque::new(),
+            queries: BTreeMap::new(),
+            next_query: 0,
+            drained: false,
+            last_down: None,
+            reconciled: false,
         }
     }
 }
@@ -192,6 +223,18 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
         .arg(client.0.as_str())
         .args(["-d", "4000", "-l"])
         .arg(format!("moa: {text}"))
+}
+
+/// The link's connection, for an op that acts on bindings: up, and this connection's panes
+/// reconciled.
+#[allow(dead_code, reason = "the ops on bindings use it (4b)")]
+pub(crate) fn ready(state: &State) -> Result<u64, OpError> {
+    let tmux = state.tmux();
+    match tmux.link {
+        Link::Up { conn, .. } if tmux.reconciled => Ok(conn),
+        Link::Up { .. } => Err(OpError(NOT_READY.into())),
+        Link::Down | Link::Connecting => Err(OpError(NO_TERMINAL.into())),
+    }
 }
 
 fn log(level: LogLevel, message: String) -> Effect {
@@ -275,16 +318,20 @@ impl TmuxState {
                     TmuxToken::Refresh => self.listed(&results),
                     // `settle` took it.
                     TmuxToken::Open(_) => Vec::new(),
+                    // `answered` took it.
+                    TmuxToken::Query(_) => Vec::new(),
                 }
             }
         }
     }
 
     /// After a reload: the link and what it knows stay; its bookkeeping starts over, since a
-    /// failed commit or a panic may have left it half-changed.
+    /// failed commit or a panic may have left it half-changed. A reconcile's changes may be
+    /// among those the reload dropped, so its flag goes too.
     pub(crate) fn reload(&mut self) -> Vec<Effect> {
         self.refresh = Refresh::Idle;
         self.written.reset();
+        self.reconciled = false;
         match self.link {
             Link::Up { .. } => self.refresh(),
             Link::Connecting => vec![self.connect()],
@@ -372,6 +419,65 @@ impl TmuxState {
         }
     }
 
+    /// Asks tmux about the server's panes, on this connection: the tokened commands, whose
+    /// answer [`TmuxState::answered`] hands back. `None` while the link isn't up.
+    #[allow(dead_code, reason = "reconcile asks (4b)")]
+    pub(crate) fn ask(&mut self, asked: Asked, cmds: Vec<Cmd>) -> Option<Effect> {
+        let conn = self.conn()?;
+        self.next_query += 1;
+        let n = self.next_query;
+        self.queries.insert(n, asked);
+        Some(Effect::Tmux {
+            conn,
+            cmds,
+            token: Some(TmuxToken::Query(n)),
+        })
+    }
+
+    /// The pane queries this input answers: the one tmux replied to, or every one, failed,
+    /// when the link goes down or a new connection replaces the one they were asked on. Run
+    /// before [`TmuxState::input`], like [`TmuxState::settle`].
+    #[allow(dead_code, reason = "reconcile reads the answers (4b)")]
+    pub(crate) fn answered(&mut self, input: &TmuxIn) -> Vec<(Asked, Answer)> {
+        match input {
+            TmuxIn::Replies {
+                conn,
+                token: TmuxToken::Query(n),
+                results,
+            } if self.conn() == Some(*conn) => self
+                .queries
+                .remove(n)
+                .map(|asked| {
+                    let lines = results.iter().cloned().collect::<Result<Vec<_>, _>>();
+                    (asked, lines.map_err(|_| ()))
+                })
+                .into_iter()
+                .collect(),
+            TmuxIn::Down(_) => self.all_failed(),
+            TmuxIn::Connected { conn, .. } if self.conn().is_some_and(|c| c != *conn) => {
+                self.all_failed()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn all_failed(&mut self) -> Vec<(Asked, Answer)> {
+        std::mem::take(&mut self.queries)
+            .into_values()
+            .map(|asked| (asked, Err(())))
+            .collect()
+    }
+
+    /// The pane queries waiting for their answer, by number.
+    pub fn queries(&self) -> impl Iterator<Item = u64> + '_ {
+        self.queries.keys().copied()
+    }
+
+    /// Whether this connection's panes have been reconciled.
+    pub fn reconciled(&self) -> bool {
+        self.reconciled
+    }
+
     fn all_gone(&mut self) -> Vec<Settled> {
         std::mem::take(&mut self.opens)
             .into_iter()
@@ -427,8 +533,10 @@ impl TmuxState {
     ) -> Vec<Effect> {
         let mut fx = Vec::new();
         if self.conn() != Some(conn) {
-            // A new connection: nothing asked on another one will be answered.
+            // A new connection: nothing asked on another one will be answered, and its
+            // panes are yet to be reconciled.
             self.refresh = Refresh::Idle;
+            self.reconciled = false;
         }
         if self.generation.is_some_and(|g| g != generation) {
             self.restarts += 1;
@@ -453,6 +561,8 @@ impl TmuxState {
     }
 
     fn down(&mut self, d: Down) -> Vec<Effect> {
+        self.last_down = Some(d.clone());
+        self.reconciled = false;
         self.link = match d {
             // The link is reconnecting.
             Down::Lost => Link::Connecting,
@@ -553,3 +663,6 @@ impl TmuxState {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests;

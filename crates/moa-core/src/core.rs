@@ -8,13 +8,14 @@ use crate::effect::{Effect, Input, LogLevel, LogLine, Publish, TimerKey};
 use crate::hooks;
 use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
-use crate::op::{Op, OpError};
+use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::publish::{CoreEvent, Topic};
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
+use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
-use crate::tmux::link;
+use crate::tmux::link::{self, Link};
 use crate::tmux::status;
 use crate::{Now, UtcMs};
 
@@ -148,6 +149,11 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.tmux.client_gone(conn);
             Vec::new()
         }
+        // Reconcile (4b) waits for it.
+        Input::StartDrained => {
+            state.tmux.drained = true;
+            Vec::new()
+        }
         Input::ZoneChanged => vec![backup_timer(now)],
         Input::ActorFailed { actor, message: _ } => {
             // The message may carry contents; it stays with the executor.
@@ -215,31 +221,49 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let caller = state.caller(&caller);
             let mut tx = Tx::new(now);
             let result = ops::run(state, &mut tx, &caller, op, now);
-            // Handlers commit once, last: a refusal has applied nothing, so there is nothing
-            // to persist that the reply would deny.
-            debug_assert!(
-                result.is_ok() || tx.changes.is_empty(),
-                "an op returned Err after committing"
-            );
-            if result.is_err() {
-                tx.events.clear();
-            }
-            let mut fx = post_commit(state, tx);
-            fx.push(Effect::Reply { conn, req, result });
-            fx
+            finish_op(state, tx, conn, req, result)
         }
     }
 }
 
+/// An op's transaction, then its reply. Handlers commit once, last: a refusal has applied
+/// nothing, so there is nothing to persist that the reply would deny, and nothing it queued
+/// (an event, a tmux command) is said.
+pub(crate) fn finish_op(
+    state: &mut State,
+    mut tx: Tx,
+    conn: ConnId,
+    req: ReqId,
+    result: Result<Done, OpError>,
+) -> Vec<Effect> {
+    debug_assert!(
+        result.is_ok() || tx.changes.is_empty(),
+        "an op returned Err after committing"
+    );
+    if result.is_err() {
+        tx.events.clear();
+        tx.cmds.clear();
+    }
+    let mut fx = post_commit(state, tx);
+    fx.push(Effect::Reply { conn, req, result });
+    fx
+}
+
 /// What a transaction's commits owe the world, in order: the `Persist`, the model it
-/// changed, then its events. The caller adds any reply after.
+/// changed, its events, then its tmux commands (R15). The caller adds any reply after.
+/// The commands go only for a saved change, on the link's connection: with nothing saved
+/// or the link down, they are dropped.
 pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
     let Tx {
-        changes, events, ..
+        changes,
+        events,
+        cmds,
+        ..
     } = tx;
     let topics = topics_of(&changes);
+    let saved = !changes.is_empty();
     let mut fx = Vec::new();
-    if !changes.is_empty() {
+    if saved {
         fx.push(Effect::Persist(changes));
     }
     if let Some(model) = state.publish(&topics) {
@@ -250,6 +274,22 @@ pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
             .into_iter()
             .map(|e| Effect::Publish(Publish::Event(e))),
     );
+    if !cmds.is_empty() {
+        match state.tmux().link {
+            Link::Up { conn, .. } if saved => fx.push(Effect::Tmux {
+                conn,
+                cmds,
+                token: None,
+            }),
+            _ => fx.push(Effect::Log(LogLine {
+                level: LogLevel::Debug,
+                message: format!(
+                    "{} tmux commands dropped: nothing saved, or no link",
+                    cmds.len()
+                ),
+            })),
+        }
+    }
     fx
 }
 
@@ -322,6 +362,8 @@ pub(crate) struct Tx {
     /// Everything committed so far, in order.
     pub(crate) changes: Vec<Change>,
     pub(crate) events: Vec<CoreEvent>,
+    /// tmux commands for after the commit (R15): see [`Tx::tmux`].
+    pub(crate) cmds: Vec<Cmd>,
     /// The last id handed out per table, for ids asked for before the commit.
     issued: Vec<(Table, i64)>,
 }
@@ -333,8 +375,18 @@ impl Tx {
             today: now.local_day,
             changes: Vec::new(),
             events: Vec::new(),
+            cmds: Vec::new(),
             issued: Vec::new(),
         }
+    }
+
+    /// Queues a tmux command for after this transaction's commit, on the link's connection
+    /// ([`post_commit`]). Only after a successful [`Tx::commit`]: a kill must never go out
+    /// for a change the store refused.
+    #[allow(dead_code, reason = "reconcile and the ops on tabs use it (4b)")]
+    pub(crate) fn tmux(&mut self, cmd: Cmd) {
+        debug_assert!(!self.changes.is_empty(), "a tmux command before any commit");
+        self.cmds.push(cmd);
     }
 
     /// Checks every change, then applies all of them to `state` and records them. A refusal

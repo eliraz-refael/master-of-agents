@@ -24,14 +24,13 @@ use crate::state::State;
 use crate::time::{days_ago, local_text};
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::{Link, OPENED_FORMAT, OpenEnd, Settled};
+use crate::tmux::link::{Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled};
 
 /// How much of the last prompt stands in for a missing title.
 const TITLE_CUT: usize = 40;
 /// How much of a title names its tab, as the spike cut it.
 const WINDOW_NAME_CUT: usize = 24;
 
-const NO_TERMINAL: &str = "moa isn't open in a terminal yet; run moa first";
 const NOT_FULL: &str = "open needs a full path";
 const NO_ACCOUNT: &str = "no account to open with: set open_account in moa.toml";
 const ONLY_CLAUDE: &str = "only Claude accounts can open sessions for now";
