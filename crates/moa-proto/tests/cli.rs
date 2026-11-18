@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use moa_core::model::SuggestionAction;
-use moa_core::op::{Action, Answer, NoParams, Op, TaskAdd, TaskSet};
+use moa_core::op::{Answer, NoParams, Op, TaskAdd, TaskSet};
 use moa_proto::cli::{Moactl, VERB_NAMES, VerbCtx, parse_action};
 
 fn ctx() -> VerbCtx {
@@ -243,10 +243,6 @@ fn verb_names_match_clap_and_the_enum() {
 
 #[test]
 fn later_verbs_say_not_yet() {
-    assert_eq!(
-        err(&["resume", "x"]),
-        "moactl resume isn't in this build yet"
-    );
     assert_eq!(err(&["peers"]), "moactl peers isn't in this build yet");
     assert_eq!(
         err(&["layout", "list"]),
@@ -295,6 +291,70 @@ fn open_parses_to_session_open() {
 }
 
 #[test]
+fn resume_parses_to_session_resume() {
+    assert_eq!(
+        op(&["resume", "lantern"]),
+        Op::SessionResume {
+            q: "lantern".into(),
+            bg: false
+        }
+    );
+    assert_eq!(
+        op(&["resume", "a1b2", "--bg"]),
+        Op::SessionResume {
+            q: "a1b2".into(),
+            bg: true
+        }
+    );
+}
+
+#[test]
+fn focus_parses_to_session_focus() {
+    assert_eq!(
+        op(&["focus", "lantern"]),
+        Op::SessionFocus {
+            q: "lantern".into()
+        }
+    );
+}
+
+/// `sleep` by name, or by how long sessions have been idle (R20).
+#[test]
+fn sleep_parses_to_session_sleep() {
+    assert_eq!(
+        op(&["sleep", "a1b2", "lantern"]),
+        Op::SessionSleep {
+            qs: vec!["a1b2".into(), "lantern".into()],
+            idle_ms: None,
+            dry_run: false,
+        }
+    );
+    assert_eq!(
+        op(&["sleep", "--idle", "1.5", "--dry-run"]),
+        Op::SessionSleep {
+            qs: Vec::new(),
+            idle_ms: Some(5_400_000),
+            dry_run: true,
+        }
+    );
+    assert_eq!(
+        op(&["sleep", "--idle", "0"]),
+        Op::SessionSleep {
+            qs: Vec::new(),
+            idle_ms: Some(0),
+            dry_run: false,
+        }
+    );
+    let hours = "--idle needs a number of hours, 0 or more";
+    for bad in ["-1", "NaN", "inf", "-0.5"] {
+        assert_eq!(err(&["sleep", "--idle", bad]), hours, "{bad}");
+    }
+    let usage = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
+    assert_eq!(err(&["sleep"]), usage);
+    assert_eq!(err(&["sleep", "--dry-run"]), usage);
+}
+
+#[test]
 fn usage_errors_are_the_spikes() {
     assert_eq!(
         err(&["task", "set", "x"]),
@@ -310,7 +370,7 @@ fn usage_errors_are_the_spikes() {
     );
 }
 
-fn act(verb: &str, args: &[&str]) -> Result<Action, String> {
+fn act(verb: &str, args: &[&str]) -> Result<Op, String> {
     parse_action(
         &SuggestionAction {
             verb: verb.into(),
@@ -324,7 +384,7 @@ fn act(verb: &str, args: &[&str]) -> Result<Action, String> {
 fn actions_parse_with_the_same_grammar() {
     assert!(matches!(
         act("task", &["set", "1", "--status", "done"]),
-        Ok(Action::Op(Op::TaskSet(_)))
+        Ok(Op::TaskSet(_))
     ));
     assert!(
         act("task", &["1", "--status", "done"])
@@ -334,7 +394,12 @@ fn actions_parse_with_the_same_grammar() {
     let wl = "a suggestion can run moactl archive, close, group, note, project, set, task";
     assert_eq!(act("rm", &["-rf", "x"]).unwrap_err(), wl);
     assert_eq!(act("open", &["~/x"]).unwrap_err(), wl);
-    assert_eq!(act("close", &["3f9a1c52"]), Ok(Action::NotYet("close")));
+    assert_eq!(
+        act("close", &["3f9a1c52"]),
+        Ok(Op::SessionClose {
+            q: "3f9a1c52".into()
+        })
+    );
     assert_eq!(
         act("project", &["X", "--add", "rel"]).unwrap_err(),
         "use a full path in a suggestion"
@@ -348,4 +413,41 @@ fn every_verb_and_subcommand_is_reserved() {
     for verb in VERB_NAMES {
         assert!(RESERVED_BRAIN_NAMES.contains(verb), "{verb} isn't reserved");
     }
+}
+
+/// `close` maps to its op, from moactl and from a suggestion alike; `term` opens a shell in
+/// the folder it names, else where it was typed; the help says "tab" (R30).
+#[test]
+fn close_and_term_parse() {
+    assert_eq!(op(&["close", "x"]), Op::SessionClose { q: "x".into() });
+    assert_eq!(act("close", &["x"]), Ok(Op::SessionClose { q: "x".into() }));
+    assert_eq!(
+        op(&["term"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h/private/lantern"),
+            title: None
+        }
+    );
+    assert_eq!(
+        op(&["term", "../web", "--title", "dev", "--pane", "%3"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h/private/web"),
+            title: Some("dev".into())
+        }
+    );
+    assert_eq!(
+        op(&["term", "~"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h"),
+            title: None
+        }
+    );
+
+    use clap::CommandFactory;
+    let help = Moactl::command().render_help().to_string();
+    let line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("term "))
+        .unwrap_or_else(|| panic!("{help}"));
+    assert!(line.ends_with("A plain shell in a new tab"), "{line}");
 }

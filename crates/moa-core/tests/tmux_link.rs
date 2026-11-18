@@ -300,6 +300,35 @@ fn ensures_waiting_together_share_a_ping() {
     assert!(fx.is_empty(), "{fx:?}");
 }
 
+/// The link saying again that the same connection is up (a connect asked again by a reload
+/// while it was connecting) proves nothing new about the server: the ensures waiting still
+/// wait for a ping answered after them.
+#[test]
+fn a_repeated_connected_waits_for_the_ping() {
+    let mut s = started();
+    connected(&mut s, 1, generation(10));
+    let fx = ensure_as(&mut s, 1, None);
+    assert_eq!(tmux_effects(&fx), vec![&ping_effect(1, 1)]);
+    ensure_as(&mut s, 2, None);
+    let fx = connected(&mut s, 1, generation(10));
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    // The ping that is out is shared, not sent again.
+    assert!(
+        !tmux_effects(&fx).iter().any(|e| matches!(
+            e,
+            Effect::Tmux {
+                token: Some(TmuxToken::Ping(_)),
+                ..
+            }
+        )),
+        "{fx:?}"
+    );
+    let fx = pong(&mut s, 1, 1, true);
+    assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
+    let fx = pong(&mut s, 1, 2, true);
+    assert_eq!(replies(&fx), vec![(ReqId(2), running(true))]);
+}
+
 /// A connection that closed while its ensure waited for a ping is never answered.
 #[test]
 fn a_closed_connections_ensure_is_dropped_from_its_ping() {

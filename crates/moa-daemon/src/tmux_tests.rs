@@ -702,8 +702,8 @@ async fn no_ping_answer_before_state(heard: &mut Heard) -> TmuxIn {
     }
 }
 
-/// A ping the server never answers (here, it is stopped) is a loss within `STEP_WAIT`, so
-/// an ensure waiting on it is answered within the front door's 10 s.
+/// A ping the server never answers (here, it is stopped) is a loss once its `STEP_WAIT`
+/// has passed. An ensure waiting on it then waits for what the reconnect finds.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_ping_a_hung_server_never_answers_is_a_loss() {
     let tb = TempBrain::new(None);
@@ -723,6 +723,41 @@ async fn a_ping_a_hung_server_never_answers_is_a_loss() {
         TmuxIn::Down(Down::Lost)
     );
     drop(resume);
+}
+
+/// A ping the server answers is done with: its `STEP_WAIT` deadline goes with it, so the
+/// link stays up past it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answered_ping_clears_its_deadline() {
+    let tb = TempBrain::new(None);
+    let (actor, mut heard) = started(server(&tb));
+    actor.send(connect()).unwrap();
+    let conn = conn_of(&heard.next_state().await);
+    actor
+        .send(TmuxCmd::Send {
+            conn,
+            cmds: vec![moa_core::tmux::link::ping()],
+            token: Some(TmuxToken::Ping(1)),
+        })
+        .unwrap();
+    loop {
+        match heard.next().await {
+            TmuxIn::Replies {
+                token: TmuxToken::Ping(1),
+                results,
+                ..
+            } => {
+                assert_eq!(results, [Ok(vec!["moa:ping".to_string()])]);
+                break;
+            }
+            TmuxIn::Notification(_) | TmuxIn::Replies { .. } => {}
+            other => panic!("the link said {other:?} before the ping's answer"),
+        }
+    }
+    assert_eq!(
+        heard.quiet_for(STEP_WAIT + Duration::from_secs(1)).await,
+        None
+    );
 }
 
 /// A ping tmux answers with an error (here, a pane that doesn't exist) proves nothing:
@@ -1013,6 +1048,83 @@ async fn an_open_whose_commit_fails_starts_no_tab() {
         "a tab was opened for a session that wasn't saved"
     );
     assert_eq!(core.stats().commit_failures.load(Ordering::SeqCst), 1);
+    // The link is a channel, which never answers its stop: closing it skips the wait.
+    drop(rx);
+    core.stop().await;
+}
+
+/// R15 for a new tab's tag: the `set-option @moa_session` waits for the binding's commit, so
+/// when the store refuses that commit, no tag reaches the link (the listings it asked for at
+/// once may still go: they change nothing).
+#[tokio::test]
+async fn a_binding_whose_commit_fails_tags_nothing() {
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let (core, mut rx) = opening_core(&brain, &time).await;
+    let (c, mut replies) = core.open_conn();
+    core.send(
+        c,
+        moa_core::op::ReqId(1),
+        CallerInfo::default(),
+        open_lantern(&brain),
+    );
+    let id = timeout(PATIENCE, async {
+        loop {
+            if let Some(id) = opened_id(&rx.recv().await.expect("the link is held")) {
+                return id;
+            }
+        }
+    })
+    .await
+    .expect("the new window is sent");
+    core.barrier().await;
+    core.store_fault(Fault::FailNextCommit);
+    core.tmux_input(TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Open(id),
+        results: vec![Ok(vec!["P %7 4242".into()])],
+    });
+    let (req, _) = timeout(PATIENCE, replies.recv()).await.unwrap().unwrap();
+    assert_eq!(req, moa_core::op::ReqId(1));
+    core.barrier().await;
+    let tags = |cmd: &TmuxCmd| match cmd {
+        TmuxCmd::Send { cmds, .. } => cmds
+            .iter()
+            .any(|c| c.name() == "set-option" && c.argv().iter().any(|a| a == "@moa_session")),
+        _ => false,
+    };
+    assert!(
+        !sent(&mut rx).iter().any(tags),
+        "a tab was tagged for a binding that wasn't saved"
+    );
+    assert_eq!(core.stats().commit_failures.load(Ordering::SeqCst), 1);
+
+    // Saved, the same answer tags the tab.
+    core.send(
+        c,
+        moa_core::op::ReqId(2),
+        CallerInfo::default(),
+        open_lantern(&brain),
+    );
+    let id = timeout(PATIENCE, async {
+        loop {
+            if let Some(id) = opened_id(&rx.recv().await.expect("the link is held")) {
+                return id;
+            }
+        }
+    })
+    .await
+    .expect("the new window is sent");
+    core.tmux_input(TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Open(id),
+        results: vec![Ok(vec!["P %8 4343".into()])],
+    });
+    let (req, result) = timeout(PATIENCE, replies.recv()).await.unwrap().unwrap();
+    assert_eq!(req, moa_core::op::ReqId(2));
+    assert!(result.is_ok(), "{result:?}");
+    core.barrier().await;
+    assert!(sent(&mut rx).iter().any(tags), "the saved tab is tagged");
     // The link is a channel, which never answers its stop: closing it skips the wait.
     drop(rx);
     core.stop().await;

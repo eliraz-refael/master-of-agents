@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
-use moa_core::op::{Action, Answer, NoParams, Op, TaskAdd, TaskSet};
+use moa_core::op::{Answer, NoParams, Op, SLEEP_USAGE, TaskAdd, TaskSet};
 
 /// What `moactl` parses: a global `--json` and one verb.
 #[derive(Parser, Debug)]
@@ -181,10 +181,11 @@ pub enum Verb {
         ids: Vec<String>,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long, value_name = "HOURS")]
+        // A negative number reaches `to_op`, which says what is wrong with it.
+        #[arg(long, value_name = "HOURS", allow_negative_numbers = true)]
         idle: Option<f64>,
     },
-    /// A plain shell in a new window.
+    /// A plain shell in a new tab.
     Term {
         path: Option<String>,
         #[arg(long)]
@@ -492,13 +493,38 @@ impl Verb {
                 prompt: prompt.clone(),
                 bg: *bg,
             },
+            Verb::Focus { q } => Op::SessionFocus { q: q.clone() },
+            Verb::Resume { id, bg } => Op::SessionResume {
+                q: id.clone(),
+                bg: *bg,
+            },
+            Verb::Close { id } => Op::SessionClose { q: id.clone() },
+            Verb::Sleep { ids, dry_run, idle } => {
+                let idle_ms = match idle {
+                    Some(h) if !h.is_finite() || *h < 0.0 => {
+                        return usage("--idle needs a number of hours, 0 or more");
+                    }
+                    // `as` saturates: an absurd number of hours matches nothing.
+                    Some(h) => Some((h * 3_600_000.0).round() as i64),
+                    None => None,
+                };
+                if ids.is_empty() && idle_ms.is_none() {
+                    return usage(SLEEP_USAGE);
+                }
+                Op::SessionSleep {
+                    qs: ids.clone(),
+                    idle_ms,
+                    dry_run: *dry_run,
+                }
+            }
+            // `--pane` is for slice 5's "here"; until then a terminal opens where it was
+            // typed.
+            Verb::Term { path, title, .. } => Op::TermOpen {
+                path: resolve_path(path.as_deref().unwrap_or("."), ctx)?,
+                title: title.clone(),
+            },
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Resume { .. }
-            | Verb::Focus { .. }
-            | Verb::Close { .. }
-            | Verb::Sleep { .. }
-            | Verb::Term { .. }
-            | Verb::Adopt { .. }
+            Verb::Adopt { .. }
             | Verb::Goto { .. }
             | Verb::Layout { .. }
             | Verb::Peers
@@ -512,7 +538,7 @@ impl Verb {
 }
 
 /// Parse a suggestion's action with the `moactl` grammar. No cwd: paths must be full.
-pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Action, String> {
+pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Op, String> {
     if !ACTION_VERBS.contains(&a.verb.as_str()) {
         let mut verbs = ACTION_VERBS.to_vec();
         verbs.sort_unstable();
@@ -535,16 +561,9 @@ pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Action, String>
         let first = text.lines().next().unwrap_or("");
         first.strip_prefix("error: ").unwrap_or(first).to_string()
     })?;
-    if matches!(parsed.verb, Verb::Close { .. }) {
-        return Ok(Action::NotYet("close"));
-    }
     let ctx = VerbCtx {
         cwd: None,
         home: home.to_path_buf(),
     };
-    parsed
-        .verb
-        .to_op(&ctx)
-        .map(Action::Op)
-        .map_err(|e| e.to_string())
+    parsed.verb.to_op(&ctx).map_err(|e| e.to_string())
 }

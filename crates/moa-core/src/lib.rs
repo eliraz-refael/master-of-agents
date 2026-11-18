@@ -17,6 +17,7 @@ mod peers;
 pub mod publish;
 mod reconcile;
 pub mod route;
+pub mod sleep;
 pub mod state;
 pub mod time;
 pub mod tmux;

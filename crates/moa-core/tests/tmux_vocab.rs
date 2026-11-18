@@ -361,6 +361,9 @@ fn topology_apply() {
             window: WindowId(2),
         },
         Notification::Other("session-renamed"),
+        // The cockpit is a window by its name.
+        Notification::Other("window-renamed"),
+        Notification::Other("unlinked-window-renamed"),
     ] {
         assert_eq!(t.apply(&n), Applied::Refresh, "{n:?}");
     }

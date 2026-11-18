@@ -41,7 +41,7 @@ pub enum Op {
     #[serde(rename = "session.find")]
     SessionFind { q: String },
     /// A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes
-    /// once tmux says which pane the tab has.
+    /// once tmux says which pane the tab has. The tab comes to the screen unless `bg`.
     #[serde(rename = "session.open")]
     SessionOpen {
         path: PathBuf,
@@ -55,6 +55,40 @@ pub enum Op {
         prompt: Option<String>,
         #[serde(default)]
         bg: bool,
+    },
+    /// Brings a session's tab to the screen. A write: a session not running is resumed.
+    #[serde(rename = "session.focus")]
+    SessionFocus { q: String },
+    /// Relaunches a session's conversation in a new tab, under the account whose store it
+    /// was recorded in (C11); one that runs is only brought to the screen. The tab comes to
+    /// the screen unless `bg`.
+    #[serde(rename = "session.resume")]
+    SessionResume {
+        q: String,
+        #[serde(default)]
+        bg: bool,
+    },
+    /// Ends a session and kills its tab, once moa can prove the tab is the session's.
+    #[serde(rename = "session.close")]
+    SessionClose { q: String },
+    /// Puts sessions to sleep: their tabs close and they stay resumable. By name (`qs`), or
+    /// every one idle `idle_ms` that could sleep on its own. A `dry_run` only says which.
+    #[serde(rename = "session.sleep")]
+    SessionSleep {
+        #[serde(default)]
+        qs: Vec<String>,
+        #[serde(default)]
+        idle_ms: Option<i64>,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    /// A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is
+    /// named after `title`, else the folder.
+    #[serde(rename = "term.open")]
+    TermOpen {
+        path: PathBuf,
+        #[serde(default)]
+        title: Option<String>,
     },
     #[serde(rename = "task.ls")]
     TaskLs {
@@ -128,14 +162,6 @@ pub enum Answer {
     Yes,
     No,
     Later,
-}
-
-/// What a suggestion action parses to: an op the core runs, or a verb this build can't run yet.
-#[derive(Clone, PartialEq, Eq, Debug)]
-#[allow(clippy::large_enum_variant)] // short-lived, never stored in bulk
-pub enum Action {
-    Op(Op),
-    NotYet(&'static str),
 }
 
 /// The params of an op that takes none. Missing, `null` and `{}` all decode (a unit variant
@@ -240,6 +266,11 @@ impl Op {
         "session.archive",
         "session.find",
         "session.open",
+        "session.focus",
+        "session.resume",
+        "session.close",
+        "session.sleep",
+        "term.open",
         "task.ls",
         "task.add",
         "task.set",
@@ -264,6 +295,10 @@ impl Op {
             | Op::SessionSet { .. }
             | Op::SessionArchive { .. }
             | Op::SessionOpen { .. }
+            | Op::SessionFocus { .. }
+            | Op::SessionResume { .. }
+            | Op::SessionClose { .. }
+            | Op::SessionSleep { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -278,6 +313,7 @@ impl Op {
             | Op::Attention(_)
             | Op::SuggestionLs(_)
             | Op::TmuxEnsure { .. }
+            | Op::TermOpen { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -293,6 +329,11 @@ impl Op {
             Op::SessionArchive { .. } => "session.archive",
             Op::SessionFind { .. } => "session.find",
             Op::SessionOpen { .. } => "session.open",
+            Op::SessionFocus { .. } => "session.focus",
+            Op::SessionResume { .. } => "session.resume",
+            Op::SessionClose { .. } => "session.close",
+            Op::SessionSleep { .. } => "session.sleep",
+            Op::TermOpen { .. } => "term.open",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",
@@ -318,6 +359,9 @@ pub struct Done {
     pub text: String,
     pub data: serde_json::Value,
 }
+
+/// What `sleep` is for, said when it is given neither names nor `--idle`.
+pub const SLEEP_USAGE: &str = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
 
 /// A refusal, as one human line.
 #[derive(Clone, PartialEq, Eq, Debug)]

@@ -216,6 +216,16 @@ pub enum TranscriptCheck {
     NotChecked,
 }
 
+/// Claude's project folder name for a cwd: every character that isn't ASCII alphanumeric
+/// becomes `-`. The core's copy of `moa_agents::claude::project_slot`, which a test keeps
+/// equal to it: resume tells by it which folder a transcript belongs to.
+pub fn project_slot(cwd: &std::path::Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 // ---------- suggestions and asks ----------
 
 pub const ACTION_VERBS: &[&str] = &[

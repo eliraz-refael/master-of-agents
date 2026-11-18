@@ -45,6 +45,17 @@ pub(crate) fn bound_session(state: &State, pane: PaneId) -> Option<SessionId> {
         .map(|b| b.session_id)
 }
 
+/// The pane `id` is bound to on the server the link is connected to: it runs there.
+pub(crate) fn bound_pane(state: &State, id: SessionId) -> Option<PaneId> {
+    let Link::Up { generation, .. } = &state.tmux().link else {
+        return None;
+    };
+    state
+        .binding(id)
+        .filter(|b| b.server_pid == generation.pid && b.server_start == generation.start)
+        .and_then(|b| b.pane_id.parse().ok())
+}
+
 /// Sets `seen_at` on every session with an unseen turn end whose trusted pane a user can
 /// see. A session that can't be written now (a row this build doesn't know, or writes
 /// refused) is skipped, and tried again at the next focus change.

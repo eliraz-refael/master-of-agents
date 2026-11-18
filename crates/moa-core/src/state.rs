@@ -15,7 +15,7 @@ use crate::change::Change;
 use crate::config::{AccountName, BrainName, Config, caller_store};
 use crate::effect::RefuseWrites;
 use crate::model::*;
-use crate::op::Action;
+use crate::op::Op;
 use crate::publish::{ACTIVITY_SHOWN, Model};
 use crate::tmux::link::{Link, TmuxState};
 
@@ -141,11 +141,12 @@ fn conv_key(c: &Conversation) -> ConvKey {
 }
 
 /// The moactl grammar for one suggestion action: its op, or why it doesn't parse.
-pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Action, String>;
+pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Op, String>;
 
 /// What the core needs from outside to run suggestions, compare paths and open sessions.
 /// The daemon supplies the real ones; the default has no grammar (so no suggestion can carry
-/// actions), treats every path as already canonical, and hands out sequential ids.
+/// actions), treats every path as already canonical, hands out sequential ids, and finds
+/// every folder and transcript there.
 #[derive(Clone)]
 pub struct Deps {
     /// Parses one suggestion action with the moactl grammar (`moa_proto::cli::parse_action`),
@@ -162,6 +163,11 @@ pub struct Deps {
     /// (the daemon reads them in-process). Called only where a pane is checked, never per
     /// event.
     pub inspect: fn(i64, &[String]) -> Option<PaneAgent>,
+    /// Looks for a conversation's transcript in a store (`moa_agents::claude::find_transcript`):
+    /// directory reads only, before a resume (C11 rule 2).
+    pub transcript: fn(&Path, &str) -> TranscriptCheck,
+    /// Whether a folder exists (`Path::is_dir`): a resume refuses one that is gone.
+    pub is_dir: fn(&Path) -> bool,
 }
 
 fn identity(p: &Path) -> PathBuf {
@@ -191,6 +197,8 @@ impl Default for Deps {
             new_uuid: sequential_uuid,
             session_plugin: PathBuf::new(),
             inspect: |_, _| None,
+            transcript: |_, _| TranscriptCheck::Present(PathBuf::new()),
+            is_dir: |_| true,
         }
     }
 }
@@ -242,6 +250,9 @@ pub struct State {
     next_ids: NextIds,
     unknown: Vec<LoadNote>,
     pub(crate) tmux: TmuxState,
+    /// The sleep deadline the timer is armed at, if any (R19): `SetTimer` and `CancelTimer`
+    /// go out only when it changes.
+    pub(crate) sleep_at: Option<UtcMs>,
     /// The keys of the last [`RECENT_HOOKS`] hook events applied, oldest first, and the same
     /// keys for lookup: a hook that arrives twice is applied once.
     pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
@@ -275,6 +286,7 @@ impl State {
             next_ids: NextIds::default(),
             unknown: Vec::new(),
             tmux: TmuxState::default(),
+            sleep_at: None,
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),
         }

@@ -153,8 +153,11 @@ impl Topology {
             | Notification::WindowClose { .. }
             | Notification::SessionsChanged
             | Notification::LayoutChange { .. }
-            // A renamed session changes what `session_named` answers.
-            | Notification::Other("session-renamed") => Applied::Refresh,
+            // A renamed session changes what `session_named` answers, and a renamed window
+            // which window is the cockpit (by name: `moa` in the session `moa`).
+            | Notification::Other(
+                "session-renamed" | "window-renamed" | "unlinked-window-renamed",
+            ) => Applied::Refresh,
             _ => Applied::Same,
         }
     }
@@ -207,6 +210,11 @@ impl Topology {
     /// Whether `w` is the cockpit: the window named `moa` in the session named `moa`.
     pub fn is_cockpit(&self, w: WindowId) -> bool {
         self.cockpits.contains(&w)
+    }
+
+    /// Records that `p` is tagged with session `id`, as moa just set it.
+    pub fn tag(&mut self, p: PaneId, id: SessionId) {
+        self.moa_sessions.insert(p, id);
     }
 
     /// The moa session a pane was tagged with (`@moa_session`), if any.

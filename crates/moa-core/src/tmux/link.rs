@@ -16,6 +16,7 @@ use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::ops::launch::ResumeAsk;
 use crate::state::State;
 
 /// An op that needs a tab, while moa's terminal isn't linked.
@@ -109,11 +110,10 @@ pub struct TmuxState {
     pub(super) written: Written,
     /// When the status clock's timer fires, while it is armed.
     pub(super) clock_at: Option<UtcMs>,
-    /// The `open`s waiting for tmux to say which pane their tab has, with whom to answer:
-    /// nobody, once the caller's connection closed.
-    opens: BTreeMap<SessionId, Option<(ConnId, ReqId)>>,
+    /// The launches waiting for tmux to say which pane their tab has.
+    opens: BTreeMap<SessionId, Launching>,
     /// Panes of this server that exited with no session bound to them, oldest first, at
-    /// most [`EXITED_KEPT`]: an `open`'s answer naming one may still be on its way.
+    /// most [`EXITED_KEPT`]: a launch's answer naming one may still be on its way.
     exited: VecDeque<PaneId>,
     /// The pane queries waiting for their answer, by number, and what each was asked for.
     queries: BTreeMap<u64, Asked>,
@@ -131,12 +131,29 @@ pub struct TmuxState {
     pub(crate) unfinished_reconciles: u32,
     /// This connection's reconciles were given up on, and the log said so.
     pub(crate) reconcile_given_up: bool,
+    /// The `@moa_session` tags moa sent after a saved commit that no listing has shown yet,
+    /// by pane. The daemon sends a listing at once but holds the tag until the commit is
+    /// released, so a listing can predate the tag: these stay in the topology until one
+    /// shows it (R18 reads the tag).
+    sent_tags: BTreeMap<PaneId, SessionId>,
 }
 
 /// What a pane query was asked for: who reads its answer.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Asked {
     Reconcile,
+    /// A resume whose checks passed, looking for a tab that already runs its conversation
+    /// (R13 step 6).
+    Resume(ResumeAsk),
+    /// A terminal's new window (R16), named `name` and opened in `path`: its tab is tagged
+    /// and brought to the screen once tmux says which pane it has. `reply` is whom to
+    /// answer: nobody, once the caller's connection closed, though the tab still gets its
+    /// tags (R26).
+    Term {
+        reply: Option<(ConnId, ReqId)>,
+        name: String,
+        path: String,
+    },
 }
 
 /// A pane query's answer: each command's lines, or `Err` when any command failed or the
@@ -146,7 +163,7 @@ pub(crate) type Answer = Result<Vec<Vec<String>>, ()>;
 /// How many unbound pane exits are remembered.
 const EXITED_KEPT: usize = 64;
 
-/// How an `open`'s new tab turned out.
+/// How a launch's new tab turned out.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum OpenEnd {
     /// The pane it runs in, and the pane's process.
@@ -157,12 +174,35 @@ pub(crate) enum OpenEnd {
     Gone,
 }
 
-/// An `open` that has its answer.
+/// What started an agent in a new tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LaunchKind {
+    Open,
+    Resume,
+    // Comes with `moactl restart`.
+    #[allow(dead_code)]
+    Restart,
+}
+
+/// A launch waiting for tmux to say which pane its tab has.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Launching {
+    /// Whom to answer: nobody, once the caller's connection closed.
+    pub reply: Option<(ConnId, ReqId)>,
+    pub kind: LaunchKind,
+    /// The tab is brought to the screen once it is bound.
+    pub focus: bool,
+    /// The `focus` callers waiting for the tab.
+    pub waiters: Vec<(ConnId, ReqId)>,
+    /// When the launch was committed: the binding's `bound_at`.
+    pub launched_at: UtcMs,
+}
+
+/// A launch that has its answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Settled {
     pub id: SessionId,
-    /// Whom to answer, unless the caller went.
-    pub reply: Option<(ConnId, ReqId)>,
+    pub launching: Launching,
     pub end: OpenEnd,
 }
 
@@ -191,14 +231,15 @@ impl Default for TmuxState {
             reconciled: false,
             unfinished_reconciles: 0,
             reconcile_given_up: false,
+            sent_tags: BTreeMap::new(),
         }
     }
 }
 
-/// What an `open`'s `new-window -P` prints: the new pane and its process.
+/// What a launch's `new-window -P` prints: the new pane and its process.
 pub(crate) const OPENED_FORMAT: &str = "P #{pane_id} #{pane_pid}";
 
-/// What tmux said to an `open`'s new window, printed with [`OPENED_FORMAT`].
+/// What tmux said to a launch's new window, printed with [`OPENED_FORMAT`].
 fn open_end(results: &[Result<Vec<String>, String>]) -> OpenEnd {
     let line = match results {
         [Ok(lines)] => match lines.as_slice() {
@@ -208,21 +249,26 @@ fn open_end(results: &[Result<Vec<String>, String>]) -> OpenEnd {
         [Err(e)] => return OpenEnd::Failed(Some(e.lines().next().unwrap_or("").to_string())),
         _ => return OpenEnd::Failed(None),
     };
+    match opened_pane(line) {
+        Some((pane, pid)) => OpenEnd::Bound { pane, pid },
+        None => OpenEnd::Failed(None),
+    }
+}
+
+/// The pane and its process in a line printed with [`OPENED_FORMAT`], if it is one.
+pub(crate) fn opened_pane(line: &str) -> Option<(PaneId, i64)> {
     let mut words = line.split(' ');
     let (Some("P"), Some(pane), Some(pid), None) =
         (words.next(), words.next(), words.next(), words.next())
     else {
-        return OpenEnd::Failed(None);
+        return None;
     };
     // `i64::from_str` would accept a leading '+'.
     let pid = Some(pid)
         .filter(|p| p.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|p| p.parse::<i64>().ok())
-        .filter(|p| *p > 0);
-    match (pane.parse::<PaneId>(), pid) {
-        (Ok(pane), Some(pid)) => OpenEnd::Bound { pane, pid },
-        _ => OpenEnd::Failed(None),
-    }
+        .filter(|p| *p > 0)?;
+    Some((pane.parse::<PaneId>().ok()?, pid))
 }
 
 /// An absolute path whose last part is `tmux`.
@@ -368,6 +414,8 @@ impl TmuxState {
     /// among those the reload dropped, so its flag goes too.
     pub(crate) fn reload(&mut self) -> Vec<Effect> {
         self.refresh = Refresh::Idle;
+        // A failed commit's held tags were never sent; the refresh below shows the rest.
+        self.sent_tags.clear();
         self.written.reset();
         self.reconciled = false;
         // The ping out may have been lost with the handling that sent it: its callers wait
@@ -412,33 +460,59 @@ impl TmuxState {
         }
     }
 
-    /// Holds `open`'s reply until tmux says how its tab turned out.
-    pub(crate) fn wait_open(&mut self, id: SessionId, conn: ConnId, req: ReqId) {
-        self.opens.insert(id, Some((conn, req)));
+    /// Holds a launch's answers until tmux says how its tab turned out.
+    pub(crate) fn wait_open(&mut self, id: SessionId, launching: Launching) {
+        self.opens.insert(id, launching);
     }
 
-    /// `conn` closed: its ensures are forgotten, and its opens go on with nobody to answer.
+    /// The launch of `id` waiting for its tab, if there is one.
+    pub(crate) fn launching(&mut self, id: SessionId) -> Option<&mut Launching> {
+        self.opens.get_mut(&id)
+    }
+
+    /// Whether `id` is on its way to a tab: its launch waits for its pane, or a resume of it
+    /// is still looking at the tabs (and will launch it unless they show it running).
+    pub(crate) fn opening(&self, id: SessionId) -> bool {
+        self.opens.contains_key(&id)
+            || self
+                .queries
+                .values()
+                .any(|a| matches!(a, Asked::Resume(r) if r.checked.id == id))
+    }
+
+    /// `conn` closed: its ensures, resumes still looking at the tabs and focus waiters are
+    /// forgotten, and its launches and terminals go on with nobody to answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
         self.waiters.retain(|(c, _)| *c != conn);
         self.pinged.retain(|(c, _)| *c != conn);
-        for reply in self.opens.values_mut() {
-            if matches!(reply, Some((c, _)) if *c == conn) {
+        self.queries
+            .retain(|_, a| !matches!(a, Asked::Resume(r) if r.conn == conn));
+        for asked in self.queries.values_mut() {
+            if let Asked::Term { reply, .. } = asked
+                && matches!(reply, Some((c, _)) if *c == conn)
+            {
                 *reply = None;
             }
         }
+        for launching in self.opens.values_mut() {
+            if matches!(launching.reply, Some((c, _)) if c == conn) {
+                launching.reply = None;
+            }
+            launching.waiters.retain(|(c, _)| *c != conn);
+        }
     }
 
-    /// The sessions whose `open` is waiting.
+    /// The sessions whose launch is waiting.
     pub(crate) fn waiting_opens(&self) -> impl Iterator<Item = SessionId> + '_ {
         self.opens.keys().copied()
     }
 
-    /// Stops waiting for `id`'s tab, and says whom to answer.
-    pub(crate) fn forget_open(&mut self, id: SessionId) -> Option<(ConnId, ReqId)> {
-        self.opens.remove(&id).flatten()
+    /// Stops waiting for `id`'s tab, and gives back its launch.
+    pub(crate) fn forget_open(&mut self, id: SessionId) -> Option<Launching> {
+        self.opens.remove(&id)
     }
 
-    /// The `open`s this input answers: the one whose tab tmux reports on, or every one
+    /// The launches this input answers: the one whose tab tmux reports on, or every one
     /// when the link goes down or a new connection replaces the one they were asked on.
     /// Run before [`TmuxState::input`], while the link is still as they knew it.
     pub(crate) fn settle(&mut self, input: &TmuxIn) -> Vec<Settled> {
@@ -450,9 +524,9 @@ impl TmuxState {
             } if self.conn() == Some(*conn) => self
                 .opens
                 .remove(id)
-                .map(|reply| Settled {
+                .map(|launching| Settled {
                     id: *id,
-                    reply,
+                    launching,
                     end: open_end(results),
                 })
                 .into_iter()
@@ -518,8 +592,8 @@ impl TmuxState {
     }
 
     /// Whether a query for `asked` is waiting for its answer.
-    pub(crate) fn asking(&self, asked: Asked) -> bool {
-        self.queries.values().any(|a| *a == asked)
+    pub(crate) fn asking(&self, asked: &Asked) -> bool {
+        self.queries.values().any(|a| a == asked)
     }
 
     /// Whether this connection's panes have been reconciled.
@@ -541,9 +615,9 @@ impl TmuxState {
     fn all_gone(&mut self) -> Vec<Settled> {
         std::mem::take(&mut self.opens)
             .into_iter()
-            .map(|(id, reply)| Settled {
+            .map(|(id, launching)| Settled {
                 id,
-                reply,
+                launching,
                 end: OpenEnd::Gone,
             })
             .collect()
@@ -606,6 +680,13 @@ impl TmuxState {
         fx
     }
 
+    /// Moa tagged `pane` with session `id`, after a saved commit: the topology knows it at
+    /// once, and keeps it through listings that don't show it yet.
+    pub(crate) fn tag_sent(&mut self, pane: PaneId, id: SessionId) {
+        self.sent_tags.insert(pane, id);
+        self.topology.tag(pane, id);
+    }
+
     /// Reads the lists again, at most one in flight and one more after it.
     fn refresh(&mut self) -> Vec<Effect> {
         let Some(conn) = self.conn() else {
@@ -636,12 +717,14 @@ impl TmuxState {
         socket: String,
     ) -> Vec<Effect> {
         let mut fx = Vec::new();
-        if self.conn() != Some(conn) {
+        let fresh = self.conn() != Some(conn);
+        if fresh {
             // A new connection: nothing asked on another one will be answered, and its
             // panes are yet to be reconciled, with a fresh count of tries.
             self.refresh = Refresh::Idle;
             self.unping();
             self.reconciled = false;
+            self.sent_tags.clear();
             self.unfinished_reconciles = 0;
             self.reconcile_given_up = false;
         }
@@ -663,7 +746,14 @@ impl TmuxState {
             socket,
         };
         self.written.reset();
-        fx.extend(self.answer(&running(true)));
+        if fresh {
+            // The connection was just made: the server answered it.
+            fx.extend(self.answer(&running(true)));
+        } else {
+            // The same connection said again (a connect asked again by a reload) proves
+            // nothing new: the ensures waiting get a ping, or share the one out.
+            fx.extend(self.ping());
+        }
         fx.extend(self.refresh());
         fx
     }
@@ -680,6 +770,7 @@ impl TmuxState {
             _ => Link::Down,
         };
         self.topology = Topology::default();
+        self.sent_tags.clear();
         self.written.reset();
         self.refresh = Refresh::Idle;
         // Nobody is known to be attached any more: the status clock stops.
@@ -749,6 +840,18 @@ impl TmuxState {
         match results {
             [Ok(sessions), Ok(panes), Ok(clients)] => {
                 self.topology = Topology::from_lists(sessions, panes, clients);
+                // A tag the listing shows (or another one it shows instead) is the listing's
+                // from now on; one it doesn't show yet may have been sent after it was asked.
+                // A tag is sent only once tmux has answered with its pane, so a listing
+                // without the pane was asked after it was gone: its tag goes too.
+                let topology = &mut self.topology;
+                self.sent_tags.retain(|pane, id| {
+                    let keep = topology.moa_session(*pane).is_none() && topology.has_pane(*pane);
+                    if keep {
+                        topology.tag(*pane, *id);
+                    }
+                    keep
+                });
             }
             // No information: what was known stays.
             _ => fx.push(log(

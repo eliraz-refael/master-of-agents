@@ -257,15 +257,21 @@ fn history_row(
 
 /// The conversation a start belongs to: a new one for an id nobody has had, or the known one
 /// with its `last_seen_at` moved. One another session had is running here now: it moves to
-/// this session and keeps what it knows, unless the envelope says better.
+/// this session and keeps what it knows, unless the envelope says better. The store is
+/// always the envelope's: the agent runs in it.
 fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource) -> Conversation {
+    // No variable is Claude's own default store, which moa launches without one (R11, R32).
+    let store_dir = Some(
+        state
+            .store_of(env.store_dir.as_deref())
+            .display()
+            .to_string(),
+    );
     if let Some(known) = state.conversation_of_agent(env.agent, &env.conversation_id) {
         let mut c = known.clone();
         c.session_id = id;
         c.last_seen_at = env.at;
-        if env.store_dir.is_some() {
-            c.store_dir = env.store_dir.clone();
-        }
+        c.store_dir = store_dir;
         if env.transcript_path.is_some() {
             c.transcript_path = env.transcript_path.clone();
         }
@@ -275,7 +281,7 @@ fn rotated(state: &State, id: SessionId, env: &HookEnvelope, source: StartSource
         agent_kind: env.agent,
         conversation_id: env.conversation_id.clone(),
         session_id: id,
-        store_dir: env.store_dir.clone(),
+        store_dir,
         spike_account: None,
         reason: source.reason(),
         first_seen_at: env.at,

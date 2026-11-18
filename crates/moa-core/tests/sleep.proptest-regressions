@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3eadd9fc88244bce5bcecbf6faafde4e1baf4b91ff752bcf9d8ce5b2ab56c88d # shrinks to sess = [Sess { activity: Idle, question: false, done: false, tracked: true, heard: true, cockpit: false, ask: 0, idle_hours: 0, archived: false }], inputs = [(false, 3, 226), (false, 0, 134)]

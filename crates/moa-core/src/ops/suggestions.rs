@@ -12,7 +12,7 @@ use crate::activity;
 use crate::change::Change;
 use crate::core::{Tx, unknown_message};
 use crate::model::{Suggestion, SuggestionAction, SuggestionId, SuggestionStatus};
-use crate::op::{Action, Answer, Done, OpError};
+use crate::op::{Answer, Done, OpError};
 use crate::state::{Caller, State, Table};
 
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
@@ -230,8 +230,6 @@ fn run_action(
         return Err("suggestions need the moactl grammar".into());
     };
     let home: &Path = &deps.home;
-    match parse(a, home)? {
-        Action::Op(op) => run(state, tx, caller, op, now).map(|_| ()).map_err(|e| e.0),
-        Action::NotYet(verb) => Err(format!("{verb} isn't in this build yet")),
-    }
+    let op = parse(a, home)?;
+    run(state, tx, caller, op, now).map(|_| ()).map_err(|e| e.0)
 }

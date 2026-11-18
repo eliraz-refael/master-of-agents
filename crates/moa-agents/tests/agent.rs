@@ -118,3 +118,18 @@ fn project_slot_replaces_non_alphanumerics() {
         "-Users-x-private-a-b"
     );
 }
+
+/// The core keeps a copy for resume (it can't depend on this crate): the two must agree.
+#[test]
+fn the_cores_project_slot_is_the_same() {
+    for cwd in [
+        "/Users/x/private/a.b",
+        "/tmp/moa x/work/a#(b)",
+        "/h/ünï/c_d-e",
+        "",
+        "relative/path",
+    ] {
+        let p = Path::new(cwd);
+        assert_eq!(moa_core::model::project_slot(p), project_slot(p), "{cwd}");
+    }
+}

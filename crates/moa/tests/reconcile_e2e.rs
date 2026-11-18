@@ -73,9 +73,64 @@ fn kill_server_brings_sessions_back_asleep() {
     for id in &ids {
         shows(&tb, id, "asleep");
     }
-    let running = tmux(&tb, &["list-panes", "-a", "-F", "#{pane_current_command}"]);
-    assert!(
-        !running.lines().any(|c| c == "claude" || c == "fake-claude"),
-        "an agent started on its own: {running}"
+    assert_eq!(agents(&tb), 0, "an agent started on its own");
+}
+
+/// How many tabs run fake-claude.
+fn agents(tb: &TempBrain) -> usize {
+    let running = tmux(tb, &["list-panes", "-a", "-F", "#{pane_current_command}"]);
+    running
+        .lines()
+        .filter(|c| *c == "claude" || *c == "fake-claude")
+        .count()
+}
+
+/// C11 end to end: a session put to sleep by a `kill-server` resumes its conversation, under
+/// the account it was recorded in, in one new tab. Its transcript is the one fake-claude
+/// wrote on the first run (R34).
+#[test]
+fn a_session_asleep_after_kill_server_resumes() {
+    let tb = TempBrain::new(None);
+    let claude = fake_claude_named_claude(tb.root());
+    moa_toml_with_launcher(&tb, &claude);
+    let first = open(&tb, &[], &[]);
+    came_up(&tb, &first);
+
+    let start = |source: &str| FakeStep::Hook {
+        event: "SessionStart".into(),
+        fields: Map::from_iter([("source".to_string(), Value::String(source.into()))]),
+    };
+    let id = open_session(&tb, "a", &[start("startup"), FakeStep::Hang]);
+    shows(&tb, &id, "idle");
+    let conversation = ls_row(&tb, &id).unwrap()["conversation"].clone();
+    let conv = conversation.as_str().unwrap().to_string();
+    // The agent has started once it has its transcript: the `kill-server` must not come
+    // before.
+    let store = tb.root().join(".claude-a/projects");
+    let written = wait_for(SHOWS, || {
+        let slots = fs::read_dir(&store).ok()?;
+        slots
+            .flatten()
+            .any(|slot| slot.path().join(format!("{conv}.jsonl")).is_file())
+            .then_some(())
+    });
+    assert!(written.is_some(), "fake-claude never wrote its transcript");
+
+    tmux(&tb, &["kill-server"]);
+    let second = open(&tb, &[], &[]);
+    came_up(&tb, &second);
+    shows(&tb, &id, "asleep");
+
+    // fake-claude reads its script from its folder at each launch.
+    write_script(
+        &tb.root().join("work/a"),
+        &[start("resume"), FakeStep::Hang],
     );
+    let o = run_exe(&tb, &moactl(&tb), &["resume", &id], &[("MOA_BRAIN", B)]);
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    assert!(out(&o).starts_with("resumed "), "{}", out(&o));
+
+    shows(&tb, &id, "idle");
+    assert_eq!(ls_row(&tb, &id).unwrap()["conversation"], conversation);
+    assert_eq!(agents(&tb), 1);
 }

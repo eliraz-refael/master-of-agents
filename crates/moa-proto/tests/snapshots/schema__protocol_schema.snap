@@ -257,7 +257,7 @@ expression: all
             "type": "object"
           },
           {
-            "description": "A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes\nonce tmux says which pane the tab has.",
+            "description": "A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes\nonce tmux says which pane the tab has. The tab comes to the screen unless `bg`.",
             "properties": {
               "method": {
                 "const": "session.open",
@@ -292,6 +292,155 @@ expression: all
                       "string",
                       "null"
                     ]
+                  },
+                  "title": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Brings a session's tab to the screen. A write: a session not running is resumed.",
+            "properties": {
+              "method": {
+                "const": "session.focus",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Relaunches a session's conversation in a new tab, under the account whose store it\nwas recorded in (C11); one that runs is only brought to the screen. The tab comes to\nthe screen unless `bg`.",
+            "properties": {
+              "method": {
+                "const": "session.resume",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "bg": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Ends a session and kills its tab, once moa can prove the tab is the session's.",
+            "properties": {
+              "method": {
+                "const": "session.close",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Puts sessions to sleep: their tabs close and they stay resumable. By name (`qs`), or\nevery one idle `idle_ms` that could sleep on its own. A `dry_run` only says which.",
+            "properties": {
+              "method": {
+                "const": "session.sleep",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "dry_run": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "idle_ms": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "qs": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is\nnamed after `title`, else the folder.",
+            "properties": {
+              "method": {
+                "const": "term.open",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "path": {
+                    "type": "string"
                   },
                   "title": {
                     "default": null,

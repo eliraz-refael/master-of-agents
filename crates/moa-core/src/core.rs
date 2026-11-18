@@ -12,20 +12,25 @@ use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
+use crate::sleep;
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
-use crate::tmux::link::{self, Link};
+use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
+use crate::tmux::panes::parse_panes;
 use crate::tmux::status;
 use crate::{Now, UtcMs};
 
 /// The effects of one input. Persist first, then what people hear about it.
 pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     state.set_now(now.wall);
+    let sleep_fired = matches!(input, Input::Timer(TimerKey::Sleep));
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
+    // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
+    sleep::run(state, &now, sleep_fired, &mut fx);
     // Last, so the status line shows what this input saved, after its `Persist`.
     status::run(state, &now, &mut fx);
     fx
@@ -84,10 +89,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.load(*snapshot);
             state.forget_hooks();
             state.refuse_writes = refuse_writes;
+            // The timer this input armed may have been lost with it: it is armed again.
+            state.sleep_at = None;
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
-            fx.extend(ops::sessions::lost_opens(state));
+            fx.extend(ops::launch::lost_opens(state));
             // The reload may have dropped a reconcile's changes: the panes are looked at again.
             fx.extend(reconcile::ask_if_due(state, now));
             fx
@@ -116,7 +123,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // a pane exit, so this commit is the input's only one.
             let settled = state.tmux.settle(&t);
             if !settled.is_empty() {
-                fx.extend(ops::sessions::opened(state, now, settled));
+                fx.extend(ops::launch::opened(state, now, settled));
             }
             let answers = state.tmux.answered(&t);
             let replied = matches!(t, TmuxIn::Replies { .. });
@@ -125,8 +132,29 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
             fx.extend(state.tmux.input(t));
-            // Reconcile reads its listing, once the link is as the input left it.
-            let mut more = reconcile::answered(state, now, answers, replied);
+            // Reconcile reads its listing, a resume its own and a terminal its new tab, once
+            // the link is as the input left it.
+            let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
+            for (asked, answer) in answers {
+                match asked {
+                    Asked::Reconcile => reconciles.push(answer),
+                    Asked::Resume(ask) => resumes.push((ask, answer)),
+                    Asked::Term { reply, name, path } => terms.push((reply, name, path, answer)),
+                }
+            }
+            let mut more = reconcile::answered(state, now, reconciles, replied);
+            for (ask, answer) in resumes {
+                let panes = answer.and_then(|lists| match lists.as_slice() {
+                    [info, start] => Ok(parse_panes(info, start)),
+                    _ => Err(()),
+                });
+                more.extend(ops::launch::resumed(state, now, ask, panes));
+            }
+            for (reply, name, path, answer) in terms {
+                more.extend(ops::launch::term_opened(
+                    state, reply, &name, &path, answer, replied,
+                ));
+            }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));
             }
@@ -167,7 +195,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.push(quiet_timer(state, now.wall));
             fx
         }
-        // Its waiters are dropped; a launch it asked for goes on (R26).
+        // The check at the end of every input does the work.
+        Input::Timer(TimerKey::Sleep) => Vec::new(),
+        // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
+        // gets its tags (R26).
         Input::ClientGone(conn) => {
             state.tmux.client_gone(conn);
             Vec::new()
@@ -205,7 +236,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             ..
         } => state.tmux.ensure(conn, req, tmux),
         // Answered once tmux says how the new tab turned out. Every tab opens detached
-        // (`-d`) for now, so `bg` changes nothing yet.
+        // (`-d`); unless `bg`, it is brought to the screen once it is bound.
         Input::Client {
             conn,
             req,
@@ -216,33 +247,58 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     title,
                     group,
                     prompt,
-                    bg: _,
+                    bg,
                 },
             ..
         } => {
             let mut tx = Tx::new(now);
-            let asked = ops::sessions::OpenArgs {
+            let asked = ops::launch::OpenArgs {
                 path: &path,
                 account: account.as_deref(),
                 title: title.as_deref(),
                 group: group.as_deref(),
                 prompt: prompt.as_deref(),
             };
-            let result = ops::sessions::open(state, &mut tx, now, &asked);
-            let mut fx = post_commit(state, tx);
-            match result {
+            match ops::launch::open(state, &mut tx, now, &asked) {
                 Ok((id, new_window)) => {
-                    state.tmux.wait_open(id, conn, req);
+                    let launching = Launching {
+                        reply: Some((conn, req)),
+                        kind: LaunchKind::Open,
+                        focus: !bg,
+                        waiters: Vec::new(),
+                        launched_at: tx.wall,
+                    };
+                    state.tmux.wait_open(id, launching);
+                    let mut fx = post_commit(state, tx);
                     fx.push(new_window);
+                    fx
                 }
-                Err(e) => fx.push(Effect::Reply {
-                    conn,
-                    req,
-                    result: Err(e),
-                }),
+                // Nothing queued is said: the refusal is all there is.
+                Err(e) => finish_op(state, tx, conn, req, Err(e)),
             }
-            fx
         }
+        // Answered now, or once the tab it waits for is bound.
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionFocus { q },
+            ..
+        } => ops::launch::focus(state, now, conn, req, &q),
+        // Answered once tmux says which pane the new tab has. It binds nothing, so it
+        // needs the link up but not the tabs reconciled.
+        Input::Client {
+            conn,
+            req,
+            op: Op::TermOpen { path, title },
+            ..
+        } => ops::launch::term(state, conn, req, &path, title.as_deref()),
+        // Answered at once, or after one pane query and the new tab (C11).
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionResume { q, bg },
+            ..
+        } => ops::launch::start_resume(state, now, conn, req, &q, !bg, false),
         Input::Client {
             conn,
             req,
@@ -517,8 +573,19 @@ impl Tx {
     pub(crate) fn ui_each(
         &mut self,
         state: &mut State,
+        changes: Vec<Change>,
+        texts: Vec<String>,
+    ) -> Result<(), OpError> {
+        self.ui_by(state, changes, texts, ActivityWho::You)
+    }
+
+    /// [`Tx::ui_each`] with the activity rows written by `who`.
+    pub(crate) fn ui_by(
+        &mut self,
+        state: &mut State,
         mut changes: Vec<Change>,
         texts: Vec<String>,
+        who: ActivityWho,
     ) -> Result<(), OpError> {
         for text in &texts {
             changes.push(Change::Event(Event {
@@ -532,7 +599,7 @@ impl Tx {
                 text: Some(text.clone()),
                 detail: None,
             }));
-            changes.push(self.activity_row(state, ActivityWho::You, text.clone(), None));
+            changes.push(self.activity_row(state, who, text.clone(), None));
         }
         self.commit(state, changes)?;
         self.events

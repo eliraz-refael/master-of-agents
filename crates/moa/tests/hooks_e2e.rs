@@ -135,7 +135,9 @@ struct Opened {
 }
 
 impl Rig {
-    /// `moactl open <root>/work/<name>`, with `steps` as fake-claude's script there.
+    /// `moactl open --bg <root>/work/<name>`, with `steps` as fake-claude's script there.
+    /// In the background: a tab on screen is seen, and a turn's end there would show `idle`,
+    /// not `done`.
     fn open(&self, name: &str, steps: &[FakeStep]) -> Opened {
         let dir = self.tb.root().join("work").join(name);
         fs::create_dir_all(&dir).unwrap();
@@ -143,7 +145,7 @@ impl Rig {
         let o = run_exe(
             &self.tb,
             &moactl(&self.tb),
-            &["--json", "open", &dir.display().to_string()],
+            &["--json", "open", "--bg", &dir.display().to_string()],
             &[("MOA_BRAIN", B)],
         );
         assert!(o.status.success(), "{}{}", out(&o), err(&o));
