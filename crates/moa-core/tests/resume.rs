@@ -953,6 +953,68 @@ fn the_resumed_agents_start_is_its_own() {
     assert_eq!(current, [C]);
 }
 
+/// `/resume` inside Claude went back to the older of S's two conversations, then the agent
+/// died: the resume launches the one it ran last, not the one first seen last.
+#[test]
+fn a_resume_inside_claude_to_an_older_conversation_is_what_resumes() {
+    const C2: &str = "d0000000-0000-4000-8000-0000000000a2";
+    let mut w = World::new();
+    let home = w.home().to_path_buf();
+    write_transcript(&home.join(".claude-a"), &home.join("work/lantern"), C2);
+    let older = w.conv().clone();
+    let mut newer = older.clone();
+    newer.conversation_id = C2.into();
+    newer.first_seen_at = UtcMs(older.first_seen_at.0 + 60_000);
+    newer.last_seen_at = newer.first_seen_at;
+    newer.transcript_path = None;
+    let s = w.s.clone();
+    let mut r = w.reconciled();
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(s);
+    snap.conversations.extend([older, newer]);
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    listed(&mut r.st, &r.b, &[], &[]);
+    assert_eq!(r.st.handle_of(s_id()), &C2[..8]);
+    let hook = |seq: u32, at: i64, kind: HookKind| Input::Hook {
+        reply: None,
+        envelope: HookEnvelope {
+            agent: AgentKind::Claude,
+            slot: Some(S.into()),
+            brain: Some("default".into()),
+            store_dir: Some(shown(&home.join(".claude-a"))),
+            conversation_id: C.into(),
+            kind,
+            at: UtcMs(at),
+            at_ns: at * 1_000_000,
+            pid: 100,
+            seq,
+            cwd: None,
+            transcript_path: None,
+        },
+    };
+    let at = r.b.now().wall.0 - 2_000;
+    let resumed = HookKind::SessionStarted {
+        source: StartSource::Resume,
+    };
+    handle_checked(&mut r.st, hook(1, at, resumed), r.b.now());
+    let died = HookKind::SessionEnded {
+        reason: "other".into(),
+    };
+    handle_checked(&mut r.st, hook(2, at + 1_000, died), r.b.now());
+    assert!(is_asleep(r.s()));
+    assert_eq!(r.st.handle_of(s_id()), &C[..8]);
+    let fx = r.launched(1, false);
+    let (_, cmds) = the_open(&fx);
+    assert_eq!(after(&cmds[0], "--resume"), C);
+}
+
 /// A `resume_failed` mark that can't be saved still refuses, and says so in the log, with
 /// the id only.
 #[test]

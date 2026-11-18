@@ -545,6 +545,19 @@ fn clear_rotates_the_conversation_and_stays_live() {
     assert_eq!(again[1].last_seen_at, UtcMs(T0 + 1500));
 }
 
+/// `/resume` inside Claude back to an older conversation makes that one current: the
+/// current conversation is the latest started on, not the latest first seen.
+#[test]
+fn a_resume_to_an_older_conversation_makes_it_current() {
+    let mut st = seeded();
+    let mut start = started(1, 1500, StartSource::Clear);
+    start.conversation_id = "b2c3d4e5-0000-4000-8000-000000000002".into();
+    feed(&mut st, start);
+    assert_eq!(st.handle_of(sid()), "b2c3d4e5");
+    feed(&mut st, started(2, 2500, StartSource::Resume));
+    assert_eq!(st.handle_of(sid()), &C[..8]);
+}
+
 /// R32: a session on Claude's own default store runs without `CLAUDE_CONFIG_DIR` (R11), so
 /// its hooks carry no store. A rotation still records the store it is in.
 #[test]

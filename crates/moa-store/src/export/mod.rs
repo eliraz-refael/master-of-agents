@@ -249,7 +249,7 @@ impl<'a> Exporter<'a> {
         let mut all_conversations = Vec::new();
         let mut stmt = src.prepare(
             "SELECT session_id, conversation_id, spike_account, store_dir FROM conversations \
-             ORDER BY first_seen_at, rowid",
+             ORDER BY last_seen_at, first_seen_at, rowid",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((

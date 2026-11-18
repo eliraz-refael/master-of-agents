@@ -24,7 +24,7 @@ use crate::state::State;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Asked, Link, NO_TERMINAL, ready};
 use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes};
-use crate::{Now, UtcMs};
+use crate::Now;
 
 const WENT_AWAY: &str = "moa's terminal went away; try again";
 const TERMINAL: &str = "that tab is a terminal, not an agent";
@@ -263,18 +263,10 @@ pub(crate) fn adopt(
                 .cloned()
                 .ok_or_else(|| OpError(LOST.into()))?;
             // The adopted conversation is the session's current one from now on, so `ls`
-            // shows it and `restart` resumes it. The current one is the latest first seen
-            // (`State::current_conversation`): an older one is seen first again now.
+            // shows it and `restart` resumes it: the current one is the latest an agent
+            // started on (`State::current_conversation`).
             if let Some(c) = state.conversation_of_agent(AgentKind::Claude, &conv) {
-                // After the current one's, even should the clock have gone back.
-                let first_seen_at = match state.current_conversation(id) {
-                    Some(cur) if cur.conversation_id != conv => {
-                        tx.wall.max(UtcMs(cur.first_seen_at.0.saturating_add(1)))
-                    }
-                    _ => c.first_seen_at,
-                };
                 changes.push(Change::Conversation(Conversation {
-                    first_seen_at,
                     last_seen_at: tx.wall,
                     ..c.clone()
                 }));

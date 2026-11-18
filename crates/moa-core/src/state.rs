@@ -478,10 +478,13 @@ impl State {
         self.now = now;
     }
 
-    /// The session's current conversation: the latest first seen.
+    /// The session's current conversation: the latest an agent started on. A conversation's
+    /// `last_seen_at` moves only when an agent starts on it (a start hook, adopt, open), so a
+    /// `/resume` inside Claude back to an older one makes that one current. Ties go to the
+    /// latest first seen, then to the highest id.
     pub(crate) fn current_conversation(&self, id: SessionId) -> Option<&Conversation> {
         self.conversations_of(id)
-            .max_by_key(|c| (c.first_seen_at, c.last_seen_at))
+            .max_by_key(|c| (c.last_seen_at, c.first_seen_at))
     }
 
     /// The conversation row for an agent's conversation id, whichever session owns it.

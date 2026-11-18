@@ -506,6 +506,40 @@ fn an_agent_without_moa_session_rebinds_untracked() {
     assert!(after_persist(&fx, &set_tag(9, D)), "{fx:?}");
 }
 
+/// D's older conversation, which a hand-run `claude --resume` in %9 runs.
+const D_OLD: &str = "e0000000-0000-4000-8000-000000000004";
+
+fn d_old_in_9(pid: i64, _: &[String]) -> Option<PaneAgent> {
+    (pid == 909).then(|| claude(Some(D_OLD.into()), None))
+}
+
+/// R6 (b) by conversation: the conversation the tab runs becomes its session's current one,
+/// as the agent's own start on it would make it, so a restart resumes that one.
+#[test]
+fn a_rebind_by_an_older_conversation_makes_it_current() {
+    let mut w = World::new();
+    w.add(D).lifecycle = Lifecycle::Ended;
+    let mut old = w.conversation(D).clone();
+    old.conversation_id = D_OLD.into();
+    old.first_seen_at = UtcMs(old.first_seen_at.0 - 60_000);
+    old.last_seen_at = old.first_seen_at;
+    w.snap.conversations.push(old);
+    let mut r = w.drained(d_old_in_9);
+    r.connect(G1);
+    assert_eq!(r.st.handle_of(id(D)), conv(D)[..8]);
+    let mut lines = abc(&r.b);
+    lines.push(pane(9, "", &cwd(&r.b, D)));
+    let fx = r.listed(&lines, &[]);
+    assert!(r.is_live(D));
+    assert_eq!(r.bound_to(D).unwrap().pane_id, "%9");
+    assert_eq!(r.st.handle_of(id(D)), D_OLD[..8]);
+    assert!(
+        changes(&fx).iter().any(|c| matches!(c,
+            Change::Conversation(c) if c.conversation_id == D_OLD && c.last_seen_at == r.b.now().wall)),
+        "{fx:?}"
+    );
+}
+
 /// D ended by a lost `open`, its agent typed in terminal %9, untagged.
 fn with_d_in_terminal_9(inspect: fn(i64, &[String]) -> Option<PaneAgent>) -> (Rig, Vec<Effect>) {
     let mut w = World::new();

@@ -13,7 +13,9 @@ use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::hooks::asleep;
-use crate::model::{AgentKind, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId};
+use crate::model::{
+    AgentKind, Conversation, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId,
+};
 use crate::state::State;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Answer, Asked, Link, log, set_pane_option, unset_pane_option};
@@ -143,6 +145,8 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     let mut bound: BTreeMap<SessionId, PaneBinding> = BTreeMap::new();
     // Each new binding's tab, its session, and whether it is marked adopted too.
     let mut to_tag: Vec<(PaneId, SessionId, bool)> = Vec::new();
+    // The conversations a tab was bound by that become their session's current one.
+    let mut made_current: Vec<Conversation> = Vec::new();
     for info in panes {
         if info.dead || held.contains(&info.pane) {
             continue;
@@ -183,16 +187,19 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
                 let agent = inspect(info.pid, &info.start);
                 let spike = spike_candidate(state, info.pane, &socket);
                 // (b) The agent names a known session, by `MOA_SESSION` or conversation.
-                let named = agent.as_ref().and_then(|a| {
+                // By conversation, the one it runs becomes its session's current one, as an
+                // agent's start on it would make it: a restart then resumes that one.
+                let by_moa = agent.as_ref().and_then(|a| {
                     a.moa_session
                         .as_deref()
                         .and_then(|s| s.parse::<SessionId>().ok())
                         .filter(|id| state.session(*id).is_some())
-                        .or_else(|| {
-                            let conv = a.conversation.as_deref()?;
-                            Some(state.conversation_of_agent(a.kind, conv)?.session_id)
-                        })
                 });
+                let by_conv = agent.as_ref().and_then(|a| {
+                    let conv = a.conversation.as_deref()?;
+                    state.conversation_of_agent(a.kind, conv)
+                });
+                let named = by_moa.or(by_conv.map(|c| c.session_id));
                 let id = match named {
                     Some(id) => id,
                     // (c) The spike's pane for a session, running its agent.
@@ -205,6 +212,16 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
                 };
                 if !free(id, &bound) {
                     continue;
+                }
+                if let Some(c) = by_conv.filter(|c| by_moa.is_none() && c.session_id == id)
+                    && state
+                        .current_conversation(id)
+                        .is_some_and(|cur| cur.conversation_id != c.conversation_id)
+                {
+                    made_current.push(Conversation {
+                        last_seen_at: now.wall.max(c.last_seen_at),
+                        ..c.clone()
+                    });
                 }
                 let has_moa_session = agent.as_ref().is_some_and(|a| a.moa_session.is_some());
                 let tracked = !untracked && (has_moa_session || spike == Some(id));
@@ -263,6 +280,7 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     changes.extend(sessions.into_iter().map(Change::Session));
     let (n_kept, n_bound) = (kept.len(), bound.len());
     changes.extend(bound.into_values().map(Change::PaneBinding));
+    changes.extend(made_current.into_iter().map(Change::Conversation));
     changes.extend(spike_gone.into_iter().map(Change::DeleteSpikePane));
 
     let mut tx = Tx::new(now);
