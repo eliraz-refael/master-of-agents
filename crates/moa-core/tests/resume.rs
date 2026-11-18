@@ -15,10 +15,10 @@ use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::is_asleep;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent, Session,
-    SessionId, SpikePane,
+    SessionId, SpikePane, TranscriptCheck,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
-use moa_core::state::{Deps, State};
+use moa_core::state::{Deps, LoadNote, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::link::NOT_READY;
 use moa_testkit::brain::TypicalBrain;
@@ -111,6 +111,8 @@ struct World {
     spike: Option<SpikePane>,
     toml: String,
     deps: Deps,
+    /// S's row was loaded with a value this build doesn't know: no write to it is saved.
+    unknown: bool,
 }
 
 impl World {
@@ -171,6 +173,7 @@ impl World {
             spike: None,
             toml: TOML.to_string(),
             deps,
+            unknown: false,
         }
     }
 
@@ -197,6 +200,13 @@ impl World {
         snap.sessions.push(self.s);
         snap.conversations.extend(self.conv);
         snap.spike_panes.extend(self.spike);
+        if self.unknown {
+            snap.unknown.push(LoadNote {
+                table: "sessions",
+                key: S.into(),
+                reason: "a state this build doesn't know",
+            });
+        }
         let mut st = loaded_with(&self.b, &self.toml, self.deps, snap);
         link_up(&self.b, &mut st);
         Rig { b: self.b, st }
@@ -923,4 +933,103 @@ fn the_resumed_agents_start_is_its_own() {
             .map(|c| c.conversation_id.as_str())
             .collect();
     assert_eq!(current, [C]);
+}
+
+/// A `resume_failed` mark that can't be saved still refuses, and says so in the log, with
+/// the id only.
+#[test]
+fn an_unsaved_resume_failed_mark_is_logged() {
+    let mut w = World::new();
+    w.unknown = true;
+    fs::remove_dir_all(w.home().join(".claude-a/projects")).unwrap();
+    let (r, fx, text) = refused(w);
+    assert_eq!(
+        text,
+        "its conversation isn't in acct-a's folder any more, so it can't be resumed"
+    );
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(!r.s().resume_failed);
+    let warned: Vec<&str> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) if l.level == moa_core::effect::LogLevel::Warn => {
+                Some(l.message.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        warned,
+        [format!(
+            "the resume_failed mark of session {S} was not saved"
+        )]
+    );
+}
+
+/// A title that is only spaces is no title, for the tab and the answers alike.
+#[test]
+fn a_blank_title_is_no_title() {
+    let mut w = World::new();
+    w.s.title = Some("  ".into());
+    let mut r = w.reconciled();
+    let fx = r.launched(1, false);
+    let (_, cmds) = the_open(&fx);
+    assert_eq!(after(&cmds[0], "-n"), "lantern");
+    assert_eq!(after(&cmds[0], "--name"), "lantern");
+    let fx = r.bound("%7");
+    let handle = &C[..8];
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Ok(Done {
+                text: format!("resumed {handle} in {}", r.lantern()),
+                data: json!({ "id": s_id(), "title": handle }),
+            })
+        )]
+    );
+}
+
+/// Claude names a transcript's slot after its real folder: a folder recorded in another
+/// spelling still matches by its canonical form, and is launched as recorded.
+#[test]
+fn the_transcripts_slot_matches_a_folder_in_another_spelling() {
+    fn resolve(p: &Path) -> PathBuf {
+        PathBuf::from(p.display().to_string().replace("/./", "/"))
+    }
+    let mut w = World::new();
+    w.deps.canonical = resolve;
+    let other = w.home().join("work/other");
+    fs::create_dir_all(&other).unwrap();
+    fs::remove_dir_all(w.home().join(".claude-a/projects")).unwrap();
+    let transcript = write_transcript(&w.home().join(".claude-a"), &other, C);
+    let spelled = format!("{}/work/./other", w.home().display());
+    w.s.cwd = Some(spelled.clone());
+    w.conv().transcript_path = Some(shown(&transcript));
+    let mut r = w.reconciled();
+    let fx = r.launched(1, false);
+    let (_, cmds) = the_open(&fx);
+    assert_eq!(after(&cmds[0], "-c"), spelled);
+}
+
+#[test]
+fn resume_refuses_a_session_with_no_folder() {
+    let mut w = World::new();
+    w.s.cwd = None;
+    w.s.start_cwd = Some(String::new());
+    assert_eq!(
+        refused_unsaved(w),
+        "moa doesn't know which folder it ran in; start it fresh with moactl open"
+    );
+}
+
+/// A transcript nobody looked for is as good as missing: refused, and marked.
+#[test]
+fn an_unchecked_transcript_refuses_and_marks() {
+    let mut w = World::new();
+    w.deps.transcript = |_, _| TranscriptCheck::NotChecked;
+    assert_eq!(
+        refused_failed(w),
+        "its conversation isn't in acct-a's folder any more, so it can't be resumed"
+    );
 }

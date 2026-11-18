@@ -351,8 +351,14 @@ pub(crate) fn account_of(
 
 /// The folder a resume runs in (R13 step 4): of the session's `cwd` and `start_cwd`, the one
 /// whose Claude project slot holds the conversation's transcript, since Claude finds a
-/// conversation by the folder it began in; else `start_cwd`, else `cwd`.
-pub(crate) fn resume_folder(s: &Session, conv: &Conversation) -> Option<String> {
+/// conversation by the folder it began in; else `start_cwd`, else `cwd`. Claude names the
+/// slot after its real folder, so a folder matches in its recorded spelling or its
+/// `canonical` one; the recorded one is launched.
+pub(crate) fn resume_folder(
+    s: &Session,
+    conv: &Conversation,
+    canonical: fn(&Path) -> PathBuf,
+) -> Option<String> {
     let known = |f: &Option<String>| f.clone().filter(|f| !f.is_empty());
     let (cwd, start) = (known(&s.cwd), known(&s.start_cwd));
     let slot = conv
@@ -363,8 +369,11 @@ pub(crate) fn resume_folder(s: &Session, conv: &Conversation) -> Option<String> 
         .and_then(Path::file_name)
         .map(|f| f.to_string_lossy().into_owned());
     let holds = |f: &Option<String>| {
-        f.as_deref()
-            .is_some_and(|f| slot.as_deref() == Some(project_slot(Path::new(f)).as_str()))
+        let (Some(f), Some(slot)) = (f.as_deref(), slot.as_deref()) else {
+            return false;
+        };
+        let f = Path::new(f);
+        project_slot(f) == slot || project_slot(&canonical(f)) == slot
     };
     if holds(&start) {
         return start;
@@ -377,16 +386,17 @@ pub(crate) fn resume_folder(s: &Session, conv: &Conversation) -> Option<String> 
 
 /// `resume Q` (C11), R13 steps 1–5, once the tabs are reconciled (R10). A missing transcript
 /// commits `resume_failed` with its refusal (rule 3), so the caller says what `tx` holds
-/// whatever comes back.
+/// whatever comes back, after `logs`.
 pub(crate) fn resume(
     state: &mut State,
     tx: &mut Tx,
+    logs: &mut Vec<Effect>,
     q: &str,
     kind: LaunchKind,
 ) -> Result<Resume, OpError> {
     ready(state)?;
     let id = state.resolve(q)?;
-    check(state, tx, id, kind)
+    check(state, tx, logs, id, kind)
 }
 
 /// Steps 1–5 for session `id`, the link up and reconciled. A restart skips step 1: its own
@@ -394,6 +404,7 @@ pub(crate) fn resume(
 fn check(
     state: &mut State,
     tx: &mut Tx,
+    logs: &mut Vec<Effect>,
     id: SessionId,
     kind: LaunchKind,
 ) -> Result<Resume, OpError> {
@@ -434,8 +445,9 @@ fn check(
     }
     let launcher = launcher_of(&name, &acct)?;
     // 4. The folder it began in, there, and this brain's.
-    let folder = resume_folder(&s, &conv).ok_or_else(|| OpError(NO_FOLDER.into()))?;
     let deps = state.deps().clone();
+    let folder =
+        resume_folder(&s, &conv, deps.canonical).ok_or_else(|| OpError(NO_FOLDER.into()))?;
     if !(deps.is_dir)(Path::new(&folder)) {
         return Err(OpError(format!("its folder {folder} is gone")));
     }
@@ -474,19 +486,20 @@ fn check(
                 ),
             };
             // The next open asks "start fresh or pick a conversation". A refused write
-            // leaves only the refusal, which still holds.
+            // leaves the refusal, which still holds.
             let failed = Session {
                 resume_failed: true,
                 ..s
             };
-            let _ = tx.commit(state, vec![Change::Session(failed)]);
+            if tx.commit(state, vec![Change::Session(failed)]).is_err() {
+                logs.push(warn(format!(
+                    "the resume_failed mark of session {id} was not saved"
+                )));
+            }
             return Err(OpError(text));
         }
     }
-    let title = s
-        .title
-        .clone()
-        .filter(|t| !t.trim().is_empty())
+    let title = named(&s)
         .or_else(|| {
             Path::new(&folder)
                 .file_name()
@@ -516,8 +529,9 @@ pub(crate) fn start_resume(
     via_focus: bool,
 ) -> Vec<Effect> {
     let mut tx = Tx::new(now);
-    let checked = resume(state, &mut tx, q, LaunchKind::Resume);
-    let mut fx = post_commit(state, tx);
+    let mut fx = Vec::new();
+    let checked = resume(state, &mut tx, &mut fx, q, LaunchKind::Resume);
+    fx.extend(post_commit(state, tx));
     fx.extend(go_on(
         state,
         conn,
@@ -581,11 +595,10 @@ fn go_on(
                 focus,
                 via_focus,
             };
-            state
-                .tmux
-                .ask(Asked::Resume(ask), list_panes())
-                .into_iter()
-                .collect()
+            match state.tmux.ask(Asked::Resume(ask), list_panes()) {
+                Some(query) => vec![query],
+                None => vec![reply(Err(OpError(NO_TERMINAL.into())))],
+            }
         }
     }
 }
@@ -610,8 +623,9 @@ pub(crate) fn resumed(
     } = ask;
     let reply = |result| Effect::Reply { conn, req, result };
     let mut tx = Tx::new(now);
-    let again = ready(state).and_then(|_| check(state, &mut tx, checked.id, kind));
-    let mut fx = post_commit(state, tx);
+    let mut fx = Vec::new();
+    let again = ready(state).and_then(|_| check(state, &mut tx, &mut fx, checked.id, kind));
+    fx.extend(post_commit(state, tx));
     let checked = match again {
         // Unchanged: the listing answers for it.
         Ok(Resume::Check(c)) if c == checked => c,
@@ -884,12 +898,14 @@ fn launched_reply(state: &State, kind: LaunchKind, s: Session) -> Done {
     }
 }
 
+/// A session's title, unless it has none: empty or only spaces is none.
+fn named(s: &Session) -> Option<String> {
+    s.title.clone().filter(|t| !t.trim().is_empty())
+}
+
 /// What a session is called in a launch's answers: its title, else its handle.
 fn title_of(state: &State, s: &Session) -> String {
-    s.title
-        .clone()
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| state.handle_of(s.id))
+    named(s).unwrap_or_else(|| state.handle_of(s.id))
 }
 
 /// `went to <title>`: the title, else the handle.
