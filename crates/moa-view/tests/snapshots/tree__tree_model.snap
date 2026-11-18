@@ -1,0 +1,23 @@
+---
+source: crates/moa-view/tests/tree.rs
+expression: "debug_lines(&tree(&data, &ctx, 80))"
+---
+[dim]10 sessions · 8 live · 1 asleep · ⠸ 1 working · 1 waiting on you
+[head*]▾ Private  8 · 7 live ⠸  ‹group›
+[group*]├─ ▾ Lantern  3 · 3 live ⠸  ‹group›
+[warn*]│  ├─ ! Fix login                                                     acct-   1m  ‹session›
+[ok]│  ├─ ⠸ Rust scaffold                                                 acct-   1h  ‹session›
+[ok]│  └─ ◌ Import the whole archive of old notes into the new format     acct-   6h  ‹session›
+[group*]├─ ▾ Kite  3 · 2 live  ‹group›
+[ask*]│  ├─ ? Release notes                                                 acct-   2h  ‹session›
+[ok*]│  ├─ ✓ 設計レビュー                                                  acct-   3h  ‹session›
+[dim]│  └─ ○ Closed thing 👨                                               acct-   9h  ‹session›
+[group*]├─ ▾ Harbor  2 · 2 live  ‹group›
+[ok]│  ├─ ● Dev server 👍                                                 acct-   4h  ‹session›
+[ok]│  └─ ● Hand started                                                  acct-   7h  ‹session›
+[group*]└─ ▾ Ideas  0  ‹group›
+[head*]▾ Work  1 · 1 live  ‹group›
+[group*]└─ ▾ Harbor  1 · 1 live  ‹group›
+[fail*]   └─ ✗ Migrate DB                                                    acct-   5h  ‹session›
+[head*]▾ Loose  1  ‹group›
+[dim]└─ 💤Old spike                                 acct- ~/private                8h  ‹session›

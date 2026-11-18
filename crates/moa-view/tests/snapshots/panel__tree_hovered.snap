@@ -1,0 +1,17 @@
+---
+source: crates/moa-view/tests/panel.rs
+expression: debug_screen(&screen)
+---
+  [dim]10 sessions · 8 live · 1 asleep · ⠸ 1 working · 1 waiting on you
+> [head*]▾ Private  8 · 7 live ⠸  ‹group›
+  [group*]├─ ▾ Lantern  3 · 3 live ⠸  ‹group›
+  [warn*]│  ├─ ! Fix login                                                  acct-   1m  ‹session›
+  [ok]│  ├─ ⠸ Rust scaffold                                              acct-   1h  ‹session›
+  [ok]│  └─ ◌ Import the whole archive of old notes into the new format  acct-   6h  ‹session›
+  [group*]├─ ▾ Kite  3 · 2 live  ‹group›
+~ [ask*]│  ├─ ? Release notes                                              acct-   2h  ‹session›
+  [ok*]│  ├─ ✓ 設計レビュー                                               acct-   3h  ‹session›
+  [dim]│  └─ ○ Closed thing 👨                                            acct-   9h  ‹session›
+  [group*]├─ ▾ Harbor  2 · 2 live  ‹group›
+  [ok]│  ├─ ● Dev server 👍                                              acct-   4h  ‹session›
+footer: [dim]⏎/click open · n new · + group · m move · r rename · D del group · a archive · x close
