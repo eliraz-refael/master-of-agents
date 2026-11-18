@@ -59,17 +59,16 @@ impl ListState {
     pub fn follow(&mut self, lines: &[Line], body: usize) {
         let body = body.max(1);
         if let (true, Some(sel)) = (self.tracking, self.current(lines)) {
-            let selectable = selectable(lines);
-            let mut start = selectable
+            let mut start = lines[..sel]
                 .iter()
-                .rev()
-                .find(|&&i| i < sel)
+                .rposition(Line::selectable)
                 .map_or(0, |i| i + 1);
             // Not the wrapped lines of the item above.
             while start < sel && lines[start].more {
                 start += 1;
             }
-            let mut end = if selectable.last() == Some(&sel) {
+            let last = !lines[sel + 1..].iter().any(Line::selectable);
+            let mut end = if last {
                 lines.len().saturating_sub(1)
             } else {
                 sel

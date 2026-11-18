@@ -221,6 +221,18 @@ fn editor_keys() {
     e.paste("a\nb");
     assert_eq!(e.text, "a b");
 
+    let mut e = Editor::new("t:", "");
+    e.paste("🇮🇱 launch 👍🏽\r\nnow\u{2028}x\u{202e}y");
+    assert_eq!(
+        e.text, "🇮🇱 launch 👍🏽 now xy",
+        "a paste keeps what typing keeps"
+    );
+    assert_eq!(
+        e.shown(40),
+        "t: IL launch 👍 now xy",
+        "and is cleaned only to draw"
+    );
+
     let e = Editor::new("folder:", "~/private/lantern/src");
     assert_eq!(e.shown(40), "folder: ~/private/lantern/src");
     assert_eq!(e.shown(10), "antern/src", "the end is kept");

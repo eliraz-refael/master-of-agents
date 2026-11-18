@@ -57,9 +57,12 @@ impl Editor {
         Edited::Typing
     }
 
-    /// Takes pasted text: a line break or any other control character becomes a space.
+    /// Takes pasted text: a line break, any other control character or a line or paragraph
+    /// separator becomes a space and a bidi control is dropped. The rest is kept as pasted,
+    /// as typed text is; [`Editor::shown`] cleans it for drawing.
     pub fn paste(&mut self, text: &str) {
-        self.text.push_str(&clean(&text.replace("\r\n", "\n")));
+        self.text
+            .push_str(&text::strip_controls(&text.replace("\r\n", "\n")));
     }
 
     /// `<label> <text>` in at most `width` cells, cleaned for drawing; when too long, its end

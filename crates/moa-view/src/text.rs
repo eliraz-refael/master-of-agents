@@ -83,12 +83,33 @@ fn is_variation_selector(c: char) -> bool {
     matches!(c, '\u{FE0E}' | '\u{FE0F}')
 }
 
-/// One code point of cleaned text: a control is a space, a variation selector goes, a
-/// regional indicator is its ASCII capital.
+/// A bidi mark, embedding, override or isolate: it draws nothing, but it can reorder the
+/// text drawn after it.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A control character (Cc) or a line or paragraph separator: it breaks the line.
+fn is_line_breaking(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Text with only what could break or reorder the line taken out: a control character or a
+/// line or paragraph separator becomes a space and a bidi control is dropped. Everything else
+/// (a flag, a skin tone, a variation selector) is kept as typed; [`clean`] is for drawing.
+pub fn strip_controls(s: &str) -> String {
+    s.chars()
+        .filter(|&c| !is_bidi_control(c))
+        .map(|c| if is_line_breaking(c) { ' ' } else { c })
+        .collect()
+}
+
+/// One code point of cleaned text: a control or a line or paragraph separator is a space,
+/// a variation selector or a bidi control goes, a regional indicator is its ASCII capital.
 fn push_clean(out: &mut String, c: char) {
-    if c.is_control() {
+    if is_line_breaking(c) {
         out.push(' ');
-    } else if is_variation_selector(c) {
+    } else if is_variation_selector(c) || is_bidi_control(c) {
     } else if ('\u{1F1E6}'..='\u{1F1FF}').contains(&c) {
         out.push((b'A' + (c as u32 - 0x1F1E6) as u8) as char);
     } else {
@@ -96,10 +117,10 @@ fn push_clean(out: &mut String, c: char) {
     }
 }
 
-/// Text safe to draw and measure (V9): control characters (`\n`, `\t`, ESC, DEL, C1) become
-/// a space; U+FE0E and U+FE0F are dropped; a grapheme holding a ZWJ, a skin-tone modifier or
-/// a tag character becomes its first code point; a regional indicator becomes its ASCII
-/// capital (a flag `🇮🇱` reads `IL`).
+/// Text safe to draw and measure (V9): control characters (`\n`, `\t`, ESC, DEL, C1) and
+/// U+2028/U+2029 become a space; U+FE0E, U+FE0F and the bidi controls are dropped; a
+/// grapheme holding a ZWJ, a skin-tone modifier or a tag character becomes its first code
+/// point; a regional indicator becomes its ASCII capital (a flag `🇮🇱` reads `IL`).
 pub fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for g in s.graphemes(true) {
@@ -158,13 +179,17 @@ pub fn fit_right(s: &str, w: usize) -> String {
 }
 
 /// `s` wrapped at word boundaries to `w` cells, first fit; a word longer than a line is
-/// broken. Never empty: no text is one empty line.
+/// broken. Never empty: no text is one empty line. Leading spaces that don't fit beside the
+/// first word go, rather than making an empty first line.
 pub fn wrap(s: &str, w: usize) -> Vec<String> {
     let options = textwrap::Options::new(w.max(1)).break_words(true);
-    let lines: Vec<String> = textwrap::wrap(s, options)
+    let mut lines: Vec<String> = textwrap::wrap(s, options)
         .into_iter()
         .map(|l| l.into_owned())
         .collect();
+    if lines.len() > 1 && lines[0].is_empty() {
+        lines.remove(0);
+    }
     if lines.is_empty() {
         vec![String::new()]
     } else {

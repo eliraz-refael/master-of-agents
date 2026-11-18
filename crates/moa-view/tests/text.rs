@@ -17,6 +17,16 @@ use unicode_segmentation::UnicodeSegmentation;
 fn clean_replaces_control_characters() {
     assert_eq!(clean("a\x1b[31mb\nc\td\u{7f}"), "a [31mb c d ");
     assert_eq!(clean("x\u{9b}y"), "x y", "a C1 control too");
+    assert_eq!(
+        clean("a\u{2028}b\u{2029}c"),
+        "a b c",
+        "line and paragraph separators"
+    );
+    assert_eq!(
+        clean("a\u{202e}b\u{2067}c\u{2069}\u{200f}d"),
+        "abcd",
+        "bidi controls"
+    );
 }
 
 #[test]
@@ -89,6 +99,12 @@ fn wrap_never_returns_nothing_and_breaks_long_words() {
         assert!(width(&line) <= 5, "{line}");
     }
     assert!(!wrap("anything", 0).is_empty());
+    assert_eq!(
+        wrap(" hello world", 5),
+        vec!["hello", "world"],
+        "no empty first line"
+    );
+    assert_eq!(wrap("   ", 4), vec![String::new()]);
 }
 
 fn piece() -> impl Strategy<Value = String> {

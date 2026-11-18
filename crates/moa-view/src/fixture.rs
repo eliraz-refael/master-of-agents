@@ -22,11 +22,11 @@ const TZ: &str = "EST5EDT,M3.2.0,M11.1.0";
 /// The fixture's session `n` (1 to 11, in the order the fixture lists them): its moa id.
 pub fn session(n: u8) -> SessionId {
     let id = format!("5e5500{n:02x}-0000-4000-8000-0000000000{n:02x}");
-    SessionId(uuid::Uuid::parse_str(&id).unwrap_or_default())
+    SessionId(uuid::Uuid::parse_str(&id).expect("a fixture session id is a uuid"))
 }
 
 fn tz() -> TimeZone {
-    TimeZone::posix(TZ).unwrap_or(TimeZone::UTC)
+    TimeZone::posix(TZ).expect("the fixture zone parses")
 }
 
 /// A local wall time in the fixture's zone.
@@ -35,7 +35,9 @@ fn local(day: Date, hour: i8, minute: i8) -> UtcMs {
     let ms = tz()
         .to_ambiguous_zoned(at)
         .compatible()
-        .map_or(0, |z| z.timestamp().as_millisecond());
+        .expect("a fixture time is in range")
+        .timestamp()
+        .as_millisecond();
     UtcMs(ms)
 }
 
