@@ -95,6 +95,10 @@ pub enum Op {
         #[serde(default)]
         id: Option<String>,
     },
+    /// Restarts an adopted session under moa: its tab is closed and its conversation resumed
+    /// in a new tab moa tracks.
+    #[serde(rename = "session.restart")]
+    SessionRestart { q: String },
     /// A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is
     /// named after `title`, else the folder.
     #[serde(rename = "term.open")]
@@ -284,6 +288,7 @@ impl Op {
         "session.close",
         "session.sleep",
         "session.adopt",
+        "session.restart",
         "term.open",
         "task.ls",
         "task.add",
@@ -314,6 +319,7 @@ impl Op {
             | Op::SessionClose { .. }
             | Op::SessionSleep { .. }
             | Op::SessionAdopt { .. }
+            | Op::SessionRestart { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -349,6 +355,7 @@ impl Op {
             Op::SessionClose { .. } => "session.close",
             Op::SessionSleep { .. } => "session.sleep",
             Op::SessionAdopt { .. } => "session.adopt",
+            Op::SessionRestart { .. } => "session.restart",
             Op::TermOpen { .. } => "term.open",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",

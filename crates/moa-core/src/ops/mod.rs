@@ -65,6 +65,7 @@ pub(crate) fn run(
         | Op::SessionFocus { .. }
         | Op::SessionResume { .. }
         | Op::SessionAdopt { .. }
+        | Op::SessionRestart { .. }
         | Op::TermOpen { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),

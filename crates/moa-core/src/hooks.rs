@@ -155,13 +155,15 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     // and a hook the agent sent before it died can still arrive after. An end goes by its
     // kind first (R14): one that is only the conversation changing (`/clear`, a resume)
     // changes nothing either, a clean quit ends a session that is asleep however old it is,
-    // and any other end of a session already ended is history only.
+    // and any other end of a session already ended is history only. While a restart opens
+    // the session's new tab, any end is the old agent's, which moa killed (R24).
     let older = before
         .activity_at
         .max(before.asleep_at)
         .is_some_and(|t| env.at < t);
     let ended = before.lifecycle == Lifecycle::Ended;
     let after = match &env.kind {
+        HookKind::SessionEnded { .. } if state.tmux().restarting(id) => None,
         HookKind::SessionEnded { reason } => match end_kind(reason) {
             EndKind::Clean if ended && before.asleep_at.is_some() => {
                 Some(woken_to_end(&before, env))

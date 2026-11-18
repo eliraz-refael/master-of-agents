@@ -118,6 +118,7 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "sleep",
     "term",
     "adopt",
+    "restart",
     "goto",
     "layout",
     "peers",

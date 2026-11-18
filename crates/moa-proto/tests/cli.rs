@@ -212,6 +212,7 @@ const EACH_VERB: &[&[&str]] = &[
     &["sleep"],
     &["term"],
     &["adopt", "x"],
+    &["restart", "x"],
     &["goto", "x"],
     &["layout", "list"],
     &["peers"],
@@ -500,4 +501,25 @@ fn adopt_parses() {
         .find(|l| l.trim_start().starts_with("adopt "))
         .unwrap_or_else(|| panic!("{help}"));
     assert!(line.ends_with("Adopt an agent running in a tab"), "{line}");
+}
+
+/// `restart Q` maps to its op; it isn't a suggestion action, and the help says "tab" (R30).
+#[test]
+fn restart_parses() {
+    assert_eq!(
+        op(&["restart", "3f9a"]),
+        Op::SessionRestart { q: "3f9a".into() }
+    );
+    assert!(act("restart", &["3f9a"]).is_err());
+
+    use clap::CommandFactory;
+    let help = Moactl::command().render_help().to_string();
+    let line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("restart "))
+        .unwrap_or_else(|| panic!("{help}"));
+    assert!(
+        line.ends_with("Restart an adopted agent in a tab moa tracks"),
+        "{line}"
+    );
 }

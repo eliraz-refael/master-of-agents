@@ -369,12 +369,8 @@ pub(crate) fn close(state: &mut State, tx: &mut Tx, now: &Now, q: &str) -> Resul
     let pane = match kill_checked(state, id) {
         Ok(pane) => pane,
         Err(left) => {
-            // The adopted agent left its shell tab, which stays the user's: the session goes
-            // to sleep, as any unexpected end does, and loses the binding, and the tab its
-            // tags. That is saved, so the answer is success-shaped.
-            let changes = put_to_sleep(state, tx, id);
-            tx.commit(state, changes)?;
-            untag_pane(state, tx, left.pane);
+            // Saved, so the answer is success-shaped.
+            agent_left(state, tx, id, left.pane)?;
             return Ok(Done {
                 text: left.said,
                 data,
@@ -563,6 +559,21 @@ pub(crate) fn kill_checked(state: &State, id: SessionId) -> Result<Option<PaneId
         said: format!("{title}'s agent isn't running in that tab any more"),
         pane,
     })
+}
+
+/// The adopted agent of session `id` left its shell tab `pane` (R31), which stays the user's:
+/// the session goes to sleep, as any unexpected end does, and loses its binding, in one
+/// commit; then the tab loses moa's tags.
+pub(crate) fn agent_left(
+    state: &mut State,
+    tx: &mut Tx,
+    id: SessionId,
+    pane: PaneId,
+) -> Result<(), OpError> {
+    let changes = put_to_sleep(state, tx, id);
+    tx.commit(state, changes)?;
+    untag_pane(state, tx, pane);
+    Ok(())
 }
 
 /// A kill [`kill_checked`] refused: the adopted agent left its tab (R31).

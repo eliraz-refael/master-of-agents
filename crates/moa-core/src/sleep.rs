@@ -43,7 +43,8 @@ pub fn why_not(state: &State, id: SessionId, now: UtcMs, after_ms: i64) -> Optio
     if now < due_at(s, after_ms) {
         return Some("too soon");
     }
-    if state.tmux().waiting_opens().any(|o| o == id) {
+    // A launch waits for its tab, or a resume or restart of it is looking at the tabs.
+    if state.tmux().opening(id) {
         return Some("opening");
     }
     // A binding of the server the link is up on.

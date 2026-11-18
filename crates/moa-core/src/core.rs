@@ -324,6 +324,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::SessionResume { q, bg },
             ..
         } => ops::launch::start_resume(state, now, conn, req, &q, !bg, false),
+        // Answered at once, or after one pane query and the new tab (R24).
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionRestart { q },
+            ..
+        } => ops::launch::start_restart(state, now, conn, req, &q),
         // Answered at once, or after one pane query (R21).
         Input::Client {
             conn,

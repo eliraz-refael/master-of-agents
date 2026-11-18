@@ -204,6 +204,8 @@ pub enum Verb {
         #[arg(long)]
         id: Option<String>,
     },
+    /// Restart an adopted agent in a tab moa tracks.
+    Restart { id: String },
     /// Go to a panel.
     Goto { panel: String },
     /// List, show, apply or set layouts.
@@ -260,6 +262,7 @@ pub const VERB_NAMES: &[&str] = &[
     "sleep",
     "term",
     "adopt",
+    "restart",
     "goto",
     "layout",
     "peers",
@@ -353,6 +356,7 @@ impl Verb {
             Verb::Sleep { .. } => "sleep",
             Verb::Term { .. } => "term",
             Verb::Adopt { .. } => "adopt",
+            Verb::Restart { .. } => "restart",
             Verb::Goto { .. } => "goto",
             Verb::Layout { .. } => "layout",
             Verb::Peers => "peers",
@@ -540,6 +544,7 @@ impl Verb {
                     id: id.clone(),
                 }
             }
+            Verb::Restart { id } => Op::SessionRestart { q: id.clone() },
             // Listed one by one, so a new verb can't become "not yet" by default.
             Verb::Goto { .. }
             | Verb::Layout { .. }

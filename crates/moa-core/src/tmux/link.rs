@@ -193,8 +193,7 @@ pub(crate) enum OpenEnd {
 pub(crate) enum LaunchKind {
     Open,
     Resume,
-    // Comes with `moactl restart`.
-    #[allow(dead_code)]
+    /// `moactl restart`: an adopted session's conversation, resumed in a tab moa tracks.
     Restart,
 }
 
@@ -493,6 +492,13 @@ impl TmuxState {
     /// The launch of `id` waiting for its tab, if there is one.
     pub(crate) fn launching(&mut self, id: SessionId) -> Option<&mut Launching> {
         self.opens.get_mut(&id)
+    }
+
+    /// Whether a restart of `id` waits for its new tab (R24).
+    pub(crate) fn restarting(&self, id: SessionId) -> bool {
+        self.opens
+            .get(&id)
+            .is_some_and(|l| l.kind == LaunchKind::Restart)
     }
 
     /// Whether `id` is on its way to a tab: its launch waits for its pane, or a resume of it

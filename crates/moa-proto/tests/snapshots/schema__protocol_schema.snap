@@ -477,6 +477,31 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Restarts an adopted session under moa: its tab is closed and its conversation resumed\nin a new tab moa tracks.",
+            "properties": {
+              "method": {
+                "const": "session.restart",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is\nnamed after `title`, else the folder.",
             "properties": {
               "method": {

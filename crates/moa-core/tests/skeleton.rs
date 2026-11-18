@@ -452,6 +452,7 @@ fn op_methods_match_the_variants() {
             group: None,
             id: Some("c".into()),
         },
+        Op::SessionRestart { q: "q".into() },
         Op::TermOpen {
             path: "/x".into(),
             title: Some("t".into()),
@@ -504,6 +505,7 @@ const WRITES: &[&str] = &[
     "session.close",
     "session.sleep",
     "session.adopt",
+    "session.restart",
     "task.add",
     "task.set",
     "note.add",

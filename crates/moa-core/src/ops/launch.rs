@@ -1,5 +1,5 @@
-//! Agents in new tabs of moa's terminal: `open`, `resume` (and later restart) through one
-//! window builder (R11), the answers once tmux says how each tab turned out, and `focus`.
+//! Agents in new tabs of moa's terminal: `open`, `resume` and `restart` through one window
+//! builder (R11), the answers once tmux says how each tab turned out, and `focus`.
 
 use std::path::{Path, PathBuf};
 
@@ -7,6 +7,7 @@ use serde_json::json;
 
 use super::cut;
 use super::projects::project_for;
+use super::sessions::{agent_left, kill_checked};
 use crate::Now;
 use crate::change::Change;
 use crate::config::{AccountConfig, AccountName};
@@ -20,6 +21,7 @@ use crate::model::{
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::reconcile::on_this_server;
 use crate::route::{Route, route};
+use crate::sleep::kill_pane;
 use crate::state::State;
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_pane, bound_session};
@@ -308,6 +310,8 @@ pub(crate) struct Checked {
     pub store: PathBuf,
     pub launcher: PathBuf,
     pub title: String,
+    /// A restart's adopted tab, killed once the restart is saved (R24); `None` for a resume.
+    pub kill: Option<PaneId>,
 }
 
 /// Where a resume's checks leave it.
@@ -515,7 +519,79 @@ fn check(
         store: acct.store,
         launcher,
         title,
+        kill: None,
     }))
+}
+
+/// `restart Q` (R24): a running adopted session, once the tabs are reconciled (R10), is
+/// checked ([`check_restart`]), then one pane query; [`resumed`] goes on with its answer.
+/// The new tab comes to the screen, as a resume's does.
+pub(crate) fn start_restart(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    q: &str,
+) -> Vec<Effect> {
+    let mut tx = Tx::new(now);
+    let mut fx = Vec::new();
+    let checked = ready(state)
+        .and_then(|_| state.resolve(q))
+        .and_then(|id| check_restart(state, &mut tx, &mut fx, id));
+    fx.extend(post_commit(state, tx));
+    fx.extend(go_on(
+        state,
+        conn,
+        req,
+        LaunchKind::Restart,
+        true,
+        false,
+        checked,
+    ));
+    fx
+}
+
+/// R24's checks for session `id`, the link up and reconciled: a restart already opening its
+/// tab is joined; otherwise the session runs here in a tab moa doesn't track, whose agent is
+/// read again (R31), and resume's checks pass (R13 steps 3–5). An agent that left its tab
+/// puts the session to sleep, as `close` would, and refuses.
+fn check_restart(
+    state: &mut State,
+    tx: &mut Tx,
+    logs: &mut Vec<Effect>,
+    id: SessionId,
+) -> Result<Resume, OpError> {
+    if state.tmux.launching(id).is_some() {
+        return Ok(Resume::Waiting(id));
+    }
+    let Some(s) = state.session(id) else {
+        return Err(OpError(LOST.into()));
+    };
+    let title = title_of(state, s);
+    if bound_pane(state, id).is_some() && state.binding(id).is_some_and(|b| b.tracked) {
+        return Err(OpError(format!(
+            "{title} is already tracked; nothing to restart"
+        )));
+    }
+    let pane = match kill_checked(state, id) {
+        Ok(Some(pane)) => pane,
+        Ok(None) => {
+            return Err(OpError(format!(
+                "{title} isn't running; resume it with moactl resume"
+            )));
+        }
+        Err(left) => {
+            agent_left(state, tx, id, left.pane)?;
+            return Err(OpError(left.said));
+        }
+    };
+    match check(state, tx, logs, id, LaunchKind::Restart)? {
+        Resume::Check(c) => Ok(Resume::Check(Checked {
+            kill: Some(pane),
+            ..c
+        })),
+        other => Ok(other),
+    }
 }
 
 /// `resume Q`, and `focus Q` of a session that isn't running (R12): checked, then one pane
@@ -605,10 +681,11 @@ fn go_on(
     }
 }
 
-/// A resume's pane query came back. The tabs were listed while other inputs ran, so steps
-/// 1–5 are run again first. Then step 6: a tab no binding holds whose agent runs the
-/// conversation refuses it; a listing that failed goes on, since steps 1–5 still guard it.
-/// Then R13a's one commit, and the window.
+/// A resume's or restart's pane query came back. The tabs were listed while other inputs
+/// ran, so the checks are run again first (a restart's own, with its agent read again).
+/// Then step 6: a tab no binding holds whose agent runs the conversation refuses it; a
+/// listing that failed goes on, since steps 1–5 still guard it. Then one commit, R13a's or
+/// a restart's (R24), and the window; a restart kills its old tab between the two.
 pub(crate) fn resumed(
     state: &mut State,
     now: &Now,
@@ -626,10 +703,13 @@ pub(crate) fn resumed(
     let reply = |result| Effect::Reply { conn, req, result };
     let mut tx = Tx::new(now);
     let mut fx = Vec::new();
-    let again = ready(state).and_then(|_| check(state, &mut tx, &mut fx, checked.id, kind));
+    let again = ready(state).and_then(|_| match kind {
+        LaunchKind::Restart => check_restart(state, &mut tx, &mut fx, checked.id),
+        LaunchKind::Open | LaunchKind::Resume => check(state, &mut tx, &mut fx, checked.id, kind),
+    });
     fx.extend(post_commit(state, tx));
     let checked = match again {
-        // Unchanged: the listing answers for it.
+        // Unchanged, its tab to kill too: the listing answers for it.
         Ok(Resume::Check(c)) if c == checked => c,
         // Running, opening or refused by now, or its conversation or folder moved: it goes
         // on as a new resume would (a moved one looks at the tabs again).
@@ -668,29 +748,46 @@ pub(crate) fn resumed(
         ))),
     }
 
-    // R13a.
     let Some(s) = state.session(id).cloned() else {
         fx.push(reply(Err(OpError(LOST.into()))));
         return fx;
     };
     let mut tx = Tx::new(now);
-    let live = Session {
-        lifecycle: Lifecycle::Live,
-        asleep_at: None,
-        location: Location::Here,
-        resume_failed: false,
-        activity: Activity::Idle,
-        activity_why: None,
-        activity_at: Some(now.wall),
-        last_seen_at: Some(now.wall),
-        // The folder it runs in, which the reply names.
-        cwd: Some(checked.folder.clone()),
-        ..s
+    let (changes, text) = match checked.kill {
+        // R24: the old binding goes first, so the old tab's exit isn't the session's end. The
+        // session stays live, its launch waiting.
+        Some(_) => (
+            vec![Change::DeletePaneBinding(id)],
+            format!("restarted {} under moa", checked.title),
+        ),
+        // R13a.
+        None => {
+            let live = Session {
+                lifecycle: Lifecycle::Live,
+                asleep_at: None,
+                location: Location::Here,
+                resume_failed: false,
+                activity: Activity::Idle,
+                activity_why: None,
+                activity_at: Some(now.wall),
+                last_seen_at: Some(now.wall),
+                // The folder it runs in, which the reply names.
+                cwd: Some(checked.folder.clone()),
+                ..s
+            };
+            (
+                vec![Change::Session(live)],
+                format!("resumed {}", checked.title),
+            )
+        }
     };
-    let text = format!("resumed {}", checked.title);
-    if let Err(e) = tx.ui(state, vec![Change::Session(live)], text) {
+    if let Err(e) = tx.ui(state, changes, text) {
         fx.push(reply(Err(e)));
         return fx;
+    }
+    // Saved: the old tab goes before the new one opens, on the same connection (R15).
+    if let Some(pane) = checked.kill {
+        tx.tmux(kill_pane(pane));
     }
     let (answer, waiters) = if via_focus {
         (None, vec![(conn, req)])
