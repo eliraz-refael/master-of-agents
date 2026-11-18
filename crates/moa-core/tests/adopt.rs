@@ -687,6 +687,110 @@ fn adopt_reuses_the_session_of_a_known_conversation() {
     );
 }
 
+/// Z had CZ, then CB (a `/clear`). An agent resumed on CZ by hand and adopted makes CZ Z's
+/// current conversation again: `ls` shows it, and `restart` resumes it.
+#[test]
+fn adopt_makes_an_older_conversation_current() {
+    const CB: &str = "cb000000-0000-4000-8000-0000000000b8";
+    let mut w = World::new();
+    let mut later = conversation(&w.b, Z, CB);
+    later.first_seen_at = UtcMs(5);
+    later.last_seen_at = UtcMs(5);
+    w.conversations.push(later);
+    let mut r = w.reconciled();
+    assert_eq!(r.handle(Z), "cb000000");
+
+    r.in_5(Some(&r.home().join(".claude-a")), Some(CZ));
+    let fx = r.adopt("%5");
+    assert_eq!(adopted_id(&fx), id(Z));
+    assert_eq!(r.handle(Z), "c0000000");
+    assert_eq!(r.st.conversations_of(id(Z)).count(), 2);
+
+    let fx = send(&r.b, &mut r.st, 2, Op::SessionLs { all: true });
+    let lantern = r.lantern();
+    let tagged = format!("I\t%5\t50\t0\t\t1\t{Z}\t{}", lantern.display());
+    let k = line("%7", 70, K, &r.home().join("private/web"));
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let fx = listed(&mut r.st, &r.b, &[&tagged, &k], &[]);
+    let done = one_reply(&fx).unwrap();
+    let row = done
+        .data
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(id(Z)))
+        .unwrap()
+        .clone();
+    assert_eq!(row["conversation"], CZ, "{row}");
+
+    let fx = send(&r.b, &mut r.st, 3, Op::SessionRestart { q: Z.into() });
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let fx = listed(&mut r.st, &r.b, &[&tagged, &k], &[]);
+    let (sid, cmds) = the_open(&fx);
+    assert_eq!(sid, id(Z));
+    let argv = cmds[0].argv();
+    let at = argv.iter().position(|a| a == "--resume").unwrap();
+    assert_eq!(argv[at + 1], CZ, "{argv:?}");
+}
+
+/// An agent moa started for a session it knows carries `MOA_SESSION`: it is that session's,
+/// not one to adopt. Its tab is bound already, or a launch of it is still opening.
+#[test]
+fn adopt_refuses_moas_own_agent() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    let mut agent = claude(Some(&store), Some(C9), started(&r.b));
+    agent.moa_session = Some(K.into());
+    r.runs(50, agent);
+    let fx = r.adopt("%5");
+    refused(&fx, &format!("that tab is already {}", r.handle(K)));
+}
+
+#[test]
+fn adopt_refuses_moas_own_agent_while_its_session_opens() {
+    let mut r = World::new().reconciled();
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        7,
+        Op::SessionResume {
+            q: Z.into(),
+            bg: true,
+        },
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let store = r.home().join(".claude-a");
+    let mut agent = claude(Some(&store), Some(C9), started(&r.b));
+    agent.moa_session = Some(Z.into());
+    r.runs(50, agent);
+    r.ask(adopt_op("%5", None, None, None));
+    let n = r.st.tmux().queries().max().unwrap();
+    let tabs: Vec<String> = r.tabs.clone();
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: vec![Ok(tabs), Ok(Vec::new())],
+        },
+    );
+    refused(&fx, "it's still opening; try again in a moment");
+}
+
+/// A `MOA_SESSION` naming no session this brain knows says nothing: the adopt goes on.
+#[test]
+fn adopt_takes_an_agent_whose_moa_session_is_unknown() {
+    let mut r = World::new().reconciled();
+    let store = r.home().join(".claude-a");
+    let mut agent = claude(Some(&store), Some(C9), started(&r.b));
+    agent.moa_session = Some(Y.into());
+    r.runs(50, agent);
+    let fx = r.adopt("%5");
+    let new = adopted_id(&fx);
+    assert_eq!(r.st.binding(new).map(|b| b.tracked), Some(false));
+}
+
 #[test]
 fn adopt_refuses_a_tab_that_isnt_there() {
     let mut r = World::new().reconciled();

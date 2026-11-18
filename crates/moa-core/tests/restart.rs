@@ -607,6 +607,22 @@ fn the_new_agents_own_end_still_counts() {
     assert!(is_asleep(r.s()), "{:?}", r.s());
 }
 
+/// The new agent can end before tmux says which tab it has: its end names S in
+/// `MOA_SESSION`, so it is applied (R14), not history only.
+#[test]
+fn the_new_agents_end_before_its_tab_is_known_counts() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    let fx = hook(&mut r, true, ended(), 1000, 700);
+    assert!(
+        changes(&fx)
+            .iter()
+            .any(|c| matches!(c, Change::Session(s) if s.id == s_id())),
+        "{fx:?}"
+    );
+    assert!(is_asleep(r.s()), "{:?}", r.s());
+}
+
 /// Once moa takes on a hand-started agent for S again (adopt), that agent is S's own: its
 /// events apply.
 #[test]

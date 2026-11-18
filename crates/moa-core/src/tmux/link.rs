@@ -494,13 +494,6 @@ impl TmuxState {
         self.opens.get_mut(&id)
     }
 
-    /// Whether a restart of `id` waits for its new tab (R24).
-    pub(crate) fn restarting(&self, id: SessionId) -> bool {
-        self.opens
-            .get(&id)
-            .is_some_and(|l| l.kind == LaunchKind::Restart)
-    }
-
     /// Whether `id` is on its way to a tab: its launch waits for its pane, or a resume of it
     /// is still looking at the tabs (and will launch it unless they show it running).
     pub(crate) fn opening(&self, id: SessionId) -> bool {

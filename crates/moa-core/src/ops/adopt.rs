@@ -9,7 +9,6 @@ use serde_json::json;
 use super::launch::{UNSAFE_ID, title_of};
 use super::projects::project_for;
 use super::sessions::STILL_OPENING;
-use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, finish_op};
 use crate::effect::Effect;
@@ -25,6 +24,7 @@ use crate::state::State;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Asked, Link, NO_TERMINAL, ready};
 use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes};
+use crate::{Now, UtcMs};
 
 const WENT_AWAY: &str = "moa's terminal went away; try again";
 const TERMINAL: &str = "that tab is a terminal, not an agent";
@@ -166,6 +166,22 @@ pub(crate) fn adopt(
     let agent = (deps.inspect)(info.pid, &info.start)
         .filter(|a| a.kind == AgentKind::Claude)
         .ok_or_else(|| OpError(if info.term { TERMINAL } else { NOT_AN_AGENT }.into()))?;
+    // An agent moa started for a session it knows is that session's, not one to adopt: its
+    // tab is on its way to being bound, or is bound already.
+    if let Some(own) = agent
+        .moa_session
+        .as_deref()
+        .and_then(|s| s.parse::<SessionId>().ok())
+        .filter(|id| state.session(*id).is_some())
+    {
+        if state.tmux().opening(own) {
+            return Err(OpError(STILL_OPENING.into()));
+        }
+        return Err(OpError(format!(
+            "that tab is already {}",
+            state.handle_of(own)
+        )));
+    }
 
     // The brain's folder (R22), a listed account's store (R32), and this brain's route.
     let cwd = info.cwd.clone();
@@ -246,6 +262,23 @@ pub(crate) fn adopt(
                 .session(id)
                 .cloned()
                 .ok_or_else(|| OpError(LOST.into()))?;
+            // The adopted conversation is the session's current one from now on, so `ls`
+            // shows it and `restart` resumes it. The current one is the latest first seen
+            // (`State::current_conversation`): an older one is seen first again now.
+            if let Some(c) = state.conversation_of_agent(AgentKind::Claude, &conv) {
+                // After the current one's, even should the clock have gone back.
+                let first_seen_at = match state.current_conversation(id) {
+                    Some(cur) if cur.conversation_id != conv => {
+                        tx.wall.max(UtcMs(cur.first_seen_at.0.saturating_add(1)))
+                    }
+                    _ => c.first_seen_at,
+                };
+                changes.push(Change::Conversation(Conversation {
+                    first_seen_at,
+                    last_seen_at: tx.wall,
+                    ..c.clone()
+                }));
+            }
             Session {
                 title: title_flag.clone().or(s.title.clone()),
                 title_locked: s.title_locked || title_flag.is_some(),
