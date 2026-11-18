@@ -146,6 +146,35 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Folds or unfolds one tree path. Saved as one value; never a group.",
+            "properties": {
+              "method": {
+                "const": "group.fold",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "collapsed": {
+                    "type": "boolean"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "collapsed"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "method": {
                 "const": "session.ls",

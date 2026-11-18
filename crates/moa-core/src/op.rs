@@ -25,6 +25,9 @@ pub enum Op {
     GroupRename { old: String, new: String },
     #[serde(rename = "group.rm")]
     GroupRm { path: String },
+    /// Folds or unfolds one tree path. Saved as one value; never a group.
+    #[serde(rename = "group.fold")]
+    GroupFold { path: String, collapsed: bool },
     #[serde(rename = "session.ls")]
     SessionLs {
         #[serde(default)]
@@ -296,6 +299,7 @@ impl Op {
         "group.add",
         "group.rename",
         "group.rm",
+        "group.fold",
         "session.ls",
         "session.set",
         "session.archive",
@@ -331,6 +335,7 @@ impl Op {
             Op::GroupAdd { .. }
             | Op::GroupRename { .. }
             | Op::GroupRm { .. }
+            | Op::GroupFold { .. }
             | Op::SessionSet { .. }
             | Op::SessionArchive { .. }
             | Op::SessionOpen { .. }
@@ -367,6 +372,7 @@ impl Op {
             Op::GroupAdd { .. } => "group.add",
             Op::GroupRename { .. } => "group.rename",
             Op::GroupRm { .. } => "group.rm",
+            Op::GroupFold { .. } => "group.fold",
             Op::SessionLs { .. } => "session.ls",
             Op::SessionSet { .. } => "session.set",
             Op::SessionArchive { .. } => "session.archive",

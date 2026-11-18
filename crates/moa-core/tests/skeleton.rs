@@ -391,6 +391,10 @@ fn op_methods_match_the_variants() {
             new: "B".into(),
         },
         Op::GroupRm { path: "A".into() },
+        Op::GroupFold {
+            path: "A".into(),
+            collapsed: true,
+        },
         Op::SessionLs { all: true },
         Op::SessionSet {
             q: "q".into(),
@@ -504,6 +508,7 @@ const WRITES: &[&str] = &[
     "group.add",
     "group.rename",
     "group.rm",
+    "group.fold",
     "session.set",
     "session.archive",
     "session.open",

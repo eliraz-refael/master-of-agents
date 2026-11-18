@@ -70,8 +70,9 @@ impl Change {
             | Change::Thread(_)
             | Change::Feed(_)
             | Change::Nag(_)
-            | Change::Meta { .. }
             | Change::DeleteSpikePane(_) => &[],
+            // Folds are the only meta the views read.
+            Change::Meta { .. } => &[Topic::Brain],
         }
     }
 

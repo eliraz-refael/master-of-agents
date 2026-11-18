@@ -42,6 +42,18 @@ impl Topic {
     ];
 }
 
+/// The meta key holding the folded tree paths.
+pub const FOLDED_KEY: &str = "tree.folded";
+
+/// The folded tree paths, sorted. A value that doesn't parse reads as empty; the next fold
+/// rewrites it.
+pub fn folded(state: &State) -> Vec<String> {
+    state
+        .meta(FOLDED_KEY)
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default()
+}
+
 /// The `brain` topic's one row (key `brain`): the brain's name, its folders as absolute
 /// paths, the listed accounts with a launcher, the account sessions open with, and the
 /// folded tree paths.
@@ -178,7 +190,7 @@ impl State {
                 .map(|(name, _)| name.as_str().to_string())
                 .collect(),
             open_account: brain.open_account.map(|a| a.as_str().to_string()),
-            folded: Vec::new(),
+            folded: folded(self),
         };
         BTreeMap::from([("brain".to_string(), keyed("brain", &row))])
     }

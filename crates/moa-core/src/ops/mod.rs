@@ -29,6 +29,7 @@ pub(crate) fn run(
         Op::GroupAdd { path } => groups::add(state, tx, now, &path),
         Op::GroupRename { old, new } => groups::rename(state, tx, now, &old, &new),
         Op::GroupRm { path } => groups::rm(state, tx, &path),
+        Op::GroupFold { path, collapsed } => groups::fold(state, tx, &path, collapsed),
         Op::SessionLs { all } => sessions::ls(state, now, all),
         Op::SessionSet { q, title, group } => {
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())

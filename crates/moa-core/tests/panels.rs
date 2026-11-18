@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moa_core::UtcMs;
+use moa_core::change::Change;
 use moa_core::effect::{Down, Effect, Input, LogLevel, Publish, TmuxIn, TmuxToken, handle_checked};
 use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
 use moa_core::op::{ConnId, Done, Op, OpError};
 use moa_core::panel::View;
-use moa_core::publish::{BrainRow, Model, Topic};
+use moa_core::publish::{BrainRow, FOLDED_KEY, Model, Topic, folded};
 use moa_core::state::{Deps, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, PaneId};
@@ -539,4 +540,98 @@ fn a_terminal_key_whose_answer_never_comes_opens_nothing() {
             "moa's terminal went away before it said where to open a terminal".to_string()
         )]
     );
+}
+
+fn fold(path: &str, collapsed: bool) -> Op {
+    Op::GroupFold {
+        path: path.into(),
+        collapsed,
+    }
+}
+
+fn groups(st: &State) -> Vec<String> {
+    st.groups().map(|g| g.path.clone()).collect()
+}
+
+fn brain_row(st: &State) -> BrainRow {
+    serde_json::from_value(st.model().topics[&Topic::Brain]["brain"].clone()).unwrap()
+}
+
+#[test]
+fn a_fold_is_one_meta_value() {
+    let (b, mut st) = loaded(TOML);
+    let before = groups(&st);
+    let fx = send(&b, &mut st, 1, fold("Private/Lantern", true));
+    assert_eq!(
+        changes(&fx),
+        [&Change::Meta {
+            key: "tree.folded".into(),
+            value: Some("[\"Private/Lantern\"]".into()),
+        }]
+    );
+    assert_eq!(FOLDED_KEY, "tree.folded");
+    let done = the_reply(&fx).unwrap();
+    assert_eq!(done.text, "");
+    assert_eq!(
+        done.data,
+        json!({"path": "Private/Lantern", "collapsed": true})
+    );
+    assert_eq!(brain_row(&st).folded, ["Private/Lantern"]);
+    assert_eq!(groups(&st), before);
+
+    let fx = send(&b, &mut st, 2, fold("Private/Lantern", false));
+    assert_eq!(
+        changes(&fx),
+        [&Change::Meta {
+            key: "tree.folded".into(),
+            value: Some("[]".into()),
+        }]
+    );
+    assert!(brain_row(&st).folded.is_empty());
+}
+
+#[test]
+fn folding_loose_leaves_groups_unchanged() {
+    let (b, mut st) = loaded(TOML);
+    let before = groups(&st);
+    let fx = send(&b, &mut st, 1, fold("Loose", true));
+    assert!(
+        !changes(&fx).iter().any(|c| matches!(c, Change::Group(_))),
+        "{fx:?}"
+    );
+    assert_eq!(groups(&st), before);
+    assert_eq!(folded(&st), ["Loose"]);
+}
+
+#[test]
+fn folds_are_sorted_and_kept_once() {
+    let (b, mut st) = loaded(TOML);
+    send(&b, &mut st, 1, fold("B", true));
+    send(&b, &mut st, 2, fold("A", true));
+    send(&b, &mut st, 3, fold("A", true));
+    assert_eq!(folded(&st), ["A", "B"]);
+    assert_eq!(brain_row(&st).folded, ["A", "B"]);
+}
+
+#[test]
+fn an_empty_fold_path_is_refused() {
+    let (b, mut st) = loaded(TOML);
+    let fx = send(&b, &mut st, 1, fold("", true));
+    assert_eq!(the_reply(&fx), Err(OpError("a group needs a name".into())));
+    assert!(changes(&fx).is_empty());
+}
+
+#[test]
+fn a_bad_folded_value_reads_as_empty() {
+    let b = TypicalBrain::new();
+    let deps = Deps {
+        home: b.home.clone(),
+        ..Deps::default()
+    };
+    let mut snapshot = b.snapshot();
+    snapshot.meta.push((FOLDED_KEY.into(), "not json".into()));
+    let mut st = loaded_with(&b, TOML, deps, snapshot);
+    assert!(folded(&st).is_empty());
+    send(&b, &mut st, 1, fold("A", true));
+    assert_eq!(folded(&st), ["A"]);
 }

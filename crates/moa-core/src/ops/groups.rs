@@ -1,5 +1,7 @@
 //! `group add|rename|rm`.
 
+use std::collections::BTreeSet;
+
 use serde_json::json;
 
 use crate::Now;
@@ -7,6 +9,7 @@ use crate::change::Change;
 use crate::core::Tx;
 use crate::model::{Group, Session, normalize_group_path};
 use crate::op::{Done, OpError};
+use crate::publish::{FOLDED_KEY, folded};
 use crate::state::State;
 
 pub(crate) fn add(state: &mut State, tx: &mut Tx, now: &Now, raw: &str) -> Result<Done, OpError> {
@@ -141,5 +144,36 @@ pub(crate) fn rm(state: &mut State, tx: &mut Tx, path: &str) -> Result<Done, OpE
     Ok(Done {
         text: "ok".into(),
         data: json!({ "path": path }),
+    })
+}
+
+/// `group.fold`: adds or removes one path in the saved list, in one `Meta` change. It never
+/// writes `groups`: a tree node may be `Loose` or a project's, not a real group.
+pub(crate) fn fold(
+    state: &mut State,
+    tx: &mut Tx,
+    path: &str,
+    collapsed: bool,
+) -> Result<Done, OpError> {
+    if path.is_empty() {
+        return Err(OpError("a group needs a name".into()));
+    }
+    let mut paths: BTreeSet<String> = folded(state).into_iter().collect();
+    if collapsed {
+        paths.insert(path.to_string());
+    } else {
+        paths.remove(path);
+    }
+    let value = serde_json::to_string(&paths).expect("a list of strings serializes");
+    tx.commit(
+        state,
+        vec![Change::Meta {
+            key: FOLDED_KEY.into(),
+            value: Some(value),
+        }],
+    )?;
+    Ok(Done {
+        text: String::new(),
+        data: json!({ "path": path, "collapsed": collapsed }),
     })
 }
