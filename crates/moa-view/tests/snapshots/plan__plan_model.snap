@@ -1,0 +1,23 @@
+---
+source: crates/moa-view/tests/plan.rs
+expression: "debug_lines(&plan(&data, &ctx, 80))"
+---
+[head*]Fri 13 Nov · ✓ 1 done today
+
+[group*]Lantern ───────────────────────────────── 2 on you · 1 with agents · 1 waiting
+[warn*]  ! Fix login: the session needs you  ‹session›
+[p0*]  ★ P0 Fix the login loop ⟨[late*] 1d overdue ⟩  ‹task›
+[ok]  ⠸ Write the README  (agent working) ⟨[today*] today ⟩  ‹task›
+[dim]  ◷ Wait for review  (design team) ⟨[soon]tomorrow⟩  ‹task›
+
+[group*]Kite ──────────────────────────────────────────────────── 2 on you · 1 waiting
+[text]  ▸ P1 Pick a cover ⟨[soon]Tue⟩  ‹task›
+[text]  ▸ Write the back-cover text for both the paperback and the e-book editions  ‹task›
+[dim]  ◷ Order copies  (someone else) ⟨[dim]3 Dec⟩  ‹task›
+
+[head*]- ────────────────────────────────────────────────────────────────── 1 waiting
+[dim]  ◷ Renew the domain  (someone else)  ‹task›
+
+[dim]no open tasks: Harbor
+
+[dim]↵ or click: jump to its session · d done · x drop
