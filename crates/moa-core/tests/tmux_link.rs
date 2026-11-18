@@ -15,7 +15,7 @@ use moa_core::model::SessionId;
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{CallerInfo, State, TmuxLinkData};
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, WindowId};
-use moa_core::tmux::link::Link;
+use moa_core::tmux::link::{Link, ping};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
@@ -108,6 +108,44 @@ fn reply_lists(s: &mut State, conn: u64, sessions: &[&str]) -> Vec<Effect> {
 const WITH_MOA: &[&str] = &["S $0 moa", "S $1 _moa"];
 const WITHOUT_MOA: &[&str] = &["S $1 _moa"];
 
+fn ping_effect(conn: u64, n: u64) -> Effect {
+    Effect::Tmux {
+        conn,
+        cmds: vec![ping()],
+        token: Some(TmuxToken::Ping(n)),
+    }
+}
+
+/// tmux's answer to ping `n` on `conn`: its text, or an error.
+fn pong(s: &mut State, conn: u64, n: u64, ok: bool) -> Vec<Effect> {
+    let result = if ok {
+        lines(&["moa:ping"])
+    } else {
+        Err("the terminal server connection closed".into())
+    };
+    feed(
+        s,
+        TmuxIn::Replies {
+            conn,
+            token: TmuxToken::Ping(n),
+            results: vec![result],
+        },
+    )
+}
+
+fn ensure_from(s: &mut State, conn: u64, req: u64) -> Vec<Effect> {
+    handle_checked(
+        s,
+        Input::Client {
+            conn: ConnId(conn),
+            req: ReqId(req),
+            caller: CallerInfo::default(),
+            op: Op::TmuxEnsure { tmux: None },
+        },
+        now(),
+    )
+}
+
 fn refresh_effect(conn: u64) -> Effect {
     Effect::Tmux {
         conn,
@@ -188,10 +226,102 @@ fn ensure_waits_for_the_link_only() {
     assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
     let fx = reply_lists(&mut s, 1, WITHOUT_MOA);
     assert!(replies(&fx).is_empty());
-    // Now it answers at once, and asks the server nothing.
+    // Linked, it asks the server one ping, and says it runs once the ping comes back.
     let fx = ensure_as(&mut s, 2, None);
+    assert!(replies(&fx).is_empty());
+    assert_eq!(tmux_effects(&fx), vec![&ping_effect(1, 1)]);
+    let fx = pong(&mut s, 1, 1, true);
     assert_eq!(replies(&fx), vec![(ReqId(2), running(true))]);
     assert!(tmux_effects(&fx).is_empty());
+}
+
+/// A server killed a moment ago can still look linked: the link hasn't seen its client
+/// drop yet. An ensure then waits for the ping, and a ping that fails, or a link that goes
+/// before it answers, never says the server runs.
+#[test]
+fn a_ping_that_fails_never_says_running() {
+    let mut s = started();
+    connected(&mut s, 1, generation(10));
+    ensure(&mut s);
+    // The link drops a client whose ping failed; the failure itself says nothing.
+    let fx = pong(&mut s, 1, 1, false);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert!(tmux_effects(&fx).is_empty(), "{fx:?}");
+    let fx = feed(&mut s, TmuxIn::Down(Down::Lost));
+    assert!(replies(&fx).is_empty(), "it waits for the link to know");
+    let fx = feed(&mut s, TmuxIn::Down(Down::NoServer));
+    assert_eq!(replies(&fx), vec![(ReqId(1), running(false))]);
+
+    // The link goes before the ping is answered; the answer, late, is dropped.
+    let mut s = started();
+    connected(&mut s, 1, generation(10));
+    ensure(&mut s);
+    feed(&mut s, TmuxIn::Down(Down::Lost));
+    let fx = pong(&mut s, 1, 1, true);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let fx = feed(&mut s, TmuxIn::Down(Down::NoServer));
+    assert_eq!(replies(&fx), vec![(ReqId(1), running(false))]);
+
+    // The server was still there: a fresh connection says it runs.
+    let mut s = started();
+    connected(&mut s, 1, generation(10));
+    ensure(&mut s);
+    feed(&mut s, TmuxIn::Down(Down::Lost));
+    let fx = connected(&mut s, 2, generation(10));
+    assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
+    let fx = pong(&mut s, 1, 1, true);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+}
+
+/// The ensures that wait together share one ping. One that comes while a ping is out waits
+/// for the next: an answer already on its way may predate it.
+#[test]
+fn ensures_waiting_together_share_a_ping() {
+    let mut s = started();
+    connected(&mut s, 1, generation(10));
+    let fx = ensure_as(&mut s, 1, None);
+    assert_eq!(tmux_effects(&fx), vec![&ping_effect(1, 1)]);
+    for req in [2, 3] {
+        let fx = ensure_as(&mut s, req, None);
+        assert!(replies(&fx).is_empty());
+        assert!(tmux_effects(&fx).is_empty(), "one ping out");
+    }
+    let fx = pong(&mut s, 1, 1, true);
+    assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
+    assert_eq!(tmux_effects(&fx), vec![&ping_effect(1, 2)]);
+    let fx = pong(&mut s, 1, 2, true);
+    assert_eq!(
+        replies(&fx),
+        vec![(ReqId(2), running(true)), (ReqId(3), running(true))]
+    );
+    assert!(tmux_effects(&fx).is_empty());
+    // Nobody waits: an extra answer says nothing.
+    let fx = pong(&mut s, 1, 2, true);
+    assert!(fx.is_empty(), "{fx:?}");
+}
+
+/// A connection that closed while its ensure waited for a ping is never answered.
+#[test]
+fn a_closed_connections_ensure_is_dropped_from_its_ping() {
+    let mut s = started();
+    connected(&mut s, 1, generation(10));
+    ensure_from(&mut s, 7, 1);
+    ensure_from(&mut s, 8, 2);
+    ensure_from(&mut s, 7, 3);
+    let fx = handle_checked(&mut s, Input::ClientGone(ConnId(7)), now());
+    assert!(fx.is_empty(), "{fx:?}");
+    let fx = pong(&mut s, 1, 1, true);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(tmux_effects(&fx), vec![&ping_effect(1, 2)]);
+    let fx = pong(&mut s, 1, 2, true);
+    let to: Vec<(ConnId, ReqId)> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Reply { conn, req, .. } => Some((*conn, *req)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(to, [(ConnId(8), ReqId(2))]);
 }
 
 #[test]
@@ -223,6 +353,12 @@ fn a_missing_moa_session_is_left_to_the_front_door() {
     let fx = reply_lists(&mut s, 1, WITHOUT_MOA);
     assert!(tmux_effects(&fx).is_empty(), "nothing is created");
     let fx = ensure(&mut s);
+    assert_eq!(
+        tmux_effects(&fx),
+        vec![&ping_effect(1, 1)],
+        "nothing is created"
+    );
+    let fx = pong(&mut s, 1, 1, true);
     assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
     assert!(tmux_effects(&fx).is_empty());
 }
@@ -456,6 +592,24 @@ fn reload_keeps_the_link_and_restarts_its_bookkeeping() {
     assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
     assert!(matches!(s.tmux().link, Link::Up { conn: 1, .. }));
     let fx = ensure(&mut s);
+    assert_eq!(tmux_effects(&fx), vec![&ping_effect(1, 1)]);
+    // A reload while the ping is out pings again: the one out may have been lost with the
+    // handling that sent it. Only the new one's answer counts.
+    let fx = handle_checked(
+        &mut s,
+        Input::Reload {
+            snapshot: Box::default(),
+            refuse_writes: None,
+        },
+        now(),
+    );
+    assert_eq!(
+        tmux_effects(&fx),
+        vec![&refresh_effect(1), &ping_effect(1, 2)]
+    );
+    let fx = pong(&mut s, 1, 1, true);
+    assert!(fx.is_empty(), "{fx:?}");
+    let fx = pong(&mut s, 1, 2, true);
     assert_eq!(replies(&fx), vec![(ReqId(1), running(true))]);
 
     // While connecting, a reload asks to connect again.
@@ -483,6 +637,7 @@ fn effect_ordering() {
     assert!(!view.runs_at_once());
     assert!(refresh_effect(1).runs_at_once());
     assert!(Effect::TmuxConnect { tmux: None }.runs_at_once());
+    assert!(ping_effect(1, 1).runs_at_once() && !ping_effect(1, 1).is_heard());
     // Plumbing isn't heard: a Persist may follow it.
     assert!(check_order(&[refresh_effect(1), Effect::Persist(vec![])]).is_ok());
     // An `open`'s new window starts an agent that reports on its session: it waits for the

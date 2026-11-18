@@ -120,6 +120,10 @@ pub enum TmuxToken {
     Open(SessionId),
     /// A question about the server's panes (`TmuxState::ask`), by number.
     Query(u64),
+    /// A no-op that proves the server still answers, before `tmux.ensure` says it runs, by
+    /// number. The link answers it only when every command succeeded; otherwise, or when
+    /// tmux takes too long, it drops the client and reports `Lost`.
+    Ping(u64),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -164,9 +168,9 @@ pub enum Effect {
     Log(LogLine),
     /// Commands for the link's connection `conn`. Untokened, they show saved state (the
     /// status line, notices) and wait for the commit. Tokened, their answers come back as
-    /// [`TmuxIn::Replies`]: a `Refresh` or a `Query` is the link's own plumbing, and runs at
-    /// once; an `Open` starts an agent that reports on its session, and waits for the commit
-    /// that saves it.
+    /// [`TmuxIn::Replies`]: a `Refresh`, a `Query` or a `Ping` is the link's own plumbing,
+    /// and runs at once; an `Open` starts an agent that reports on its session, and waits for
+    /// the commit that saves it.
     Tmux {
         conn: u64,
         cmds: Vec<Cmd>,
@@ -192,7 +196,7 @@ impl Effect {
                 | Effect::Log(_)
                 | Effect::TmuxConnect { .. }
                 | Effect::Tmux {
-                    token: Some(TmuxToken::Refresh | TmuxToken::Query(_)),
+                    token: Some(TmuxToken::Refresh | TmuxToken::Query(_) | TmuxToken::Ping(_)),
                     ..
                 }
         )

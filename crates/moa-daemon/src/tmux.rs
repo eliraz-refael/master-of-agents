@@ -37,8 +37,8 @@ const BACKOFF: [Duration; 6] = [
     Duration::from_millis(3200),
 ];
 
-/// How long each command of a stop's clean-up may take. A server that hangs mid-way is
-/// treated as gone.
+/// How long each command of a stop's clean-up, and each ping, may take. A server that hangs
+/// mid-way is treated as gone.
 const STEP_WAIT: Duration = Duration::from_secs(2);
 
 /// How long a connect's setup may take, all its steps together. With `CONNECT_WAIT` (6 s)
@@ -261,6 +261,8 @@ struct Up {
     /// client's sends still waiting for their answers, by tag.
     tokens: BTreeMap<u64, TmuxToken>,
     last_tag: u64,
+    /// The pings still waiting for their answers: by tag, when each is given up on.
+    pings: BTreeMap<u64, Instant>,
 }
 
 impl Up {
@@ -277,7 +279,15 @@ impl Up {
     fn tag(&mut self, token: TmuxToken) -> u64 {
         self.last_tag += 1;
         self.tokens.insert(self.last_tag, token);
+        if let TmuxToken::Ping(_) = token {
+            self.pings.insert(self.last_tag, Instant::now() + STEP_WAIT);
+        }
         self.last_tag
+    }
+
+    /// When the oldest unanswered ping is given up on: tags and deadlines both grow.
+    fn ping_by(&self) -> Option<Instant> {
+        self.pings.values().next().copied()
     }
 }
 
@@ -295,6 +305,8 @@ enum Step {
     Cmd(Option<TmuxCmd>),
     Event(Option<Event>),
     Retry(usize),
+    /// A ping wasn't answered within `STEP_WAIT`.
+    PingLate,
 }
 
 struct Actor {
@@ -361,14 +373,16 @@ impl Actor {
                 }
                 #[cfg(test)]
                 Step::Cmd(Some(TmuxCmd::Crash)) => panic!("a test crashed the terminal link"),
-                Step::Event(Some(ev)) => self.event(ev),
-                Step::Event(None) => {
-                    let steady = self.steady();
-                    let after = match &self.state {
-                        State::Up(up) if up.since.elapsed() < steady => up.tried,
-                        _ => None,
-                    };
-                    self.lost(after).await;
+                Step::Event(Some(ev)) => {
+                    if !self.event(ev) {
+                        tracing::info!("the terminal server failed the link's ping");
+                        self.dropped().await;
+                    }
+                }
+                Step::Event(None) => self.dropped().await,
+                Step::PingLate => {
+                    tracing::info!("the terminal server didn't answer the link's ping in time");
+                    self.dropped().await;
                 }
                 Step::Retry(next) => self.retry(next).await,
             }
@@ -378,10 +392,15 @@ impl Actor {
     async fn next(&mut self, inbox: &mut mpsc::UnboundedReceiver<TmuxCmd>) -> Step {
         match &mut self.state {
             State::Idle => Step::Cmd(inbox.recv().await),
-            State::Up(up) => tokio::select! {
-                cmd = inbox.recv() => Step::Cmd(cmd),
-                ev = up.events.recv() => Step::Event(ev),
-            },
+            State::Up(up) => {
+                let late = up.ping_by();
+                tokio::select! {
+                    cmd = inbox.recv() => Step::Cmd(cmd),
+                    ev = up.events.recv() => Step::Event(ev),
+                    () = tokio::time::sleep_until(late.unwrap_or_else(Instant::now)),
+                        if late.is_some() => Step::PingLate,
+                }
+            }
             State::Backoff { next, at } => {
                 let (next, at) = (*next, *at);
                 tokio::select! {
@@ -585,9 +604,21 @@ impl Actor {
             tried,
             tokens: BTreeMap::new(),
             last_tag: 0,
+            pings: BTreeMap::new(),
         };
         self.tell(up.connected(&self.sh.link.socket));
         self.set(State::Up(up));
+    }
+
+    /// The client dropped, or is dropped: a loss, which continues the backoff when it comes
+    /// before the connection was steady.
+    async fn dropped(&mut self) {
+        let steady = self.steady();
+        let after = match &self.state {
+            State::Up(up) if up.since.elapsed() < steady => up.tried,
+            _ => None,
+        };
+        self.lost(after).await;
     }
 
     /// The client dropped. The core hears so before anything else, then the link finds out
@@ -624,27 +655,37 @@ impl Actor {
         }
     }
 
-    fn event(&mut self, ev: Event) {
+    /// Passes `ev` on to the core. `false` when the client must go: a ping failed, which
+    /// proves nothing about the server (it is going, or gone), so its answer stays here.
+    fn event(&mut self, ev: Event) -> bool {
         let State::Up(up) = &mut self.state else {
-            return;
+            return true;
         };
         let conn = up.conn;
         match ev {
             // The end of the events says it.
             Event::Notification(Notification::Exit) => {}
             Event::Notification(n) => self.tell(TmuxIn::Notification(n)),
-            Event::Replies { tag, results } => match up.tokens.remove(&tag) {
-                Some(token) => self.tell(TmuxIn::Replies {
+            Event::Replies { tag, results } => {
+                let Some(token) = up.tokens.remove(&tag) else {
+                    tracing::warn!(tag, "an answer came back that nothing asked for");
+                    return true;
+                };
+                let ping = up.pings.remove(&tag).is_some();
+                if ping && results.iter().any(Result::is_err) {
+                    return false;
+                }
+                self.tell(TmuxIn::Replies {
                     conn,
                     token,
                     results: results
                         .into_iter()
                         .map(|r| r.map_err(|e| e.to_string()))
                         .collect(),
-                }),
-                None => tracing::warn!(tag, "an answer came back that nothing asked for"),
-            },
+                });
+            }
         }
+        true
     }
 
     /// Takes down what the link put up, so keys say moa isn't running, and closes the

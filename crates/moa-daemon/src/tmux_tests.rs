@@ -685,6 +685,68 @@ async fn a_stop_queued_before_a_restart_is_answered_without_a_reconnect() {
     assert_eq!(heard.quiet_for(Duration::from_millis(300)).await, None);
 }
 
+/// Everything the link says up to its next word on being up or down, which is returned;
+/// panics on an answer to a ping, which only a server that answered gets.
+async fn no_ping_answer_before_state(heard: &mut Heard) -> TmuxIn {
+    loop {
+        match heard.next().await {
+            TmuxIn::Notification(_) => {}
+            TmuxIn::Replies {
+                token: TmuxToken::Ping(_),
+                results,
+                ..
+            } => panic!("a ping was answered: {results:?}"),
+            TmuxIn::Replies { .. } => {}
+            other => return other,
+        }
+    }
+}
+
+/// A ping the server never answers (here, it is stopped) is a loss within `STEP_WAIT`, so
+/// an ensure waiting on it is answered within the front door's 10 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ping_a_hung_server_never_answers_is_a_loss() {
+    let tb = TempBrain::new(None);
+    let (actor, mut heard) = started(server(&tb));
+    actor.send(connect()).unwrap();
+    let conn = conn_of(&heard.next_state().await);
+    let resume = stop_server(&tb);
+    actor
+        .send(TmuxCmd::Send {
+            conn,
+            cmds: vec![moa_core::tmux::link::ping()],
+            token: Some(TmuxToken::Ping(1)),
+        })
+        .unwrap();
+    assert_eq!(
+        no_ping_answer_before_state(&mut heard).await,
+        TmuxIn::Down(Down::Lost)
+    );
+    drop(resume);
+}
+
+/// A ping tmux answers with an error (here, a pane that doesn't exist) proves nothing:
+/// the link drops the client, says `Lost`, and reconnects to the server that is still there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_ping_is_a_loss() {
+    let tb = TempBrain::new(None);
+    let (actor, mut heard) = started(server(&tb));
+    actor.send(connect()).unwrap();
+    let conn = conn_of(&heard.next_state().await);
+    actor
+        .send(TmuxCmd::Send {
+            conn,
+            cmds: vec![Cmd::new("list-panes").args(["-t", "%999"])],
+            token: Some(TmuxToken::Ping(1)),
+        })
+        .unwrap();
+    assert_eq!(
+        no_ping_answer_before_state(&mut heard).await,
+        TmuxIn::Down(Down::Lost)
+    );
+    assert!(conn_of(&heard.next_state().await) > conn);
+}
+
 // --- The core's handover to the link ---
 
 fn core_options(brain: &TypicalBrain, time: &Arc<FakeTime>) -> CoreOptions {
@@ -953,5 +1015,51 @@ async fn an_open_whose_commit_fails_starts_no_tab() {
     assert_eq!(core.stats().commit_failures.load(Ordering::SeqCst), 1);
     // The link is a channel, which never answers its stop: closing it skips the wait.
     drop(rx);
+    core.stop().await;
+}
+
+/// `tmux.ensure` on a core with a real link, answered with whether the server runs.
+async fn ensure_running(
+    core: &CoreHandle,
+    c: moa_core::op::ConnId,
+    replies: &mut mpsc::UnboundedReceiver<crate::core_task::ConnReply>,
+    req: u64,
+) -> bool {
+    core.send(
+        c,
+        moa_core::op::ReqId(req),
+        CallerInfo::default(),
+        moa_core::op::Op::TmuxEnsure { tmux: None },
+    );
+    let (got, result) = timeout(PATIENCE, replies.recv())
+        .await
+        .expect("the ensure is answered in time")
+        .expect("the core is there");
+    assert_eq!(got, moa_core::op::ReqId(req));
+    let done = result.unwrap_or_else(|e| panic!("the ensure failed: {e:?}"));
+    done.data["running"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("{done:?}"))
+}
+
+/// The race a `moa` run right after `kill-server` hit: the link still looked up for a few
+/// milliseconds, the ensure said the server runs, and the front door attached to a server
+/// on its way out. Asked right after `kill-server` returns, whichever of the ping and the
+/// link's own notice of the loss comes first, the answer is "not running".
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ensure_right_after_kill_server_says_not_running() {
+    let tb = TempBrain::new(None);
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let mut opts = core_options(&brain, &time);
+    opts.tmux = Some(server(&tb));
+    let core = CoreHandle::start_inner(opts, brain.store(), vec![], None, 0)
+        .await
+        .expect("the core starts");
+    let (c, mut replies) = core.open_conn();
+    assert!(ensure_running(&core, c, &mut replies, 1).await, "linked");
+    assert!(ensure_running(&core, c, &mut replies, 2).await, "pinged");
+    tb.tmux(B, &["kill-server"]).unwrap();
+    assert!(!ensure_running(&core, c, &mut replies, 3).await);
     core.stop().await;
 }
