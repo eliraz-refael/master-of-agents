@@ -3,7 +3,7 @@
 //! program or touches a file.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use moa_core::UtcMs;
 use moa_core::op::{Done, Op};
@@ -16,7 +16,7 @@ use crate::geometry::{Geometry, Rect, Size, geometry};
 use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
-use crate::text::clean;
+use crate::text::{clean, tilde};
 use crate::views::tree;
 use crate::views::{self, ViewUi};
 
@@ -165,18 +165,6 @@ const CANCELLED: &str = "cancelled";
 /// The body width a view is built for: at least 10 cells (V2).
 fn build_width(g: &Geometry) -> u16 {
     g.body.w.max(10)
-}
-
-/// `path` with the home folder as `~`.
-fn tilde(path: &str, home: &Path) -> String {
-    let home = home.to_string_lossy();
-    let home = home.trim_end_matches('/');
-    match path.strip_prefix(home) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
-            format!("~{rest}")
-        }
-        _ => path.to_string(),
-    }
 }
 
 /// The folder a typed answer names, checked as `n` checks it (V7): it starts with `~` or `/`,
@@ -757,9 +745,10 @@ impl Panel {
             }
             Ask::RenameGroup { old } => {
                 let (parent, leaf) = old.rsplit_once('/').unwrap_or(("", &old));
-                if text.is_empty() || text == leaf {
+                // Tidied as the core will, so `leaf/` is no rename either.
+                let Some(text) = tree::tidy(&text).filter(|t| t != leaf) else {
                     return self.say(CANCELLED);
-                }
+                };
                 let new = if parent.is_empty() {
                     text
                 } else {

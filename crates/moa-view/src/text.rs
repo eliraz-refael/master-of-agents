@@ -253,17 +253,22 @@ pub fn when(due: Date, today: Date) -> String {
     }
 }
 
-/// A folder as the spike showed it: the home folder as `~`, and only the last two
-/// components when there are more than three.
-pub fn short_path(path: &str, home: &Path) -> String {
+/// `path` with the home folder as `~`.
+pub fn tilde(path: &str, home: &Path) -> String {
     let home = home.to_string_lossy();
     let home = home.trim_end_matches('/');
-    let path = match path.strip_prefix(home) {
+    match path.strip_prefix(home) {
         Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
             format!("~{rest}")
         }
         _ => path.to_string(),
-    };
+    }
+}
+
+/// A folder as the spike showed it: the home folder as `~`, and only the last two
+/// components when there are more than three.
+pub fn short_path(path: &str, home: &Path) -> String {
+    let path = tilde(path, home);
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() > 3 {
         parts[parts.len() - 2..].join("/")

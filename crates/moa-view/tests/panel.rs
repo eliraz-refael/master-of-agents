@@ -770,3 +770,44 @@ fn n_falls_back_to_the_brains_folder_when_the_session_has_none() {
         "new session in Private/Lantern · folder: ~/private"
     );
 }
+
+// ---------- review fixes ----------
+
+#[test]
+fn an_archived_sessions_old_group_doesnt_make_a_project_node_a_group() {
+    let mut t = T::new();
+    // Release notes (project Kite) sits under the project's node; an archived session still
+    // names a group `Kite` whose row was removed.
+    reshape(&mut t, RELEASE_NOTES, |row| {
+        row["group_path"] = serde_json::Value::Null;
+    });
+    reshape(&mut t, OLD_SPIKE, |row| {
+        row["group_path"] = serde_json::json!("Kite");
+        row["display_state"] = serde_json::json!("archived");
+    });
+    assert_eq!(
+        t.data.sessions[&session(OLD_SPIKE)].display_state,
+        moa_core::live::DisplayState::Archived
+    );
+    t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert!(t.panel.select(&group("Kite")));
+    t.char('n');
+    let footer = t.footer();
+    assert!(footer.starts_with("new session in top level"), "{footer}");
+}
+
+#[test]
+fn renaming_a_group_to_its_own_name_with_a_slash_is_no_rename() {
+    let mut t = T::on(group("Private/Lantern"));
+    t.char('r');
+    assert!(t.answer("Lantern/").is_empty());
+    assert_eq!(t.footer(), "cancelled");
+    t.char('r');
+    assert_eq!(
+        t.answer("Beacon/"),
+        send(Op::GroupRename {
+            old: "Private/Lantern".to_string(),
+            new: "Private/Beacon".to_string(),
+        })
+    );
+}

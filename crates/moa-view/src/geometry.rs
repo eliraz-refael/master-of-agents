@@ -47,6 +47,7 @@ pub struct Geometry {
     /// The list.
     pub body: Rect,
     /// The picture's activity strip; the rule above it is the line just above the rect.
+    /// `None` when the screen is too short for it.
     pub strip: Option<Rect>,
     /// One line for the editor, a question, a message or the key hints.
     pub footer: Rect,
@@ -71,15 +72,15 @@ pub fn geometry(view: View, size: Size) -> Geometry {
         };
         // Tabs, at least a line of body, the rule, the strip and the footer.
         let (body_h, strip) = if h > STRIP + 3 {
-            (h - STRIP - 3, Rect::new(0, h - 1 - STRIP, w, STRIP))
+            (h - STRIP - 3, Some(Rect::new(0, h - 1 - STRIP, w, STRIP)))
         } else {
-            (h.saturating_sub(2), Rect::default())
+            (h.saturating_sub(2), None)
         };
         return Geometry {
             framed: false,
             tabs: Some(tabs),
             body: Rect::new(0, 1, w, body_h),
-            strip: Some(strip),
+            strip,
             footer,
         };
     }

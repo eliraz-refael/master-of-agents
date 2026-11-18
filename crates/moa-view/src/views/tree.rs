@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moa_core::UtcMs;
 use moa_core::live::DisplayState;
+use moa_core::model::normalize_group_path;
 
 use crate::ctx::Ctx;
 use crate::data::{Data, SessionRow};
@@ -16,10 +17,10 @@ use crate::views::{ViewUi, animates, live, spinner, state_glyph};
 /// The node of the sessions with neither a group nor a project.
 pub const LOOSE: &str = "Loose";
 
-/// `path` without empty parts (`A//B/` is `A/B`); `None` when nothing is left.
+/// `path` without empty parts (`A//B/` is `A/B`), as the core normalizes it; `None` when
+/// nothing is left.
 pub fn tidy(path: &str) -> Option<String> {
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    (!parts.is_empty()).then(|| parts.join("/"))
+    Some(normalize_group_path(path)).filter(|p| !p.is_empty())
 }
 
 /// Whether `node` is `path` or lies under it.
@@ -30,13 +31,11 @@ pub fn is_under(node: &str, path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// Whether the tree node at `path` is a real group: a `groups` row or a session's group is
-/// at or under it. A node made only from a project's name (or `Loose`) isn't.
+/// Whether the tree node at `path` is a real group: a `groups` row or a listed session's group
+/// is at or under it. A node made only from a project's name (or `Loose`) isn't, and neither
+/// is a group only an archived session still names after its row was removed.
 pub fn is_group(data: &Data, path: &str) -> bool {
-    let sessions = data
-        .sessions
-        .values()
-        .filter_map(|r| r.session.group_path.as_deref());
+    let sessions = listed(data).filter_map(|r| r.session.group_path.as_deref());
     data.groups
         .keys()
         .map(String::as_str)
