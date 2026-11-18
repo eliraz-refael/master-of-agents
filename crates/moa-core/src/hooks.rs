@@ -1,7 +1,8 @@
 //! Hook events in the core: which session one is for, whether it is new, what it changes and
 //! what is written down. `core.rs` dispatches here. A session starting or ending brings its
 //! lifecycle and conversation rotation. A clean quit ends a session; any other end, a pane
-//! that exits among them, puts it to sleep (R14).
+//! that exits among them, puts it to sleep (R14). Any other event from a session that isn't
+//! live is history until a look at the tabs finds its agent ([`crate::wake`]).
 
 use serde_json::json;
 
@@ -14,7 +15,7 @@ use crate::model::{
     Activity, ActivityWho, Conversation, Event, EventId, EventKind, Lifecycle, Location, Session,
     SessionId,
 };
-use crate::op::{ConnId, Done, ReqId};
+use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::peers::peers_note;
 use crate::state::{State, Table};
 use crate::tmux::focus::bound_session;
@@ -33,6 +34,9 @@ pub(crate) enum Applied {
     /// Older than the session's last activity, an end that leaves the session live, or one
     /// for a session already ended: written to history, nothing else.
     HistoryOnly,
+    /// Newer than session `0`'s last activity, though it isn't live and has no tab: written
+    /// to history, and applied only if a look at the tabs finds its agent ([`crate::wake`]).
+    Unproven(SessionId),
     Applied,
 }
 
@@ -55,6 +59,9 @@ pub(crate) fn run(
         }));
     }
     fx.extend(post_commit(state, tx));
+    if let Applied::Unproven(id) = applied {
+        fx.extend(crate::wake::look(state, id, env));
+    }
     if let Some((conn, req)) = reply {
         // Only a start has anything to say; slice 7 fills the note.
         let note = match env.kind {
@@ -151,15 +158,49 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         changes.push(row);
     }
 
-    // An older event keeps its history row and changes nothing else. Older is than the
-    // session's last activity, or than its going to sleep: a sleep keeps `activity_at` (R5),
-    // and a hook the agent sent before it died can still arrive after. An end goes by its
-    // kind first (R14): one that is only the conversation changing (`/clear`, a resume)
-    // changes nothing either, a clean quit ends a session that is asleep however old it is,
-    // and any other end of a session already ended is history only. Once a session is
-    // restarted (R24), an event that doesn't name it in `MOA_SESSION` isn't from an agent moa
-    // started for it, whenever it arrives: the killed agent's end is history only, and the
-    // new agent's own end, even before its tab is known, is applied.
+    match after_of(state, id, &before, env) {
+        After::History => commit(state, tx, key, changes, Applied::HistoryOnly),
+        After::Unproven => {
+            let applied = if state.binding(id).is_none() {
+                Applied::Unproven(id)
+            } else {
+                Applied::HistoryOnly
+            };
+            commit(state, tx, key, changes, applied)
+        }
+        After::Apply(after) => {
+            changes.extend(applied_changes(state, tx, id, &after, env));
+            changes.insert(0, Change::Session(*after));
+            commit(state, tx, key, changes, Applied::Applied)
+        }
+    }
+}
+
+/// What an event does to its session past its history row.
+enum After {
+    /// Nothing more.
+    History,
+    /// Nothing yet: the session isn't live, and only a look at the tabs can show its agent
+    /// runs.
+    Unproven,
+    /// The session becomes this.
+    Apply(Box<Session>),
+}
+
+/// What `env` does to session `id`, now `before`.
+///
+/// An older event keeps its history row and changes nothing else. Older is than the
+/// session's last activity, or than its going to sleep: a sleep keeps `activity_at` (R5),
+/// and a hook the agent sent before it died can still arrive after. An end goes by its
+/// kind first (R14): one that is only the conversation changing (`/clear`, a resume)
+/// changes nothing either, a clean quit ends a session that is asleep however old it is,
+/// and any other end of a session already ended is history only. A start brings the
+/// session back. Any other event from a session that isn't live changes nothing until its
+/// agent is found running (M7: an asleep or ended session shows as it was left). Once a
+/// session is restarted (R24), an event that doesn't name it in `MOA_SESSION` isn't from
+/// an agent moa started for it, whenever it arrives: the killed agent's end is history
+/// only, and the new agent's own end, even before its tab is known, is applied.
+fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) -> After {
     let older = before
         .activity_at
         .max(before.asleep_at)
@@ -170,23 +211,35 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         _ if not_its_agent => None,
         HookKind::SessionEnded { reason } => match end_kind(reason) {
             EndKind::Clean if ended && before.asleep_at.is_some() => {
-                Some(woken_to_end(&before, env))
+                Some(woken_to_end(before, env))
             }
             EndKind::Rotating => None,
             _ if older || ended => None,
-            EndKind::Clean => Some(transition(&before, env)),
+            EndKind::Clean => Some(transition(before, env)),
             // Heard from, as every applied event is; the rest stays as it was left (R5).
             EndKind::Unexpected => Some(Session {
                 last_seen_at: before.last_seen_at.max(Some(env.at)),
-                ..asleep(&before, env.at)
+                ..asleep(before, env.at)
             }),
         },
         _ if older => None,
-        _ => Some(transition(&before, env)),
+        HookKind::SessionStarted { .. } => Some(transition(before, env)),
+        _ if ended => return After::Unproven,
+        _ => Some(transition(before, env)),
     };
-    let Some(after) = after else {
-        return commit(state, tx, key, changes, Applied::HistoryOnly);
-    };
+    after.map_or(After::History, |s| After::Apply(Box::new(s)))
+}
+
+/// The changes an applied event brings besides the session itself, `after`: the project's
+/// day, the activity row, and a start's conversation.
+fn applied_changes(
+    state: &State,
+    tx: &mut Tx,
+    id: SessionId,
+    after: &Session,
+    env: &HookEnvelope,
+) -> Vec<Change> {
+    let mut changes = Vec::new();
     if let Some(project) = after
         .project_id
         .and_then(|p| state.projects.get(&p))
@@ -196,7 +249,7 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         project.last_activity_on = Some(tx.today);
         changes.push(Change::Project(project));
     }
-    if let Some(text) = activity_text(&after, &env.kind) {
+    if let Some(text) = activity_text(after, &env.kind) {
         changes.push(tx.activity_row(
             state,
             ActivityWho::Session,
@@ -207,8 +260,27 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     if let HookKind::SessionStarted { source } = &env.kind {
         changes.push(Change::Conversation(rotated(state, id, env, *source)));
     }
-    changes.insert(0, Change::Session(after));
-    commit(state, tx, key, changes, Applied::Applied)
+    changes
+}
+
+/// An event a look at the tabs held back ([`Applied::Unproven`]), applied to session `id`
+/// now that its agent was found and the session woken: as [`apply`] would, without the
+/// history row it already has.
+pub(crate) fn apply_held(
+    state: &mut State,
+    tx: &mut Tx,
+    id: SessionId,
+    env: &HookEnvelope,
+) -> Result<(), OpError> {
+    let Some(before) = state.session(id).cloned() else {
+        return Ok(());
+    };
+    let After::Apply(after) = after_of(state, id, &before, env) else {
+        return Ok(());
+    };
+    let mut changes = applied_changes(state, tx, id, &after, env);
+    changes.insert(0, Change::Session(*after));
+    tx.commit(state, changes)
 }
 
 /// Commits, and only then remembers the key. A refused write drops the event here; the

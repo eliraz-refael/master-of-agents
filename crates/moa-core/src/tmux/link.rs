@@ -14,6 +14,7 @@ use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
 use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
+use crate::hook::HookEnvelope;
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::ops::adopt::AdoptArgs;
@@ -140,7 +141,7 @@ pub struct TmuxState {
 }
 
 /// What a pane query was asked for: who reads its answer.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Asked {
     Reconcile,
     /// A resume whose checks passed, looking for a tab that already runs its conversation
@@ -167,6 +168,13 @@ pub(crate) enum Asked {
         reply: Option<(ConnId, ReqId)>,
         name: String,
         path: String,
+    },
+    /// Session `id`, which isn't live and has no tab, was heard from: does a tab run its
+    /// agent? `events` are what it sent meanwhile, applied once it is found (the human's
+    /// option C).
+    Look {
+        id: SessionId,
+        events: Vec<HookEnvelope>,
     },
 }
 
@@ -513,7 +521,7 @@ impl TmuxState {
         self.queries.retain(|_, a| match a {
             Asked::Resume(r) => r.conn != conn,
             Asked::Adopt { conn: c, .. } | Asked::Ls { conn: c, .. } => *c != conn,
-            Asked::Reconcile | Asked::Term { .. } => true,
+            Asked::Reconcile | Asked::Term { .. } | Asked::Look { .. } => true,
         });
         for asked in self.queries.values_mut() {
             if let Asked::Term { reply, .. } = asked
@@ -622,6 +630,14 @@ impl TmuxState {
     /// The pane queries waiting for their answer, by number.
     pub fn queries(&self) -> impl Iterator<Item = u64> + '_ {
         self.queries.keys().copied()
+    }
+
+    /// The events waiting with the look at the tabs asked for session `id`, while one is.
+    pub(crate) fn looking(&mut self, id: SessionId) -> Option<&mut Vec<HookEnvelope>> {
+        self.queries.values_mut().find_map(|a| match a {
+            Asked::Look { id: i, events } if *i == id => Some(events),
+            _ => None,
+        })
     }
 
     /// Whether a query for `asked` is waiting for its answer.

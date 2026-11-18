@@ -20,6 +20,7 @@ use crate::tmux::focus::mark_seen;
 use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
 use crate::tmux::panes::parse_panes;
 use crate::tmux::status;
+use crate::wake;
 use crate::{Now, UtcMs};
 
 /// The effects of one input. Persist first, then what people hear about it.
@@ -135,7 +136,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // Reconcile reads its listing, a resume, an adopt or an `ls` its own and a
             // terminal its new tab, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
-            let (mut adopts, mut lists) = (Vec::new(), Vec::new());
+            let (mut adopts, mut lists, mut looks) = (Vec::new(), Vec::new(), Vec::new());
             for (asked, answer) in answers {
                 match asked {
                     Asked::Reconcile => reconciles.push(answer),
@@ -143,6 +144,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     Asked::Adopt { conn, req, args } => adopts.push((conn, req, args, answer)),
                     Asked::Ls { conn, req, all } => lists.push((conn, req, all, answer)),
                     Asked::Term { reply, name, path } => terms.push((reply, name, path, answer)),
+                    Asked::Look { id, events } => looks.push((id, events, answer)),
                 }
             }
             let panes_of = |answer: link::Answer| {
@@ -179,6 +181,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 more.extend(ops::launch::term_opened(
                     state, reply, &name, &path, answer, replied,
                 ));
+            }
+            for (id, events, answer) in looks {
+                more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
             }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));
