@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use moa_core::UtcMs;
 use moa_core::model::{Project, TaskStatus};
-use moa_core::op::{Done, Op, TaskSet};
+use moa_core::op::{Answer, Done, Op, TaskSet};
 use moa_core::panel::View;
 
 use crate::ctx::Ctx;
@@ -479,7 +479,14 @@ impl Panel {
                         Some(s) => Some(vec![Out::Send(Op::SessionFocus { q: s.to_string() })]),
                         None => Some(self.say("no session linked to this task")),
                     },
-                    Item::Project(_) | Item::Suggestion(_) => None,
+                    // Opens or closes the project's rows; the selection stays on it (V8).
+                    Item::Project(id) => {
+                        if !self.ui.expanded.remove(&id) {
+                            self.ui.expanded.insert(id);
+                        }
+                        Some(Vec::new())
+                    }
+                    Item::Suggestion(_) => None,
                 };
             }
             Action::NewSession if self.view == View::Tree => {
@@ -524,10 +531,23 @@ impl Panel {
                     ..TaskSet::default()
                 }))]);
             }
-            // The picture's tabs and suggestions come with their views.
-            Action::NextTab | Action::PrevTab | Action::Tab(_) | Action::Yes | Action::No => {
-                return None;
+            // `y` and `n` answer a suggestion; on any other row `n` is a new session.
+            Action::Yes | Action::No => {
+                let Item::Suggestion(id) = selected? else {
+                    return None;
+                };
+                let answer = if action == Action::Yes {
+                    Answer::Yes
+                } else {
+                    Answer::No
+                };
+                return Some(vec![Out::Send(Op::SuggestionAnswer {
+                    id: Some(id.0),
+                    answer,
+                })]);
             }
+            // The picture's tabs come with its own view.
+            Action::NextTab | Action::PrevTab | Action::Tab(_) => return None,
         }
         // A move through the list: nothing to send.
         Some(Vec::new())

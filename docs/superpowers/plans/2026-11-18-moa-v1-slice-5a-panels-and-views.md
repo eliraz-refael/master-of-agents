@@ -469,8 +469,9 @@ opens a terminal in the sandbox's home.
     10. `Closed thing 👨‍👩‍👧`, `Private/Kite`, ended;
     11. `Gone`, archived.
   - **Groups rows:** `Private/Ideas` (empty).
-  - **Projects:** Lantern (active, last activity today), Kite (active, today), Harbor (active, 10
-    Nov), Beacon (idea, no path, no activity).
+  - **Projects:** Lantern (active, last activity today, summary
+    `A small lamp for the terminal: the Rust rewrite`), Kite (active, today), Harbor (active,
+    10 Nov), Beacon (idea, no path, no activity).
   - **Tasks:** Lantern: `Fix the login loop` P0, you, due 12 Nov, today's; `Write the README`
     agent, linked to session 2, due 13 Nov; `Wait for review` waiting, blocked on `design team`,
     due 14 Nov. Kite: `Pick a cover` P1, you, due 17 Nov; `Order copies` who other, due 3 Dec;

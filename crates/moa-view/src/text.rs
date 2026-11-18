@@ -199,7 +199,8 @@ pub fn wrap(s: &str, w: usize) -> Vec<String> {
 
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
-const DAY: i64 = 24 * HOUR;
+/// A day, in milliseconds.
+pub const DAY: i64 = 24 * HOUR;
 
 /// How long ago `from` was, as the spike's picture said it: `""` for none, `now` under a
 /// minute (and for the future), then `{m}m`, `{h}h`, `{d}d`.

@@ -12,7 +12,7 @@ use crate::ctx::Ctx;
 use crate::data::{Data, SessionRow};
 use crate::line::{Item, Line, Span, Tone};
 use crate::text::{self, clean, cut, fit, fit_right, short_account, short_path};
-use crate::views::{ViewUi, animates, live, spinner, state_glyph};
+use crate::views::{ViewUi, animates, by_newest, live, spinner, state_glyph};
 
 /// The node of the sessions with neither a group nor a project.
 pub const LOOSE: &str = "Loose";
@@ -198,12 +198,7 @@ fn walk(node: &Node, prefix: &str, path: &str, depth: usize, cx: &Cx, out: &mut 
             .then(a.0.cmp(b.0))
     });
     let mut sessions = node.sessions.clone();
-    sessions.sort_by(|a, b| {
-        b.session
-            .last_seen_at
-            .cmp(&a.session.last_seen_at)
-            .then(a.session.id.cmp(&b.session.id))
-    });
+    sessions.sort_by(|a, b| by_newest(a, b));
 
     let n_groups = groups.len();
     let total = n_groups + sessions.len();

@@ -1,0 +1,22 @@
+---
+source: crates/moa-view/tests/status_today.rs
+expression: "debug_lines(&today(&data, &ctx, 80))"
+---
+[head*]TODAY · Fri 13 Nov
+[text]▸ Lantern: Fix the login loop  [todo]  ‹task›
+
+[head*]WAITING ON YOU
+[warn]! Fix login [acct-a]  1m  ‹session›
+[text]? Release notes [acct-a]  2h  ‹session›
+[text]✓ 設計レビュー [acct-a]  3h  ‹session›
+[text]● Dev server 👍 [acct-a]  4h  ‹session›
+[text]✗ Migrate DB [acct-b]  5h  ‹session›
+[text]● Hand started [acct-a]  7h  ‹session›
+
+[head*]WORKING
+[ok]⠸ Rust scaffold [acct-a]  1h  split the store  ‹session›
+[dim]◌ Import the whole archive of old notes into the new format [acct-a]  6h  ‹session›
+
+[head*]SUGGESTIONS  (y accept · n reject)
+[brain]? #1 Archive 3 ended sessions?  ‹suggestion›
+[brain]? #2 Set Kite's due date  ‹suggestion›
