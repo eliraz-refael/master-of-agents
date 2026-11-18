@@ -285,3 +285,48 @@ store = "~/.codex-x"
     fill_launchers(&mut config, None);
     assert_eq!(launcher(&config, "acct-a"), None);
 }
+
+/// The brain's folder is checked like the other private folders: a link in its place stops
+/// the daemon before it starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_brain_dir_that_is_a_symlink_is_refused() {
+    let root = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let paths = Paths::with_root(root.path());
+    let real = root.path().join("elsewhere");
+    ensure_private_dir(&real).unwrap();
+    let link = paths.brain_dir("default");
+    ensure_private_dir(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let brain = TypicalBrain::new();
+    let time = FakeTime::new(brain.now().wall);
+    let mut config = brain.config();
+    config.canonicalize_with(moa_platform::canonical);
+    let opts = RunOptions {
+        paths: paths.clone(),
+        brain: BrainName::default_brain(),
+        config,
+        tz: TimeZone::posix(TYPICAL_TZ).unwrap(),
+        clock: time.clone(),
+        alarm: Box::new(time.alarm()),
+        zone: None,
+        ready: Ready::Nothing,
+        events_capacity: 16,
+        uid_override: None,
+    };
+    let err = tokio::time::timeout(Duration::from_secs(10), run(opts))
+        .await
+        .expect("the daemon stops before it starts")
+        .expect_err("a linked brain folder is refused");
+    assert!(
+        matches!(
+            &err,
+            DaemonError::Paths(moa_platform::PathsError::UnsafeDir(dir, "is a symlink"))
+                if *dir == link
+        ),
+        "{err:?}"
+    );
+}

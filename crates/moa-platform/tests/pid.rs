@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use moa_platform::{kill_term, pid_alive};
+use moa_platform::{kill_term, pid_alive, wait_exited};
 
 #[test]
 fn pid_alive_sees_itself_and_not_a_reaped_child() {
@@ -28,4 +28,20 @@ fn kill_term_stops_a_child() {
     let status = child.wait().unwrap();
     assert!(!status.success());
     assert!(!pid_alive(child.id()));
+}
+
+#[test]
+fn wait_exited_leaves_the_child_to_reap() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 3"])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    wait_exited(pid).unwrap();
+    // Exited but not reaped: a zombie, so the pid can't be reused yet.
+    assert!(pid_alive(pid));
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(3), "{:?}", status.signal());
+    assert!(!pid_alive(pid));
 }

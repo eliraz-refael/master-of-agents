@@ -183,13 +183,16 @@ fn user_home(paths: &Paths) -> PathBuf {
 }
 
 /// The `moa` session in `home`: made in the background (`detached`), or attached, and made
-/// first when it's missing.
+/// first when it's missing. It detaches its terminal when it goes, whatever the user's own
+/// config says, so the terminal never lands in `_moa`. `set-option` takes a pane target,
+/// where the exact session needs its colon (`=moa:`): a bare `=moa` isn't found.
 pub fn moa_session_argv(detached: bool, home: &Path) -> Vec<OsString> {
     let how = if detached { "-d" } else { "-A" };
     let mut argv: Vec<OsString> = ["new-session", how, "-s", "moa", "-n", "moa", "-c"]
         .map(OsString::from)
         .into();
     argv.push(home.into());
+    argv.extend([";", "set-option", "-t", "=moa:", "detach-on-destroy", "on"].map(OsString::from));
     argv
 }
 
@@ -414,7 +417,8 @@ pub fn nesting(tmux_var: Option<&OsStr>, ours: &Path) -> Nesting {
 }
 
 /// T1's command: the server with its config, the `_moa` session the daemon's link
-/// attaches to, and the `moa` session the user does, in `home`.
+/// attaches to, and the `moa` session the user does, in `home`. `_moa`'s shell is two words,
+/// so tmux execs it itself instead of handing it to the user's login shell.
 pub fn create_argv(socket: &TmuxSocket, conf: &Path, home: &Path) -> Vec<OsString> {
     let mut argv: Vec<OsString> = socket.args().into();
     argv.push("-f".into());
@@ -430,6 +434,7 @@ pub fn create_argv(socket: &TmuxSocket, conf: &Path, home: &Path) -> Vec<OsStrin
             "-y",
             "3",
             "/bin/sh",
+            "-s",
             ";",
         ]
         .map(OsString::from),
@@ -569,8 +574,14 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        assert_eq!(text(false), "new-session -A -s moa -n moa -c /home/u");
-        assert_eq!(text(true), "new-session -d -s moa -n moa -c /home/u");
+        assert_eq!(
+            text(false),
+            "new-session -A -s moa -n moa -c /home/u ; set-option -t =moa: detach-on-destroy on"
+        );
+        assert_eq!(
+            text(true),
+            "new-session -d -s moa -n moa -c /home/u ; set-option -t =moa: detach-on-destroy on"
+        );
     }
 
     #[test]
@@ -587,8 +598,9 @@ mod tests {
         assert_eq!(
             argv.join(" "),
             "-S /r/run/tmux-default -f /r/default/tmux.conf \
-             new-session -d -s _moa -x 10 -y 3 /bin/sh ; \
-             new-session -d -s moa -n moa -c /home/u"
+             new-session -d -s _moa -x 10 -y 3 /bin/sh -s ; \
+             new-session -d -s moa -n moa -c /home/u ; \
+             set-option -t =moa: detach-on-destroy on"
         );
         let named = create_argv(
             &TmuxSocket::Name("moa".into()),

@@ -39,6 +39,24 @@ pub fn kill_term(pid: u32) {
     }
 }
 
+/// Blocks until this process's child `pid` has exited, and leaves it unreaped: a zombie
+/// whose pid can't be given to another process until something reaps it (`WNOWAIT`).
+pub fn wait_exited(pid: u32) -> std::io::Result<()> {
+    loop {
+        // SAFETY: a zeroed `siginfo_t` is a valid one (plain integers and a union of them),
+        // and `waitid` only writes into it for the length of the call.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live, writable `siginfo_t` for the whole call.
+        let ret =
+            unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        match check(ret) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Points file descriptor 1 at `/dev/null`, so nothing the daemon prints later reaches the
 /// pipe its starter read `ready` from.
 pub fn stdout_to_null() -> std::io::Result<()> {

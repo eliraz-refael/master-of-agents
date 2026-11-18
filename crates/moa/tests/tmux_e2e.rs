@@ -296,3 +296,29 @@ fn a_user_tmux_conf_with_run_shell_and_hooks() {
     assert!(gone.is_some(), "{}", hooks(&tb));
     assert!(hooks(&tb).contains("pane-exited[5]"), "{}", hooks(&tb));
 }
+
+/// A user's `detach-on-destroy off` would drop the terminal into `_moa` when the `moa`
+/// session's last shell goes. The `moa` session sets its own `on`, so the terminal leaves.
+#[test]
+fn a_user_detach_on_destroy_off_never_lands_in_moas_hidden_session() {
+    let tb = typical();
+    std::fs::write(
+        tb.root().join(".tmux.conf"),
+        "set -g detach-on-destroy off\n",
+    )
+    .unwrap();
+    let term = open(&tb, &[], &[]);
+    came_up(&tb, &term);
+    assert_eq!(option(&tb, "detach-on-destroy"), "off");
+    assert_eq!(
+        tmux(
+            &tb,
+            &["show-options", "-t", "moa", "-v", "detach-on-destroy"]
+        ),
+        "on"
+    );
+
+    clients_become(&tb, &["moa"]);
+    tmux(&tb, &["kill-session", "-t", "=moa"]);
+    clients_become(&tb, &[]);
+}

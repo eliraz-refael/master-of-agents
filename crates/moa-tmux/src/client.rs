@@ -13,7 +13,7 @@ use std::time::Duration;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
-use moa_platform::{Spawner, kill_term};
+use moa_platform::{Spawner, kill_term, wait_exited};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::pipe;
 use tokio::process::{ChildStderr, ChildStdin};
@@ -93,7 +93,8 @@ pub enum Event {
 pub type Events = mpsc::UnboundedReceiver<Event>;
 
 /// The arguments after the tmux program. `-u` because a daemon started at login may have no
-/// `LANG`, and `-N` so that it never starts a server.
+/// `LANG`, and `-N` so that it never starts a server. `_moa`'s shell is two words, so tmux
+/// execs it itself instead of handing it to the user's login shell.
 pub fn ctl_argv(socket: &[OsString]) -> Vec<OsString> {
     let mut v: Vec<OsString> = vec!["-u".into(), "-N".into()];
     v.extend(socket.iter().cloned());
@@ -111,6 +112,7 @@ pub fn ctl_argv(socket: &[OsString]) -> Vec<OsString> {
             "-y",
             "3",
             "/bin/sh",
+            "-s",
         ]
         .map(OsString::from),
     );
@@ -267,11 +269,13 @@ impl ControlClient {
         let stdout = pipe::Receiver::from_owned_fd(OwnedFd::from(out_r)).map(Some);
         let stderr = child.stderr.take().map(ChildStderr::from_std).transpose();
         // The reaper reports the exit, so `close` can wait for it and nothing signals a pid
-        // that is gone.
+        // that is gone. It sees the exit without reaping, so the pid stays the child's
+        // (a zombie) until the flag is up, and only then reaps.
         let (exit_tx, exited) = watch::channel(false);
         std::thread::spawn(move || {
-            drop(child.wait());
+            let _ = wait_exited(pid);
             let _ = exit_tx.send(true);
+            drop(child.wait());
         });
         let (Ok(Some(mut stdin)), Ok(Some(mut stdout)), Ok(Some(stderr))) = (stdin, stdout, stderr)
         else {
@@ -413,9 +417,14 @@ impl ControlClient {
 /// Signals `pid` only while its reaper has not reported the exit, so a reused pid is
 /// never signalled.
 fn kill_unless_exited(pid: u32, exited: &watch::Receiver<bool>) {
-    if !*exited.borrow() {
+    // The read guard is held across the kill (R28): the reaper's `send(true)` waits for it,
+    // and so does the reap after that, so the pid can't be reaped and reused between the
+    // look and the signal.
+    let seen = exited.borrow();
+    if !*seen {
         kill_term(pid);
     }
+    drop(seen);
 }
 
 /// Reads stderr to its end, handing back the first line and discarding the rest.
@@ -690,6 +699,11 @@ mod tests {
         let argv = ctl_argv(&["-L".into(), "x".into()]);
         assert_eq!(&argv[..4], ["-u", "-N", "-L", "x"].map(OsString::from));
         assert!(argv.iter().any(|a| a == "-C"));
+        // Two words, so tmux execs the shell itself and not through the user's.
+        assert_eq!(
+            argv[argv.len() - 2..],
+            ["/bin/sh", "-s"].map(OsString::from)
+        );
     }
 
     #[test]

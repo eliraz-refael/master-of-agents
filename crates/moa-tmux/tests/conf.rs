@@ -24,6 +24,24 @@ fn the_generated_config_is_stable() {
     );
 }
 
+/// A failed agent's tab shows a red cross in the current-window pill.
+#[test]
+fn the_current_window_pill_shows_failed() {
+    assert!(
+        moa_tmux("default").contains("#{?#{==:#{@moa_state},failed},#[fg=#d57780]✗ ,"),
+        "the pill has no branch for failed"
+    );
+    // And tmux reads the branch as meant: the pill renders the cross.
+    let sb = Sandbox::start().unwrap();
+    load(&sb);
+    sb.tmux(&["set-option", "-w", "@moa_state", "failed"])
+        .unwrap();
+    let left = sb
+        .tmux(&["display-message", "-p", "#{T:status-left}"])
+        .unwrap();
+    assert!(left.contains("✗ "), "{left}");
+}
+
 /// Sources `tmux_conf` on a server whose home holds the user's three possible config files,
 /// each appending its name to `@order`, with `XDG_CONFIG_HOME` as given (a path under the
 /// home, or none).

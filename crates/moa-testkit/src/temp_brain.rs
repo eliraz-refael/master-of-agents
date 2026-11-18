@@ -188,14 +188,15 @@ impl TempBrain {
     }
 
     /// The Typical spike fixture under `<root>/spike-home`, imported into `db(brain)` with
-    /// derived ids (so a test knows the ids it will see).
+    /// derived ids (so a test knows the ids it will see). The brain's folder is made
+    /// private, as `moa adopt` makes it.
     pub fn adopt_typical(&self, brain: &str) {
         let home = self.root().join("spike-home");
         fs::create_dir_all(&home).expect("the spike home");
         let spike = self.root().join("spike.db");
         SpikeFixture::write(&spike, Scenario::Typical, &home).expect("the fixture writes");
         let db = self.db(brain);
-        fs::create_dir_all(db.parent().expect("a brain dir")).expect("the brain dir");
+        ensure_private_dir(db.parent().expect("a brain dir")).expect("the brain dir");
         let mut store = Store::open(&db, &self.paths().backups(brain)).expect("a new store");
         let env = ImportEnv {
             tz: tz(),
