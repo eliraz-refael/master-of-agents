@@ -636,7 +636,8 @@ impl TmuxState {
         socket: String,
     ) -> Vec<Effect> {
         let mut fx = Vec::new();
-        if self.conn() != Some(conn) {
+        let fresh = self.conn() != Some(conn);
+        if fresh {
             // A new connection: nothing asked on another one will be answered, and its
             // panes are yet to be reconciled, with a fresh count of tries.
             self.refresh = Refresh::Idle;
@@ -663,7 +664,14 @@ impl TmuxState {
             socket,
         };
         self.written.reset();
-        fx.extend(self.answer(&running(true)));
+        if fresh {
+            // The connection was just made: the server answered it.
+            fx.extend(self.answer(&running(true)));
+        } else {
+            // The same connection said again (a connect asked again by a reload) proves
+            // nothing new: the ensures waiting get a ping, or share the one out.
+            fx.extend(self.ping());
+        }
         fx.extend(self.refresh());
         fx
     }
