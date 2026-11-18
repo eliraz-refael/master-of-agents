@@ -755,11 +755,19 @@ pub(crate) fn resumed(
     let mut tx = Tx::new(now);
     let (changes, text) = match checked.kill {
         // R24: the old binding goes first, so the old tab's exit isn't the session's end. The
-        // session stays live, its launch waiting.
-        Some(_) => (
-            vec![Change::DeletePaneBinding(id)],
-            format!("restarted {} under moa", checked.title),
-        ),
+        // session stays live and here, its launch waiting.
+        Some(_) => {
+            let live = Session {
+                lifecycle: Lifecycle::Live,
+                asleep_at: None,
+                location: Location::Here,
+                ..s
+            };
+            (
+                vec![Change::DeletePaneBinding(id), Change::Session(live)],
+                format!("restarted {} under moa", checked.title),
+            )
+        }
         // R13a.
         None => {
             let live = Session {
@@ -785,8 +793,10 @@ pub(crate) fn resumed(
         fx.push(reply(Err(e)));
         return fx;
     }
-    // Saved: the old tab goes before the new one opens, on the same connection (R15).
+    // Saved: the old agent's hooks are history only from now on, however late they come, and
+    // its tab goes before the new one opens, on the same connection (R15).
     if let Some(pane) = checked.kill {
+        state.restarted.insert(id);
         tx.tmux(kill_pane(pane));
     }
     let (answer, waiters) = if via_focus {

@@ -1,7 +1,7 @@
 //! The core's in-memory copy of the brain: every row the views need, kept in step with the
 //! store by [`Change`]s and published as a [`Model`].
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -263,6 +263,11 @@ pub struct State {
     /// keys for lookup: a hook that arrives twice is applied once.
     pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
     pub(crate) recent_hook_set: HashSet<(u32, u32, i64)>,
+    /// The sessions restarted under moa (R24) since moa last took on a hand-started agent for
+    /// them (an untracked binding). Every agent of theirs since carries `MOA_SESSION`, so a
+    /// hook without it is from the agent the restart killed, or another one moa didn't
+    /// start: history only, whenever it arrives. Kept in memory: a daemon restart forgets it.
+    pub(crate) restarted: BTreeSet<SessionId>,
 }
 
 impl State {
@@ -295,6 +300,7 @@ impl State {
             sleep_at: None,
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),
+            restarted: BTreeSet::new(),
         }
     }
 
@@ -604,6 +610,10 @@ impl State {
                 self.conversations.insert(conv_key(r), r.clone());
             }
             Change::PaneBinding(r) => {
+                // A hand-started agent is the session's own again.
+                if !r.tracked {
+                    self.restarted.remove(&r.session_id);
+                }
                 self.pane_bindings.insert(r.session_id, r.clone());
             }
             Change::SpikePane(r) => {

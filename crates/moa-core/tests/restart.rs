@@ -5,15 +5,16 @@
 
 mod common;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use moa_agents::claude::{find_transcript, project_slot};
 use moa_core::UtcMs;
 use moa_core::change::Change;
+use moa_core::effect::Down;
 use moa_core::effect::{Effect, Input, TmuxIn, TmuxToken, handle_checked};
-use moa_core::hook::{HookEnvelope, HookKind};
+use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::is_asleep;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, EventKind, Lifecycle, Location,
@@ -57,13 +58,15 @@ fn shown(p: &Path) -> String {
 thread_local! {
     /// Whether S's agent still runs in its shell tab, %5.
     static AGENT_RUNS: Cell<bool> = const { Cell::new(true) };
+    /// The store S's agent runs with: acct-a's.
+    static STORE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// S's agent in %5 (pid 505), started by hand: no `MOA_SESSION`, while it runs.
 fn s_in_a_shell(pid: i64, _: &[String]) -> Option<PaneAgent> {
     (pid == 505 && AGENT_RUNS.with(Cell::get)).then(|| PaneAgent {
         kind: AgentKind::Claude,
-        store_dir: None,
+        store_dir: STORE.with(|s| s.borrow().clone()),
         conversation: Some(C9.into()),
         moa_session: None,
         moa_brain: None,
@@ -89,6 +92,7 @@ impl World {
     fn new() -> World {
         AGENT_RUNS.with(|r| r.set(true));
         let b = TypicalBrain::new();
+        STORE.with(|s| *s.borrow_mut() = Some(shown(&b.home.join(".claude-a"))));
         let lantern = b.home.join("work/lantern");
         fs::create_dir_all(&lantern).unwrap();
         let at = UtcMs(b.now().wall.0 - 3_600_000);
@@ -336,8 +340,10 @@ fn activity_rows(fx: &[Effect]) -> Vec<String> {
         .collect()
 }
 
-/// S's old agent says it ended, `ms` after the typical now.
-fn old_agent_ended(r: &mut Rig, ms: i64) -> Vec<Effect> {
+/// A hook on conversation C9, `ms` after the typical now: from the agent moa started for S
+/// (`MOA_SESSION` = S) when `ours`, else from S's old agent, started by hand. `pid` is the
+/// hook process's, which also keeps the events apart.
+fn hook(r: &mut Rig, ours: bool, kind: HookKind, ms: i64, pid: u32) -> Vec<Effect> {
     let at = r.b.now().wall.0 + ms;
     handle_checked(
         &mut r.st,
@@ -345,16 +351,14 @@ fn old_agent_ended(r: &mut Rig, ms: i64) -> Vec<Effect> {
             reply: None,
             envelope: HookEnvelope {
                 agent: AgentKind::Claude,
-                slot: None,
+                slot: ours.then(|| S.to_string()),
                 brain: Some("default".into()),
                 store_dir: Some(shown(&r.b.home.join(".claude-a"))),
                 conversation_id: C9.into(),
-                kind: HookKind::SessionEnded {
-                    reason: "other".into(),
-                },
+                kind,
                 at: UtcMs(at),
                 at_ns: at * 1_000_000,
-                pid: 505,
+                pid,
                 seq: 1,
                 cwd: None,
                 transcript_path: None,
@@ -362,6 +366,27 @@ fn old_agent_ended(r: &mut Rig, ms: i64) -> Vec<Effect> {
         },
         r.b.now(),
     )
+}
+
+fn ended() -> HookKind {
+    HookKind::SessionEnded {
+        reason: "other".into(),
+    }
+}
+
+/// S's old agent says it ended, `ms` after the typical now.
+fn old_agent_ended(r: &mut Rig, ms: i64) -> Vec<Effect> {
+    hook(r, false, ended(), ms, 900)
+}
+
+/// `fx` saved S's `SessionEnd` as history, and nothing else.
+fn history_only(fx: &[Effect]) {
+    let saved = changes(fx);
+    assert!(
+        matches!(saved.as_slice(), [Change::Event(e)]
+            if e.kind.0 == EventKind::SESSION_ENDED && e.session_id == Some(s_id())),
+        "{fx:?}"
+    );
 }
 
 #[test]
@@ -390,9 +415,23 @@ fn restart_kills_then_resumes() {
             .any(|c| matches!(c, Change::DeletePaneBinding(id) if *id == s_id())),
         "{fx:?}"
     );
-    assert!(
-        !saved.iter().any(|c| matches!(c, Change::Session(_))),
-        "{fx:?}"
+    // Live and here, said outright; what it was doing stays.
+    let before = r.s().clone();
+    let sessions: Vec<&Session> = saved
+        .iter()
+        .filter_map(|c| match c {
+            Change::Session(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sessions, [&before], "{fx:?}");
+    assert_eq!(
+        (before.lifecycle, before.asleep_at, before.location),
+        (Lifecycle::Live, None, Location::Here)
+    );
+    assert_eq!(
+        before.activity_at,
+        Some(UtcMs(r.b.now().wall.0 - 3_600_000))
     );
     assert_eq!(activity_rows(&fx), [format!("restarted {TITLE} under moa")]);
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
@@ -487,18 +526,139 @@ fn the_old_agents_end_while_restarting_is_history_only() {
     let mut r = World::new().reconciled();
     r.committed(1);
     let fx = old_agent_ended(&mut r, 1000);
-    let saved = changes(&fx);
-    assert!(
-        matches!(saved.as_slice(), [Change::Event(e)]
-            if e.kind.0 == EventKind::SESSION_ENDED && e.session_id == Some(s_id())),
-        "{fx:?}"
-    );
+    history_only(&fx);
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
     assert!(!is_asleep(r.s()));
     let fx = r.bound("%7");
     assert_eq!(replies(&fx), [(ReqId(1), restarted())]);
     assert!(r.st.binding(s_id()).is_some_and(|b| b.tracked));
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
+}
+
+/// The likely order: the new tab is bound within milliseconds of the kill, and the old
+/// agent's end comes after. It carries no `MOA_SESSION`, so it is still history only.
+#[test]
+fn the_old_agents_end_after_the_bind_is_history_only() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    let fx = old_agent_ended(&mut r, 1000);
+    history_only(&fx);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(!is_asleep(r.s()));
+    assert!(
+        r.st.binding(s_id())
+            .is_some_and(|b| b.tracked && b.pane_id == "%7")
+    );
+}
+
+/// A slow old agent: its end is stamped after the new agent's start. It still changes
+/// nothing, and neither does any other late event of its own.
+#[test]
+fn the_old_agents_end_after_the_new_agents_start_is_history_only() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    let fx = hook(
+        &mut r,
+        true,
+        HookKind::SessionStarted {
+            source: StartSource::Resume,
+        },
+        1000,
+        700,
+    );
+    assert!(
+        changes(&fx)
+            .iter()
+            .any(|c| matches!(c, Change::Session(s) if s.id == s_id())),
+        "the new agent's start applies: {fx:?}"
+    );
+    let seen = r.s().last_seen_at;
+    let fx = old_agent_ended(&mut r, 2000);
+    history_only(&fx);
+    let fx = hook(
+        &mut r,
+        false,
+        HookKind::TurnStarted {
+            prompt: "late".into(),
+        },
+        3000,
+        901,
+    );
+    assert!(
+        !changes(&fx).iter().any(|c| matches!(c, Change::Session(_))),
+        "{fx:?}"
+    );
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(!is_asleep(r.s()));
+    assert_eq!(r.s().activity, Activity::Idle);
+    assert_eq!(r.s().last_seen_at, seen);
+}
+
+/// The fence is only for agents moa didn't start: the new agent's own unexpected end still
+/// puts S to sleep (R14).
+#[test]
+fn the_new_agents_own_end_still_counts() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    hook(&mut r, true, ended(), 1000, 700);
+    assert!(is_asleep(r.s()), "{:?}", r.s());
+}
+
+/// Once moa takes on a hand-started agent for S again (adopt), that agent is S's own: its
+/// events apply.
+#[test]
+fn adopting_again_lifts_the_fence() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        2,
+        Op::SessionSleep {
+            qs: vec![S.into()],
+            idle_ms: None,
+            dry_run: false,
+        },
+    );
+    assert_eq!(kills(&fx), [&kill("%7")]);
+    assert!(is_asleep(r.s()));
+
+    // A new hand-started agent on C9, in tab %8 (pid 505 again, as `inspect` knows it).
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        3,
+        Op::SessionAdopt {
+            pane: "%8".into(),
+            title: None,
+            group: None,
+            id: None,
+        },
+    );
+    assert!(queried(&fx), "{fx:?}");
+    let lantern = shown(&r.b.home.join("work/lantern"));
+    let line = format!("I\t%8\t505\t0\t\t\t\t{lantern}");
+    let fx = listed(&mut r.st, &r.b, &[&line], &[]);
+    assert!(
+        matches!(replies(&fx).as_slice(), [(ReqId(3), Ok(_))]),
+        "{fx:?}"
+    );
+    assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
+
+    hook(
+        &mut r,
+        false,
+        HookKind::TurnStarted {
+            prompt: "go on".into(),
+        },
+        1000,
+        902,
+    );
+    assert_eq!(r.s().activity, Activity::Working);
 }
 
 /// R31: an adopted agent that left its shell tab isn't killed with it. The session goes
@@ -589,7 +749,8 @@ fn restart_refusals() {
 }
 
 /// Resume's checks (R13 step 5): a conversation whose transcript is gone can't be resumed,
-/// so the running agent is left alone.
+/// so the running agent is left alone. It is marked so, as a resume would mark it (rule 3):
+/// once its agent stops it can't be resumed either, and its next start clears the mark.
 #[test]
 fn restart_refuses_a_missing_transcript() {
     let mut r = World::new().reconciled();
@@ -606,7 +767,14 @@ fn restart_refuses_a_missing_transcript() {
         "its conversation isn't in acct-a's folder any more, so it can't be resumed"
     );
     assert!(sent(&fx).is_empty(), "{fx:?}");
-    assert!(r.st.binding(s_id()).is_some());
+    assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
+    let saved = changes(&fx);
+    assert!(
+        matches!(saved.as_slice(), [Change::Session(s)]
+            if s.resume_failed && s.lifecycle == Lifecycle::Live && s.asleep_at.is_none()),
+        "{saved:?}"
+    );
+    assert!(r.s().resume_failed);
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
 }
 
@@ -681,11 +849,37 @@ fn two_restarts_in_flight_open_one_tab() {
     }
     assert_eq!(kills(&fx).len(), 1, "{fx:?}");
     assert_eq!(windows(&fx).len(), 1, "{fx:?}");
-    // The second joined the first's launch, as a second resume does.
+    // The second joined the first's launch, and hears where it went, as a joined resume
+    // does.
     let fx = r.bound("%7");
-    let to: Vec<ReqId> = replies(&fx).into_iter().map(|(req, _)| req).collect();
-    assert_eq!(to, [ReqId(1), ReqId(2)]);
-    assert_eq!(replies(&fx)[0], (ReqId(1), restarted()));
+    assert_eq!(
+        replies(&fx),
+        [
+            (ReqId(1), restarted()),
+            (
+                ReqId(2),
+                Ok(Done {
+                    text: format!("went to {TITLE}"),
+                    data: json!({ "id": s_id(), "title": TITLE }),
+                })
+            )
+        ]
+    );
+}
+
+/// R13a: a restart whose link goes away before its new tab is answered leaves the session
+/// asleep and resumable, not failed; the old tab was already killed.
+#[test]
+fn a_restart_whose_link_goes_away_sleeps() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    let fx = feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    assert_eq!(refusal(&fx), "moa's terminal went away before it opened");
+    let s = r.s();
+    assert!(is_asleep(s), "{s:?}");
+    assert_eq!(s.asleep_at, Some(r.b.now().wall));
+    assert!(!s.resume_failed);
+    assert!(r.st.binding(s_id()).is_none());
 }
 
 /// R13a: a restart whose new tab tmux couldn't open leaves the session asleep and

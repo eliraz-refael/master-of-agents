@@ -87,11 +87,7 @@ fn resolve(state: &State, env: &HookEnvelope) -> Result<SessionId, &'static str>
     if env.slot.as_deref() == Some("moa") {
         return Err("");
     }
-    let slot = env
-        .slot
-        .as_deref()
-        .and_then(|s| s.parse::<SessionId>().ok())
-        .filter(|id| state.session(*id).is_some());
+    let slot = slot_of(env).filter(|id| state.session(*id).is_some());
     if let Some(id) = slot {
         return if is_own(state, id, env) {
             Ok(id)
@@ -103,6 +99,11 @@ fn resolve(state: &State, env: &HookEnvelope) -> Result<SessionId, &'static str>
         .conversation_of_agent(env.agent, &env.conversation_id)
         .map(|c| c.session_id)
         .ok_or("a hook event for an unknown session was dropped")
+}
+
+/// The session an event's `MOA_SESSION` names, if it is one.
+fn slot_of(env: &HookEnvelope) -> Option<SessionId> {
+    env.slot.as_deref().and_then(|s| s.parse().ok())
 }
 
 /// Whether an event under session `id`'s slot comes from the session's own agent. Anything
@@ -156,13 +157,17 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     // kind first (R14): one that is only the conversation changing (`/clear`, a resume)
     // changes nothing either, a clean quit ends a session that is asleep however old it is,
     // and any other end of a session already ended is history only. While a restart opens
-    // the session's new tab, any end is the old agent's, which moa killed (R24).
+    // the session's new tab, any end is the old agent's, which moa killed (R24); and once a
+    // session is restarted, an event that doesn't name it in `MOA_SESSION` isn't from an
+    // agent moa started for it, whenever it arrives.
     let older = before
         .activity_at
         .max(before.asleep_at)
         .is_some_and(|t| env.at < t);
     let ended = before.lifecycle == Lifecycle::Ended;
+    let not_its_agent = state.restarted.contains(&id) && slot_of(env) != Some(id);
     let after = match &env.kind {
+        _ if not_its_agent => None,
         HookKind::SessionEnded { .. } if state.tmux().restarting(id) => None,
         HookKind::SessionEnded { reason } => match end_kind(reason) {
             EndKind::Clean if ended && before.asleep_at.is_some() => {
