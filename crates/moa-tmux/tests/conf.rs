@@ -174,35 +174,42 @@ fn attach(sb: &Sandbox) -> Terminal {
     term
 }
 
+/// The next `moa:` message, parsed, with no time limit.
+async fn recv_mailbox(events: &mut Events) -> Mailbox {
+    while let Some(ev) = events.recv().await {
+        if let Event::Notification(Notification::Message(m)) = ev
+            && m.starts_with("moa:")
+        {
+            return Mailbox::parse(&m).unwrap_or_else(|e| panic!("{m:?}: {e:?}"));
+        }
+    }
+    panic!("the events ended")
+}
+
 /// The next `moa:` message, parsed.
 async fn next_mailbox(events: &mut Events) -> Mailbox {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(ev) = events.recv().await {
-            if let Event::Notification(Notification::Message(m)) = ev
-                && m.starts_with("moa:")
-            {
-                return Mailbox::parse(&m).unwrap_or_else(|e| panic!("{m:?}: {e:?}"));
-            }
-        }
-        panic!("the events ended")
-    })
-    .await
-    .expect("no moa message within 5 s")
+    tokio::time::timeout(Duration::from_secs(5), recv_mailbox(events))
+        .await
+        .expect("no moa message within 5 s")
 }
 
 /// The next hook message that `pick` takes, skipping other hooks (a new window also
-/// changes a layout).
-async fn next_hook<T>(events: &mut Events, pick: impl Fn(HookMsg) -> Option<T>) -> T {
-    loop {
-        match next_mailbox(events).await {
-            Mailbox::Hook(h) => {
-                if let Some(v) = pick(h) {
-                    return v;
+/// changes a layout). `what` names the hook a failure waited for.
+async fn next_hook<T>(events: &mut Events, what: &str, pick: impl Fn(HookMsg) -> Option<T>) -> T {
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match recv_mailbox(events).await {
+                Mailbox::Hook(h) => {
+                    if let Some(v) = pick(h) {
+                        return v;
+                    }
                 }
+                other => panic!("waiting for {what}: {other:?}"),
             }
-            other => panic!("{other:?}"),
         }
-    }
+    })
+    .await;
+    found.unwrap_or_else(|_| panic!("no {what} hook within 5 s"))
 }
 
 /// Waits until `client` is back in the root key table, so the next Ctrl-a starts a fresh key.
@@ -383,6 +390,23 @@ async fn user_hooks_at_other_indexes_survive() {
     client.close().await;
 }
 
+/// A new window, in the background, whose command exits at once; its pane.
+fn new_window(sb: &Sandbox) -> PaneId {
+    let out = sb
+        .tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "=sandbox:",
+            "exit 0",
+        ])
+        .unwrap();
+    out.parse().unwrap_or_else(|e| panic!("{out:?}: {e}"))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn every_hook_reaches_the_mailbox() {
     let sb = Sandbox::start().unwrap();
@@ -392,33 +416,45 @@ async fn every_hook_reaches_the_mailbox() {
     }
 
     // A window whose command exits.
-    sb.tmux(&["new-window", "-d", "-t", "=sandbox:", "exit 0"])
-        .unwrap();
-    next_hook(&mut events, |h| {
-        matches!(h, HookMsg::PaneExited(_)).then_some(())
+    let pane = new_window(&sb);
+    next_hook(&mut events, "pane-exited", |h| {
+        (h == HookMsg::PaneExited(pane)).then_some(())
     })
     .await;
 
-    // The same, kept on screen.
+    // The same, kept on screen. tmux 3.4 and 3.5 built with utempter (Linux distro
+    // packages) can lose this pane's SIGCHLD: when the pty closes before the child is
+    // reaped, tmux closes the pane and runs the utmp helper with SIGCHLD set to SIG_DFL,
+    // and a SIGCHLD that lands then is dropped (3.6 raises it again after the helper).
+    // The pane is then dead with no exit status, so no pane-died until tmux next reaps a
+    // child. Once the pane is dead, a run-shell job makes it reap.
     sb.tmux(&["set-option", "-g", "remain-on-exit", "on"])
         .unwrap();
-    sb.tmux(&["new-window", "-d", "-t", "=sandbox:", "exit 0"])
-        .unwrap();
-    next_hook(&mut events, |h| {
-        matches!(h, HookMsg::PaneDied(_)).then_some(())
+    let pane = new_window(&sb);
+    let target = pane.to_string();
+    let dead = wait_for(Duration::from_secs(5), || {
+        let d = sb
+            .tmux(&["display-message", "-p", "-t", &target, "#{pane_dead}"])
+            .ok()?;
+        (d == "1").then_some(())
+    });
+    assert!(dead.is_some(), "{pane} never died");
+    sb.tmux(&["run-shell", "true"]).unwrap();
+    next_hook(&mut events, "pane-died", |h| {
+        (h == HookMsg::PaneDied(pane)).then_some(())
     })
     .await;
 
     // A split changes the layout.
     sb.tmux(&["split-window", "-d", "-t", "=sandbox:"]).unwrap();
-    next_hook(&mut events, |h| {
+    next_hook(&mut events, "layout", |h| {
         matches!(h, HookMsg::Layout(_)).then_some(())
     })
     .await;
 
     // A terminal attaching.
     let term = attach(&sb);
-    let c = next_hook(&mut events, |h| match h {
+    let c = next_hook(&mut events, "client-attached", |h| match h {
         HookMsg::ClientAttached(c) => Some(c),
         _ => None,
     })
