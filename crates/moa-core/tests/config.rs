@@ -466,3 +466,47 @@ fn a_brain_named_like_a_verb_is_refused() {
     // A word that only looks like one is fine.
     Config::parse("[brains.briefs]\n", home()).unwrap();
 }
+
+/// R17: how long an idle session waits before it goes to sleep, per brain. Absent is 6 hours,
+/// `0` is never, and anything but a number of hours, 0 or more, is refused.
+#[test]
+fn sleep_after_hours_parses() {
+    use moa_core::config::SleepAfter;
+    let after =
+        |text: &str| Config::parse(text, home()).map(|c| c.brains[&brain("default")].sleep_after);
+    assert_eq!(after("[brains.default]\n").unwrap(), SleepAfter(21_600_000));
+    assert_eq!(SleepAfter::default(), SleepAfter(21_600_000));
+    assert_eq!(SleepAfter::default().ms(), Some(21_600_000));
+    // An unconfigured default brain has the default too.
+    let none = Config::default().brain(&brain("default")).unwrap();
+    assert_eq!(none.sleep_after, SleepAfter::default());
+    assert_eq!(
+        after("[brains.default]\nsleep_after_hours = 0.5\n").unwrap(),
+        SleepAfter(1_800_000)
+    );
+    assert_eq!(
+        after("[brains.default]\nsleep_after_hours = 2\n").unwrap(),
+        SleepAfter(7_200_000)
+    );
+    assert_eq!(
+        after("[brains.default]\nsleep_after_hours = 0\n")
+            .unwrap()
+            .ms(),
+        None
+    );
+    assert_eq!(
+        after("[brains.default]\nsleep_after_hours = 0.0\n")
+            .unwrap()
+            .ms(),
+        None
+    );
+    let refused =
+        "moa.toml: sleep_after_hours in [brains.default] must be a number of hours, 0 or more";
+    for bad in ["-1", "\"x\"", "-0.5", "nan", "inf", "true", "[1]"] {
+        assert_eq!(
+            err(&format!("[brains.default]\nsleep_after_hours = {bad}\n")),
+            refused,
+            "{bad}"
+        );
+    }
+}

@@ -140,6 +140,42 @@ pub struct BrainConfig {
     pub moa_account: Option<AccountName>,
     pub open_account: Option<AccountName>,
     pub spike_db: Option<PathBuf>,
+    /// How long an idle session waits before it goes to sleep (`sleep_after_hours`, R17).
+    pub sleep_after: SleepAfter,
+}
+
+/// How long an idle session waits before it goes to sleep, in milliseconds; `0` is never.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SleepAfter(pub i64);
+
+impl Default for SleepAfter {
+    /// Six hours (spec §6.13).
+    fn default() -> Self {
+        SleepAfter(21_600_000)
+    }
+}
+
+impl SleepAfter {
+    /// The wait, or `None` for never.
+    pub fn ms(self) -> Option<i64> {
+        (self.0 > 0).then_some(self.0)
+    }
+
+    /// `sleep_after_hours`: a whole or fractional number of hours, 0 or more. A positive
+    /// value too small for a millisecond is one.
+    fn parse(v: &toml::Value) -> Option<SleepAfter> {
+        let hours = match v {
+            toml::Value::Integer(n) => *n as f64,
+            toml::Value::Float(f) => *f,
+            _ => return None,
+        };
+        if !hours.is_finite() || hours < 0.0 {
+            return None;
+        }
+        // `as` saturates: an absurd number of hours is as good as never waking.
+        let ms = (hours * 3_600_000.0).round() as i64;
+        Some(SleepAfter(if hours > 0.0 { ms.max(1) } else { 0 }))
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -184,6 +220,8 @@ struct RawBrain {
     moa_account: Option<String>,
     open_account: Option<String>,
     spike_db: Option<String>,
+    /// Checked by hand, so any value gets the one plain line.
+    sleep_after_hours: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -312,6 +350,14 @@ impl Config {
                 )));
             }
             let place = format!("brains.{name}");
+            let sleep_after = match &b.sleep_after_hours {
+                None => SleepAfter::default(),
+                Some(v) => SleepAfter::parse(v).ok_or_else(|| {
+                    problem(format_args!(
+                        "sleep_after_hours in [{place}] must be a number of hours, 0 or more"
+                    ))
+                })?,
+            };
             config.brains.insert(
                 name,
                 BrainConfig {
@@ -331,6 +377,7 @@ impl Config {
                         .as_deref()
                         .map(|s| expand_one(s, "spike_db", &place, home))
                         .transpose()?,
+                    sleep_after,
                 },
             );
         }
