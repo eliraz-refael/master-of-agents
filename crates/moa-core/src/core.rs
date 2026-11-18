@@ -10,6 +10,7 @@ use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
+use crate::ops::launch::Tell;
 use crate::panel;
 use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
@@ -19,6 +20,8 @@ use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
 use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
+use crate::tmux::mailbox::{KeyAction, Mailbox};
+use crate::tmux::notify::Notification;
 use crate::tmux::panes::parse_panes;
 use crate::tmux::status;
 use crate::wake;
@@ -102,6 +105,18 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx
         }
         Input::Tmux(t) => {
+            // `Ctrl-a $` opens a terminal where it was pressed (V6); the link answers the
+            // other keys with a notice.
+            if let TmuxIn::Notification(Notification::Message(m)) = &t
+                && let Ok(Mailbox::Key {
+                    action: KeyAction::Terminal,
+                    pane,
+                    client,
+                    ..
+                }) = Mailbox::parse(m)
+            {
+                return ops::launch::term_key(state, pane, client);
+            }
             // A pane that exited puts its session to sleep, before the link looks at the tree.
             let mut fx = match link::exited_pane(&t) {
                 Some(pane) => {
@@ -135,16 +150,18 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             );
             fx.extend(state.tmux.input(t));
             // Reconcile reads its listing, a resume, an adopt or an `ls` its own and a
-            // terminal its new tab, once the link is as the input left it.
+            // terminal its new tab or a key its folder, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
             let (mut adopts, mut lists, mut looks) = (Vec::new(), Vec::new(), Vec::new());
+            let mut heres = Vec::new();
             for (asked, answer) in answers {
                 match asked {
                     Asked::Reconcile => reconciles.push(answer),
                     Asked::Resume(ask) => resumes.push((ask, answer)),
                     Asked::Adopt { conn, req, args } => adopts.push((conn, req, args, answer)),
                     Asked::Ls { conn, req, all } => lists.push((conn, req, all, answer)),
-                    Asked::Term { reply, name, path } => terms.push((reply, name, path, answer)),
+                    Asked::Term { tell, name, path } => terms.push((tell, name, path, answer)),
+                    Asked::Here { client } => heres.push((client, answer)),
                     Asked::Look { id, events } => looks.push((id, events, answer)),
                 }
             }
@@ -178,10 +195,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     panes_of(answer),
                 ));
             }
-            for (reply, name, path, answer) in terms {
+            for (tell, name, path, answer) in terms {
                 more.extend(ops::launch::term_opened(
-                    state, reply, &name, &path, answer, replied,
+                    state, tell, &name, &path, answer, replied,
                 ));
+            }
+            for (client, answer) in heres {
+                more.extend(ops::launch::here_answered(state, client, answer, replied));
             }
             for (id, events, answer) in looks {
                 more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
@@ -335,7 +355,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             req,
             op: Op::TermOpen { path, title },
             ..
-        } => ops::launch::term(state, conn, req, &path, title.as_deref()),
+        } => ops::launch::term(state, Tell::Reply(conn, req), &path, title.as_deref()),
         // Answered at once, or after one pane query and the new tab (C11).
         Input::Client {
             conn,

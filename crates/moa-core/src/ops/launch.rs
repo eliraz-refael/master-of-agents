@@ -25,10 +25,10 @@ use crate::sleep::kill_pane;
 use crate::state::State;
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_pane, bound_session};
-use crate::tmux::ids::PaneId;
+use crate::tmux::ids::{ClientName, PaneId};
 use crate::tmux::link::{
     Answer, Asked, LaunchKind, Launching, Link, NO_TERMINAL, OPENED_FORMAT, OpenEnd, Settled, log,
-    opened_pane, ready, set_pane_option,
+    notice, opened_pane, ready, set_pane_option,
 };
 use crate::tmux::panes::{PaneInfo, list_panes};
 
@@ -1146,23 +1146,108 @@ pub(crate) fn focus(
     }
 }
 
+/// Whom a terminal's tab is told about: the `term` op's caller, by its reply, or the client
+/// whose `Ctrl-a $` asked for it, by a notice.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Tell {
+    Reply(ConnId, ReqId),
+    Notice(ClientName),
+}
+
+/// What tells `tell` how a terminal turned out: the reply, or a notice on the key's client
+/// while the link is up (a key came over it; with the link gone, nobody can be shown one).
+fn told(state: &State, tell: Option<Tell>, result: Result<Done, OpError>) -> Option<Effect> {
+    match tell? {
+        Tell::Reply(conn, req) => Some(Effect::Reply { conn, req, result }),
+        Tell::Notice(client) => {
+            let Link::Up { conn, .. } = state.tmux().link else {
+                return None;
+            };
+            let text = match result {
+                Ok(done) => done.text,
+                Err(OpError(text)) => text,
+            };
+            Some(Effect::Tmux {
+                conn,
+                cmds: vec![notice(&client, &text)],
+                token: None,
+            })
+        }
+    }
+}
+
+/// `Ctrl-a $` (V6): a terminal "here", by the key's pane. A panel's pane opens in its
+/// `ui.here` (home until 5b gives it the agent spot's folder), an agent's in its session's
+/// folder, and any other pane where tmux says it is, asked on the link ([`here_answered`]).
+/// A key from the menu has no pane: home.
+pub(crate) fn term_key(state: &mut State, pane: Option<PaneId>, client: ClientName) -> Vec<Effect> {
+    let Some(pane) = pane else {
+        return term_here(state, client, None);
+    };
+    if let Some(panel) = state.panels.values().find(|p| p.pane == Some(pane)) {
+        let here = panel.here.clone();
+        return term_here(state, client, here.as_deref());
+    }
+    if let Some(id) = bound_session(state, pane) {
+        let cwd = state.session(id).and_then(|s| s.cwd.clone());
+        return term_here(state, client, cwd.as_deref());
+    }
+    let cmd = Cmd::new("display-message").args([
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        "#{pane_current_path}".to_string(),
+    ]);
+    // A key comes over the link, so it is up.
+    state
+        .tmux
+        .ask(Asked::Here { client }, vec![cmd])
+        .into_iter()
+        .collect()
+}
+
+/// tmux said where a key's pane is: the terminal opens there. A pane that went is an error
+/// answer, and opens at home. `replied` is whether tmux answered: otherwise the link went
+/// first, and nothing opens.
+pub(crate) fn here_answered(
+    state: &mut State,
+    client: ClientName,
+    answer: Answer,
+    replied: bool,
+) -> Vec<Effect> {
+    if !replied {
+        return vec![log(
+            LogLevel::Info,
+            "moa's terminal went away before it said where to open a terminal".into(),
+        )];
+    }
+    let folder = answer
+        .ok()
+        .and_then(|lists| match <[_; 1]>::try_from(lists) {
+            Ok([lines]) => <[_; 1]>::try_from(lines).ok().map(|[line]| line),
+            Err(_) => None,
+        });
+    term_here(state, client, folder.as_deref())
+}
+
+/// A key's terminal in `folder`: home when there is none, or it isn't a full path to a
+/// folder that exists.
+fn term_here(state: &mut State, client: ClientName, folder: Option<&str>) -> Vec<Effect> {
+    let deps = state.deps();
+    let path = folder
+        .map(Path::new)
+        .filter(|p| p.is_absolute() && (deps.is_dir)(p))
+        .map_or_else(|| deps.home.clone(), Path::to_path_buf);
+    term(state, Tell::Notice(client), &path, None)
+}
+
 /// `term [PATH]` (R16): a plain shell in a new tab, in folder `path`. The window runs no
 /// command, so it is the user's shell with no moa environment, and nothing is bound or
-/// saved. [`term_opened`] tags it once tmux says which pane it has.
-pub(crate) fn term(
-    state: &mut State,
-    conn: ConnId,
-    req: ReqId,
-    path: &Path,
-    title: Option<&str>,
-) -> Vec<Effect> {
-    let reply = |text: &str| Effect::Reply {
-        conn,
-        req,
-        result: Err(OpError(text.into())),
-    };
+/// saved. [`term_opened`] tags it once tmux says which pane it has, and tells `tell`.
+pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&str>) -> Vec<Effect> {
     if !path.is_absolute() {
-        return vec![reply(TERM_NOT_FULL)];
+        let refused = Err(OpError(TERM_NOT_FULL.into()));
+        return told(state, Some(tell), refused).into_iter().collect();
     }
     let folder = path.display().to_string();
     let deps = state.deps();
@@ -1182,25 +1267,29 @@ pub(crate) fn term(
         .arg(literal_format(&folder))
         .args(["-t", "=moa:"]);
     let asked = Asked::Term {
-        reply: Some((conn, req)),
+        tell: Some(tell.clone()),
         name,
         path: folder,
     };
     // Asked only while the link is up.
     match state.tmux.ask(asked, vec![cmd]) {
         Some(query) => vec![query],
-        None => vec![reply(NO_TERMINAL)],
+        None => {
+            let refused = Err(OpError(NO_TERMINAL.into()));
+            told(state, Some(tell), refused).into_iter().collect()
+        }
     }
 }
 
 /// tmux answered a terminal's new window: its tab is tagged as a terminal with its label
 /// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen.
-/// Nothing is saved, so the commands go out on their own, before the reply. A caller that
-/// went has nobody to tell, and the tab is still tagged. `replied` is whether tmux answered:
-/// otherwise the link went before it did, and the answer says so as a launch's does.
+/// Nothing is saved, so the commands go out on their own, before the reply or notice. A
+/// caller that went has nobody to tell, and the tab is still tagged. `replied` is whether
+/// tmux answered: otherwise the link went before it did, and the answer says so as a
+/// launch's does.
 pub(crate) fn term_opened(
     state: &State,
-    reply: Option<(ConnId, ReqId)>,
+    tell: Option<Tell>,
     name: &str,
     path: &str,
     answer: Answer,
@@ -1211,13 +1300,7 @@ pub(crate) fn term_opened(
             LogLevel::Info,
             "moa's terminal went away before a terminal's tab opened".into(),
         )];
-        if let Some((conn, req)) = reply {
-            fx.push(Effect::Reply {
-                conn,
-                req,
-                result: Err(OpError(WENT_AWAY.into())),
-            });
-        }
+        fx.extend(told(state, tell, Err(OpError(WENT_AWAY.into()))));
         return fx;
     }
     let refused = answer.is_err();
@@ -1259,9 +1342,7 @@ pub(crate) fn term_opened(
             Err(OpError(NO_SHELL.into()))
         }
     };
-    if let Some((conn, req)) = reply {
-        fx.push(Effect::Reply { conn, req, result });
-    }
+    fx.extend(told(state, tell, result));
     fx
 }
 

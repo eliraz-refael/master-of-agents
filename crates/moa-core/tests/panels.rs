@@ -1,19 +1,22 @@
 //! Panels in the core: which connection is which panel (`ui.panel`), where each points
-//! (`ui.here`), and the `brain` and `panels` topics their views read.
+//! (`ui.here`), the `brain` and `panels` topics their views read, and `Ctrl-a $`, which opens
+//! a terminal where the key was pressed (V6).
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moa_core::UtcMs;
-use moa_core::effect::{Effect, Input, Publish, TmuxIn, handle_checked};
+use moa_core::effect::{Down, Effect, Input, LogLevel, Publish, TmuxIn, TmuxToken, handle_checked};
 use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
 use moa_core::op::{ConnId, Done, Op, OpError};
 use moa_core::panel::View;
 use moa_core::publish::{BrainRow, Model, Topic};
 use moa_core::state::{Deps, State};
-use moa_core::tmux::ids::PaneId;
+use moa_core::tmux::cmd::Cmd;
+use moa_core::tmux::ids::{ClientName, PaneId};
+use moa_core::tmux::link::notice;
 use moa_core::tmux::notify::Notification;
 use moa_testkit::brain::TypicalBrain;
 use serde_json::{Value, json};
@@ -283,4 +286,246 @@ fn session_rows_say_adopted() {
     let ms = models(&fx);
     assert!(!ms.is_empty(), "{fx:?}");
     assert_eq!(adopted(ms[ms.len() - 1], A), json!(false));
+}
+
+// --- Ctrl-a $ (V6) ---
+
+/// `Ctrl-a $` from client `/dev/ttys1` in tab `pane`, as moa's binding sends it.
+fn terminal_key(b: &TypicalBrain, st: &mut State, pane: &str) -> Vec<Effect> {
+    feed(
+        b,
+        st,
+        TmuxIn::Notification(Notification::Message(format!(
+            "moa:key terminal {pane} $1 /dev/ttys1"
+        ))),
+    )
+}
+
+/// The one tokened query's number and commands.
+fn the_query(fx: &[Effect]) -> (u64, Vec<Cmd>) {
+    let asked: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Tmux {
+                conn: 1,
+                cmds,
+                token: Some(TmuxToken::Query(n)),
+            } => Some((*n, cmds.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked.len(), 1, "{fx:?}");
+    asked[0].clone()
+}
+
+/// tmux answers query `n` with one command's result.
+fn answer(
+    b: &TypicalBrain,
+    st: &mut State,
+    n: u64,
+    result: Result<Vec<String>, String>,
+) -> Vec<Effect> {
+    feed(
+        b,
+        st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: vec![result],
+        },
+    )
+}
+
+fn line(s: &str) -> Result<Vec<String>, String> {
+    Ok(vec![s.to_string()])
+}
+
+fn new_window(name: &str, path: &str) -> Cmd {
+    Cmd::new("new-window").args([
+        "-d",
+        "-P",
+        "-F",
+        "P #{pane_id} #{pane_pid}",
+        "-n",
+        name,
+        "-c",
+        path,
+        "-t",
+        "=moa:",
+    ])
+}
+
+fn where_is(pane: &str) -> Cmd {
+    Cmd::new("display-message").args(["-p", "-t", pane, "#{pane_current_path}"])
+}
+
+/// Every command sent, in order.
+fn all_cmds(fx: &[Effect]) -> Vec<Cmd> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds.iter().cloned()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// A key is told by notice: nothing but commands to tmux.
+fn only_tmux(fx: &[Effect]) {
+    assert!(
+        fx.iter().all(|e| matches!(e, Effect::Tmux { .. })),
+        "{fx:?}"
+    );
+}
+
+fn log_lines(fx: &[Effect]) -> Vec<(LogLevel, String)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some((l.level, l.message.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `fx` opens a terminal tab `name` in `path`; once tmux answers with its pane, the tab is
+/// tagged and brought to the screen, and the key's client gets the notice.
+fn opens_in(b: &TypicalBrain, st: &mut State, fx: &[Effect], name: &str, path: &str) {
+    only_tmux(fx);
+    let (n, cmds) = the_query(fx);
+    assert_eq!(cmds, [new_window(name, path)]);
+    let fx = answer(b, st, n, line("P %9 777"));
+    only_tmux(&fx);
+    let shown = if path == b.home.display().to_string() {
+        "~"
+    } else {
+        path
+    };
+    assert_eq!(
+        all_cmds(&fx),
+        [
+            Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_term", "1"]),
+            Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_label", name]),
+            Cmd::new("select-window").args(["-t", "%9"]),
+            Cmd::new("select-pane").args(["-t", "%9"]),
+            notice(
+                &ClientName("/dev/ttys1".into()),
+                &format!("opened a terminal in {shown} (tab {name})")
+            ),
+        ]
+    );
+}
+
+/// The link up, and conn 7 the tree panel on `%3`.
+fn with_panel(b: &TypicalBrain, deps: Deps, snapshot: moa_core::state::Snapshot) -> State {
+    let mut st = loaded_with(b, TOML, deps, snapshot);
+    link_up(b, &mut st);
+    send_on(b, &mut st, 7, 1, panel(Some("%3"), Some(View::Tree)));
+    st
+}
+
+fn deps(b: &TypicalBrain) -> Deps {
+    Deps {
+        home: b.home.clone(),
+        session_plugin: PathBuf::from(PLUGIN),
+        ..Deps::default()
+    }
+}
+
+fn home(b: &TypicalBrain) -> String {
+    b.home.display().to_string()
+}
+
+#[test]
+fn the_terminal_key_opens_in_the_panels_here() {
+    let b = TypicalBrain::new();
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    send_on(&b, &mut st, 7, 2, here("/r/work/a"));
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ a", "/r/work/a");
+}
+
+/// Until 5b gives a panel the agent spot's folder (V6).
+#[test]
+fn a_panel_with_no_here_opens_at_home() {
+    let b = TypicalBrain::new();
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
+}
+
+/// The menu's item has no pane.
+#[test]
+fn the_terminal_menu_item_opens_at_home() {
+    let b = TypicalBrain::new();
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    let fx = terminal_key(&b, &mut st, "-");
+    opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
+}
+
+#[test]
+fn the_terminal_key_on_an_agent_tab_uses_its_folder() {
+    let b = TypicalBrain::new();
+    let mut snapshot = b.snapshot();
+    let mut s = session(A, Lifecycle::Live);
+    s.cwd = Some("/r/work/b".into());
+    snapshot.sessions.push(s);
+    snapshot.pane_bindings.push(binding(A, "%4", true));
+    let mut st = with_panel(&b, deps(&b), snapshot);
+    let fx = terminal_key(&b, &mut st, "%4");
+    opens_in(&b, &mut st, &fx, "⌨ b", "/r/work/b");
+}
+
+#[test]
+fn the_terminal_key_on_a_shell_asks_tmux_where_it_is() {
+    let b = TypicalBrain::new();
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    let home = home(&b);
+    let cases = [
+        (line("/r/work/c"), "⌨ c", "/r/work/c"),
+        (line(""), "⌨ ~", home.as_str()),
+        (line("r/work/c"), "⌨ ~", home.as_str()),
+        (Err("can't find pane".to_string()), "⌨ ~", home.as_str()),
+    ];
+    for (result, name, path) in cases {
+        let fx = terminal_key(&b, &mut st, "%5");
+        only_tmux(&fx);
+        let (n, cmds) = the_query(&fx);
+        assert_eq!(cmds, [where_is("%5")]);
+        let fx = answer(&b, &mut st, n, result);
+        opens_in(&b, &mut st, &fx, name, path);
+    }
+}
+
+#[test]
+fn the_terminal_key_avoids_a_missing_folder() {
+    let b = TypicalBrain::new();
+    let deps = Deps {
+        is_dir: |p| p != Path::new("/r/gone"),
+        ..deps(&b)
+    };
+    let mut st = with_panel(&b, deps, b.snapshot());
+    send_on(&b, &mut st, 7, 2, here("/r/gone"));
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
+}
+
+#[test]
+fn a_terminal_key_whose_answer_never_comes_opens_nothing() {
+    let b = TypicalBrain::new();
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    let fx = terminal_key(&b, &mut st, "%5");
+    the_query(&fx);
+    let fx = feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    assert!(
+        !all_cmds(&fx).iter().any(|c| c.name() == "new-window"),
+        "{fx:?}"
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        log_lines(&fx),
+        [(
+            LogLevel::Info,
+            "moa's terminal went away before it said where to open a terminal".to_string()
+        )]
+    );
 }
