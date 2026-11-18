@@ -4,13 +4,14 @@
 use std::collections::BTreeSet;
 
 use crate::change::Change;
-use crate::effect::{Effect, Input, LogLevel, LogLine, Publish, TimerKey};
+use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn};
 use crate::hooks;
 use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::publish::{CoreEvent, Topic};
+use crate::reconcile;
 use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
@@ -22,7 +23,9 @@ use crate::{Now, UtcMs};
 /// The effects of one input. Persist first, then what people hear about it.
 pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     state.set_now(now.wall);
-    let mut fx = decide(state, input, &now);
+    // A reconcile that was refused or failed is asked again as the next input starts (R10).
+    let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
+    fx.extend(decide(state, input, &now));
     // Last, so the status line shows what this input saved, after its `Persist`.
     status::run(state, &now, &mut fx);
     fx
@@ -85,6 +88,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
             fx.extend(ops::sessions::lost_opens(state));
+            // The reload may have dropped a reconcile's changes: the panes are looked at again.
+            fx.extend(reconcile::ask_if_due(state, now));
             fx
         }
         Input::Tmux(t) => {
@@ -97,7 +102,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     if !saved {
                         fx.push(Effect::Log(LogLine {
                             level: LogLevel::Warn,
-                            message: "a pane exit was not saved; reconcile will put its session to sleep at the next start".into(),
+                            message: "a pane exit was not saved; reconcile puts its session to sleep once moa can save again".into(),
                         }));
                     }
                     if !fx.is_empty() {
@@ -113,7 +118,25 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             if !settled.is_empty() {
                 fx.extend(ops::sessions::opened(state, now, settled));
             }
+            let answers = state.tmux.answered(&t);
+            let replied = matches!(t, TmuxIn::Replies { .. });
+            let (connected, no_server) = (
+                matches!(t, TmuxIn::Connected { .. }),
+                matches!(t, TmuxIn::Down(Down::NoServer)),
+            );
             fx.extend(state.tmux.input(t));
+            // Reconcile reads its listing, once the link is as the input left it.
+            let mut more = reconcile::answered(state, now, answers, replied);
+            if connected {
+                more.extend(reconcile::ask_if_due(state, now));
+            }
+            if no_server {
+                more.extend(reconcile::no_server(state, now));
+            }
+            if more.iter().any(|e| matches!(e, Effect::Persist(_))) {
+                more.push(quiet_timer(state, now.wall));
+            }
+            fold_in(&mut fx, more);
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
             fx
@@ -149,10 +172,18 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.tmux.client_gone(conn);
             Vec::new()
         }
-        // Reconcile (4b) waits for it.
+        // Reconcile waits for it (R2): the connection's panes are looked at now, or, when
+        // the link found no server, every session that ran in one goes to sleep.
         Input::StartDrained => {
             state.tmux.drained = true;
-            Vec::new()
+            let mut fx: Vec<Effect> = reconcile::ask_if_due(state, now).into_iter().collect();
+            if state.tmux().link == Link::Down && state.tmux().last_down == Some(Down::NoServer) {
+                fx.extend(reconcile::no_server(state, now));
+            }
+            if fx.iter().any(|e| matches!(e, Effect::Persist(_))) {
+                fx.push(quiet_timer(state, now.wall));
+            }
+            fx
         }
         Input::ZoneChanged => vec![backup_timer(now)],
         Input::ActorFailed { actor, message: _ } => {
@@ -293,23 +324,30 @@ pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
     fx
 }
 
-/// Runs `mark_seen` and adds what it changed to `fx`: the `Persist` after any `Persist`
-/// already there (the store applies them in the order they were made) and before any
-/// reply or view, and the `Publish` after.
+/// Runs `mark_seen` and adds what it changed to `fx` ([`fold_in`]).
 pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
     let mut tx = Tx::new(now);
     mark_seen(state, &mut tx, now);
     if tx.changes.is_empty() {
         return;
     }
-    let topics = topics_of(&tx.changes);
-    let at = fx.iter().position(Effect::is_heard).unwrap_or(fx.len());
-    fx.insert(at, Effect::Persist(tx.changes));
-    fx.extend(
-        state
-            .publish(&topics)
-            .map(|m| Effect::Publish(Publish::Model(m))),
-    );
+    let more = post_commit(state, tx);
+    fold_in(fx, more);
+}
+
+/// Adds a later commit's effects to `fx`: each `Persist` after any `Persist` already there
+/// (the store applies them in the order they were made) and before any reply or view, and
+/// the rest after.
+pub(crate) fn fold_in(fx: &mut Vec<Effect>, more: Vec<Effect>) {
+    let mut at = fx.iter().position(Effect::is_heard).unwrap_or(fx.len());
+    for e in more {
+        if matches!(e, Effect::Persist(_)) {
+            fx.insert(at, e);
+            at += 1;
+        } else {
+            fx.push(e);
+        }
+    }
 }
 
 /// The topics a set of changes touches.
@@ -383,7 +421,6 @@ impl Tx {
     /// Queues a tmux command for after this transaction's commit, on the link's connection
     /// ([`post_commit`]). Only after a successful [`Tx::commit`]: a kill must never go out
     /// for a change the store refused.
-    #[allow(dead_code, reason = "reconcile and the ops on tabs use it (4b)")]
     pub(crate) fn tmux(&mut self, cmd: Cmd) {
         debug_assert!(!self.changes.is_empty(), "a tmux command before any commit");
         self.cmds.push(cmd);

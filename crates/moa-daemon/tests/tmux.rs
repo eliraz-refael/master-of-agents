@@ -128,8 +128,9 @@ impl Rig {
         self.tmux(&["show-hooks", "-g"]) + "\n" + &self.tmux(&["show-hooks", "-gw"])
     }
 
+    /// The status line's counts once the daemon has reconciled its tabs.
     fn counts_text(&self) -> String {
-        moa_core::tmux::status::counts_text(&self.brain.state())
+        moa_core::tmux::status::counts_text(&self.brain.reconciled_state())
     }
 
     /// A clean stop: `shutdown`, then `run` returns.

@@ -92,6 +92,9 @@ pub struct TmuxState {
     refresh: Refresh,
     /// The last server generation the link connected to.
     generation: Option<Generation>,
+    /// The socket of the last server the link connected to: the one a `NoServer` means
+    /// (one per daemon). Spike panes are compared with it.
+    socket: Option<String>,
     /// The tmux program the front door found.
     tmux: Option<PathBuf>,
     /// The status options last written to the server, by name. Forgotten whenever the
@@ -119,7 +122,6 @@ pub struct TmuxState {
 
 /// What a pane query was asked for: who reads its answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code, reason = "reconcile asks it (4b)")]
 pub(crate) enum Asked {
     Reconcile,
 }
@@ -160,6 +162,7 @@ impl Default for TmuxState {
             waiters: Vec::new(),
             refresh: Refresh::Idle,
             generation: None,
+            socket: None,
             tmux: None,
             written: Written::default(),
             clock_at: None,
@@ -227,7 +230,10 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
 
 /// The link's connection, for an op that acts on bindings: up, and this connection's panes
 /// reconciled.
-#[allow(dead_code, reason = "the ops on bindings use it (4b)")]
+#[allow(
+    dead_code,
+    reason = "focus, the first op on bindings, uses it (Task 8)"
+)]
 pub(crate) fn ready(state: &State) -> Result<u64, OpError> {
     let tmux = state.tmux();
     match tmux.link {
@@ -421,7 +427,6 @@ impl TmuxState {
 
     /// Asks tmux about the server's panes, on this connection: the tokened commands, whose
     /// answer [`TmuxState::answered`] hands back. `None` while the link isn't up.
-    #[allow(dead_code, reason = "reconcile asks (4b)")]
     pub(crate) fn ask(&mut self, asked: Asked, cmds: Vec<Cmd>) -> Option<Effect> {
         let conn = self.conn()?;
         self.next_query += 1;
@@ -437,7 +442,6 @@ impl TmuxState {
     /// The pane queries this input answers: the one tmux replied to, or every one, failed,
     /// when the link goes down or a new connection replaces the one they were asked on. Run
     /// before [`TmuxState::input`], like [`TmuxState::settle`].
-    #[allow(dead_code, reason = "reconcile reads the answers (4b)")]
     pub(crate) fn answered(&mut self, input: &TmuxIn) -> Vec<(Asked, Answer)> {
         match input {
             TmuxIn::Replies {
@@ -473,9 +477,25 @@ impl TmuxState {
         self.queries.keys().copied()
     }
 
+    /// Whether a query for `asked` is waiting for its answer.
+    pub(crate) fn asking(&self, asked: Asked) -> bool {
+        self.queries.values().any(|a| *a == asked)
+    }
+
     /// Whether this connection's panes have been reconciled.
     pub fn reconciled(&self) -> bool {
         self.reconciled
+    }
+
+    /// This connection's panes are reconciled: the bindings can be trusted until the next
+    /// connection or reload.
+    pub(crate) fn set_reconciled(&mut self) {
+        self.reconciled = self.conn().is_some();
+    }
+
+    /// The socket of the last server the link connected to, if it ever connected.
+    pub(crate) fn last_socket(&self) -> Option<&str> {
+        self.socket.as_deref()
     }
 
     fn all_gone(&mut self) -> Vec<Settled> {
@@ -547,6 +567,7 @@ impl TmuxState {
             self.exited.clear();
         }
         self.generation = Some(generation);
+        self.socket = Some(socket.clone());
         self.link = Link::Up {
             conn,
             generation,

@@ -18,7 +18,8 @@ use moa_core::change::Change;
 use moa_core::config::BrainName;
 use moa_core::hook::HookLine;
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Session, SessionId,
+    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneBinding,
+    Session, SessionId, SpikePane,
 };
 use moa_core::op::{Op, ReqId};
 use moa_core::state::CallerInfo;
@@ -45,8 +46,24 @@ fn ago(ms: i64) -> i64 {
     now.as_millisecond() - ms
 }
 
-/// A live, idle session, in the brain's store.
+/// A live, idle session, in the brain's store. Its spike tab is on the spike's own server,
+/// so the daemon's reconcile at start (no server here) leaves it live: these tests are
+/// about hooks, not tabs.
 fn seed(store: &mut Store) {
+    seed_session(store);
+    let tab = SpikePane {
+        session_id: S.parse().unwrap(),
+        pane_id: "%1".into(),
+        tmux: Some("/tmp/tmux-501/spike".into()),
+        imported_at: UtcMs(1),
+    };
+    store
+        .apply(&[Change::SpikePane(tab)])
+        .expect("the spike tab is saved");
+}
+
+/// A live, idle session, in the brain's store, with no tab anywhere.
+fn seed_session(store: &mut Store) {
     let id: SessionId = S.parse().unwrap();
     let session = Session {
         id,
@@ -151,6 +168,19 @@ fn event_times(paths: &Paths) -> Vec<i64> {
         .unwrap()
         .map(Result::unwrap)
         .collect()
+}
+
+/// How many pane bindings the seeded session has.
+fn bindings(paths: &Paths) -> i64 {
+    let store = Store::open_read_only(&paths.db("default")).unwrap();
+    store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM pane_bindings WHERE session_id = ?1",
+            [S],
+            |r| r.get(0),
+        )
+        .unwrap()
 }
 
 fn spool_is_empty(paths: &Paths) -> bool {
@@ -322,6 +352,46 @@ async fn spooled_events_are_drained_in_order_at_start() {
     assert_eq!(display(&mut c), "done");
     assert_eq!(event_times(&d.paths), vec![t1, t2, t3]);
     assert!(spool_is_empty(&d.paths));
+}
+
+/// R2, R14: a clean quit spooled while the daemon was down ends its session, whose binding
+/// names a server that is gone. The drain runs before the tabs are looked at, and finding
+/// no server drops the binding: the session shows ended, not asleep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spooled_clean_exit_ends_the_session() {
+    let d = boot_with(
+        |paths| {
+            let mut store = Store::open(&paths.db("default"), &paths.backups("default")).unwrap();
+            seed_session(&mut store);
+            let gone = PaneBinding {
+                session_id: S.parse().unwrap(),
+                server_pid: 1,
+                server_start: 1,
+                socket: "tmux-default".into(),
+                pane_id: "%3".into(),
+                pane_pid: 2,
+                bound_at: UtcMs(1),
+                tracked: true,
+            };
+            store.apply(&[Change::PaneBinding(gone)]).unwrap();
+            let mut end = hook_line("SessionEnd", ago(10_000), 1);
+            end["payload"]["reason"] = json!("prompt_input_exit");
+            put_in_spool(&paths.spool("default"), &[end]);
+        },
+        |_| {},
+    )
+    .await;
+    let mut c = Client::connect(&d.sock);
+    c.hello();
+    let settled = wait_for(WAIT, || {
+        (display(&mut c) == "ended" && bindings(&d.paths) == 0).then_some(())
+    });
+    assert!(
+        settled.is_some(),
+        "{} with {} bindings",
+        display(&mut c),
+        bindings(&d.paths)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

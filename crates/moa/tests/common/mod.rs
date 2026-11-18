@@ -116,6 +116,11 @@ pub fn came_up(tb: &TempBrain, term: &Terminal) {
 /// a Claude account whose store is `<root>/.claude-a` and whose launcher is fake-claude, so
 /// the real `claude` is never looked for. Both folders are made.
 pub fn moa_toml_with_fake_account(tb: &TempBrain) {
+    moa_toml_with_launcher(tb, &fake_claude());
+}
+
+/// [`moa_toml_with_fake_account`], with `launcher` as `acct-a`'s launcher.
+pub fn moa_toml_with_launcher(tb: &TempBrain, launcher: &Path) {
     let work = tb.root().join("work");
     let store = tb.root().join(".claude-a");
     for dir in [&work, &store] {
@@ -126,7 +131,7 @@ pub fn moa_toml_with_fake_account(tb: &TempBrain) {
          [accounts.acct-a]\nkind = \"claude\"\nstore = \"{}\"\nlauncher = \"{}\"\n",
         work.display(),
         store.display(),
-        fake_claude().display()
+        launcher.display()
     );
     let paths = tb.paths();
     std::fs::create_dir_all(paths.config_dir()).unwrap();

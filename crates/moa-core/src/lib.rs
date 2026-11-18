@@ -15,6 +15,7 @@ pub mod op;
 mod ops;
 mod peers;
 pub mod publish;
+mod reconcile;
 pub mod route;
 pub mod state;
 pub mod time;

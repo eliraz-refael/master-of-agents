@@ -1057,7 +1057,7 @@ fn a_pane_exit_under_refused_writes_changes_nothing_and_is_logged() {
     assert_eq!(persists(&fx), 0);
     let warned = fx.iter().any(|e| {
         matches!(e, Effect::Log(l) if l.level == LogLevel::Warn
-            && l.message == "a pane exit was not saved; reconcile will put its session to sleep at the next start")
+            && l.message == "a pane exit was not saved; reconcile puts its session to sleep once moa can save again")
     });
     assert!(warned, "{fx:?}");
 }

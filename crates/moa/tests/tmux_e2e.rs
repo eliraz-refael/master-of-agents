@@ -9,12 +9,11 @@ mod common;
 
 use std::time::Duration;
 
-use moa_core::live::{DisplayState, display_state};
 use moa_core::op::Op;
 use moa_core::tmux::mailbox::KeyAction;
 use moa_core::tmux::status::counts_text;
 use moa_testkit::brain::{TypicalBrain, run as run_op};
-use moa_testkit::{TempBrain, Terminal, wait_for};
+use moa_testkit::{TempBrain, Terminal, ids, wait_for};
 
 use common::*;
 
@@ -87,17 +86,11 @@ fn launches(tb: &TempBrain) -> u64 {
     s["launches"].as_u64().unwrap_or_else(|| panic!("{s}"))
 }
 
-/// The idle count in a status text: none shown is 0.
-fn idle_count(text: &str) -> usize {
-    let mark = format!("{} ", DisplayState::Idle.glyph());
-    let Some(at) = text.find(&mark).map(|at| at + mark.len()) else {
-        return 0;
-    };
-    let digits: String = text[at..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().unwrap()
+/// How many sessions a status text counts, whatever their state.
+fn counted(text: &str) -> usize {
+    text.split("  ")
+        .filter_map(|part| part.rsplit(' ').next()?.parse::<usize>().ok())
+        .sum()
 }
 
 /// Waits (2 s) for `@moa_status` to be `want`.
@@ -170,7 +163,9 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
 fn the_status_line_follows_the_brain() {
     let tb = typical();
     let brain = TypicalBrain::new();
-    let mut state = brain.state();
+    // As the daemon shows it once it has looked at its tabs: the live sessions no tab runs
+    // are asleep.
+    let mut state = brain.reconciled_state();
     let want = counts_text(&state);
     assert!(!want.is_empty());
 
@@ -178,25 +173,17 @@ fn the_status_line_follows_the_brain() {
     came_up(&tb, &term);
     status_becomes(&tb, &want);
 
-    // The live session the status line counts as idle. (The fixture's `S2_IDLE` reads as a
-    // question: its last words ask one.)
+    // A live session the status line counts: its spike tab is on the spike's own server, so
+    // it stays live. It reads as a question: its last words ask one.
     let now = brain.now();
-    let idle: Vec<String> = state
-        .sessions()
-        .filter(|s| display_state(s, now.wall).0 == DisplayState::Idle)
-        .map(|s| s.id.to_string())
-        .collect();
-    let [idle] = idle.as_slice() else {
-        panic!("one idle session, not {idle:?}");
-    };
-    let o = run_exe(&tb, &moactl(&tb), &["archive", idle], &[]);
+    let o = run_exe(&tb, &moactl(&tb), &["archive", ids::S2_IDLE], &[]);
     assert!(o.status.success(), "{}{}", out(&o), err(&o));
     let op = Op::SessionArchive {
-        qs: vec![idle.clone()],
+        qs: vec![ids::S2_IDLE.to_string()],
     };
     run_op(&mut state, op, &now).expect("the archive applies");
     let after = counts_text(&state);
-    assert_eq!(idle_count(&after), idle_count(&want) - 1, "{after:?}");
+    assert_eq!(counted(&after), counted(&want) - 1, "{after:?}");
     status_becomes(&tb, &after);
 }
 

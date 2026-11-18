@@ -361,13 +361,12 @@ impl State {
     }
 
     /// The session's pane binding, of whichever server.
-    #[allow(dead_code, reason = "reconcile uses it (4b)")]
-    pub(crate) fn binding(&self, id: SessionId) -> Option<&PaneBinding> {
+    pub fn binding(&self, id: SessionId) -> Option<&PaneBinding> {
         self.pane_bindings.get(&id)
     }
 
-    #[allow(dead_code, reason = "reconcile uses it (4b)")]
-    pub(crate) fn spike_panes(&self) -> impl Iterator<Item = &SpikePane> {
+    /// The panes imported from the spike, by session: verified or cleared by reconcile.
+    pub fn spike_panes(&self) -> impl Iterator<Item = &SpikePane> {
         self.spike_panes.values()
     }
 
