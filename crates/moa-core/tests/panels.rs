@@ -16,7 +16,7 @@ use moa_core::panel::View;
 use moa_core::publish::{BrainRow, FOLDED_KEY, Model, Topic, folded};
 use moa_core::state::{Deps, State};
 use moa_core::tmux::cmd::Cmd;
-use moa_core::tmux::ids::{ClientName, PaneId};
+use moa_core::tmux::ids::{ClientName, Generation, PaneId};
 use moa_core::tmux::link::notice;
 use moa_core::tmux::notify::Notification;
 use moa_testkit::brain::TypicalBrain;
@@ -123,6 +123,40 @@ fn a_panel_without_a_view_gets_its_panes_last_one_else_picture() {
         the_reply(&fx).unwrap().data,
         json!({"key": "c9", "view": "picture"})
     );
+}
+
+fn connected(conn: u64, generation: Generation) -> TmuxIn {
+    TmuxIn::Connected {
+        conn,
+        generation,
+        version: "3.5a".into(),
+        ctl: ClientName("client-9".into()),
+        socket: "moa".into(),
+    }
+}
+
+/// Another tmux server's `%3` is another tab: it doesn't get the old `%3`'s view.
+#[test]
+fn another_server_forgets_the_tabs_views() {
+    let (b, mut st) = loaded(TOML);
+    link_up(&b, &mut st);
+    send_on(&b, &mut st, 7, 1, panel(Some("%3"), Some(View::Plan)));
+    handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+    // The same server, linked again: `%3` keeps its view.
+    feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    feed(&b, &mut st, connected(2, generation()));
+    let fx = send_on(&b, &mut st, 8, 1, panel(Some("%3"), None));
+    assert_eq!(the_reply(&fx).unwrap().data["view"], "plan");
+    handle_checked(&mut st, Input::ClientGone(ConnId(8)), b.now());
+    // A new server.
+    feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    let other = Generation {
+        pid: 11,
+        start: 2000,
+    };
+    feed(&b, &mut st, connected(3, other));
+    let fx = send_on(&b, &mut st, 9, 1, panel(Some("%3"), None));
+    assert_eq!(the_reply(&fx).unwrap().data["view"], "picture");
 }
 
 #[test]
@@ -476,6 +510,24 @@ fn the_terminal_key_on_an_agent_tab_uses_its_folder() {
     opens_in(&b, &mut st, &fx, "⌨ b", "/r/work/b");
 }
 
+/// An agent tab whose session has no folder opens where tmux says the tab is.
+#[test]
+fn an_agent_tab_with_no_folder_asks_tmux_where_it_is() {
+    let b = TypicalBrain::new();
+    let mut snapshot = b.snapshot();
+    let mut s = session(A, Lifecycle::Live);
+    s.cwd = None;
+    snapshot.sessions.push(s);
+    snapshot.pane_bindings.push(binding(A, "%4", true));
+    let mut st = with_panel(&b, deps(&b), snapshot);
+    let fx = terminal_key(&b, &mut st, "%4");
+    only_tmux(&fx);
+    let (n, cmds) = the_query(&fx);
+    assert_eq!(cmds, [where_is("%4")]);
+    let fx = answer(&b, &mut st, n, line("/r/work/d"));
+    opens_in(&b, &mut st, &fx, "⌨ d", "/r/work/d");
+}
+
 #[test]
 fn the_terminal_key_on_a_shell_asks_tmux_where_it_is() {
     let b = TypicalBrain::new();
@@ -611,6 +663,82 @@ fn folds_are_sorted_and_kept_once() {
     send(&b, &mut st, 3, fold("A", true));
     assert_eq!(folded(&st), ["A", "B"]);
     assert_eq!(brain_row(&st).folded, ["A", "B"]);
+}
+
+/// Folding what is folded, or unfolding what isn't, saves nothing.
+#[test]
+fn a_fold_already_so_saves_nothing() {
+    let (b, mut st) = loaded(TOML);
+    let fx = send(&b, &mut st, 1, fold("A", false));
+    assert!(the_reply(&fx).is_ok());
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Persist(_))),
+        "{fx:?}"
+    );
+    send(&b, &mut st, 2, fold("A", true));
+    let fx = send(&b, &mut st, 3, fold("A", true));
+    assert!(the_reply(&fx).is_ok());
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Persist(_))),
+        "{fx:?}"
+    );
+}
+
+/// A renamed group keeps its fold, and its subgroups' folds, under the new name, in the
+/// rename's own commit; a new group with the old name starts unfolded.
+#[test]
+fn a_rename_moves_its_folds() {
+    let (b, mut st) = loaded(TOML);
+    send(&b, &mut st, 1, Op::GroupAdd { path: "A/x".into() });
+    send(&b, &mut st, 2, fold("A", true));
+    send(&b, &mut st, 3, fold("A/x", true));
+    send(&b, &mut st, 4, fold("AB", true));
+    let fx = send(
+        &b,
+        &mut st,
+        5,
+        Op::GroupRename {
+            old: "A".into(),
+            new: "B".into(),
+        },
+    );
+    assert!(the_reply(&fx).is_ok(), "{fx:?}");
+    assert_eq!(
+        fx.iter()
+            .filter(|e| matches!(e, Effect::Persist(_)))
+            .count(),
+        1,
+        "{fx:?}"
+    );
+    assert!(
+        changes(&fx)
+            .iter()
+            .any(|c| matches!(c, Change::Meta { key, .. } if key == FOLDED_KEY)),
+        "{fx:?}"
+    );
+    assert_eq!(folded(&st), ["AB", "B", "B/x"]);
+    assert_eq!(brain_row(&st).folded, ["AB", "B", "B/x"]);
+    send(&b, &mut st, 6, Op::GroupAdd { path: "A".into() });
+    assert!(!folded(&st).contains(&"A".to_string()));
+}
+
+/// A removed group's folds, and its subgroups', go with it.
+#[test]
+fn a_removed_group_drops_its_folds() {
+    let (b, mut st) = loaded(TOML);
+    send(&b, &mut st, 1, Op::GroupAdd { path: "A/x".into() });
+    send(&b, &mut st, 2, fold("A", true));
+    send(&b, &mut st, 3, fold("A/x", true));
+    let fx = send(&b, &mut st, 4, Op::GroupRm { path: "A".into() });
+    assert!(the_reply(&fx).is_ok(), "{fx:?}");
+    assert_eq!(
+        fx.iter()
+            .filter(|e| matches!(e, Effect::Persist(_)))
+            .count(),
+        1,
+        "{fx:?}"
+    );
+    assert!(folded(&st).is_empty());
 }
 
 #[test]

@@ -408,10 +408,12 @@ impl State {
 
     /// The folder the selection of the panel in tab `pane` is in (`ui.here`).
     pub fn here_of(&self, pane: PaneId) -> Option<&str> {
-        self.panels
-            .values()
-            .find(|p| p.pane == Some(pane))
-            .and_then(|p| p.here.as_deref())
+        self.panel_in(pane).and_then(|p| p.here.as_deref())
+    }
+
+    /// The panel drawing in tab `pane`, if one is.
+    pub(crate) fn panel_in(&self, pane: PaneId) -> Option<&PanelReg> {
+        self.panels.values().find(|p| p.pane == Some(pane))
     }
 
     /// The panes imported from the spike, by session: verified or cleared by reconcile.

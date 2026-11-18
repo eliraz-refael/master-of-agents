@@ -149,6 +149,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Connected { .. }),
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
+            // Another server's pane ids name other tabs: the views the old tabs had go.
+            if state.tmux.another_server(&t) {
+                state.pane_views.clear();
+            }
             fx.extend(state.tmux.input(t));
             // Reconcile reads its listing, a resume, an adopt or an `ls` its own and a
             // terminal its new tab or a key its folder, once the link is as the input left it.

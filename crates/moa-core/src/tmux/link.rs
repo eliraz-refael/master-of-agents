@@ -676,6 +676,13 @@ impl TmuxState {
             .collect()
     }
 
+    /// Whether `input` connects to another server than the one last connected to: its pane
+    /// ids name other panes.
+    pub(crate) fn another_server(&self, input: &TmuxIn) -> bool {
+        matches!(input, TmuxIn::Connected { generation, .. }
+            if self.generation.is_some_and(|g| g != *generation))
+    }
+
     /// The link's connection, while it is up.
     pub(crate) fn conn(&self) -> Option<u64> {
         match self.link {

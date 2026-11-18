@@ -1177,19 +1177,20 @@ fn told(state: &State, tell: Option<Tell>, result: Result<Done, OpError>) -> Opt
 
 /// `Ctrl-a $` (V6): a terminal "here", by the key's pane. A panel's pane opens in its
 /// `ui.here` (home until 5b gives it the agent spot's folder), an agent's in its session's
-/// folder, and any other pane where tmux says it is, asked on the link ([`here_answered`]).
+/// folder, and any other pane (an agent's whose session has no folder too) where tmux says
+/// it is, asked on the link ([`here_answered`]).
 /// A key from the menu has no pane: home.
 pub(crate) fn term_key(state: &mut State, pane: Option<PaneId>, client: ClientName) -> Vec<Effect> {
     let Some(pane) = pane else {
         return term_here(state, client, None);
     };
-    if let Some(panel) = state.panels.values().find(|p| p.pane == Some(pane)) {
+    if let Some(panel) = state.panel_in(pane) {
         let here = panel.here.clone();
         return term_here(state, client, here.as_deref());
     }
-    if let Some(id) = bound_session(state, pane) {
-        let cwd = state.session(id).and_then(|s| s.cwd.clone());
-        return term_here(state, client, cwd.as_deref());
+    // An agent's tab whose session has no folder is asked about like any other tab.
+    if let Some(cwd) = bound_session(state, pane).and_then(|id| state.session(id)?.cwd.clone()) {
+        return term_here(state, client, Some(&cwd));
     }
     let cmd = Cmd::new("display-message").args([
         "-p".to_string(),

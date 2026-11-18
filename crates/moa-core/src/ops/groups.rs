@@ -1,4 +1,4 @@
-//! `group add|rename|rm`.
+//! `group add|rename|rm|fold`.
 
 use std::collections::BTreeSet;
 
@@ -89,6 +89,7 @@ pub(crate) fn rename(
             s.group_path = s.group_path.map(|g| moved(&g, &old, &new));
             changes.push(Change::Session(s));
         }
+        changes.extend(refold(state, &old, |p| Some(moved(p, &old, &new))));
     }
     let exists_after = if old == new {
         state.groups.contains_key(&new)
@@ -131,7 +132,7 @@ pub(crate) fn rm(state: &mut State, tx: &mut Tx, path: &str) -> Result<Done, OpE
             "{path} still has {n} session(s); move or archive them first"
         )));
     }
-    let changes: Vec<Change> = state
+    let mut changes: Vec<Change> = state
         .groups()
         .filter(|g| in_subtree(&g.path, &path))
         .map(|g| Change::DeleteGroup(g.path.clone()))
@@ -140,11 +141,41 @@ pub(crate) fn rm(state: &mut State, tx: &mut Tx, path: &str) -> Result<Done, OpE
     if changes.is_empty() {
         return Err(OpError(format!("no group {path}")));
     }
+    changes.extend(refold(state, &path, |_| None));
     tx.ui(state, changes, format!("removed group {path}"))?;
     Ok(Done {
         text: "ok".into(),
         data: json!({ "path": path }),
     })
+}
+
+/// The saved folds after the group at `root` and every group under it move: each folded path
+/// in that subtree becomes `to(path)`, or goes when that is `None`. `None` when no folded
+/// path is in it.
+fn refold(state: &State, root: &str, to: impl Fn(&str) -> Option<String>) -> Option<Change> {
+    let before = folded(state);
+    if !before.iter().any(|p| in_subtree(p, root)) {
+        return None;
+    }
+    let after: BTreeSet<String> = before
+        .iter()
+        .filter_map(|p| {
+            if in_subtree(p, root) {
+                to(p)
+            } else {
+                Some(p.clone())
+            }
+        })
+        .collect();
+    Some(folded_change(&after))
+}
+
+/// The one `Meta` change that saves `paths` as the folded list.
+fn folded_change(paths: &BTreeSet<String>) -> Change {
+    Change::Meta {
+        key: FOLDED_KEY.into(),
+        value: Some(serde_json::to_string(paths).expect("a list of strings serializes")),
+    }
 }
 
 /// `group.fold`: adds or removes one path in the saved list, in one `Meta` change. It never
@@ -159,21 +190,19 @@ pub(crate) fn fold(
         return Err(OpError("a group needs a name".into()));
     }
     let mut paths: BTreeSet<String> = folded(state).into_iter().collect();
-    if collapsed {
-        paths.insert(path.to_string());
+    let moved = if collapsed {
+        paths.insert(path.to_string())
     } else {
-        paths.remove(path);
-    }
-    let value = serde_json::to_string(&paths).expect("a list of strings serializes");
-    tx.commit(
-        state,
-        vec![Change::Meta {
-            key: FOLDED_KEY.into(),
-            value: Some(value),
-        }],
-    )?;
-    Ok(Done {
+        paths.remove(path)
+    };
+    let done = Done {
         text: String::new(),
         data: json!({ "path": path, "collapsed": collapsed }),
-    })
+    };
+    // Already as asked: nothing to save.
+    if !moved {
+        return Ok(done);
+    }
+    tx.commit(state, vec![folded_change(&paths)])?;
+    Ok(done)
 }

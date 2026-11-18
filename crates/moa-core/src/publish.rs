@@ -231,13 +231,8 @@ impl State {
         if topics.is_empty() {
             return None;
         }
-        let mut next = (*self.model).clone();
-        for t in topics {
-            next.topics.insert(*t, Arc::new(self.build(*t)));
-        }
-        next.rev += 1;
-        self.model = Arc::new(next);
-        Some(self.model.clone())
+        let built: Vec<_> = topics.iter().map(|t| (*t, self.build(*t))).collect();
+        Some(self.put(built))
     }
 
     /// Publishes `topic` only when its rows differ from the ones last published.
@@ -246,6 +241,17 @@ impl State {
         if self.model.topics.get(&topic).is_some_and(|t| **t == rows) {
             return None;
         }
-        self.publish(&BTreeSet::from([topic]))
+        Some(self.put(vec![(topic, rows)]))
+    }
+
+    /// Replaces these topics' rows and bumps `rev`.
+    fn put(&mut self, built: Vec<(Topic, BTreeMap<String, Value>)>) -> Arc<Model> {
+        let mut next = (*self.model).clone();
+        for (t, rows) in built {
+            next.topics.insert(t, Arc::new(rows));
+        }
+        next.rev += 1;
+        self.model = Arc::new(next);
+        self.model.clone()
     }
 }
