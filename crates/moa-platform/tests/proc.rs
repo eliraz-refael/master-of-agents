@@ -4,7 +4,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime};
 
 use moa_platform::kill_term;
-use moa_platform::proc::{ENV_KEPT, Reader, Unread, children, started};
+use moa_platform::proc::{ENV_KEPT, Reader, Unread, children, owned_by_another, started};
 
 /// Polls `f` every 20 ms for up to 10 s.
 fn wait_for<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
@@ -122,13 +122,41 @@ fn a_pid_that_doesnt_exist_reads_as_gone() {
     }
 }
 
+/// A long-lived process another user owns, if this machine shows one: pid 1, else one of
+/// its children. A build sandbox's pid namespace may hold only the build user's.
+fn another_users_process() -> Option<u32> {
+    std::iter::once(1)
+        .chain(children(1).unwrap_or_default())
+        .find(|&p| owned_by_another(p) == Some(true))
+}
+
+/// Another user's process is never "couldn't read" nor gone: its arguments are closed to us
+/// (foreign), or open (we are root). Where no such process exists (a build sandbox), the
+/// rule is `proc`'s `why_a_read_failed`, with made-up owners.
 #[test]
-fn another_users_process_reads_as_failed_not_gone() {
-    // Pid 1 is root's, and its environment is closed to anyone else.
-    if moa_platform::current_uid() == 0 {
+fn another_users_process_reads_as_foreign_not_failed() {
+    let Some(pid) = another_users_process() else {
+        eprintln!("no other user's process is visible here; `why_a_read_failed` covers the rule");
         return;
+    };
+    let read = Reader::new().args(pid);
+    assert!(
+        read.is_ok() || read == Err(Unread::Foreign),
+        "pid {pid}: {read:?}"
+    );
+    if moa_platform::current_uid() != 0 {
+        assert_eq!(read, Err(Unread::Foreign), "pid {pid}");
     }
-    assert_eq!(Reader::new().args(1), Err(Unread::Failed));
+}
+
+#[test]
+fn who_owns_a_process_is_read_for_any_user() {
+    assert_eq!(owned_by_another(std::process::id()), Some(false));
+    let child = spawn(Command::new("sleep").arg("30"));
+    assert_eq!(owned_by_another(child.0.id()), Some(false));
+    for pid in [i32::MAX as u32, 0] {
+        assert_eq!(owned_by_another(pid), None);
+    }
 }
 
 #[test]

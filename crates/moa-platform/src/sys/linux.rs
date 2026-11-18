@@ -212,6 +212,12 @@ fn scan_children(parent: u32) -> Option<Vec<u32>> {
     Some(kids)
 }
 
+/// `pid`'s real and effective user ids, from `/proc/<pid>/status`, which any user may read.
+pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
+    let pid = proc_pid(pid)?;
+    crate::proc::status_uids(&std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
+}
+
 /// When `pid` started: field 22 of `/proc/<pid>/stat`, in clock ticks since boot, plus the
 /// boot time (`btime` in `/proc/stat`).
 pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
@@ -253,6 +259,11 @@ mod tests {
         assert!(read_args(me, &mut buf).is_some_and(|a| !a.argv.is_empty()));
         assert!(child_pids(me).is_some());
         assert!(scan_children(me).is_some());
+        assert_eq!(
+            uids(me),
+            Some((super::super::current_uid(), super::super::current_uid()))
+        );
+        assert!(uids(i32::MAX as u32).is_none());
     }
 
     #[test]

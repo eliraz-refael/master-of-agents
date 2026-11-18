@@ -429,10 +429,11 @@ pub struct PaneAgent {
 pub enum Inspected {
     /// An agent runs in the tab.
     Agent(PaneAgent),
-    /// No agent runs there: the tab's process and its children were all read and none is
-    /// one, or the tab's process doesn't exist.
+    /// No agent runs there: the tab's process and its children were all read (or are
+    /// another user's, which no agent of ours is) and none is one, or the tab's process
+    /// doesn't exist.
     Gone,
-    /// A read that mattered failed (a process mid-exit, another user's, a refused list).
+    /// A read that mattered failed (a process mid-exit, a zombie, a refused list).
     Unknown,
 }
 

@@ -3,10 +3,26 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use moa_core::model::{AgentKind, Inspected};
+use moa_core::config::{BrainName, Config};
+use moa_core::effect::{Input, TmuxIn, TmuxToken, handle_checked};
+use moa_core::model::{AgentKind, Inspected, Lifecycle, Location};
+use moa_core::state::{Deps, State};
+use moa_core::tmux::ids::{ClientName, Generation};
 use moa_daemon::inspect::inspect_pane;
 use moa_platform::{kill_term, proc};
+use moa_testkit::brain::TypicalBrain;
 use moa_testkit::{FakeStep, fake_claude_named_claude, wait_for};
+
+/// A brain with no folders of its own, so every folder is its.
+const BRAIN_TOML: &str = r#"
+[brains.default]
+open_account = "acct-a"
+
+[accounts.acct-a]
+kind = "claude"
+store = "~/.claude-a"
+launcher = "/opt/claude"
+"#;
 
 const ID1: &str = "00000000-0000-4000-8000-000000000001";
 
@@ -92,11 +108,91 @@ fn a_shell_running_no_claude_is_gone() {
     assert_eq!(inspect_pane(i64::from(pid), &[]), Inspected::Gone);
 }
 
-#[test]
-fn a_process_moa_cant_read_is_unknown_not_gone() {
-    // Pid 1 is root's: its arguments and environment are closed to anyone else.
-    if moa_platform::current_uid() == 0 {
-        return;
+/// A long-lived process another user owns, with no children, if this machine shows one: pid
+/// 1, else one of its children. A build sandbox's pid namespace may hold only the build
+/// user's; then the rule is checked with made-up reads (`inspect`'s unit tests).
+fn another_users_process() -> Option<u32> {
+    let found = std::iter::once(1)
+        .chain(proc::children(1).unwrap_or_default())
+        .find(|&p| proc::owned_by_another(p) == Some(true) && proc::children(p) == Ok(Vec::new()));
+    if found.is_none() {
+        eprintln!(
+            "no other user's childless process is visible here; \
+             `inspect::tests::another_users_processes_are_no_agent_of_ours` covers the rule"
+        );
     }
-    assert_ne!(inspect_pane(1, &[]), Inspected::Gone);
+    found
+}
+
+/// A process another user owns is no agent of ours: a tab running it, with nothing under
+/// it, is proven to run none, not unread.
+#[test]
+fn another_users_processes_are_no_agent_of_ours() {
+    let Some(pid) = another_users_process() else {
+        return;
+    };
+    assert_eq!(
+        inspect_pane(i64::from(pid), &[]),
+        Inspected::Gone,
+        "pid {pid}"
+    );
+}
+
+/// Reconcile with the real process reads: a live session with no tab, and one untagged tab
+/// whose process is another user's. That tab is proven to run no agent of ours, so it
+/// doesn't hold the session back from sleep, as a tab that can't be read would (R5, R31).
+#[test]
+fn another_users_tab_doesnt_keep_tabless_sessions_live() {
+    let Some(pid) = another_users_process() else {
+        return;
+    };
+    let b = TypicalBrain::new();
+    let mut snap = b.snapshot();
+    snap.pane_bindings.clear();
+    snap.spike_panes.clear();
+    for s in &mut snap.sessions {
+        s.lifecycle = Lifecycle::Ended;
+    }
+    let s = &mut snap.sessions[0];
+    s.lifecycle = Lifecycle::Live;
+    s.asleep_at = None;
+    s.location = Location::Here;
+    let d = s.id;
+    let deps = Deps {
+        home: b.home.clone(),
+        inspect: inspect_pane,
+        ..Deps::default()
+    };
+    let config = Config::parse(BRAIN_TOML, &b.home).unwrap();
+    let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
+    handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
+    handle_checked(
+        &mut st,
+        Input::Tmux(TmuxIn::Connected {
+            conn: 1,
+            generation: Generation { pid: 10, start: 1 },
+            version: "3.5a".into(),
+            ctl: ClientName("client-9".into()),
+            socket: "moa".into(),
+        }),
+        b.now(),
+    );
+    handle_checked(&mut st, Input::StartDrained, b.now());
+    let asked: Vec<u64> = st.tmux().queries().collect();
+    let [n] = asked[..] else {
+        panic!("one pane query waiting, not {asked:?}");
+    };
+    let tab = format!("I\t%9\t{pid}\t0\t\t\t\t/");
+    let fx = handle_checked(
+        &mut st,
+        Input::Tmux(TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: vec![Ok(vec![tab]), Ok(Vec::new())],
+        }),
+        b.now(),
+    );
+    let s = st.session(d).unwrap();
+    assert_eq!(s.lifecycle, Lifecycle::Ended, "{fx:?}");
+    assert!(s.asleep_at.is_some(), "{fx:?}");
 }

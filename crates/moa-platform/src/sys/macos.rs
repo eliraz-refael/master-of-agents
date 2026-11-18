@@ -277,6 +277,37 @@ fn list_children(pid: libc::pid_t, room: usize) -> Option<Vec<libc::pid_t>> {
 /// When `pid` started: `proc_pidinfo(PROC_PIDTBSDINFO)`'s `pbi_start_tvsec` and
 /// `pbi_start_tvusec`.
 pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
+    let info = bsd_info(pid)?;
+    let at = std::time::Duration::from_secs(info.pbi_start_tvsec)
+        + std::time::Duration::from_micros(info.pbi_start_tvusec);
+    std::time::UNIX_EPOCH.checked_add(at)
+}
+
+/// `pid`'s real and effective user ids, from `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`, which
+/// answers for any user's process, the system's own daemons among them (the full
+/// `PROC_PIDTBSDINFO` is refused for many of those).
+pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
+    let pid = proc_pid(pid)?;
+    // SAFETY: `proc_bsdshortinfo` is a plain C struct of integers and byte arrays; all-zero
+    // is valid.
+    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    // SAFETY: `info` is live and writable for `size` bytes, and libproc writes at most that
+    // many.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    (n == size).then_some((info.pbsi_ruid, info.pbsi_uid))
+}
+
+/// `pid`'s `proc_bsdinfo`, or `None` when libproc doesn't answer it whole.
+fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
     let pid = proc_pid(pid)?;
     // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays; all-zero is
     // valid.
@@ -286,10 +317,5 @@ pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
     // many.
     let n =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-    if n != size {
-        return None;
-    }
-    let at = std::time::Duration::from_secs(info.pbi_start_tvsec)
-        + std::time::Duration::from_micros(info.pbi_start_tvusec);
-    std::time::UNIX_EPOCH.checked_add(at)
+    (n == size).then_some(info)
 }
