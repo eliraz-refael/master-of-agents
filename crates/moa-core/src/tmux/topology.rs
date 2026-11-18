@@ -197,6 +197,11 @@ impl Topology {
         self.windows.contains_key(&w)
     }
 
+    /// Every pane in the lists, in any window.
+    pub fn panes(&self) -> impl Iterator<Item = PaneId> + '_ {
+        self.windows.values().flat_map(|w| w.panes.iter().copied())
+    }
+
     pub fn has_pane(&self, p: PaneId) -> bool {
         self.window_of(p).is_some()
     }
@@ -215,6 +220,11 @@ impl Topology {
     /// Records that `p` is tagged with session `id`, as moa just set it.
     pub fn tag(&mut self, p: PaneId, id: SessionId) {
         self.moa_sessions.insert(p, id);
+    }
+
+    /// Records that `p` has no session tag any more, as moa just unset it.
+    pub fn untag(&mut self, p: PaneId) {
+        self.moa_sessions.remove(&p);
     }
 
     /// The moa session a pane was tagged with (`@moa_session`), if any.

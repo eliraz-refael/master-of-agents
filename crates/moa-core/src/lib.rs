@@ -21,6 +21,7 @@ pub mod sleep;
 pub mod state;
 pub mod time;
 pub mod tmux;
+mod wake;
 
 pub use crate::core::handle;
 pub use effect::{Effect, Input};

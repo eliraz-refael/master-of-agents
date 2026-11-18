@@ -82,6 +82,23 @@ pub enum Op {
         #[serde(default)]
         dry_run: bool,
     },
+    /// Takes on the agent running in tab `pane` (`%N`), started outside moa, as a session moa
+    /// doesn't track: it shows alive or not, and never sleeps on its own. Its conversation is
+    /// `id`, else the one its command names, else the newest it wrote.
+    #[serde(rename = "session.adopt")]
+    SessionAdopt {
+        pane: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+    },
+    /// Restarts an adopted session under moa: its tab is closed and its conversation resumed
+    /// in a new tab moa tracks.
+    #[serde(rename = "session.restart")]
+    SessionRestart { q: String },
     /// A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is
     /// named after `title`, else the folder.
     #[serde(rename = "term.open")]
@@ -270,6 +287,8 @@ impl Op {
         "session.resume",
         "session.close",
         "session.sleep",
+        "session.adopt",
+        "session.restart",
         "term.open",
         "task.ls",
         "task.add",
@@ -299,6 +318,8 @@ impl Op {
             | Op::SessionResume { .. }
             | Op::SessionClose { .. }
             | Op::SessionSleep { .. }
+            | Op::SessionAdopt { .. }
+            | Op::SessionRestart { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -333,6 +354,8 @@ impl Op {
             Op::SessionResume { .. } => "session.resume",
             Op::SessionClose { .. } => "session.close",
             Op::SessionSleep { .. } => "session.sleep",
+            Op::SessionAdopt { .. } => "session.adopt",
+            Op::SessionRestart { .. } => "session.restart",
             Op::TermOpen { .. } => "term.open",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
@@ -362,6 +385,9 @@ pub struct Done {
 
 /// What `sleep` is for, said when it is given neither names nor `--idle`.
 pub const SLEEP_USAGE: &str = "moactl sleep ID... | moactl sleep --idle HOURS [--dry-run]";
+
+/// What `adopt` says to a tab id that isn't one (`%<digits>`).
+pub const ADOPT_USAGE: &str = "adopt needs a tab id like %5";
 
 /// A refusal, as one human line.
 #[derive(Clone, PartialEq, Eq, Debug)]

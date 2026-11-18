@@ -20,6 +20,7 @@ use crate::tmux::focus::mark_seen;
 use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
 use crate::tmux::panes::parse_panes;
 use crate::tmux::status;
+use crate::wake;
 use crate::{Now, UtcMs};
 
 /// The effects of one input. Persist first, then what people hear about it.
@@ -132,28 +133,57 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
             fx.extend(state.tmux.input(t));
-            // Reconcile reads its listing, a resume its own and a terminal its new tab, once
-            // the link is as the input left it.
+            // Reconcile reads its listing, a resume, an adopt or an `ls` its own and a
+            // terminal its new tab, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut adopts, mut lists, mut looks) = (Vec::new(), Vec::new(), Vec::new());
             for (asked, answer) in answers {
                 match asked {
                     Asked::Reconcile => reconciles.push(answer),
                     Asked::Resume(ask) => resumes.push((ask, answer)),
+                    Asked::Adopt { conn, req, args } => adopts.push((conn, req, args, answer)),
+                    Asked::Ls { conn, req, all } => lists.push((conn, req, all, answer)),
                     Asked::Term { reply, name, path } => terms.push((reply, name, path, answer)),
+                    Asked::Look { id, events } => looks.push((id, events, answer)),
                 }
             }
-            let mut more = reconcile::answered(state, now, reconciles, replied);
-            for (ask, answer) in resumes {
-                let panes = answer.and_then(|lists| match lists.as_slice() {
+            let panes_of = |answer: link::Answer| {
+                answer.and_then(|lists| match lists.as_slice() {
                     [info, start] => Ok(parse_panes(info, start)),
                     _ => Err(()),
-                });
-                more.extend(ops::launch::resumed(state, now, ask, panes));
+                })
+            };
+            let mut more = reconcile::answered(state, now, reconciles, replied);
+            for (ask, answer) in resumes {
+                more.extend(ops::launch::resumed(state, now, ask, panes_of(answer)));
+            }
+            for (conn, req, args, answer) in adopts {
+                more.extend(ops::adopt::adopted(
+                    state,
+                    now,
+                    conn,
+                    req,
+                    &args,
+                    panes_of(answer),
+                ));
+            }
+            for (conn, req, all, answer) in lists {
+                more.extend(ops::sessions::listed(
+                    state,
+                    now,
+                    conn,
+                    req,
+                    all,
+                    panes_of(answer),
+                ));
             }
             for (reply, name, path, answer) in terms {
                 more.extend(ops::launch::term_opened(
                     state, reply, &name, &path, answer, replied,
                 ));
+            }
+            for (id, events, answer) in looks {
+                more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
             }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));
@@ -299,6 +329,34 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::SessionResume { q, bg },
             ..
         } => ops::launch::start_resume(state, now, conn, req, &q, !bg, false),
+        // Answered at once, or after one pane query and the new tab (R24).
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionRestart { q },
+            ..
+        } => ops::launch::start_restart(state, now, conn, req, &q),
+        // Answered at once, or after one pane query (R21).
+        Input::Client {
+            conn,
+            req,
+            op:
+                Op::SessionAdopt {
+                    pane,
+                    title,
+                    group,
+                    id,
+                },
+            ..
+        } => ops::adopt::start(state, conn, req, &pane, title, group, id),
+        // With the tabs reconciled, answered after one listing of them (R23); otherwise at
+        // once, below, without the agents moa doesn't track.
+        Input::Client {
+            conn,
+            req,
+            op: Op::SessionLs { all },
+            ..
+        } if link::ready(state).is_ok() => ops::sessions::start_ls(state, now, conn, req, all),
         Input::Client {
             conn,
             req,
@@ -307,8 +365,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         } => {
             let caller = state.caller(&caller);
             let mut tx = Tx::new(now);
-            let result = ops::run(state, &mut tx, &caller, op, now);
-            finish_op(state, tx, conn, req, result)
+            let mut fx = Vec::new();
+            let result = ops::run(state, &mut tx, &caller, op, now, &mut fx);
+            fx.extend(finish_op(state, tx, conn, req, result));
+            fx
         }
     }
 }

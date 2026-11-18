@@ -11,6 +11,7 @@ use crate::Now;
 use crate::activity;
 use crate::change::Change;
 use crate::core::{Tx, unknown_message};
+use crate::effect::Effect;
 use crate::model::{Suggestion, SuggestionAction, SuggestionId, SuggestionStatus};
 use crate::op::{Answer, Done, OpError};
 use crate::state::{Caller, State, Table};
@@ -154,6 +155,7 @@ pub(crate) fn answer(
     now: &Now,
     id: Option<i64>,
     answer: Answer,
+    logs: &mut Vec<Effect>,
 ) -> Result<Done, OpError> {
     let Some(s) = id
         .and_then(|id| state.suggestions().find(|s| s.id.0 == id))
@@ -185,7 +187,7 @@ pub(crate) fn answer(
     let mut failed = Vec::new();
     if answer == Answer::Yes {
         for a in &s.actions {
-            if let Err(why) = run_action(state, tx, caller, now, a) {
+            if let Err(why) = run_action(state, tx, caller, now, a, logs) {
                 failed.push(format!("{}: {why}", joined(a)));
             }
         }
@@ -224,6 +226,7 @@ fn run_action(
     caller: &Caller,
     now: &Now,
     a: &SuggestionAction,
+    logs: &mut Vec<Effect>,
 ) -> Result<(), String> {
     let deps = state.deps();
     let Some(parse) = deps.parse_action else {
@@ -231,5 +234,7 @@ fn run_action(
     };
     let home: &Path = &deps.home;
     let op = parse(a, home)?;
-    run(state, tx, caller, op, now).map(|_| ()).map_err(|e| e.0)
+    run(state, tx, caller, op, now, logs)
+        .map(|_| ())
+        .map_err(|e| e.0)
 }

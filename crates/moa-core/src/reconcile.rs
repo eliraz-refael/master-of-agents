@@ -8,16 +8,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::hooks::asleep;
-use crate::model::{AgentKind, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId};
+use crate::model::{
+    AgentKind, Conversation, Inspected, Lifecycle, Location, PaneAgent, PaneBinding, Session,
+    SessionId,
+};
 use crate::state::State;
-use crate::tmux::ids::PaneId;
-use crate::tmux::link::{Answer, Asked, Link, log, set_pane_option};
+use crate::tmux::cmd::Cmd;
+use crate::tmux::ids::{Generation, PaneId};
+use crate::tmux::link::{Answer, Asked, Link, log, set_pane_option, unset_pane_option};
 use crate::tmux::panes::{PaneInfo, Tag, holds, list_panes, parse_panes};
+use crate::{Now, UtcMs};
 
 /// How many reconciles of one connection may start and never finish (a panic) before moa
 /// stops asking until the next connection.
@@ -85,6 +89,10 @@ pub(crate) fn answered(
 /// 5. a live session left without a binding goes to sleep (R5), except one somewhere else,
 ///    one whose launch is waiting, and one whose spike pane is on another server.
 ///
+/// A tab whose processes can't be read proves nothing (R31): its session, when its tag or
+/// spike pane names one, is left as it is; one that names none could be any live session
+/// with no binding, and none of those goes to sleep this time.
+///
 /// A refused commit leaves the panes unreconciled, to be asked again (R10). A run that
 /// panics is counted, as one that never finished ([`ask_if_due`]).
 pub(crate) fn run(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
@@ -102,7 +110,6 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
         return Vec::new();
     };
     let (generation, socket) = (*generation, socket.clone());
-    let inspect = state.deps().inspect;
     let listed: BTreeMap<PaneId, &PaneInfo> = panes.iter().map(|p| (p.pane, p)).collect();
 
     // 1. The bindings that hold their pane, newest first per pane. `holds` keeps only the
@@ -119,16 +126,39 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     // its binding go (its agent was just found gone).
     let held: BTreeSet<PaneId> = holding.keys().copied().collect();
     let mut kept: BTreeSet<SessionId> = BTreeSet::new();
+    // The tabs an adopted agent left: their tags come off once the commit is saved.
+    let mut to_untag: Vec<PaneId> = Vec::new();
+    // The kept bindings' tabs that show no tag (one lost with the link): tagged again, and
+    // marked adopted too when that is missing from an untracked one's.
+    let mut retag: Vec<(PaneId, SessionId, bool)> = Vec::new();
+    // The tabs tagged for a session with no binding whose agent isn't the session's: their
+    // tags come off, as the untag a lost link dropped would have taken them.
+    let mut stale_tags: Vec<PaneId> = Vec::new();
+    // The tabs whose processes couldn't be read; the sessions they name, left as they are;
+    // and whether one named none.
+    let mut unread = 0usize;
+    let mut left_alone: BTreeSet<SessionId> = BTreeSet::new();
+    let mut unread_unnamed = false;
     for (pane, mut bs) in holding {
         bs.sort_by_key(|b| std::cmp::Reverse((b.bound_at, b.session_id)));
         let b = bs[0];
-        // 2. An adopted agent leaves its shell tab open when it exits (U14).
+        let info = listed[&pane];
+        // 2. An adopted agent leaves its shell tab open when it exits (U14). One that
+        // can't be read keeps its binding.
         if !b.tracked {
-            let info = listed[&pane];
-            let agent = inspect(info.pid, &info.start);
-            if !agent_runs(state, b.session_id, agent.as_ref(), Some(&info.cwd)) {
-                continue;
+            match untracked_agent_runs(state, b, Some(info)) {
+                Recheck::Runs => {}
+                Recheck::Unknown => unread += 1,
+                Recheck::Gone => {
+                    if tagged_for(info, b.session_id) {
+                        to_untag.push(pane);
+                    }
+                    continue;
+                }
             }
+        }
+        if info.tag == Tag::Unset {
+            retag.push((pane, b.session_id, !b.tracked && !info.adopted));
         }
         kept.insert(b.session_id);
     }
@@ -138,89 +168,55 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     let mut bound: BTreeMap<SessionId, PaneBinding> = BTreeMap::new();
     // Each new binding's tab, its session, and whether it is marked adopted too.
     let mut to_tag: Vec<(PaneId, SessionId, bool)> = Vec::new();
+    // The conversations a tab was bound by that become their session's current one.
+    let mut made_current: Vec<Conversation> = Vec::new();
+    let free = |id: SessionId, bound: &BTreeMap<SessionId, PaneBinding>| {
+        state.session(id).is_some()
+            && !kept.contains(&id)
+            && !bound.contains_key(&id)
+            && !waiting.contains(&id)
+    };
     for info in panes {
-        if info.dead || info.term || held.contains(&info.pane) {
+        if info.dead || held.contains(&info.pane) {
             continue;
         }
-        let free = |id: SessionId, bound: &BTreeMap<SessionId, PaneBinding>| {
-            state.session(id).is_some()
-                && !kept.contains(&id)
-                && !bound.contains_key(&id)
-                && !waiting.contains(&id)
-        };
-        let (id, tracked) = match info.tag {
-            // A tag that isn't a session id counts as another session's (R4).
-            Tag::Other => continue,
-            // (a) The tab says whose it is. An adopted agent's tab outlives the agent, so
-            // its agent is checked first.
-            Tag::Session(id) => {
-                if !free(id, &bound) {
-                    continue;
-                }
-                if info.adopted {
-                    let agent = inspect(info.pid, &info.start);
-                    if !agent_runs(state, id, agent.as_ref(), Some(&info.cwd)) {
-                        continue;
+        match match_tab(state, now.wall, info, &socket, |id| free(id, &bound)) {
+            TabMatch::Nobody => {}
+            TabMatch::Stale => stale_tags.push(info.pane),
+            TabMatch::Unread(named) => {
+                unread += 1;
+                match named {
+                    Some(id) => {
+                        left_alone.insert(id);
                     }
+                    None => unread_unnamed = true,
                 }
-                (id, !info.adopted)
             }
-            Tag::Unset => {
-                let agent = inspect(info.pid, &info.start);
-                let spike = spike_candidate(state, info.pane, &socket);
-                // (b) The agent names a known session, by `MOA_SESSION` or conversation.
-                let named = agent.as_ref().and_then(|a| {
-                    a.moa_session
-                        .as_deref()
-                        .and_then(|s| s.parse::<SessionId>().ok())
-                        .filter(|id| state.session(*id).is_some())
-                        .or_else(|| {
-                            let conv = a.conversation.as_deref()?;
-                            Some(state.conversation_of_agent(a.kind, conv)?.session_id)
-                        })
-                });
-                let id = match named {
-                    Some(id) => id,
-                    // (c) The spike's pane for a session, running its agent.
-                    None => match spike
-                        .filter(|id| agent_runs(state, *id, agent.as_ref(), Some(&info.cwd)))
-                    {
-                        Some(id) => id,
-                        None => continue,
-                    },
-                };
-                if !free(id, &bound) {
-                    continue;
-                }
-                let has_moa_session = agent.as_ref().is_some_and(|a| a.moa_session.is_some());
-                let tracked = !info.adopted && (has_moa_session || spike == Some(id));
-                // An untracked binding's tab is marked adopted, as `adopt` marks one: its
-                // agent may leave it open, so the next reconcile checks the agent before
-                // binding it again by its tag (R7, R31).
-                to_tag.push((info.pane, id, !tracked && !info.adopted));
-                (id, tracked)
-            }
-        };
-        bound.insert(
-            id,
-            PaneBinding {
-                session_id: id,
-                server_pid: generation.pid,
-                server_start: generation.start,
-                socket: socket.clone(),
-                pane_id: info.pane.to_string(),
-                pane_pid: info.pid,
-                bound_at: now.wall,
+            TabMatch::Bind {
+                id,
                 tracked,
-            },
-        );
+                tag,
+                current,
+            } => {
+                if let Some(adopted) = tag {
+                    to_tag.push((info.pane, id, adopted));
+                }
+                made_current.extend(current);
+                bound.insert(
+                    id,
+                    new_binding(id, generation, &socket, info, now.wall, tracked),
+                );
+            }
+        }
     }
 
-    // 4. The spike's panes on this server: bound above when they still run their agent.
+    // 4. The spike's panes on this server: bound above when they still run their agent. One
+    // that couldn't be read stays, for the next look.
     let spike_gone: Vec<SessionId> = state
         .spike_panes()
         .filter(|p| on_this_server(p.tmux.as_deref(), &socket))
         .map(|p| p.session_id)
+        .filter(|id| !left_alone.contains(id))
         .collect();
 
     // 5. Asleep, or live again.
@@ -234,7 +230,11 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
                 location: Location::Here,
                 ..s.clone()
             });
-        } else if !kept.contains(&s.id) && sleeps(state, s, &waiting, Some(&socket)) {
+        } else if !kept.contains(&s.id)
+            && !left_alone.contains(&s.id)
+            && !(unread_unnamed && state.binding(s.id).is_none())
+            && sleeps(state, s, &waiting, Some(&socket))
+        {
             sessions.push(asleep(s, now.wall));
             slept += 1;
         }
@@ -249,6 +249,7 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     changes.extend(sessions.into_iter().map(Change::Session));
     let (n_kept, n_bound) = (kept.len(), bound.len());
     changes.extend(bound.into_values().map(Change::PaneBinding));
+    changes.extend(made_current.into_iter().map(Change::Conversation));
     changes.extend(spike_gone.into_iter().map(Change::DeleteSpikePane));
 
     let mut tx = Tx::new(now);
@@ -258,23 +259,268 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
             "reconciling the tabs wasn't saved; moa asks again".to_string(),
         )];
     }
-    // A new binding's tab is tagged with its session, so the next reconcile knows it. An
-    // adopted tab is marked first: a link lost between the two then leaves an adopted tab
-    // with no session, never one that looks tracked.
+    // A new binding's tab is tagged with its session, so the next reconcile knows it.
     for (pane, id, adopted) in to_tag {
-        if adopted {
-            tx.tmux(set_pane_option(pane, "@moa_adopted", "1"));
-        }
-        tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
-        state.tmux.tag_sent(pane, id);
+        tag_pane(state, &mut tx, pane, id, adopted);
+    }
+    for pane in to_untag {
+        untag_pane(state, &mut tx, pane);
     }
     state.tmux.set_reconciled();
     let mut fx = vec![log(
         LogLevel::Info,
         format!("reconciled the tabs: {n_kept} kept, {n_bound} bound, {slept} put to sleep"),
     )];
+    if unread > 0 {
+        fx.push(log(
+            LogLevel::Debug,
+            format!("{unread} tabs couldn't be read; their sessions are left as they are"),
+        ));
+    }
     fx.extend(post_commit(state, tx));
+    // What these tags stand for is saved already (a kept binding, or none at all): they go
+    // out whether or not anything was saved now.
+    let mut cmds: Vec<Cmd> = Vec::new();
+    for (pane, id, adopted) in retag {
+        state.tmux.tag_sent(pane, id);
+        cmds.extend(tag_cmds(pane, id, adopted));
+    }
+    for pane in stale_tags {
+        state.tmux.untag_sent(pane);
+        cmds.extend(untag_cmds(pane));
+    }
+    if !cmds.is_empty()
+        && let Link::Up { conn, .. } = state.tmux().link
+    {
+        fx.push(Effect::Tmux {
+            conn,
+            cmds,
+            token: None,
+        });
+    }
     fx
+}
+
+/// What a listed tab that no kept binding holds says about whose agent runs in it (R6).
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum TabMatch {
+    /// No free session's: no agent moa knows, another session's tag, or a session that
+    /// isn't free.
+    Nobody,
+    /// Free session `id`'s agent runs in it: it is bound, `tracked` or not. `tag` is set when
+    /// the tab's tags have to be put on, with whether it is marked adopted too; `current` is
+    /// the conversation it was found by, when that becomes its session's current one.
+    Bind {
+        id: SessionId,
+        tracked: bool,
+        tag: Option<bool>,
+        current: Option<Conversation>,
+    },
+    /// Tagged for a free session, marked adopted or a terminal, and its agent isn't the
+    /// session's (an untag lost with the link): its tags come off.
+    Stale,
+    /// Its processes couldn't be read. The session its tag or spike pane names, if any, is
+    /// left as it is.
+    Unread(Option<SessionId>),
+}
+
+/// Whose agent runs in listed tab `info`, which no kept binding holds (R6, R7), among the
+/// sessions `free` allows:
+/// - (a) the tab's tag names the session. An adopted agent's tab outlives the agent, so
+///   its agent is checked first ([`tag_proves`]); a terminal's too. A terminal with a session
+///   tag but no adopted mark (one moa didn't set: `tag_pane` marks first, `untag_pane`
+///   unmarks last) is marked now;
+/// - (b) its agent names a known session, by `MOA_SESSION` or conversation. By
+///   conversation, the one it runs becomes its session's current one, as an agent's start
+///   on it would make it: a restart then resumes that one;
+/// - (c) it is the spike's pane for a session, running its agent. The spike started that
+///   tab with the agent as its process, so its start time isn't asked for.
+///
+/// A terminal moa opened is where an agent is typed by hand. Its binding is never tracked: a
+/// tracked tab is killed without its agent read again, and this one is the user's shell.
+/// An untracked binding of an agent that names no conversation is proven again by its start
+/// time (R31): with none to read, it isn't bound, since the next look would let it go.
+pub(crate) fn match_tab(
+    state: &State,
+    now: UtcMs,
+    info: &PaneInfo,
+    socket: &str,
+    free: impl Fn(SessionId) -> bool,
+) -> TabMatch {
+    let inspect = state.deps().inspect;
+    let untracked = info.adopted || info.term;
+    match info.tag {
+        // A tag that isn't a session id counts as another session's (R4).
+        Tag::Other => TabMatch::Nobody,
+        Tag::Session(id) => {
+            if !free(id) {
+                return TabMatch::Nobody;
+            }
+            if untracked {
+                let agent = match inspect(info.pid, &info.start) {
+                    Inspected::Unknown => return TabMatch::Unread(Some(id)),
+                    found => found.into_agent(),
+                };
+                if !tag_proves(state, id, agent.as_ref(), &info.cwd, now) {
+                    return TabMatch::Stale;
+                }
+            }
+            TabMatch::Bind {
+                id,
+                tracked: !untracked,
+                tag: (info.term && !info.adopted).then_some(true),
+                current: None,
+            }
+        }
+        Tag::Unset => {
+            let spike = spike_candidate(state, info.pane, socket);
+            let agent = match inspect(info.pid, &info.start) {
+                Inspected::Unknown => return TabMatch::Unread(spike),
+                found => found.into_agent(),
+            };
+            let by_moa = agent.as_ref().and_then(|a| moa_session_of(state, a));
+            let by_conv = agent.as_ref().and_then(|a| {
+                let conv = a.conversation.as_deref()?;
+                state.conversation_of_agent(a.kind, conv)
+            });
+            let named = by_moa.or(by_conv.map(|c| c.session_id));
+            let Some(id) = named.or_else(|| {
+                spike.filter(|id| agent_runs(state, *id, agent.as_ref(), Some(&info.cwd), None))
+            }) else {
+                return TabMatch::Nobody;
+            };
+            if !free(id) {
+                return TabMatch::Nobody;
+            }
+            let has_moa_session = agent.as_ref().is_some_and(|a| a.moa_session.is_some());
+            let tracked = !untracked && (has_moa_session || spike == Some(id));
+            if !tracked
+                && agent
+                    .as_ref()
+                    .is_some_and(|a| a.conversation.is_none() && a.started_at.is_none())
+            {
+                return TabMatch::Nobody;
+            }
+            let current = by_conv
+                .filter(|c| by_moa.is_none() && c.session_id == id)
+                .filter(|c| {
+                    state
+                        .current_conversation(id)
+                        .is_some_and(|cur| cur.conversation_id != c.conversation_id)
+                })
+                .map(|c| Conversation {
+                    last_seen_at: now.max(c.last_seen_at),
+                    ..c.clone()
+                });
+            // An untracked binding's tab is marked adopted, as `adopt` marks one: its agent
+            // may leave it open, so the next reconcile checks the agent before binding it
+            // again by its tag (R7, R31).
+            TabMatch::Bind {
+                id,
+                tracked,
+                tag: Some(!tracked && !info.adopted),
+                current,
+            }
+        }
+    }
+}
+
+/// Whether `agent`, in a tab tagged for session `id` and marked adopted or a terminal, is
+/// the session's (R31). While the session is live, any agent of its that started by now
+/// ([`agent_runs`]). Once it isn't, only the agent's conversation or its `MOA_SESSION`
+/// proves it: a plain `claude` typed in the shell after the session's agent left runs on the
+/// same store in the same folder, and when moa noticed the agent leave says nothing of when
+/// it did.
+fn tag_proves(
+    state: &State,
+    id: SessionId,
+    agent: Option<&PaneAgent>,
+    cwd: &str,
+    now: UtcMs,
+) -> bool {
+    if state
+        .session(id)
+        .is_some_and(|s| s.lifecycle == Lifecycle::Live)
+    {
+        return agent_runs(state, id, agent, Some(cwd), Some(now));
+    }
+    agent.is_some_and(|a| {
+        a.kind == AgentKind::Claude
+            && (moa_session_of(state, a) == Some(id)
+                || (a.conversation.is_some() && agent_runs(state, id, Some(a), Some(cwd), None)))
+    })
+}
+
+/// Session `id`'s binding to listed tab `info` of the server `generation` at `socket`, made
+/// at `now`.
+pub(crate) fn new_binding(
+    id: SessionId,
+    generation: Generation,
+    socket: &str,
+    info: &PaneInfo,
+    now: UtcMs,
+    tracked: bool,
+) -> PaneBinding {
+    PaneBinding {
+        session_id: id,
+        server_pid: generation.pid,
+        server_start: generation.start,
+        socket: socket.to_string(),
+        pane_id: info.pane.to_string(),
+        pane_pid: info.pid,
+        bound_at: now,
+        tracked,
+    }
+}
+
+/// Tags `pane` with session `id` once `tx`'s commit is saved (R15), and marks it adopted
+/// first when `adopted`: a link lost between the two then leaves an adopted tab with no
+/// session, never one that looks tracked. The topology knows the tag at once (R18 reads it).
+pub(crate) fn tag_pane(state: &mut State, tx: &mut Tx, pane: PaneId, id: SessionId, adopted: bool) {
+    for cmd in tag_cmds(pane, id, adopted) {
+        tx.tmux(cmd);
+    }
+    state.tmux.tag_sent(pane, id);
+}
+
+/// What tags `pane` with session `id`: the adopted mark first when `adopted`, then the
+/// session tag.
+fn tag_cmds(pane: PaneId, id: SessionId, adopted: bool) -> Vec<Cmd> {
+    let mut cmds = Vec::new();
+    if adopted {
+        cmds.push(set_pane_option(pane, "@moa_adopted", "1"));
+    }
+    cmds.push(set_pane_option(pane, "@moa_session", &id.to_string()));
+    cmds
+}
+
+/// Takes moa's tags off `pane` once `tx`'s commit is saved (R15): its adopted agent left,
+/// its session went to sleep, and the shell tab is the user's again, so an agent typed in it
+/// next shows as one moa doesn't track (R23). The session tag goes first, as [`tag_pane`]
+/// set it last.
+pub(crate) fn untag_pane(state: &mut State, tx: &mut Tx, pane: PaneId) {
+    for cmd in untag_cmds(pane) {
+        tx.tmux(cmd);
+    }
+    state.tmux.untag_sent(pane);
+}
+
+/// What takes moa's tags off `pane`: the session tag, then the adopted mark.
+fn untag_cmds(pane: PaneId) -> [Cmd; 2] {
+    [
+        unset_pane_option(pane, "@moa_session"),
+        unset_pane_option(pane, "@moa_adopted"),
+    ]
+}
+
+/// Whether listed tab `info` carries the tags of session `id`'s adoption: its session tag,
+/// or the adopted mark with no session tag (a link lost between the two).
+pub(crate) fn tagged_for(info: &PaneInfo, id: SessionId) -> bool {
+    match info.tag {
+        Tag::Session(t) => t == id,
+        Tag::Unset => info.adopted,
+        Tag::Other => false,
+    }
 }
 
 /// The link found no server (R2, R4): no pane is left, so every binding goes, and every
@@ -366,16 +612,72 @@ fn last_part(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// The session this brain knows that `agent`'s `MOA_SESSION` names: moa started it for
+/// that session.
+pub(crate) fn moa_session_of(state: &State, agent: &PaneAgent) -> Option<SessionId> {
+    agent
+        .moa_session
+        .as_deref()
+        .and_then(|s| s.parse::<SessionId>().ok())
+        .filter(|id| state.session(*id).is_some())
+}
+
+/// How much earlier than its binding an agent's start time may read and still count as
+/// started by then: Linux gives a process's start in ticks since a boot time it keeps in
+/// whole seconds.
+const START_SLACK_MS: i64 = 2_000;
+
+/// What a second look at an untracked binding's tab found (R31).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Recheck {
+    /// The session's agent still runs there.
+    Runs,
+    /// Proven: no agent runs there, or one that isn't the session's.
+    Gone,
+    /// What runs there couldn't be read. Nothing is proven: the session and its binding are
+    /// left as they are, and the next look decides.
+    Unknown,
+}
+
+/// Whether the agent in untracked binding `b`'s tab is still its session's (R31): read
+/// again, from `tab` when there is a listing (with its folder), else from the binding's
+/// pid (a kill has no listing). An agent naming no conversation must have started by the
+/// time the binding was made: one typed in the same shell after the adopted one quit runs on
+/// the same store in the same folder, and isn't the session's.
+pub(crate) fn untracked_agent_runs(
+    state: &State,
+    b: &PaneBinding,
+    tab: Option<&PaneInfo>,
+) -> Recheck {
+    let inspect = state.deps().inspect;
+    let found = match tab {
+        Some(i) => inspect(i.pid, &i.start),
+        None => inspect(b.pane_pid, &[]),
+    };
+    if found == Inspected::Unknown {
+        return Recheck::Unknown;
+    }
+    let cwd = tab.map(|i| i.cwd.as_str());
+    if agent_runs(state, b.session_id, found.agent(), cwd, Some(b.bound_at)) {
+        Recheck::Runs
+    } else {
+        Recheck::Gone
+    }
+}
+
 /// Whether `agent` is session `id`'s agent (R31): a Claude running one of the session's
 /// conversations, or naming none on the store of the session's current conversation (R32:
 /// no `CLAUDE_CONFIG_DIR` is `<home>/.claude`). With `cwd` (reconcile and `ls` have the
 /// listed folder), a Claude naming no conversation must also be in the session's folder or
-/// one inside the other (the spike's `related`). A kill passes `None`.
+/// one inside the other (the spike's `related`). A kill passes `None`. With `started_by`, a
+/// Claude naming no conversation must also have started by then (a start time it can't
+/// read proves nothing).
 pub(crate) fn agent_runs(
     state: &State,
     id: SessionId,
     agent: Option<&PaneAgent>,
     cwd: Option<&str>,
+    started_by: Option<UtcMs>,
 ) -> bool {
     let Some(agent) = agent.filter(|a| a.kind == AgentKind::Claude) else {
         return false;
@@ -384,6 +686,13 @@ pub(crate) fn agent_runs(
         return state
             .conversations_of(id)
             .any(|c| c.agent_kind == agent.kind && c.conversation_id == *conv);
+    }
+    if let Some(by) = started_by
+        && agent
+            .started_at
+            .is_none_or(|t| t.0 > by.0.saturating_add(START_SLACK_MS))
+    {
+        return false;
     }
     let Some(current) = state.current_conversation(id) else {
         return false;

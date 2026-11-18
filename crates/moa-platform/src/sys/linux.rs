@@ -162,8 +162,8 @@ fn read_into(path: &str, buf: &mut Vec<u8>) -> Option<usize> {
 }
 
 /// `pid`'s argv and kept environment from `/proc/<pid>/cmdline` and `/proc/<pid>/environ`,
-/// both read into `buf`. Another user's `environ` can't be read, which reads as `None`, like
-/// a gone process.
+/// both read into `buf`. `None` when either can't be read: the process is gone, or it is
+/// another user's (its `environ` is closed to us); the caller tells which.
 pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::ProcArgs> {
     let pid = proc_pid(pid)?;
     buf.clear();
@@ -175,13 +175,10 @@ pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::Proc
 
 /// `pid`'s direct children from each of its threads' `children` file. A kernel built
 /// without those files gets a scan of every process's `stat` for the parent pid instead.
-pub(crate) fn child_pids(pid: u32) -> Vec<u32> {
-    let Some(pid) = proc_pid(pid) else {
-        return Vec::new();
-    };
-    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-        return Vec::new();
-    };
+/// `None` when the process's threads, or `/proc` itself, can't be listed.
+pub(crate) fn child_pids(pid: u32) -> Option<Vec<u32>> {
+    let pid = proc_pid(pid)?;
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
     let mut kids = Vec::new();
     let mut listed = false;
     for task in tasks.flatten() {
@@ -191,19 +188,19 @@ pub(crate) fn child_pids(pid: u32) -> Vec<u32> {
         }
     }
     if !listed {
-        kids = scan_children(pid);
+        kids = scan_children(pid)?;
     }
     kids.sort_unstable();
     kids.dedup();
-    kids
+    Some(kids)
 }
 
-/// Every process whose `/proc/<pid>/stat` names `parent` as its parent.
-fn scan_children(parent: u32) -> Vec<u32> {
-    let Ok(all) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    all.flatten()
+/// Every process whose `/proc/<pid>/stat` names `parent` as its parent; `None` when `/proc`
+/// can't be listed. A process that exits mid-scan is left out.
+fn scan_children(parent: u32) -> Option<Vec<u32>> {
+    let all = std::fs::read_dir("/proc").ok()?;
+    let kids = all
+        .flatten()
         .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
         .filter(|kid| {
             std::fs::read_to_string(format!("/proc/{kid}/stat"))
@@ -211,7 +208,14 @@ fn scan_children(parent: u32) -> Vec<u32> {
                 .and_then(|s| crate::proc::stat_ppid(&s))
                 == Some(parent)
         })
-        .collect()
+        .collect();
+    Some(kids)
+}
+
+/// `pid`'s real and effective user ids, from `/proc/<pid>/status`, which any user may read.
+pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
+    let pid = proc_pid(pid)?;
+    crate::proc::status_uids(&std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
 }
 
 /// When `pid` started: field 22 of `/proc/<pid>/stat`, in clock ticks since boot, plus the
@@ -241,6 +245,25 @@ mod tests {
         v.extend_from_slice(name.as_bytes());
         v.extend(std::iter::repeat_n(0u8, pad));
         v
+    }
+
+    /// What the Linux reads answer for a pid that is no process and for this one; the
+    /// gone-or-failed choice on top of them is `proc`'s, and CI runs this.
+    #[test]
+    fn proc_reads_fail_for_no_process_and_answer_for_this_one() {
+        let mut buf = Vec::new();
+        assert!(read_args(i32::MAX as u32, &mut buf).is_none());
+        assert!(child_pids(i32::MAX as u32).is_none());
+        assert!(child_pids(0).is_none());
+        let me = std::process::id();
+        assert!(read_args(me, &mut buf).is_some_and(|a| !a.argv.is_empty()));
+        assert!(child_pids(me).is_some());
+        assert!(scan_children(me).is_some());
+        assert_eq!(
+            uids(me),
+            Some((super::super::current_uid(), super::super::current_uid()))
+        );
+        assert!(uids(i32::MAX as u32).is_none());
     }
 
     #[test]

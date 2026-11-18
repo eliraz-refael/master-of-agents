@@ -95,6 +95,7 @@ pub fn normalize(line: &HookLine, tail: &dyn Fn(&Path) -> Option<String>) -> Opt
     Some(HookEnvelope {
         agent: line.agent,
         slot: line.env.moa_session.clone(),
+        pane: line.env.tmux_pane.clone(),
         brain: line.env.moa_brain.clone(),
         store_dir: line.env.claude_config_dir.clone(),
         conversation_id,

@@ -221,6 +221,7 @@ async fn bring_up(
             inspect: crate::inspect::inspect_pane,
             transcript: moa_agents::claude::find_transcript,
             is_dir: std::path::Path::is_dir,
+            newest_conversation: moa_agents::claude::newest_conversation,
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

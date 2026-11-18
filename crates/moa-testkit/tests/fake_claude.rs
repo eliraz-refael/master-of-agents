@@ -188,9 +188,10 @@ fn wait_holds_the_script_until_its_file_exists() {
             .spawn()
             .unwrap(),
     );
-    // The recorder writes a call in pieces; it is whole once its line ends.
+    // The recorder writes a call in pieces; it is whole once its line ends. The bound is
+    // generous: a loaded machine (a Nix build beside a cargo run) took over 10 s here.
     let calls = rig.dir.path().join("calls");
-    let before = wait_for(Duration::from_secs(10), || {
+    let before = wait_for(Duration::from_secs(30), || {
         fs::read_to_string(&calls)
             .ok()
             .filter(|t| t.ends_with('\n'))

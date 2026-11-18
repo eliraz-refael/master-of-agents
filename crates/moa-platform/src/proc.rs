@@ -15,6 +15,18 @@ pub const ENV_KEPT: [&str; 5] = [
     "MOA_GROUP",
 ];
 
+/// Why a process read came back empty: there is no such process (a pid that never was one,
+/// or one that exited and was reaped), it is another user's (its owner was read, and isn't
+/// us), or there is one and it couldn't be read (a zombie, a kernel that refused, an owner
+/// that couldn't be read either). Only the first says the process is gone; the second says
+/// it is none of ours.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unread {
+    Gone,
+    Foreign,
+    Failed,
+}
+
 /// A process's argv and its `ENV_KEPT` entries, as lossy UTF-8.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ProcArgs {
@@ -41,15 +53,56 @@ impl Reader {
         Reader::default()
     }
 
-    /// `pid`'s argv and kept environment, or `None` when the process is gone or isn't ours.
-    pub fn args(&mut self, pid: u32) -> Option<ProcArgs> {
-        sys::read_args(pid, &mut self.buf)
+    /// `pid`'s argv and kept environment, or why they couldn't be read.
+    pub fn args(&mut self, pid: u32) -> Result<ProcArgs, Unread> {
+        sys::read_args(pid, &mut self.buf).ok_or_else(|| unread(pid))
     }
 }
 
-/// The pids of `pid`'s direct children; empty when it has none or is gone.
-pub fn children(pid: u32) -> Vec<u32> {
-    sys::child_pids(pid)
+/// Whether `pid` is another user's: its real or effective user id isn't ours. Who owns a
+/// process can be read for any user's; `None` when it can't (the process is gone, or the
+/// kernel refused).
+pub fn owned_by_another(pid: u32) -> Option<bool> {
+    sys::uids(pid).map(|owner| foreign(owner, sys::current_uid()))
+}
+
+/// Whether a process whose real and effective user ids are `owner` is another user's than
+/// `me`'s.
+fn foreign((real, effective): (u32, u32), me: u32) -> bool {
+    real != me || effective != me
+}
+
+/// The pids of `pid`'s direct children (empty when it has none), or why they couldn't be
+/// listed. macOS lists any pid's children by their parent, so a gone process has none: no
+/// children from a process that doesn't exist is that one gone.
+pub fn children(pid: u32) -> Result<Vec<u32>, Unread> {
+    match sys::child_pids(pid) {
+        Some(kids) if !kids.is_empty() || sys::pid_alive(pid) => Ok(kids),
+        _ if sys::pid_alive(pid) => Err(Unread::Failed),
+        _ => Err(Unread::Gone),
+    }
+}
+
+/// Why a read of `pid`'s arguments failed: a process that doesn't exist is gone; one another
+/// user owns is foreign; any other (a zombie, an owner that can't be read) just couldn't be
+/// read.
+fn unread(pid: u32) -> Unread {
+    let alive = sys::pid_alive(pid);
+    why_unread(
+        alive,
+        alive.then(|| sys::uids(pid)).flatten(),
+        sys::current_uid(),
+    )
+}
+
+/// [`unread`]'s rule, for a process that exists or not (`alive`), whose real and effective
+/// user ids are `owner` when they could be read, read by user `me`.
+fn why_unread(alive: bool, owner: Option<(u32, u32)>, me: u32) -> Unread {
+    match owner {
+        _ if !alive => Unread::Gone,
+        Some(owner) if foreign(owner, me) => Unread::Foreign,
+        _ => Unread::Failed,
+    }
 }
 
 /// When `pid` started, or `None` when it is gone.
@@ -144,6 +197,17 @@ pub(crate) fn boot_time(proc_stat: &str) -> Option<u64> {
         .ok()
 }
 
+/// The real and effective user ids on the `Uid:` line of a `/proc/<pid>/status` file.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn status_uids(status: &str) -> Option<(u32, u32)> {
+    let mut ids = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .map(str::parse::<u32>);
+    Some((ids.next()?.ok()?, ids.next()?.ok()?))
+}
+
 /// The pids in a `/proc/<pid>/task/<tid>/children` file: space-separated numbers.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn pid_list(text: &str) -> impl Iterator<Item = u32> + '_ {
@@ -227,6 +291,21 @@ mod tests {
         assert_eq!(stat_start_ticks("4242 (sleep) S 1"), None);
     }
 
+    /// The rule the reads go by, with made-up owners: no process is gone; another user's,
+    /// real or effective, is foreign; ours, or one whose owner can't be read, just failed.
+    #[test]
+    fn why_a_read_failed() {
+        assert_eq!(why_unread(false, Some((0, 0)), 501), Unread::Gone);
+        assert_eq!(why_unread(false, None, 501), Unread::Gone);
+        assert_eq!(why_unread(true, Some((0, 0)), 501), Unread::Foreign);
+        assert_eq!(why_unread(true, Some((501, 0)), 501), Unread::Foreign);
+        assert_eq!(why_unread(true, Some((0, 501)), 501), Unread::Foreign);
+        assert_eq!(why_unread(true, Some((501, 501)), 501), Unread::Failed);
+        assert_eq!(why_unread(true, None, 501), Unread::Failed);
+        assert!(!foreign((501, 501), 501));
+        assert!(foreign((501, 501), 0));
+    }
+
     #[test]
     fn boot_time_and_child_lists_parse() {
         assert_eq!(
@@ -234,6 +313,12 @@ mod tests {
             Some(1_700_000_000)
         );
         assert_eq!(boot_time("cpu 1\n"), None);
+        assert_eq!(
+            status_uids("Name:\tsleep\nUid:\t501\t0\t0\t0\nGid:\t20\t20\t20\t20\n"),
+            Some((501, 0))
+        );
+        assert_eq!(status_uids("Name:\tsleep\n"), None);
+        assert_eq!(status_uids("Uid:\t501\n"), None);
         assert_eq!(pid_list("12 345 \n").collect::<Vec<_>>(), [12, 345]);
         assert_eq!(pid_list("").count(), 0);
     }

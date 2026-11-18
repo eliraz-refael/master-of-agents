@@ -14,8 +14,8 @@ use moa_core::effect::{Effect, Input, TmuxIn, TmuxToken, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::is_asleep;
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneAgent, Session,
-    SessionId, SpikePane, TranscriptCheck,
+    Activity, AgentKind, Conversation, ConversationReason, Inspected, Lifecycle, Location,
+    PaneAgent, Session, SessionId, SpikePane, TranscriptCheck,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{Deps, LoadNote, State};
@@ -583,8 +583,8 @@ fn two_resumes_in_flight_open_one_tab() {
     assert_eq!(to, [ReqId(1), ReqId(2)]);
 }
 
-fn runs_c(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 808).then(|| PaneAgent {
+fn runs_c(pid: i64, _: &[String]) -> Inspected {
+    Inspected::from((pid == 808).then(|| PaneAgent {
         kind: AgentKind::Claude,
         store_dir: None,
         conversation: Some(C.into()),
@@ -593,7 +593,7 @@ fn runs_c(pid: i64, _: &[String]) -> Option<PaneAgent> {
         title: None,
         group: None,
         started_at: None,
-    })
+    }))
 }
 
 /// Step 6: an agent started by hand on the conversation since the last reconcile.
@@ -605,6 +605,24 @@ fn resume_refuses_when_an_untracked_tab_runs_it() {
     assert!(queried(&r.resume(1, false)));
     let info = format!("I\t%8\t808\t0\t\t\t\t{}", r.lantern());
     let fx = r.listed(&[&info], &["S\t%8\tclaude"]);
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(!any_tmux(&fx), "{fx:?}");
+    assert_eq!(
+        refusal(&fx),
+        "it's already running in tab %8; adopt it with moactl adopt %8"
+    );
+    assert!(is_asleep(r.s()));
+}
+
+/// Step 6, the agent typed in a terminal moa opened: that tab runs it all the same.
+#[test]
+fn resume_refuses_when_a_terminal_runs_it() {
+    let mut w = World::new();
+    w.deps.inspect = runs_c;
+    let mut r = w.reconciled();
+    assert!(queried(&r.resume(1, false)));
+    let info = format!("I\t%8\t808\t0\t1\t\t\t{}", r.lantern());
+    let fx = r.listed(&[&info], &["S\t%8\t"]);
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert!(!any_tmux(&fx), "{fx:?}");
     assert_eq!(
@@ -770,6 +788,26 @@ fn resume_refuses_an_unsafe_conversation_id() {
     );
 }
 
+/// An id that starts with `-` would read as a flag after `--resume` (R13 rule 5): refused,
+/// even when a transcript of that name is found.
+#[test]
+fn resume_refuses_an_id_that_reads_as_a_flag() {
+    for bad in ["--dangerously-skip-permissions", "-x"] {
+        for found in [false, true] {
+            let mut w = World::new();
+            w.conv().conversation_id = bad.into();
+            if found {
+                w.deps.transcript = |_, _| TranscriptCheck::Present(PathBuf::from("/t.jsonl"));
+            }
+            assert_eq!(
+                refused_unsaved(w),
+                "that conversation's id isn't one moa can resume",
+                "{bad} {found}"
+            );
+        }
+    }
+}
+
 /// tmux reads `-c` as a format: a `#` in the folder is doubled.
 #[test]
 fn resume_doubles_hashes_in_the_folder() {
@@ -905,6 +943,7 @@ fn the_resumed_agents_start_is_its_own() {
             envelope: HookEnvelope {
                 agent: AgentKind::Claude,
                 slot: Some(S.into()),
+                pane: None,
                 brain: Some("default".into()),
                 store_dir: Some(store),
                 conversation_id: C.into(),
@@ -933,6 +972,69 @@ fn the_resumed_agents_start_is_its_own() {
             .map(|c| c.conversation_id.as_str())
             .collect();
     assert_eq!(current, [C]);
+}
+
+/// `/resume` inside Claude went back to the older of S's two conversations, then the agent
+/// died: the resume launches the one it ran last, not the one first seen last.
+#[test]
+fn a_resume_inside_claude_to_an_older_conversation_is_what_resumes() {
+    const C2: &str = "d0000000-0000-4000-8000-0000000000a2";
+    let mut w = World::new();
+    let home = w.home().to_path_buf();
+    write_transcript(&home.join(".claude-a"), &home.join("work/lantern"), C2);
+    let older = w.conv().clone();
+    let mut newer = older.clone();
+    newer.conversation_id = C2.into();
+    newer.first_seen_at = UtcMs(older.first_seen_at.0 + 60_000);
+    newer.last_seen_at = newer.first_seen_at;
+    newer.transcript_path = None;
+    let s = w.s.clone();
+    let mut r = w.reconciled();
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(s);
+    snap.conversations.extend([older, newer]);
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    listed(&mut r.st, &r.b, &[], &[]);
+    assert_eq!(r.st.handle_of(s_id()), &C2[..8]);
+    let hook = |seq: u32, at: i64, kind: HookKind| Input::Hook {
+        reply: None,
+        envelope: HookEnvelope {
+            agent: AgentKind::Claude,
+            slot: Some(S.into()),
+            pane: None,
+            brain: Some("default".into()),
+            store_dir: Some(shown(&home.join(".claude-a"))),
+            conversation_id: C.into(),
+            kind,
+            at: UtcMs(at),
+            at_ns: at * 1_000_000,
+            pid: 100,
+            seq,
+            cwd: None,
+            transcript_path: None,
+        },
+    };
+    let at = r.b.now().wall.0 - 2_000;
+    let resumed = HookKind::SessionStarted {
+        source: StartSource::Resume,
+    };
+    handle_checked(&mut r.st, hook(1, at, resumed), r.b.now());
+    let died = HookKind::SessionEnded {
+        reason: "other".into(),
+    };
+    handle_checked(&mut r.st, hook(2, at + 1_000, died), r.b.now());
+    assert!(is_asleep(r.s()));
+    assert_eq!(r.st.handle_of(s_id()), &C[..8]);
+    let fx = r.launched(1, false);
+    let (_, cmds) = the_open(&fx);
+    assert_eq!(after(&cmds[0], "--resume"), C);
 }
 
 /// A `resume_failed` mark that can't be saved still refuses, and says so in the log, with
@@ -1031,5 +1133,76 @@ fn an_unchecked_transcript_refuses_and_marks() {
     assert_eq!(
         refused_failed(w),
         "its conversation isn't in acct-a's folder any more, so it can't be resumed"
+    );
+}
+
+/// The batch that held a resume's commit (R13a) failed: the reload brings S back asleep, and
+/// its window was dropped with the batch. The caller and a focus waiting on it hear nothing
+/// was saved, and the launch isn't left waiting: a second resume looks at the tabs again,
+/// and close isn't told it is still opening.
+#[test]
+fn a_reload_that_lost_a_resumes_commit_answers_it() {
+    let mut r = World::new().reconciled();
+    let s = r.s().clone();
+    let convs: Vec<Conversation> = r.st.conversations_of(s_id()).cloned().collect();
+    let fx = r.launched(1, false);
+    the_open(&fx);
+    let focus = send(&r.b, &mut r.st, 2, Op::SessionFocus { q: S.into() });
+    assert!(replies(&focus).is_empty(), "{focus:?}");
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(s);
+    snap.conversations.extend(convs);
+    let fx = handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    let not_saved = || {
+        Err(OpError(
+            "moa couldn't save that session; nothing was opened, try again".into(),
+        ))
+    };
+    assert_eq!(
+        replies(&fx),
+        [(ReqId(1), not_saved()), (ReqId(2), not_saved())]
+    );
+    assert!(is_asleep(r.s()));
+
+    // Once the tabs are reconciled again: a resume asks for them, as a new one does.
+    listed(&mut r.st, &r.b, &[], &[]);
+    let fx = r.resume(3, false);
+    assert!(queried(&fx), "{fx:?}");
+}
+
+/// A reload that kept the resume's commit (another batch failed) leaves its launch waiting:
+/// its window went out, and tmux's answer binds it.
+#[test]
+fn a_reload_that_kept_a_resumes_commit_keeps_waiting() {
+    let mut r = World::new().reconciled();
+    r.launched(1, false);
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(r.s().clone());
+    snap.conversations
+        .extend(r.st.conversations_of(s_id()).cloned());
+    let fx = handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    listed(&mut r.st, &r.b, &[], &[]);
+    let fx = r.bound("%7");
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            done(format!("resumed {TITLE} in {}", r.lantern()))
+        )]
     );
 }

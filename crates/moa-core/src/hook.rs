@@ -105,6 +105,8 @@ pub struct HookEnvelope {
     pub agent: AgentKind,
     /// `MOA_SESSION`: the moa session the agent was launched for, if any.
     pub slot: Option<String>,
+    /// `TMUX_PANE`: the tab the agent runs in (`%N`), when it runs in tmux.
+    pub pane: Option<String>,
     /// `MOA_BRAIN`.
     pub brain: Option<String>,
     /// `CLAUDE_CONFIG_DIR`: the store the conversation is recorded in.
@@ -188,6 +190,7 @@ mod tests {
         let e = HookEnvelope {
             agent: AgentKind::Claude,
             slot: None,
+            pane: None,
             brain: None,
             store_dir: None,
             conversation_id: "c".into(),

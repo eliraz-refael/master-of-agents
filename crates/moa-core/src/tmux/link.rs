@@ -14,8 +14,10 @@ use super::notify::Notification;
 use super::topology::{Applied, Topology, refresh_cmds};
 use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
+use crate::hook::HookEnvelope;
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::ops::adopt::AdoptArgs;
 use crate::ops::launch::ResumeAsk;
 use crate::state::State;
 
@@ -139,12 +141,25 @@ pub struct TmuxState {
 }
 
 /// What a pane query was asked for: who reads its answer.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Asked {
     Reconcile,
     /// A resume whose checks passed, looking for a tab that already runs its conversation
     /// (R13 step 6).
     Resume(ResumeAsk),
+    /// An adopt, looking at the tabs before it takes one on (R21).
+    Adopt {
+        conn: ConnId,
+        req: ReqId,
+        args: AdoptArgs,
+    },
+    /// An `ls` with the tabs reconciled, looking at them for the agents moa doesn't track
+    /// and the adopted ones that left (R23).
+    Ls {
+        conn: ConnId,
+        req: ReqId,
+        all: bool,
+    },
     /// A terminal's new window (R16), named `name` and opened in `path`: its tab is tagged
     /// and brought to the screen once tmux says which pane it has. `reply` is whom to
     /// answer: nobody, once the caller's connection closed, though the tab still gets its
@@ -153,6 +168,13 @@ pub(crate) enum Asked {
         reply: Option<(ConnId, ReqId)>,
         name: String,
         path: String,
+    },
+    /// Session `id`, which isn't live and has no tab, was heard from: does a tab run its
+    /// agent? `events` are what it sent meanwhile, applied once it is found (the human's
+    /// option C).
+    Look {
+        id: SessionId,
+        events: Vec<HookEnvelope>,
     },
 }
 
@@ -179,8 +201,7 @@ pub(crate) enum OpenEnd {
 pub(crate) enum LaunchKind {
     Open,
     Resume,
-    // Comes with `moactl restart`.
-    #[allow(dead_code)]
+    /// `moactl restart`: an adopted session's conversation, resumed in a tab moa tracks.
     Restart,
 }
 
@@ -295,6 +316,17 @@ pub fn notice(client: &ClientName, text: &str) -> Cmd {
         .arg(client.0.as_str())
         .args(["-d", "4000", "-l"])
         .arg(format!("moa: {text}"))
+}
+
+/// Unsets one of moa's options (`@moa_session`, `@moa_adopted`) on one pane.
+pub(crate) fn unset_pane_option(pane: PaneId, name: &str) -> Cmd {
+    Cmd::new("set-option").args([
+        "-p".to_string(),
+        "-u".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        name.to_string(),
+    ])
 }
 
 /// Sets one of moa's options (`@moa_session`, `@moa_adopted`) on one pane.
@@ -480,13 +512,17 @@ impl TmuxState {
                 .any(|a| matches!(a, Asked::Resume(r) if r.checked.id == id))
     }
 
-    /// `conn` closed: its ensures, resumes still looking at the tabs and focus waiters are
-    /// forgotten, and its launches and terminals go on with nobody to answer.
+    /// `conn` closed: its ensures, resumes, adopts and `ls` still looking at the tabs and
+    /// focus waiters are forgotten, and its launches and terminals go on with nobody to
+    /// answer.
     pub(crate) fn client_gone(&mut self, conn: ConnId) {
         self.waiters.retain(|(c, _)| *c != conn);
         self.pinged.retain(|(c, _)| *c != conn);
-        self.queries
-            .retain(|_, a| !matches!(a, Asked::Resume(r) if r.conn == conn));
+        self.queries.retain(|_, a| match a {
+            Asked::Resume(r) => r.conn != conn,
+            Asked::Adopt { conn: c, .. } | Asked::Ls { conn: c, .. } => *c != conn,
+            Asked::Reconcile | Asked::Term { .. } | Asked::Look { .. } => true,
+        });
         for asked in self.queries.values_mut() {
             if let Asked::Term { reply, .. } = asked
                 && matches!(reply, Some((c, _)) if *c == conn)
@@ -505,6 +541,11 @@ impl TmuxState {
     /// The sessions whose launch is waiting.
     pub(crate) fn waiting_opens(&self) -> impl Iterator<Item = SessionId> + '_ {
         self.opens.keys().copied()
+    }
+
+    /// The launches waiting, each with its session.
+    pub(crate) fn launches(&self) -> impl Iterator<Item = (SessionId, &Launching)> + '_ {
+        self.opens.iter().map(|(id, l)| (*id, l))
     }
 
     /// Stops waiting for `id`'s tab, and gives back its launch.
@@ -589,6 +630,14 @@ impl TmuxState {
     /// The pane queries waiting for their answer, by number.
     pub fn queries(&self) -> impl Iterator<Item = u64> + '_ {
         self.queries.keys().copied()
+    }
+
+    /// The events waiting with the look at the tabs asked for session `id`, while one is.
+    pub(crate) fn looking(&mut self, id: SessionId) -> Option<&mut Vec<HookEnvelope>> {
+        self.queries.values_mut().find_map(|a| match a {
+            Asked::Look { id: i, events } if *i == id => Some(events),
+            _ => None,
+        })
     }
 
     /// Whether a query for `asked` is waiting for its answer.
@@ -685,6 +734,13 @@ impl TmuxState {
     pub(crate) fn tag_sent(&mut self, pane: PaneId, id: SessionId) {
         self.sent_tags.insert(pane, id);
         self.topology.tag(pane, id);
+    }
+
+    /// Moa took the session tag off `pane`, after a saved commit: neither the topology nor
+    /// the tags waiting for a listing keep it.
+    pub(crate) fn untag_sent(&mut self, pane: PaneId) {
+        self.sent_tags.remove(&pane);
+        self.topology.untag(pane);
     }
 
     /// Reads the lists again, at most one in flight and one more after it.

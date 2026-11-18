@@ -216,8 +216,9 @@ fn arg_max() -> usize {
 }
 
 /// `pid`'s argv and kept environment through `sysctl([CTL_KERN, KERN_PROCARGS2, pid])`,
-/// read into `buf` (sized from `KERN_ARGMAX` on first use). The kernel refuses another
-/// user's process, which reads as `None`, like a gone one.
+/// read into `buf` (sized from `KERN_ARGMAX` on first use). `None` when the read fails: the
+/// process is gone, or the kernel refuses it (another user's, a zombie); the caller tells
+/// which.
 pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::ProcArgs> {
     let pid = proc_pid(pid)?;
     if buf.is_empty() {
@@ -245,35 +246,68 @@ pub(crate) fn read_args(pid: u32, buf: &mut Vec<u8>) -> Option<crate::proc::Proc
 
 /// `pid`'s direct children through `proc_listchildpids`, which answers a **count of pids**,
 /// not bytes. A buffer that comes back full may have cut the list short, so it grows once.
-pub(crate) fn child_pids(pid: u32) -> Vec<u32> {
+/// libproc answers any pid by looking for processes with that parent, so a gone one has no
+/// children rather than a failure; `None` when the pid can't be a process or libproc fails.
+pub(crate) fn child_pids(pid: u32) -> Option<Vec<u32>> {
     const ROOM: usize = 64;
-    let Some(pid) = proc_pid(pid) else {
-        return Vec::new();
-    };
-    let mut pids = list_children(pid, ROOM);
+    let pid = proc_pid(pid)?;
+    let mut pids = list_children(pid, ROOM)?;
     if pids.len() == ROOM {
-        pids = list_children(pid, ROOM * 16);
+        pids = list_children(pid, ROOM * 16)?;
     }
-    pids.into_iter()
-        .filter_map(|p| u32::try_from(p).ok().filter(|&p| p > 0))
-        .collect()
+    Some(
+        pids.into_iter()
+            .filter_map(|p| u32::try_from(p).ok().filter(|&p| p > 0))
+            .collect(),
+    )
 }
 
-/// Up to `room` of `pid`'s children; empty when libproc fails (the process is gone).
-fn list_children(pid: libc::pid_t, room: usize) -> Vec<libc::pid_t> {
+/// Up to `room` of `pid`'s children; `None` when libproc fails.
+fn list_children(pid: libc::pid_t, room: usize) -> Option<Vec<libc::pid_t>> {
     let mut pids: Vec<libc::pid_t> = vec![0; room];
     let bytes =
         libc::c_int::try_from(room * std::mem::size_of::<libc::pid_t>()).expect("a small buffer");
     // SAFETY: `pids` is live and writable for `bytes` bytes, and libproc writes at most
     // that many.
     let n = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), bytes) };
-    pids.truncate(usize::try_from(n).unwrap_or(0).min(room));
-    pids
+    pids.truncate(usize::try_from(n).ok()?.min(room));
+    Some(pids)
 }
 
 /// When `pid` started: `proc_pidinfo(PROC_PIDTBSDINFO)`'s `pbi_start_tvsec` and
 /// `pbi_start_tvusec`.
 pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
+    let info = bsd_info(pid)?;
+    let at = std::time::Duration::from_secs(info.pbi_start_tvsec)
+        + std::time::Duration::from_micros(info.pbi_start_tvusec);
+    std::time::UNIX_EPOCH.checked_add(at)
+}
+
+/// `pid`'s real and effective user ids, from `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`, which
+/// answers for any user's process, the system's own daemons among them (the full
+/// `PROC_PIDTBSDINFO` is refused for many of those).
+pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
+    let pid = proc_pid(pid)?;
+    // SAFETY: `proc_bsdshortinfo` is a plain C struct of integers and byte arrays; all-zero
+    // is valid.
+    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    // SAFETY: `info` is live and writable for `size` bytes, and libproc writes at most that
+    // many.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    (n == size).then_some((info.pbsi_ruid, info.pbsi_uid))
+}
+
+/// `pid`'s `proc_bsdinfo`, or `None` when libproc doesn't answer it whole.
+fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
     let pid = proc_pid(pid)?;
     // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays; all-zero is
     // valid.
@@ -283,10 +317,5 @@ pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
     // many.
     let n =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-    if n != size {
-        return None;
-    }
-    let at = std::time::Duration::from_secs(info.pbi_start_tvsec)
-        + std::time::Duration::from_micros(info.pbi_start_tvusec);
-    std::time::UNIX_EPOCH.checked_add(at)
+    (n == size).then_some(info)
 }

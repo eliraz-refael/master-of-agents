@@ -291,6 +291,47 @@ fn bindings_win_over_spike_panes() {
     );
 }
 
+/// A `/resume` back to the older conversation moves only its `last_seen_at`: that one is
+/// the session's current conversation, as the core reads it.
+#[test]
+fn export_follows_a_resume_back_to_an_older_conversation() {
+    let rig = typical();
+    let conn = rig.store.conn();
+    let sid: String = conn
+        .query_row(
+            "SELECT session_id FROM conversations WHERE conversation_id = ?1",
+            [ids::S1_WORKING],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO conversations (agent_kind, conversation_id, session_id, store_dir, \
+         spike_account, reason, first_seen_at, last_seen_at) \
+         VALUES ('claude', 'rotated-conv', ?1, NULL, NULL, 'clear', ?2, ?2)",
+        rusqlite::params![sid, NOW.0],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE conversations SET last_seen_at = ?2 WHERE conversation_id = ?1",
+        rusqlite::params![ids::S1_WORKING, NOW.0 + 1],
+    )
+    .unwrap();
+    rig.export().unwrap();
+    let out = open_ro(&rig.out);
+    let count = |sql: &str| -> i64 { out.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count(&format!(
+            "SELECT count(*) FROM sessions WHERE session_id = '{}'",
+            ids::S1_WORKING
+        )),
+        1
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM sessions WHERE session_id = 'rotated-conv'"),
+        0
+    );
+}
+
 #[test]
 fn export_follows_rotation() {
     let rig = typical();

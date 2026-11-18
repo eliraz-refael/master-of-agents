@@ -15,8 +15,8 @@ use moa_core::effect::{
 use moa_core::hook::{HookEnvelope, HookKind};
 use moa_core::live::is_asleep;
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, EventKind, Lifecycle, Location,
-    PaneAgent, PaneBinding, Session, SessionId,
+    Activity, AgentKind, Conversation, ConversationReason, EventKind, Inspected, Lifecycle,
+    Location, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{Deps, LoadNote, State};
@@ -55,20 +55,27 @@ fn shown(p: &std::path::Path) -> String {
 thread_local! {
     /// Whether S's adopted agent still runs in its shell tab, %9.
     static AGENT_RUNS: Cell<bool> = const { Cell::new(true) };
+    /// Whether %9's process can't be read.
+    static UNREADABLE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// S's agent in %9 (pid 909), started by hand: no `MOA_SESSION`, while it runs.
-fn s_in_a_shell(pid: i64, _: &[String]) -> Option<PaneAgent> {
-    (pid == 909 && AGENT_RUNS.with(Cell::get)).then(|| PaneAgent {
-        kind: AgentKind::Claude,
-        store_dir: None,
-        conversation: Some(C.into()),
-        moa_session: None,
-        moa_brain: None,
-        title: None,
-        group: None,
-        started_at: None,
-    })
+fn s_in_a_shell(pid: i64, _: &[String]) -> Inspected {
+    if pid == 909 && UNREADABLE.with(Cell::get) {
+        return Inspected::Unknown;
+    }
+    Inspected::from(
+        (pid == 909 && AGENT_RUNS.with(Cell::get)).then(|| PaneAgent {
+            kind: AgentKind::Claude,
+            store_dir: None,
+            conversation: Some(C.into()),
+            moa_session: None,
+            moa_brain: None,
+            title: None,
+            group: None,
+            started_at: None,
+        }),
+    )
 }
 
 /// The world before loading: the typical brain plus S, live in `<home>/work/lantern` on
@@ -311,6 +318,36 @@ fn close_kills_the_tab_after_the_commit() {
     assert!(!is_asleep(r.s()));
 }
 
+/// A read of the adopted tab that fails proves nothing (R31): `close` refuses, and nothing
+/// is saved, killed or untagged.
+#[test]
+fn close_of_an_adopted_session_whose_tab_cant_be_read_changes_nothing() {
+    let mut r = World::adopted().reconciled();
+    UNREADABLE.with(|c| c.set(true));
+    let before = r.s().clone();
+    let fx = r.close(1);
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Err(OpError(format!(
+                "moa couldn't read what runs in {TITLE}'s tab; try again in a moment"
+            )))
+        )]
+    );
+    assert_eq!(r.s(), &before);
+    assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
+    // moa's log says so, as restart's and resume's do.
+    let said = format!("the tab of session {S} couldn't be read; it is left as it is");
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Log(l) if l.message == said)),
+        "{fx:?}"
+    );
+}
+
 /// A session that isn't running is still marked ended, as the spike did; there's no tab
 /// to kill.
 #[test]
@@ -436,6 +473,22 @@ fn close_of_an_adopted_session_whose_agent_left_kills_nothing() {
     AGENT_RUNS.with(|c| c.set(false));
     let fx = r.close(1);
     assert!(kills(&fx).is_empty(), "{fx:?}");
+    // The tab is the user's again: moa's tags come off it, after the commit (R15).
+    let want = untagged("%9");
+    assert_eq!(unsets(&fx), want.iter().collect::<Vec<_>>(), "{fx:?}");
+    let persist = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Persist(_)))
+        .unwrap();
+    let untag = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Tmux { cmds, .. } if cmds.contains(&want[0])))
+        .unwrap();
+    assert!(persist < untag, "{fx:?}");
+    assert_eq!(
+        r.st.tmux().topology.moa_session("%9".parse().unwrap()),
+        None
+    );
     assert!(
         changes(&fx)
             .iter()
@@ -482,6 +535,7 @@ fn the_agents_end_after_close_is_history_only() {
             envelope: HookEnvelope {
                 agent: AgentKind::Claude,
                 slot: Some(S.into()),
+                pane: None,
                 brain: Some("default".into()),
                 store_dir: Some(shown(&r.b.home.join(".claude-a"))),
                 conversation_id: C.into(),

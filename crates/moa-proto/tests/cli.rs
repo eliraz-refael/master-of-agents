@@ -212,6 +212,7 @@ const EACH_VERB: &[&[&str]] = &[
     &["sleep"],
     &["term"],
     &["adopt", "x"],
+    &["restart", "x"],
     &["goto", "x"],
     &["layout", "list"],
     &["peers"],
@@ -450,4 +451,75 @@ fn close_and_term_parse() {
         .find(|l| l.trim_start().starts_with("term "))
         .unwrap_or_else(|| panic!("{help}"));
     assert!(line.ends_with("A plain shell in a new tab"), "{line}");
+}
+
+/// `adopt %N` takes a tab's id, its flags pass through as they are, and anything that isn't
+/// a tab id is refused before the daemon hears of it; the help says "tab" (R30).
+#[test]
+fn adopt_parses() {
+    assert_eq!(
+        op(&["adopt", "%5"]),
+        Op::SessionAdopt {
+            pane: "%5".into(),
+            title: None,
+            group: None,
+            id: None
+        }
+    );
+    assert_eq!(
+        op(&[
+            "adopt",
+            "%12",
+            "--title",
+            "boards",
+            "--group",
+            "Work/Lantern",
+            "--id",
+            "C9"
+        ]),
+        Op::SessionAdopt {
+            pane: "%12".into(),
+            title: Some("boards".into()),
+            group: Some("Work/Lantern".into()),
+            id: Some("C9".into())
+        }
+    );
+    for bad in ["5", "%", "%x", "%+5", "@5", "x"] {
+        assert_eq!(
+            err(&["adopt", bad]),
+            "adopt needs a tab id like %5",
+            "{bad}"
+        );
+    }
+    // Not a suggestion action.
+    assert!(act("adopt", &["%5"]).is_err());
+
+    use clap::CommandFactory;
+    let help = Moactl::command().render_help().to_string();
+    let line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("adopt "))
+        .unwrap_or_else(|| panic!("{help}"));
+    assert!(line.ends_with("Adopt an agent running in a tab"), "{line}");
+}
+
+/// `restart Q` maps to its op; it isn't a suggestion action, and the help says "tab" (R30).
+#[test]
+fn restart_parses() {
+    assert_eq!(
+        op(&["restart", "3f9a"]),
+        Op::SessionRestart { q: "3f9a".into() }
+    );
+    assert!(act("restart", &["3f9a"]).is_err());
+
+    use clap::CommandFactory;
+    let help = Moactl::command().render_help().to_string();
+    let line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("restart "))
+        .unwrap_or_else(|| panic!("{help}"));
+    assert!(
+        line.ends_with("Restart an adopted agent in a tab moa tracks"),
+        "{line}"
+    );
 }

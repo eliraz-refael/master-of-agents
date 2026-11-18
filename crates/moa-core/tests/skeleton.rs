@@ -446,6 +446,13 @@ fn op_methods_match_the_variants() {
             idle_ms: Some(1),
             dry_run: true,
         },
+        Op::SessionAdopt {
+            pane: "%5".into(),
+            title: Some("t".into()),
+            group: None,
+            id: Some("c".into()),
+        },
+        Op::SessionRestart { q: "q".into() },
         Op::TermOpen {
             path: "/x".into(),
             title: Some("t".into()),
@@ -497,6 +504,8 @@ const WRITES: &[&str] = &[
     "session.resume",
     "session.close",
     "session.sleep",
+    "session.adopt",
+    "session.restart",
     "task.add",
     "task.set",
     "note.add",

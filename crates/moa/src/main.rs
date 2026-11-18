@@ -110,8 +110,15 @@ mod tests {
         cli.build();
         let names: Vec<&str> = cli.get_subcommands().map(|c| c.get_name()).collect();
         assert!(names.contains(&"help"), "{names:?}");
-        // `hook` is handled before clap sees the arguments, so clap doesn't list it.
-        for name in names.into_iter().chain(["hook"]) {
+        // `hook` is handled before clap sees the arguments, so clap doesn't list it; nor the
+        // verbs, which `moa` hands to `moactl`.
+        assert!(VERB_NAMES.contains(&"restart"));
+        assert!(is_moactl(&["moa".into(), "restart".into(), "x".into()]));
+        for name in names
+            .into_iter()
+            .chain(["hook"])
+            .chain(VERB_NAMES.iter().copied())
+        {
             assert!(
                 RESERVED_BRAIN_NAMES.contains(&name),
                 "{name} isn't reserved"

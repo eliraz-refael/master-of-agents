@@ -1,7 +1,7 @@
 //! The core's in-memory copy of the brain: every row the views need, kept in step with the
 //! store by [`Change`]s and published as a [`Model`].
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ use crate::effect::RefuseWrites;
 use crate::model::*;
 use crate::op::Op;
 use crate::publish::{ACTIVITY_SHOWN, Model};
+use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Link, TmuxState};
 
 /// How many hook events' keys are remembered for deduplication.
@@ -160,14 +161,19 @@ pub struct Deps {
     /// The Claude Code plugin sessions are started with, as an absolute path.
     pub session_plugin: PathBuf,
     /// The agent a pane runs, from its process (and children) and its start command
-    /// (the daemon reads them in-process). Called only where a pane is checked, never per
-    /// event.
-    pub inspect: fn(i64, &[String]) -> Option<PaneAgent>,
+    /// (the daemon reads them in-process), or that none does, or that the reads failed.
+    /// Called only where a pane is checked, never per event.
+    pub inspect: fn(i64, &[String]) -> Inspected,
     /// Looks for a conversation's transcript in a store (`moa_agents::claude::find_transcript`):
     /// directory reads only, before a resume (C11 rule 2).
     pub transcript: fn(&Path, &str) -> TranscriptCheck,
     /// Whether a folder exists (`Path::is_dir`): a resume refuses one that is gone.
     pub is_dir: fn(&Path) -> bool,
+    /// The newest conversation an agent in a folder wrote in a store, leaving out the ids
+    /// given and any transcript last written before a moment
+    /// (`moa_agents::claude::newest_conversation`): directory reads only, for `adopt` when the
+    /// agent's argv names none (R21).
+    pub newest_conversation: fn(&Path, &Path, &[String], Option<UtcMs>) -> Option<String>,
 }
 
 fn identity(p: &Path) -> PathBuf {
@@ -196,9 +202,10 @@ impl Default for Deps {
             home: PathBuf::new(),
             new_uuid: sequential_uuid,
             session_plugin: PathBuf::new(),
-            inspect: |_, _| None,
+            inspect: |_, _| Inspected::Gone,
             transcript: |_, _| TranscriptCheck::Present(PathBuf::new()),
             is_dir: |_| true,
+            newest_conversation: |_, _, _, _| None,
         }
     }
 }
@@ -257,6 +264,17 @@ pub struct State {
     /// keys for lookup: a hook that arrives twice is applied once.
     pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
     pub(crate) recent_hook_set: HashSet<(u32, u32, i64)>,
+    /// The sessions restarted under moa (R24), each with when the restart was saved and the
+    /// tab it killed, since moa last took on a hand-started agent for them (an untracked
+    /// binding, or a start that doesn't name them, sent after the restart). Every agent of
+    /// theirs since carries `MOA_SESSION`, so a hook without it is from the agent the restart
+    /// killed, or another one moa didn't start: history only, whenever it arrives; so is an
+    /// end from the killed tab. Kept in memory: a daemon restart forgets it.
+    pub(crate) restarted: BTreeMap<SessionId, (UtcMs, PaneId)>,
+    /// The sessions a look at the tabs found no agent of ([`crate::wake`]), each with the
+    /// server and the panes that look listed. Their events ask no look again until they
+    /// start, or tmux shows a pane that look didn't. Kept in memory.
+    pub(crate) not_found: BTreeMap<SessionId, (Generation, BTreeSet<PaneId>)>,
 }
 
 impl State {
@@ -289,6 +307,8 @@ impl State {
             sleep_at: None,
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),
+            restarted: BTreeMap::new(),
+            not_found: BTreeMap::new(),
         }
     }
 
@@ -466,10 +486,13 @@ impl State {
         self.now = now;
     }
 
-    /// The session's current conversation: the latest first seen.
+    /// The session's current conversation: the latest an agent started on. A conversation's
+    /// `last_seen_at` moves only when an agent starts on it (a start hook, adopt, open), so a
+    /// `/resume` inside Claude back to an older one makes that one current. Ties go to the
+    /// latest first seen, then to the highest id.
     pub(crate) fn current_conversation(&self, id: SessionId) -> Option<&Conversation> {
         self.conversations_of(id)
-            .max_by_key(|c| (c.first_seen_at, c.last_seen_at))
+            .max_by_key(|c| (c.last_seen_at, c.first_seen_at))
     }
 
     /// The conversation row for an agent's conversation id, whichever session owns it.
@@ -598,6 +621,10 @@ impl State {
                 self.conversations.insert(conv_key(r), r.clone());
             }
             Change::PaneBinding(r) => {
+                // A hand-started agent is the session's own again.
+                if !r.tracked {
+                    self.restarted.remove(&r.session_id);
+                }
                 self.pane_bindings.insert(r.session_id, r.clone());
             }
             Change::SpikePane(r) => {

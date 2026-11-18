@@ -153,7 +153,8 @@ str_enum!(AskStatus, ask_status_round_trips, "ask status", {
 str_enum!(ActivityWho, activity_who_round_trips, "activity who",
     { Brain => "brain", Session => "session", You => "you" });
 str_enum!(ConversationReason, conversation_reason_round_trips, "conversation reason", {
-    Start => "start", Clear => "clear", Fork => "fork", Resume => "resume", Import => "import" });
+    Start => "start", Clear => "clear", Fork => "fork", Resume => "resume", Import => "import",
+    Adopt => "adopt" });
 str_enum!(ThreadKind, thread_kind_round_trips, "thread kind", { Daily => "daily", Manual => "manual" });
 
 // ---------- group paths ----------
@@ -214,6 +215,15 @@ pub enum TranscriptCheck {
     Missing,
     UnsafeId,
     NotChecked,
+}
+
+/// Whether a conversation id is one moa can resume, and safe as a file name:
+/// `^[A-Za-z0-9][A-Za-z0-9-]{0,63}$` (the rule `moa_agents::claude::find_transcript` checks
+/// by). A leading `-` would read as a flag after `--resume` (R13 rule 5).
+pub fn safe_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && !id.starts_with('-')
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Claude's project folder name for a cwd: every character that isn't ASCII alphanumeric
@@ -411,6 +421,46 @@ pub struct PaneAgent {
     pub group: Option<String>,
     /// When the agent's process started.
     pub started_at: Option<UtcMs>,
+}
+
+/// What a look at a tab's processes found (`Deps::inspect`). moa takes an agent for gone only
+/// when that is proven: a read that failed proves nothing, and the next look decides.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Inspected {
+    /// An agent runs in the tab.
+    Agent(PaneAgent),
+    /// No agent runs there: the tab's process and its children were all read (or are
+    /// another user's, which no agent of ours is) and none is one, or the tab's process
+    /// doesn't exist.
+    Gone,
+    /// A read that mattered failed (a process mid-exit, a zombie, a refused list).
+    Unknown,
+}
+
+impl Inspected {
+    /// The agent, when one was found.
+    pub fn agent(&self) -> Option<&PaneAgent> {
+        match self {
+            Inspected::Agent(a) => Some(a),
+            Inspected::Gone | Inspected::Unknown => None,
+        }
+    }
+
+    /// The agent, when one was found; `Unknown` counts as none, as a refusal that needs an
+    /// agent reads it.
+    pub fn into_agent(self) -> Option<PaneAgent> {
+        match self {
+            Inspected::Agent(a) => Some(a),
+            Inspected::Gone | Inspected::Unknown => None,
+        }
+    }
+}
+
+/// A read that found the agent, or proved there is none.
+impl From<Option<PaneAgent>> for Inspected {
+    fn from(agent: Option<PaneAgent>) -> Inspected {
+        agent.map_or(Inspected::Gone, Inspected::Agent)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

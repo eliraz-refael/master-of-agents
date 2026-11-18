@@ -278,6 +278,7 @@ fn an_opened_sessions_first_turn_ends_as_done() {
     let envelope = HookEnvelope {
         agent: AgentKind::Claude,
         slot: Some(id.to_string()),
+        pane: None,
         brain: Some("default".into()),
         store_dir: None,
         conversation_id: nth(&b, 2).to_string(),
@@ -322,6 +323,7 @@ fn opened_hook(
         envelope: HookEnvelope {
             agent: AgentKind::Claude,
             slot: Some(id.to_string()),
+            pane: None,
             brain: Some("default".into()),
             store_dir: None,
             conversation_id: conv.into(),
@@ -998,10 +1000,10 @@ fn refuse_writes(b: &TypicalBrain) -> Option<RefuseWrites> {
 }
 
 /// The session is saved, then writes are refused before its pane is bound: the tab runs,
-/// and the reply says moa may not know it. The pane isn't tagged, so reconcile binds it
-/// again by its agent.
+/// and the reply says how it gets bound: `adopt` binds moa's own agent to its session, and
+/// the pane isn't tagged, so reconcile binds it again by its agent at the next connection.
 #[test]
-fn a_refused_bind_commit_says_the_tab_may_be_untracked() {
+fn a_refused_bind_commit_says_how_the_tab_gets_bound() {
     let (b, mut st) = typical();
     let id = the_open(&send(&b, &mut st, 4, open_op(&lantern(&b)))).0;
     let mut snapshot = b.snapshot();
@@ -1027,7 +1029,7 @@ fn a_refused_bind_commit_says_the_tab_may_be_untracked() {
         [(
             ReqId(4),
             Err(OpError(
-                "moa couldn't save which tab it runs in; it may show as untracked until moa restarts"
+                "moa couldn't save which tab it runs in; moactl adopt %7 binds it, or moa's next connection does"
                     .into()
             ))
         )]
