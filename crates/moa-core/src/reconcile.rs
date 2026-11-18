@@ -261,12 +261,14 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
             "reconciling the tabs wasn't saved; moa asks again".to_string(),
         )];
     }
-    // A new binding's tab is tagged with its session, so the next reconcile knows it.
+    // A new binding's tab is tagged with its session, so the next reconcile knows it. An
+    // adopted tab is marked first: a link lost between the two then leaves an adopted tab
+    // with no session, never one that looks tracked.
     for (pane, id, adopted) in to_tag {
-        tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
         if adopted {
             tx.tmux(set_pane_option(pane, "@moa_adopted", "1"));
         }
+        tx.tmux(set_pane_option(pane, "@moa_session", &id.to_string()));
     }
     state.tmux.set_reconciled();
     let mut fx = vec![log(

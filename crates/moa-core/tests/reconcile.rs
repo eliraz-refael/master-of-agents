@@ -367,6 +367,16 @@ fn after_persist(fx: &[Effect], cmd: &Cmd) -> bool {
     matches!((persist, sent), (Some(p), Some(s)) if p < s)
 }
 
+/// Where the untokened command `cmd` is sent among `fx`: its effect, then its place in it.
+fn sent_at(fx: &[Effect], cmd: &Cmd) -> Option<(usize, usize)> {
+    fx.iter().enumerate().find_map(|(i, e)| match e {
+        Effect::Tmux {
+            token: None, cmds, ..
+        } => cmds.iter().position(|c| c == cmd).map(|j| (i, j)),
+        _ => None,
+    })
+}
+
 #[test]
 fn a_new_generation_puts_live_sessions_to_sleep() {
     let mut r = World::new().drained(no_agent);
@@ -751,6 +761,12 @@ fn an_untracked_rebind_is_marked_adopted_and_checked_again() {
     let adopt = Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_adopted", "1"]);
     assert!(after_persist(&fx, &set_tag(9, D)), "{fx:?}");
     assert!(after_persist(&fx, &adopt), "{fx:?}");
+    // Marked adopted before it is tagged: a link lost between the two never leaves a tab
+    // that looks tracked.
+    assert!(
+        sent_at(&fx, &adopt) < sent_at(&fx, &set_tag(9, D)),
+        "{fx:?}"
+    );
 
     // The agent leaves; its shell tab stays, tagged as moa left it. Two later connections to
     // the same server: the first puts D to sleep, and the second doesn't bind the shell.
