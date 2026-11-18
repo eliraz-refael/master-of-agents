@@ -225,6 +225,9 @@ use these names unchanged.
 | `AgentKindImpl` trait, `claude`, `acp` | `moa_agents` | 1 (`claude::find_transcript`), 4, 6 |
 | `Layout`, `LayoutFile` | `moa_core::layout` | 5 |
 | `Action`, view-models | `moa_view` | 5 |
+| `View`, `PanelReg` | `moa_core::panel` | 5a |
+| `Data`, `Line`, `Panel`, `Screen` | `moa_view` | 5a |
+| `Live` | `moa_client` | 5a |
 | `Sandbox` (tmux), `SpikeFixture`, `TypicalBrain`, `TempBrain`, `fake-claude` bin, `stub-acp` bin | `moa_testkit` | 0, 1, 2, 4, 6 |
 
 ## Conventions for every slice
@@ -666,6 +669,13 @@ sandbox, and its states show in `moactl ls`.
 
 Spec §6.13, §6.14; R1 §2.2–2.7.
 
+Slice 5 is three plans: 5a (the panels and their views), 5b (layouts, the cockpit and the agent
+spot) and 5c (the picker, help and new sessions). The split table is in
+`2026-11-18-moa-v1-slice-5a-panels-and-views.md`, under "Slice 5 is three plans".
+
+**Detailed plans:** `2026-11-18-moa-v1-slice-5a-panels-and-views.md` (5a). 5b's and 5c's are
+written just before each starts.
+
 1. **`moa-view`**:
    - View-models for tree, plan, status, today, projects, activity and picture (the 7-line
      strip, with ✦ flashing for 4 s).
@@ -737,6 +747,8 @@ Spec §6.11; R3 §1.
    - The Markdown renderer (spec §6.11 list) and tool lines.
    - Turn grouping, buttons (names on buttons, Tab hopping), and the input line with its
      history and palette.
+   - The button bar is a runtime list moa sets (and the user can override), not a fixed set;
+     the user's call, 2026-11-18.
    - Console commands run in the daemon with no LLM turn.
    - **Real-adapter smoke test** (spec §11.6): replay a recorded real-adapter transcript
      whenever the pinned version changes.
