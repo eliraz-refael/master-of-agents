@@ -9,7 +9,7 @@ use std::process::Output;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use moa_testkit::{TempBrain, Terminal, fake_claude, wait_for};
+use moa_testkit::{TempBrain, Terminal, fake_claude, fake_claude_named_claude, wait_for};
 use serde_json::Value;
 
 pub const MOA: &str = env!("CARGO_BIN_EXE_moa");
@@ -187,4 +187,81 @@ pub fn clients_become(tb: &TempBrain, want: &[&str]) {
         (c == want).then_some(())
     });
     assert!(seen.is_some(), "clients: {:?}", user_clients(tb));
+}
+
+/// A `moactl term` tab in `dir` where the test types fake-claude (named `claude`) on
+/// conversation `conv`, as a user starts an agent by hand: `CLAUDE_CONFIG_DIR` set to
+/// `acct-a`'s store, `--resume conv`, and no moa environment, so it sends no hooks. Its
+/// script is `dir`'s. Returns the tab's `%N` once the agent has written its transcript (R34),
+/// so it is running.
+///
+/// The tab runs the server's `default-shell`, `/bin/sh` here ([`TempBrain::env`]), with
+/// `HOME` the root, so no developer's shell config takes part; the typed line is plain POSIX.
+#[track_caller]
+pub fn fake_shell_agent(tb: &TempBrain, dir: &Path, conv: &str) -> String {
+    let shell = tmux(tb, &["show-options", "-gv", "default-shell"]);
+    assert_eq!(shell, "/bin/sh", "a terminal tab would run another shell");
+    let claude = tb.root().join("bin/claude");
+    if !claude.exists() {
+        fake_claude_named_claude(tb.root());
+    }
+    let o = run_exe(
+        tb,
+        &moactl(tb),
+        &["--json", "term", &dir.display().to_string()],
+        &[("MOA_BRAIN", B)],
+    );
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    let data: Value = serde_json::from_str(&out(&o)).unwrap();
+    let pane = data["pane"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{data}"))
+        .to_string();
+    let store = tb.root().join(".claude-a");
+    let line = format!(
+        "CLAUDE_CONFIG_DIR='{}' '{}' --resume {conv}",
+        store.display(),
+        claude.display()
+    );
+    tmux(tb, &["send-keys", "-t", &pane, "-l", &line]);
+    tmux(tb, &["send-keys", "-t", &pane, "Enter"]);
+    let transcript = store
+        .join("projects")
+        .join(moa_agents::claude::project_slot(&moa_platform::canonical(
+            dir,
+        )))
+        .join(format!("{conv}.jsonl"));
+    let started = wait_for(SHOWS, || transcript.is_file().then_some(()));
+    assert!(
+        started.is_some(),
+        "fake-claude never wrote {}\n{}",
+        transcript.display(),
+        tab_shows(tb, &pane)
+    );
+    pane
+}
+
+/// For a failure message: what tab `pane` shows, every tab with what it runs, and the tail of
+/// the daemon's log.
+pub fn tab_shows(tb: &TempBrain, pane: &str) -> String {
+    let shown = tb
+        .tmux(B, &["capture-pane", "-p", "-t", pane])
+        .unwrap_or_else(|e| format!("({e})"));
+    let tabs = tb
+        .tmux(
+            B,
+            &[
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id} dead=#{pane_dead} #{pane_current_command} \
+                 session=#{@moa_session} term=#{@moa_term}",
+            ],
+        )
+        .unwrap_or_else(|e| format!("({e})"));
+    format!(
+        "tab {pane} shows:\n{}\ntabs:\n{tabs}\n{}",
+        shown.trim_end(),
+        tb.log_tail(B, 60)
+    )
 }
