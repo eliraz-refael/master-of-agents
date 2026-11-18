@@ -7,14 +7,11 @@ use moa_core::model::{SuggestionStatus, Task, TaskStatus};
 use moa_core::time::start_of_next_day;
 
 use crate::ctx::Ctx;
-use crate::data::{Data, SessionRow};
+use crate::data::Data;
 use crate::line::{Item, Line, Span, Tone};
-use crate::text::{self, clean, cut, short_account};
+use crate::text::{DAY, clean, cut};
 use crate::views::plan::NO_PROJECT;
-use crate::views::{ViewUi, animates, label, live, state_glyph};
-
-/// How long a session that isn't working stays on the list after it was last seen.
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+use crate::views::{ViewUi, live, newest_first, session_line};
 
 /// Today's lines, none wider than `width` cells.
 pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
@@ -46,7 +43,7 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
 
     // Live sessions waiting on you, seen in the last day, the newest first. A quiet one is a
     // working turn gone silent, not waiting on you: it stays with the working ones.
-    let since = UtcMs(ctx.now.0.saturating_sub(DAY_MS));
+    let since = UtcMs(ctx.now.0.saturating_sub(DAY));
     let need = newest_first(data, |r| {
         live(r.display_state)
             && !working(r.display_state)
@@ -63,7 +60,7 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
         } else {
             Tone::Text
         };
-        lines.push(session_line(row, ctx, width, tone));
+        lines.push(session_line(row, ctx, width, tone, ""));
     }
 
     let busy = newest_first(data, |r| working(r.display_state));
@@ -77,7 +74,7 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
             } else {
                 Tone::Ok
             };
-            lines.push(session_line(row, ctx, width, tone));
+            lines.push(session_line(row, ctx, width, tone, ""));
         }
     }
 
@@ -120,40 +117,4 @@ fn task_line(data: &Data, t: &Task, width: usize) -> Line {
 /// Mid-turn: working, or working but silent past the quiet limit (the core's `Quiet`).
 fn working(state: DisplayState) -> bool {
     matches!(state, DisplayState::Working | DisplayState::Quiet)
-}
-
-/// The sessions `keep` keeps, the most recently seen first.
-fn newest_first(data: &Data, keep: impl Fn(&SessionRow) -> bool) -> Vec<&SessionRow> {
-    let mut rows: Vec<&SessionRow> = data.sessions.values().filter(|r| keep(r)).collect();
-    rows.sort_by(|a, b| {
-        b.session
-            .last_seen_at
-            .cmp(&a.session.last_seen_at)
-            .then(a.session.id.cmp(&b.session.id))
-    });
-    rows
-}
-
-/// `<glyph> <title or project> [<account>] <age>  <prompt>` (the spike's `session_line`); a
-/// prompt that is a command or a system message (`<…`) isn't words for you, so it is left out.
-fn session_line(row: &SessionRow, ctx: &Ctx, width: usize, tone: Tone) -> Line {
-    let s = &row.session;
-    let account = clean(short_account(s.account.as_deref().unwrap_or_default()));
-    let age = text::ago(s.last_seen_at, ctx.now);
-    let mut text = format!(
-        "{} {} [{account}] {age:>3}",
-        state_glyph(row.display_state, ctx.tick),
-        label(row)
-    );
-    let prompt = s.last_prompt.as_deref().map(clean).unwrap_or_default();
-    if !prompt.trim().is_empty() && !prompt.starts_with('<') {
-        text.push_str("  ");
-        text.push_str(&prompt);
-    }
-    let mut line = Line::plain(cut(&text, width), tone).with_item(Item::Session(s.id));
-    line.animated = animates(row.display_state);
-    line.changes_at = s
-        .last_seen_at
-        .map(|seen| text::next_ago_change(seen, ctx.now));
-    line
 }

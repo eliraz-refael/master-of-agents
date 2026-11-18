@@ -382,13 +382,17 @@ pub fn lantern() -> (Data, Ctx) {
     data.upsert(
         Topic::Projects,
         vec![
-            project(
-                1,
-                "Lantern",
-                Some("/h/private/lantern"),
-                "active",
-                Some(today),
-            ),
+            {
+                let mut lantern = project(
+                    1,
+                    "Lantern",
+                    Some("/h/private/lantern"),
+                    "active",
+                    Some(today),
+                );
+                lantern["summary"] = json!("A small lamp for the terminal: the Rust rewrite");
+                lantern
+            },
             project(2, "Kite", Some("/h/private/kite"), "active", Some(today)),
             project(
                 3,

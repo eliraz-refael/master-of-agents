@@ -479,7 +479,14 @@ impl Panel {
                         Some(s) => Some(vec![Out::Send(Op::SessionFocus { q: s.to_string() })]),
                         None => Some(self.say("no session linked to this task")),
                     },
-                    Item::Project(_) | Item::Suggestion(_) => None,
+                    // Opens or closes the project's rows; the selection stays on it (V8).
+                    Item::Project(id) => {
+                        if !self.ui.expanded.remove(&id) {
+                            self.ui.expanded.insert(id);
+                        }
+                        Some(Vec::new())
+                    }
+                    Item::Suggestion(_) => None,
                 };
             }
             Action::NewSession if self.view == View::Tree => {

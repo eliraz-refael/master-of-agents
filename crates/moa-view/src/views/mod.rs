@@ -9,10 +9,12 @@ use moa_core::panel::View;
 
 use crate::ctx::Ctx;
 use crate::data::{Data, SessionRow};
-use crate::line::Line;
-use crate::text::{SPIN, clean};
+use crate::line::{Item, Line, Tone};
+use crate::text::{self, SPIN, clean, cut, short_account};
 
+pub mod activity;
 pub mod plan;
+pub mod projects;
 pub mod status;
 pub mod today;
 pub mod tree;
@@ -32,6 +34,8 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Plan => plan::build(data, ctx, ui, width),
         View::Status => status::build(data, ctx, ui, width),
         View::Today => today::build(data, ctx, ui, width),
+        View::Projects => projects::build(data, ctx, ui, width),
+        View::Activity => activity::build(data, ctx, ui, width),
         // The other views come with their builders.
         _ => Vec::new(),
     }
@@ -51,6 +55,43 @@ pub fn label(row: &SessionRow) -> String {
         .find(|n| !n.is_empty())
         .unwrap_or(&row.handle);
     clean(name)
+}
+
+/// The sessions `keep` keeps, the most recently seen first.
+pub fn newest_first(data: &Data, keep: impl Fn(&SessionRow) -> bool) -> Vec<&SessionRow> {
+    let mut rows: Vec<&SessionRow> = data.sessions.values().filter(|r| keep(r)).collect();
+    rows.sort_by(|a, b| {
+        b.session
+            .last_seen_at
+            .cmp(&a.session.last_seen_at)
+            .then(a.session.id.cmp(&b.session.id))
+    });
+    rows
+}
+
+/// `<indent><glyph> <title or project> [<account>] <age>  <prompt>` in `tone` (the spike's
+/// `session_line`), as today and an open project list a session; a prompt that is a command
+/// or a system message (`<…`) isn't words for you, so it is left out.
+pub fn session_line(row: &SessionRow, ctx: &Ctx, width: usize, tone: Tone, indent: &str) -> Line {
+    let s = &row.session;
+    let account = clean(short_account(s.account.as_deref().unwrap_or_default()));
+    let age = text::ago(s.last_seen_at, ctx.now);
+    let mut text = format!(
+        "{indent}{} {} [{account}] {age:>3}",
+        state_glyph(row.display_state, ctx.tick),
+        label(row)
+    );
+    let prompt = s.last_prompt.as_deref().map(clean).unwrap_or_default();
+    if !prompt.trim().is_empty() && !prompt.starts_with('<') {
+        text.push_str("  ");
+        text.push_str(&prompt);
+    }
+    let mut line = Line::plain(cut(&text, width), tone).with_item(Item::Session(s.id));
+    line.animated = animates(row.display_state);
+    line.changes_at = s
+        .last_seen_at
+        .map(|seen| text::next_ago_change(seen, ctx.now));
+    line
 }
 
 /// The spinner's frame at `tick`.

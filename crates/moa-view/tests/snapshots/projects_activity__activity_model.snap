@@ -1,0 +1,12 @@
+---
+source: crates/moa-view/tests/projects_activity.rs
+expression: "debug_lines(&activity(&data, &ctx, 80))"
+---
+[dim]09:59 Fix login needs you
+[you]09:56 project Beacon: active → idea
+[dim]09:48 Release notes asks: Ship it today?
+[brain]09:40 suggests #1: Archive 3 ended sessions?
+[you]09:27 task "Proofread chapter 1": active → done
+[dim]09:16 linked session 5e550002 → Lantern
+[you]09:09 added to today: "Fix the login loop"
+[brain]09:02 new task "Write the README" in Lantern

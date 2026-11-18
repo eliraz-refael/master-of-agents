@@ -1,0 +1,14 @@
+---
+source: crates/moa-view/tests/projects_activity.rs
+expression: debug_lines(&lines)
+---
+[text]▸ Kite  active 0d  2 live · 3 tasks  ‹project›
+[text]▾ Lantern  active 0d  2 live · 3 tasks  ‹project›
+[dim]    A small lamp for the terminal: the Rust rewrite
+[text]    ▸ Fix the login loop  [todo]  ‹task›
+[text]    ▸ Write the README  [active]  ‹task›
+[text]    ▸ Wait for review  [waiting] ⧗ design team  ‹task›
+[text]    ! Fix login [acct-a]  1m  ‹session›
+[text]    ⠸ Rust scaffold [acct-a]  1h  split the store  ‹session›
+[text]▸ Harbor  active 3d  2 live  ‹project›
+[brain]▸ Beacon  idea  ‹project›
