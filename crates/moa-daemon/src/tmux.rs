@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -37,9 +37,14 @@ const BACKOFF: [Duration; 6] = [
     Duration::from_millis(3200),
 ];
 
-/// How long each command of a connect's bootstrap, or of a stop's clean-up, may take. A
-/// server that hangs mid-way is treated as gone.
+/// How long each command of a stop's clean-up may take. A server that hangs mid-way is
+/// treated as gone.
 const STEP_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a connect's setup may take, all its steps together. With `CONNECT_WAIT` (6 s)
+/// before it, a connect is up or given up on within 8 s, under the front door's 10 s wait
+/// for an answer. A server that hangs mid-way is treated as gone.
+const SETUP_WAIT: Duration = Duration::from_secs(2);
 
 /// Which server the daemon links to, and how its control client is started.
 #[derive(Clone, Debug)]
@@ -483,7 +488,7 @@ impl Actor {
         }
         let tmpdir = self.env("TMUX_TMPDIR").filter(|v| !v.is_empty());
         let path = self.sh.link.socket.path(
-            tmpdir.as_deref().map(std::path::Path::new),
+            tmpdir.as_deref().map(Path::new),
             moa_platform::current_uid(),
         );
         match tokio::net::UnixStream::connect(&path).await {
@@ -550,7 +555,7 @@ impl Actor {
 
     /// Sources moa's config, stops a stuck client from before, names the client in
     /// `@moa_ctl` and sets the hooks, then tells the core it is up. `tried` is the backoff
-    /// step that connected it, if one did. A step that takes longer than `STEP_WAIT` counts
+    /// step that connected it, if one did. A setup not done within `SETUP_WAIT` counts
     /// as a loss.
     async fn bootstrap(
         &mut self,
@@ -560,16 +565,11 @@ impl Actor {
         tried: Option<usize>,
     ) {
         let conn = self.sh.conns.fetch_add(1, Ordering::SeqCst) + 1;
-        let moa_tmux = self.sh.link.moa_tmux.to_string_lossy().into_owned();
-        let source = Cmd::new("source-file").arg(moa_tmux);
-        let name = Cmd::new("set-option").args(["-g", "@moa_ctl", info.client.0.as_str()]);
-        let linked = async {
-            linking(&client, &source).await?;
-            reap_stale(&client, &info.client).await?;
-            linking(&client, &name).await
-        };
-        // Only a loss matters here; a refusal was logged.
-        if linked.await.is_err() {
+        let by = Instant::now() + SETUP_WAIT;
+        if set_up(&client, &info, &self.sh.link.moa_tmux, by)
+            .await
+            .is_err()
+        {
             client.close().await;
             return self.lost(tried).await;
         }
@@ -674,11 +674,33 @@ async fn run_bounded(client: &ControlClient, cmd: &Cmd) -> Result<Vec<String>, C
         .unwrap_or(Err(CmdError::Gone))
 }
 
-/// One step of a connect's bootstrap: its output, or `None` when tmux refused it, which is
-/// logged and the link goes on. `Err` when the client has gone, or the step took longer
-/// than `STEP_WAIT`.
-async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<Option<Vec<String>>, CmdError> {
-    match run_bounded(client, cmd).await {
+/// A connect's setup: sources moa's config, stops a stuck client from before, and names
+/// the client in `@moa_ctl`. Every step must be done `by` the one deadline; `Err` is a loss.
+async fn set_up(
+    client: &ControlClient,
+    info: &ServerInfo,
+    moa_tmux: &Path,
+    by: Instant,
+) -> Result<(), CmdError> {
+    let source = Cmd::new("source-file").arg(moa_tmux.to_string_lossy().into_owned());
+    let name = Cmd::new("set-option").args(["-g", "@moa_ctl", info.client.0.as_str()]);
+    // A refusal was logged; only a loss stops the setup.
+    linking(client, &source, by).await?;
+    reap_stale(client, &info.client, by).await?;
+    linking(client, &name, by).await?;
+    Ok(())
+}
+
+/// One step of a connect's setup: its output, or `None` when tmux refused it, which is
+/// logged and the link goes on. `Err` when the client has gone, or the step wasn't done
+/// `by` the setup's deadline.
+async fn linking(
+    client: &ControlClient,
+    cmd: &Cmd,
+    by: Instant,
+) -> Result<Option<Vec<String>>, CmdError> {
+    let ran = tokio::time::timeout_at(by, client.run(cmd)).await;
+    match ran.unwrap_or(Err(CmdError::Gone)) {
         Ok(lines) => Ok(Some(lines)),
         Err(CmdError::Gone) => Err(CmdError::Gone),
         Err(e) => {
@@ -698,16 +720,20 @@ async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<Option<Vec<String>
 /// the keys from saying moa isn't running, and `kill-server` waits on it. Its commands are
 /// bootstrap steps (`linking`): a refusal is logged and leaves nothing to reap, and a
 /// timeout or a gone client is `Err`, a loss.
-async fn reap_stale(client: &ControlClient, ours: &ClientName) -> Result<(), CmdError> {
+async fn reap_stale(
+    client: &ControlClient,
+    ours: &ClientName,
+    by: Instant,
+) -> Result<(), CmdError> {
     let show = Cmd::new("show-options").args(["-gqv", "@moa_ctl"]);
-    let shown = linking(client, &show).await?.unwrap_or_default();
+    let shown = linking(client, &show, by).await?.unwrap_or_default();
     let old = shown.first().map(String::as_str).unwrap_or("");
     if old.is_empty() || old == ours.0 {
         return Ok(());
     }
     let format = "#{client_control_mode} #{client_pid} #{client_name}";
     let list = Cmd::new("list-clients").args(["-F", format]);
-    let clients = linking(client, &list).await?.unwrap_or_default();
+    let clients = linking(client, &list, by).await?.unwrap_or_default();
     for line in &clients {
         let mut f = line.splitn(3, ' ');
         let (Some("1"), Some(pid), Some(name)) = (f.next(), f.next(), f.next()) else {

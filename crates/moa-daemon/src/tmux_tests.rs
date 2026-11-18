@@ -458,19 +458,61 @@ async fn a_server_that_answers_late_is_tried_again() {
 async fn a_reap_on_a_hung_server_is_a_loss() {
     let tb = TempBrain::new(None);
     let link = server(&tb);
-    let (client, _events, info) = timeout(
-        PATIENCE,
-        ControlClient::connect(&connect_options(&link, CONNECT_WAIT)),
-    )
-    .await
-    .expect("connected in time")
-    .unwrap_or_else(|e| panic!("connect failed: {e}"));
+    let (client, _events, info) = connected_client(&link).await;
     let resume = stop_server(&tb);
-    let reaped = timeout(PATIENCE, reap_stale(&client, &info.client))
+    let by = Instant::now() + SETUP_WAIT;
+    let reaped = timeout(PATIENCE, reap_stale(&client, &info.client, by))
         .await
         .expect("the reap gave up in time");
     assert_eq!(reaped, Err(CmdError::Gone));
     drop(resume);
+    client.close().await;
+}
+
+/// A connected client on the brain's server, as the link has it before its setup.
+async fn connected_client(link: &TmuxLink) -> (ControlClient, Events, ServerInfo) {
+    timeout(
+        PATIENCE,
+        ControlClient::connect(&connect_options(link, CONNECT_WAIT)),
+    )
+    .await
+    .expect("connected in time")
+    .unwrap_or_else(|e| panic!("connect failed: {e}"))
+}
+
+/// Code review (b1): a server that stalls during the setup is a loss, given up on at the
+/// setup's deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_stalls_during_setup_is_a_loss() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let (client, _events, info) = connected_client(&link).await;
+    let resume = stop_server(&tb);
+    let by = Instant::now() + SETUP_WAIT;
+    let set = timeout(PATIENCE, set_up(&client, &info, &link.moa_tmux, by))
+        .await
+        .expect("the setup gave up in time");
+    assert_eq!(set, Err(CmdError::Gone));
+    drop(resume);
+    client.close().await;
+}
+
+/// Code review (b1): the setup's steps share one deadline, so connect and setup together
+/// stay under the front door's 10 s; no step starts a wait of its own. With the deadline
+/// already passed, a healthy server's setup is cut short, and the client is never named.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_setup_steps_share_one_deadline() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let (client, _events, info) = connected_client(&link).await;
+    let set = timeout(
+        PATIENCE,
+        set_up(&client, &info, &link.moa_tmux, Instant::now()),
+    )
+    .await
+    .expect("the setup ended in time");
+    assert_eq!(set, Err(CmdError::Gone));
+    assert_eq!(ctl_option(&tb), "", "the client was named");
     client.close().await;
 }
 

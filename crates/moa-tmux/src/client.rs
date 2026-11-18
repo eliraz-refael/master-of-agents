@@ -29,9 +29,9 @@ const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
 /// How long `connect` usually waits for the server's first reply. A bound on a hang, not a
 /// latency target: CI runners are slow and cold, and a loaded machine can take seconds to
-/// start tmux. It stays below the front door's 10 s wait for an answer, so the front door
-/// hears that a hung server was given up on before it stops waiting.
-pub const CONNECT_WAIT: Duration = Duration::from_secs(8);
+/// start tmux. With the daemon's 2 s for its setup after it, a connect is up or given up on
+/// within 8 s, under the front door's 10 s wait for an answer.
+pub const CONNECT_WAIT: Duration = Duration::from_secs(6);
 
 pub struct ConnectOptions {
     /// The tmux program (an absolute path).
