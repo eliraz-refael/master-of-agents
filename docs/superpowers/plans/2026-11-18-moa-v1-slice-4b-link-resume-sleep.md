@@ -342,7 +342,8 @@ The roadmap's, 2a's, 2b's, 3's and 4a's Global Constraints apply. Also:
   ends `/bin/sh -s`)
 - Modify: `crates/moa/src/front.rs`:
   - `create_argv` ends `/bin/sh -s`;
-  - both `moa` session forms add `; set-option -t =moa detach-on-destroy on`.
+  - both `moa` session forms add `; set-option -t =moa: detach-on-destroy on` (the colon is
+    needed: tmux 3.4 and 3.8 reject a bare `=moa` session target there).
 - Modify: `crates/moa-daemon/src/run.rs` (`tmux_link` uses `ensure_private_dir(&paths.brain_dir(b))`)
 - Modify: `crates/moa-tmux/src/moa.tmux.tpl` (the pill's `failed` branch: `#[fg=#d57780]✗ `)
 - Tests: `crates/moa-platform/tests/pid.rs`, `crates/moa-tmux/tests/conf.rs`,
@@ -365,7 +366,7 @@ The roadmap's, 2a's, 2b's, 3's and 4a's Global Constraints apply. Also:
     - `child.wait()` then gives exit code 3.
   - `the_argv_starts_utf8_and_never_starts_a_server` and `create_argv_is_t1s_command`: the
     expected texts end `/bin/sh -s`; the `moa` session line ends
-    `; set-option -t =moa detach-on-destroy on`, and so does `the_moa_session_is_attached_or_made_in_home`.
+    `; set-option -t =moa: detach-on-destroy on`, and so does `the_moa_session_is_attached_or_made_in_home`.
   - `a_user_detach_on_destroy_off_never_lands_in_moas_hidden_session` (e2e):
     - the user's `.tmux.conf` sets `set -g detach-on-destroy off`;
     - `moa` opens;
