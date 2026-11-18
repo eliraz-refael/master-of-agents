@@ -496,6 +496,17 @@ fn the_terminal_key_on_a_shell_asks_tmux_where_it_is() {
     }
 }
 
+/// A `#` in a panel's folder reaches tmux doubled, in the folder and the tab's name.
+#[test]
+fn a_hash_in_the_panels_here_is_literal() {
+    let b = TypicalBrain::new();
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    send_on(&b, &mut st, 7, 2, here("/r/work/#x"));
+    let fx = terminal_key(&b, &mut st, "%3");
+    only_tmux(&fx);
+    assert_eq!(the_query(&fx).1, [new_window("⌨ ##x", "/r/work/##x")]);
+}
+
 #[test]
 fn the_terminal_key_avoids_a_missing_folder() {
     let b = TypicalBrain::new();

@@ -110,6 +110,7 @@ impl KeyAction {
             KeyAction::Agent => "the agent spot isn't in this build yet",
             KeyAction::Find | KeyAction::FindOther => "finding a session isn't in this build yet",
             KeyAction::New => "new sessions aren't in this build yet",
+            // Never shown since slice 5a: the core opens the terminal (`term_key`).
             KeyAction::Terminal => "terminals aren't in this build yet",
             KeyAction::Layout(_) => "layouts aren't in this build yet",
             KeyAction::Repair => "repair isn't in this build yet",

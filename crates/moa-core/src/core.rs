@@ -106,7 +106,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         }
         Input::Tmux(t) => {
             // `Ctrl-a $` opens a terminal where it was pressed (V6); the link answers the
-            // other keys with a notice.
+            // other keys with a notice. It is the only key the core takes before the link:
+            // as more keys land, they belong in one dispatch here, not a check apiece.
             if let TmuxIn::Notification(Notification::Message(m)) = &t
                 && let Ok(Mailbox::Key {
                     action: KeyAction::Terminal,

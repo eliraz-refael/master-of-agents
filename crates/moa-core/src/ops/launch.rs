@@ -1160,9 +1160,8 @@ fn told(state: &State, tell: Option<Tell>, result: Result<Done, OpError>) -> Opt
     match tell? {
         Tell::Reply(conn, req) => Some(Effect::Reply { conn, req, result }),
         Tell::Notice(client) => {
-            let Link::Up { conn, .. } = state.tmux().link else {
-                return None;
-            };
+            // The same test `ask` makes, so the key's query and its notice agree.
+            let conn = state.tmux().conn()?;
             let text = match result {
                 Ok(done) => done.text,
                 Err(OpError(text)) => text,

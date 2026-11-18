@@ -676,7 +676,8 @@ impl TmuxState {
             .collect()
     }
 
-    fn conn(&self) -> Option<u64> {
+    /// The link's connection, while it is up.
+    pub(crate) fn conn(&self) -> Option<u64> {
         match self.link {
             Link::Up { conn, .. } => Some(conn),
             _ => None,

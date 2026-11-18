@@ -291,7 +291,7 @@ fn tmux_forwards_motion_and_focus_to_a_pane_that_asked() {
     let seen = || std::fs::read(&seen_at).unwrap_or_default();
     let holds = |want: &[u8]| seen().windows(want.len()).any(|w| w == want);
     let probe_cmd = format!(
-        "printf '\\033[?1003h\\033[?1006h\\033[?1004h'; stty raw -echo; exec dd bs=1 of={}",
+        "printf '\\033[?1003h\\033[?1006h\\033[?1004h'; stty raw -echo; exec dd bs=1 of='{}'",
         seen_at.display()
     );
     let probe = tmux_at(&[
@@ -326,10 +326,26 @@ fn tmux_forwards_motion_and_focus_to_a_pane_that_asked() {
     );
     assert_eq!(field(&probe, "#{pane_active}"), "0");
 
-    // 2. tmux asked the terminal for every mouse event, for the probe that is on screen.
+    // 2. With the other half active, tmux still asks the terminal for every mouse event, for
+    // the probe that is on screen: the last `?1003` it sent is `h`, not the `l` it clears
+    // modes with. The active pane goes back and forth first, ending on the other half; a
+    // notice drawn after that shows the terminal has everything tmux sent for it.
+    for pane in [&probe, &other, &probe, &other] {
+        tmux_at(&["select-pane", "-t", pane]);
+    }
+    tmux_at(&["display-message", "-c", &tty, "moa-probe-synced"]);
     assert!(
-        term.wait_for_text("\x1b[?1003h", SHOWS),
-        "the terminal never got ?1003h: {}",
+        term.wait_for_text("moa-probe-synced", SHOWS),
+        "the notice never showed: {}",
+        term.tail(400)
+    );
+    assert_eq!(field(&probe, "#{pane_active}"), "0");
+    // `tail` escapes ESC as `\u{1b}`.
+    let output = term.tail(usize::MAX);
+    let last = |mode: &str| output.rfind(&format!("\\u{{1b}}[?1003{mode}"));
+    assert!(
+        last("h").is_some_and(|h| last("l").is_none_or(|l| l < h)),
+        "the terminal's last ?1003 isn't h: {}",
         term.tail(400)
     );
 
