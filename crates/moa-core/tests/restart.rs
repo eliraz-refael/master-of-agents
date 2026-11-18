@@ -352,10 +352,11 @@ fn activity_rows(fx: &[Effect]) -> Vec<String> {
 }
 
 /// A hook on conversation C9, `ms` after the typical now: from the agent moa started for S
-/// (`MOA_SESSION` = S) when `ours`, else from S's old agent, started by hand. `pid` is the
-/// hook process's, which also keeps the events apart.
+/// (`MOA_SESSION` = S) in its new tab %7 when `ours`, else from S's old agent, started by
+/// hand in %5. `pid` is the hook process's, which also keeps the events apart.
 fn hook(r: &mut Rig, ours: bool, kind: HookKind, ms: i64, pid: u32) -> Vec<Effect> {
-    hook_in(r, ours, None, kind, ms, pid)
+    let pane = if ours { "%7" } else { "%5" };
+    hook_in(r, ours, Some(pane), kind, ms, pid)
 }
 
 /// [`hook`], from an agent in tab `pane` (`TMUX_PANE`), when it says.
@@ -694,6 +695,29 @@ fn restarted_from_a_moa_started_agent() -> Rig {
     assert!(r.st.binding(s_id()).is_some_and(|b| !b.tracked));
     r.committed(2);
     r
+}
+
+/// R14 holds for a restarted session: once its new agent's tab exits (and loses its
+/// binding), that agent's clean quit, from %7, still ends it.
+#[test]
+fn the_new_agents_clean_quit_after_its_tab_exits_ends_it() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    r.pane_exited("%7");
+    assert!(is_asleep(r.s()), "{:?}", r.s());
+    assert!(r.st.binding(s_id()).is_none());
+    hook(
+        &mut r,
+        true,
+        HookKind::SessionEnded {
+            reason: "prompt_input_exit".into(),
+        },
+        1000,
+        700,
+    );
+    assert_eq!(r.s().lifecycle, Lifecycle::Ended);
+    assert_eq!(r.s().asleep_at, None, "{:?}", r.s());
 }
 
 /// The likely order for an old agent moa started (it carries `MOA_SESSION` = S): the new

@@ -264,13 +264,13 @@ pub struct State {
     /// keys for lookup: a hook that arrives twice is applied once.
     pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
     pub(crate) recent_hook_set: HashSet<(u32, u32, i64)>,
-    /// The sessions restarted under moa (R24), each with when the restart was saved, since
-    /// moa last took on a hand-started agent for them (an untracked binding, or a start that
-    /// doesn't name them, sent after the restart). Every agent of theirs since carries
-    /// `MOA_SESSION`, so a hook without it is from the agent the restart killed, or another
-    /// one moa didn't start: history only, whenever it arrives. Kept in memory: a daemon
-    /// restart forgets it.
-    pub(crate) restarted: BTreeMap<SessionId, UtcMs>,
+    /// The sessions restarted under moa (R24), each with when the restart was saved and the
+    /// tab it killed, since moa last took on a hand-started agent for them (an untracked
+    /// binding, or a start that doesn't name them, sent after the restart). Every agent of
+    /// theirs since carries `MOA_SESSION`, so a hook without it is from the agent the restart
+    /// killed, or another one moa didn't start: history only, whenever it arrives; so is an
+    /// end from the killed tab. Kept in memory: a daemon restart forgets it.
+    pub(crate) restarted: BTreeMap<SessionId, (UtcMs, PaneId)>,
     /// The sessions a look at the tabs found no agent of ([`crate::wake`]), each with the
     /// server and the panes that look listed. Their events ask no look again until they
     /// start, or tmux shows a pane that look didn't. Kept in memory.

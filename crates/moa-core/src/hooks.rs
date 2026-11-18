@@ -195,18 +195,25 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
 fn lifts_fence(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
     matches!(env.kind, HookKind::SessionStarted { .. })
         && slot_of(env) != Some(id)
-        && state.restarted.get(&id).is_some_and(|at| env.at >= *at)
+        && state
+            .restarted
+            .get(&id)
+            .is_some_and(|(at, _)| env.at >= *at)
 }
 
-/// Whether end `env` comes from a tab that isn't session `id`'s since its restart (R24):
-/// the killed agent's, which may carry `MOA_SESSION` (`adopt` bound moa's own agent). An
-/// end that doesn't say its tab goes by the other rules.
+/// Whether end `env` comes from the tab session `id`'s restart killed (R24), which isn't
+/// its tab now: the killed agent's, which may carry `MOA_SESSION` (`adopt` bound moa's own
+/// agent). Any other end, one that doesn't say its tab or one with no binding among them,
+/// goes by the other rules.
 fn from_an_old_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
     let Some(pane) = env.pane.as_deref().and_then(|p| p.parse::<PaneId>().ok()) else {
         return false;
     };
-    state.restarted.contains_key(&id)
-        && matches!(env.kind, HookKind::SessionEnded { .. })
+    matches!(env.kind, HookKind::SessionEnded { .. })
+        && state
+            .restarted
+            .get(&id)
+            .is_some_and(|(_, killed)| *killed == pane)
         && state.binding(id).and_then(|b| b.pane_id.parse().ok()) != Some(pane)
 }
 
