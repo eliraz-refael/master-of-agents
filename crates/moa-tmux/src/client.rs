@@ -63,6 +63,9 @@ pub enum ConnectError {
     TooOld(String),
     #[error("tmux said something unexpected: {0}")]
     Protocol(&'static str),
+    /// The server didn't answer within `wait`, and tmux said nothing on stderr.
+    #[error("tmux didn't answer in time")]
+    TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -301,7 +304,7 @@ impl ControlClient {
                     // If tmux said why on stderr, that is the better error.
                     return Err(match stderr_line(first_line).await {
                         Some(line) => ConnectError::Exited(line),
-                        None => ConnectError::Protocol("tmux didn't answer"),
+                        None => ConnectError::TimedOut,
                     });
                 }
                 Ok(Ok(0)) => return Err(exited_error(first_line).await),

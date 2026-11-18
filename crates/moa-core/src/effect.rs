@@ -97,7 +97,8 @@ pub enum Down {
     NoServer,
     /// The reconnects ran out.
     GaveUp,
-    /// tmux answered the control client with something it couldn't follow, or not at all.
+    /// tmux answered the control client with something it couldn't follow. A server that
+    /// doesn't answer in time isn't this: the link backs off and tries it again.
     CantLink,
     /// The server's tmux is older than moa needs; its version.
     TooOld(String),

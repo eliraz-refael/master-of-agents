@@ -413,7 +413,8 @@ fn connect_options(link: &TmuxLink, wait: Duration) -> ConnectOptions {
     }
 }
 
-/// A server that never answers (here, stopped) is given up on after `wait`, not 20 s.
+/// A server that never answers (here, stopped) is given up on after `wait`, and says so as
+/// a timeout, not as something tmux said.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hung_server_is_given_up_on_within_the_wait() {
     let tb = TempBrain::new(None);
@@ -424,10 +425,30 @@ async fn a_hung_server_is_given_up_on_within_the_wait() {
         .await
         .expect("connect gave up in time");
     match result {
-        Err(ConnectError::Exited(_) | ConnectError::Protocol(_)) => {}
-        Err(e) => panic!("{e}"),
+        Err(ConnectError::TimedOut) => {}
+        Err(e) => panic!("{e:?}"),
         Ok((_, _, info)) => panic!("a stopped server answered: {info:?}"),
     }
+}
+
+/// Code review (b1): a connect that timed out was the final `CantLink`. It is tried again
+/// like a server that turned the link away, so a server that was only slow is linked once
+/// it answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_answers_late_is_tried_again() {
+    let tb = TempBrain::new(None);
+    let link = server(&tb);
+    let resume = stop_server(&tb);
+    let (actor, mut heard, shared) = started_with(link, |sh| {
+        sh.connect_wait = Duration::from_millis(300);
+    });
+    actor.send(connect()).unwrap();
+    let retrying = moa_testkit::wait_for(PATIENCE, || {
+        (!lock(&shared.scheduled).is_empty()).then_some(())
+    });
+    assert!(retrying.is_some(), "no retry: {:?}", shared.doing());
+    drop(resume);
+    conn_of(&heard.next_state().await);
 }
 
 /// Review fix (Task 1): a reap step that times out is a loss, as every bootstrap step's is,

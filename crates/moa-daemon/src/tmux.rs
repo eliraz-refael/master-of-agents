@@ -141,6 +141,10 @@ struct Shared {
     /// Tests only: the backoff's waits, `BACKOFF` unless a test sets its own.
     #[cfg(test)]
     backoff: [Duration; BACKOFF.len()],
+    /// Tests only: how long a connect waits for the server, `CONNECT_WAIT` unless a test
+    /// sets its own.
+    #[cfg(test)]
+    connect_wait: Duration,
     /// Tests only: each backoff step as it is scheduled, with the run that scheduled it.
     #[cfg(test)]
     scheduled: Mutex<Vec<(usize, usize)>>,
@@ -167,6 +171,8 @@ impl Shared {
             runs: Arc::default(),
             #[cfg(test)]
             backoff: BACKOFF,
+            #[cfg(test)]
+            connect_wait: CONNECT_WAIT,
             #[cfg(test)]
             scheduled: Mutex::default(),
             #[cfg(test)]
@@ -504,11 +510,15 @@ impl Actor {
 
     /// One connect. `tried` is the backoff step this is, if it is one.
     async fn attempt(&mut self, tmux: PathBuf, tried: Option<usize>) {
+        #[cfg(not(test))]
+        let wait = CONNECT_WAIT;
+        #[cfg(test)]
+        let wait = self.sh.connect_wait;
         let opts = ConnectOptions {
             tmux,
             socket: self.sh.link.socket.args().to_vec(),
             env: self.sh.link.env.clone(),
-            wait: CONNECT_WAIT,
+            wait,
         };
         match ControlClient::connect(&opts).await {
             Ok((client, events, info)) => self.bootstrap(client, events, info, tried).await,
@@ -524,6 +534,11 @@ impl Actor {
                     "the terminal server turned the link away: {}",
                     first_line(&line)
                 );
+                self.back_off(tried);
+            }
+            // A slow server is tried again, as one that turned the link away is.
+            Err(ConnectError::TimedOut) => {
+                tracing::info!("the terminal server didn't answer the link in time");
                 self.back_off(tried);
             }
             Err(e @ ConnectError::Protocol(_)) => {
