@@ -638,8 +638,7 @@ impl Actor {
         };
         let unset = Cmd::new("set-option").args(["-gu", "@moa_ctl"]);
         for cmd in unhooks().iter().chain([&unset]) {
-            let ran = tokio::time::timeout(STEP_WAIT, up.client.run(cmd)).await;
-            match ran.unwrap_or(Err(CmdError::Gone)) {
+            match run_bounded(&up.client, cmd).await {
                 Ok(_) => {}
                 Err(CmdError::Gone) => break,
                 Err(e) => tracing::warn!(
@@ -653,12 +652,18 @@ impl Actor {
     }
 }
 
+/// Runs `cmd`, taking a reply slower than `STEP_WAIT` as a gone client.
+async fn run_bounded(client: &ControlClient, cmd: &Cmd) -> Result<Vec<String>, CmdError> {
+    tokio::time::timeout(STEP_WAIT, client.run(cmd))
+        .await
+        .unwrap_or(Err(CmdError::Gone))
+}
+
 /// One step of a connect's bootstrap: its output, or `None` when tmux refused it, which is
 /// logged and the link goes on. `Err` when the client has gone, or the step took longer
 /// than `STEP_WAIT`.
 async fn linking(client: &ControlClient, cmd: &Cmd) -> Result<Option<Vec<String>>, CmdError> {
-    let ran = tokio::time::timeout(STEP_WAIT, client.run(cmd)).await;
-    match ran.unwrap_or(Err(CmdError::Gone)) {
+    match run_bounded(client, cmd).await {
         Ok(lines) => Ok(Some(lines)),
         Err(CmdError::Gone) => Err(CmdError::Gone),
         Err(e) => {
