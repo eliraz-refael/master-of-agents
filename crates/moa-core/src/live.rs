@@ -4,13 +4,13 @@
 
 use std::cmp::Reverse;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::UtcMs;
 use crate::model::{Activity, Lifecycle, Location, Session};
 
 /// How a session shows. The declared order is the urgency order (most urgent first).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DisplayState {
     Waiting,
@@ -258,6 +258,15 @@ mod tests {
     use super::*;
     use crate::model::{AgentKind, SessionId};
     use proptest::prelude::*;
+
+    #[test]
+    fn display_state_words_round_trip() {
+        for d in DisplayState::ALL {
+            let v = serde_json::to_value(d).unwrap();
+            assert_eq!(v, serde_json::Value::String(d.word().into()));
+            assert_eq!(serde_json::from_value::<DisplayState>(v).unwrap(), *d);
+        }
+    }
 
     #[test]
     fn cut_middle_keeps_head_and_tail_by_characters() {

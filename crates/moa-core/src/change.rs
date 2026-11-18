@@ -54,7 +54,10 @@ impl Change {
     pub fn topics(&self) -> &'static [Topic] {
         match self {
             Change::Session(_) => &[Topic::Sessions, Topic::Status],
-            Change::Conversation(_) => &[Topic::Sessions],
+            // A session row names its conversation and says whether its binding is adopted.
+            Change::Conversation(_) | Change::PaneBinding(_) | Change::DeletePaneBinding(_) => {
+                &[Topic::Sessions]
+            }
             Change::Project(_) => &[Topic::Projects, Topic::Sessions],
             Change::Activity(_) => &[Topic::Activity],
             Change::Task(_) => &[Topic::Tasks],
@@ -63,13 +66,11 @@ impl Change {
             Change::Group(_) | Change::DeleteGroup(_) => &[Topic::Groups],
             Change::Event(_)
             | Change::Note(_)
-            | Change::PaneBinding(_)
             | Change::SpikePane(_)
             | Change::Thread(_)
             | Change::Feed(_)
             | Change::Nag(_)
             | Change::Meta { .. }
-            | Change::DeletePaneBinding(_)
             | Change::DeleteSpikePane(_) => &[],
         }
     }

@@ -10,6 +10,7 @@ use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
+use crate::panel;
 use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
 use crate::sleep;
@@ -228,10 +229,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         // The check at the end of every input does the work.
         Input::Timer(TimerKey::Sleep) => Vec::new(),
         // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
-        // gets its tags (R26).
+        // gets its tags (R26). A panel on it goes, and `panels` says so.
         Input::ClientGone(conn) => {
             state.tmux.client_gone(conn);
-            Vec::new()
+            panel::gone(state, conn).into_iter().collect()
         }
         // Reconcile waits for it (R2): the connection's panes are looked at now, or, when
         // the link found no server, every session that ran in one goes to sleep.
@@ -265,6 +266,19 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::TmuxEnsure { tmux },
             ..
         } => state.tmux.ensure(conn, req, tmux),
+        // The panel registry is by connection, in memory: nothing is saved.
+        Input::Client {
+            conn,
+            req,
+            op: Op::UiPanel { pane, view },
+            ..
+        } => panel::register(state, conn, req, pane.as_deref(), view),
+        Input::Client {
+            conn,
+            req,
+            op: Op::UiHere { folder },
+            ..
+        } => panel::here(state, conn, req, folder),
         // Answered once tmux says how the new tab turned out. Every tab opens detached
         // (`-d`); unless `bg`, it is brought to the screen once it is bound.
         Input::Client {

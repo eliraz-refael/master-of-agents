@@ -15,7 +15,8 @@ use crate::change::Change;
 use crate::config::{AccountName, BrainName, Config, caller_store};
 use crate::effect::RefuseWrites;
 use crate::model::*;
-use crate::op::Op;
+use crate::op::{ConnId, Op};
+use crate::panel::{PanelReg, View};
 use crate::publish::{ACTIVITY_SHOWN, Model};
 use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Link, TmuxState};
@@ -275,6 +276,12 @@ pub struct State {
     /// server and the panes that look listed. Their events ask no look again until they
     /// start, or tmux shows a pane that look didn't. Kept in memory.
     pub(crate) not_found: BTreeMap<SessionId, (Generation, BTreeSet<PaneId>)>,
+    /// The connected panels, by connection (`ui.panel`). Kept in memory: a connection that
+    /// closes drops its panel.
+    pub(crate) panels: BTreeMap<ConnId, PanelReg>,
+    /// The view each tab last showed in a panel while this daemon ran: a panel that comes
+    /// back to a tab without naming a view gets it again.
+    pub(crate) pane_views: BTreeMap<PaneId, View>,
 }
 
 impl State {
@@ -309,6 +316,8 @@ impl State {
             recent_hook_set: HashSet::new(),
             restarted: BTreeMap::new(),
             not_found: BTreeMap::new(),
+            panels: BTreeMap::new(),
+            pane_views: BTreeMap::new(),
         }
     }
 
@@ -395,6 +404,14 @@ impl State {
     /// The session's pane binding, of whichever server.
     pub fn binding(&self, id: SessionId) -> Option<&PaneBinding> {
         self.pane_bindings.get(&id)
+    }
+
+    /// The folder the selection of the panel in tab `pane` is in (`ui.here`).
+    pub fn here_of(&self, pane: PaneId) -> Option<&str> {
+        self.panels
+            .values()
+            .find(|p| p.pane == Some(pane))
+            .and_then(|p| p.here.as_deref())
     }
 
     /// The panes imported from the spike, by session: verified or cleared by reconcile.

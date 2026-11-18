@@ -13,6 +13,7 @@ pub mod model;
 pub mod names;
 pub mod op;
 mod ops;
+pub mod panel;
 mod peers;
 pub mod publish;
 mod reconcile;
