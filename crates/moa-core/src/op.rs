@@ -170,15 +170,23 @@ pub enum Op {
         tmux: Option<PathBuf>,
     },
     /// A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`
-    /// it shows. Without a view it gets the one this pane last had, else the picture.
-    /// Answers `{key, view}`.
+    /// it shows, and whether moa `placed` it (it runs with `MOA_NO_AUTOSTART`). The view moa
+    /// tagged the tab with wins over the one asked for; without either it gets the one this
+    /// pane last had, else the picture. Answers `{key, view, managed}`: `managed` when the
+    /// view is moa's.
     #[serde(rename = "ui.panel")]
     UiPanel {
         #[serde(default)]
         pane: Option<String>,
         #[serde(default)]
         view: Option<View>,
+        #[serde(default)]
+        placed: bool,
     },
+    /// Gives the panel in tab `pane` (`%N`) another view: its tag, its frame and its
+    /// `panels` row. Answers `{pane, view}`.
+    #[serde(rename = "ui.select_view")]
+    UiSelectView { pane: String, view: View },
     /// The folder a panel's selection is in, for a terminal opened "here".
     #[serde(rename = "ui.here")]
     UiHere {
@@ -350,6 +358,7 @@ impl Op {
         "tmux.ensure",
         "ui.panel",
         "ui.here",
+        "ui.select_view",
         "layout.list",
         "layout.show",
         "layout.set",
@@ -393,6 +402,7 @@ impl Op {
             | Op::TermOpen { .. }
             | Op::UiPanel { .. }
             | Op::UiHere { .. }
+            | Op::UiSelectView { .. }
             | Op::LayoutList(_)
             | Op::LayoutShow { .. }
             | Op::Goto { .. }
@@ -433,6 +443,7 @@ impl Op {
             Op::TmuxEnsure { .. } => "tmux.ensure",
             Op::UiPanel { .. } => "ui.panel",
             Op::UiHere { .. } => "ui.here",
+            Op::UiSelectView { .. } => "ui.select_view",
             Op::LayoutList(_) => "layout.list",
             Op::LayoutShow { .. } => "layout.show",
             Op::LayoutSet { .. } => "layout.set",

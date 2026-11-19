@@ -75,6 +75,7 @@ pub(crate) fn run(
         | Op::TermOpen { .. }
         | Op::UiPanel { .. }
         | Op::UiHere { .. }
+        | Op::UiSelectView { .. }
         | Op::LayoutList(_)
         | Op::LayoutShow { .. }
         | Op::LayoutSet { .. }

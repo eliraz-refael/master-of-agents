@@ -13,6 +13,7 @@ use std::collections::{BTreeSet, VecDeque};
 use serde_json::json;
 
 use super::assign::view_of;
+use super::build::panel_tags;
 use super::scene::{AGENT, Role, Scene};
 use super::spawn::{respawn, respawn_tail, spawn, spawned};
 use super::{Plan, plan, vacate};
@@ -65,6 +66,13 @@ pub(crate) enum CockpitOp {
     /// elsewhere, a plain kill; gone, nothing. It survives a lost link and a reload.
     #[allow(dead_code)] // Queued from Task 10 (`kill_tab` while a cockpit exists).
     Vacate { pane: PaneId },
+    /// `ui.select_view`: the panel in `pane` shows `view`, its tag and frame set (L8, L10).
+    /// Queued, so it never races a build's retagging of the same pane.
+    SelectView {
+        pane: PaneId,
+        view: View,
+        tell: Option<Tell>,
+    },
 }
 
 /// Which pane a build selects once it is done (L6 step 7).
@@ -151,7 +159,9 @@ enum Next {
 /// Whom `op` answers.
 fn tell_of(op: &CockpitOp) -> Option<Tell> {
     match op {
-        CockpitOp::Build { tell, .. } | CockpitOp::Repair { tell } => tell.clone(),
+        CockpitOp::Build { tell, .. }
+        | CockpitOp::Repair { tell }
+        | CockpitOp::SelectView { tell, .. } => tell.clone(),
         CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => None,
     }
 }
@@ -159,7 +169,9 @@ fn tell_of(op: &CockpitOp) -> Option<Tell> {
 /// `text` as `op`'s refusal: said to whoever asked, or logged for an operation nobody did.
 fn refused(op: &CockpitOp, text: String) -> Said {
     match op {
-        CockpitOp::Build { .. } | CockpitOp::Repair { .. } => Said::Reply(Err(OpError(text))),
+        CockpitOp::Build { .. } | CockpitOp::Repair { .. } | CockpitOp::SelectView { .. } => {
+            Said::Reply(Err(OpError(text)))
+        }
         CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => Said::Logged(text),
     }
 }
@@ -175,15 +187,15 @@ fn first_line(e: &str) -> &str {
 /// A chain's error in plain words (L18).
 fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
     let why = first_line(e);
-    let text = if why.contains("no space for") || why.contains("pane too small") {
-        format!("the {layout} layout doesn't fit this window; make the terminal bigger")
-    } else {
-        match op {
-            CockpitOp::Vacate { pane } => {
-                format!("the agent in {pane} couldn't be taken down: {why}")
-            }
-            _ => format!("layout {layout} couldn't be applied: {why}; Ctrl-a r tries again"),
+    let text = match op {
+        CockpitOp::Vacate { pane } => format!("the agent in {pane} couldn't be taken down: {why}"),
+        CockpitOp::SelectView { pane, view, .. } => {
+            format!("the panel in {pane} couldn't show {view}: {why}")
         }
+        _ if why.contains("no space for") || why.contains("pane too small") => {
+            format!("the {layout} layout doesn't fit this window; make the terminal bigger")
+        }
+        _ => format!("layout {layout} couldn't be applied: {why}; Ctrl-a r tries again"),
     };
     refused(op, text)
 }
@@ -297,6 +309,32 @@ pub(crate) fn goto(state: &mut State, conn: ConnId, req: ReqId, panel: Leaf) -> 
     )
 }
 
+/// `ui.select_view`: the panel in `pane` retagged to show `view`, then its row and the
+/// reply (L8).
+pub(crate) fn select_view(
+    state: &mut State,
+    conn: ConnId,
+    req: ReqId,
+    pane: &str,
+    view: View,
+) -> Vec<Effect> {
+    let pane = match crate::panel::pane_arg(pane) {
+        Ok(pane) => pane,
+        Err(e) => {
+            let result = Err(e);
+            return vec![Effect::Reply { conn, req, result }];
+        }
+    };
+    queue(
+        state,
+        CockpitOp::SelectView {
+            pane,
+            view,
+            tell: Some(Tell::Reply(conn, req)),
+        },
+    )
+}
+
 /// Starts the operations waiting, while none is in flight.
 fn pump(state: &mut State) -> Vec<Effect> {
     let mut fx = Vec::new();
@@ -318,7 +356,7 @@ fn pump(state: &mut State) -> Vec<Effect> {
 /// for an operation that builds (L2).
 fn start(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     let mut fx = Vec::new();
-    if !matches!(op, CockpitOp::Vacate { .. }) {
+    if !matches!(op, CockpitOp::Vacate { .. } | CockpitOp::SelectView { .. }) {
         state.layouts = crate::ops::layout::read(state);
         fx.extend(
             state
@@ -386,8 +424,8 @@ fn awaits(state: &State, seq: u64, step: fn(&Step) -> bool) -> bool {
     matches!(state.cockpit.in_flight, Some((s, _)) if s == seq) && step(&state.cockpit.step)
 }
 
-/// An operation's listing came back: the topology is rebuilt from it, then the operation
-/// plans in it and does its next step.
+/// An operation's listing came back: the topology is rebuilt from it, the panels' views are
+/// read again from it (L8), then the operation plans in it and does its next step.
 pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> Vec<Effect> {
     if !awaits(state, seq, |s| matches!(s, Step::Listing)) {
         return Vec::new();
@@ -408,12 +446,14 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         return fx;
     }
     forget_running(state);
+    let mut fx = crate::panel::listed(state);
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     let Some((_, op)) = state.cockpit.in_flight.clone() else {
-        return Vec::new();
+        return fx;
     };
     let next = decide(state, &op, &scene);
-    act(state, seq, next)
+    fx.extend(act(state, seq, next));
+    fx
 }
 
 /// L9: what the lazy build looks for, a user's terminal and a cockpit (in session `moa`)
@@ -525,6 +565,27 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             } else {
                 Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), Vec::new(), 0))
             }
+        }
+        CockpitOp::SelectView { pane, view, .. } => {
+            // Only a pane moa tagged as a panel; never an agent's or a stranger's.
+            if scene.pane(*pane).and_then(|at| at.panel_view()).is_none() {
+                return Next::Done(refused(op, format!("{pane} isn't a moa panel")));
+            }
+            let done = Done {
+                text: String::new(),
+                data: json!({ "pane": pane.to_string(), "view": view }),
+            };
+            Next::Chain(
+                panel_tags(*pane, *view),
+                Then {
+                    tags: vec![(*pane, Some(view.word()))],
+                    untagged: Vec::new(),
+                    views: Some(vec![(*pane, *view)]),
+                    starts: 0,
+                    layout: String::new(),
+                    ok: Said::Reply(Ok(done)),
+                },
+            )
         }
     }
 }
@@ -735,13 +796,15 @@ pub(crate) fn chain_answered(
     fx
 }
 
-/// A build placed its panels: those given another view show it in `panels` (L5 step 3).
+/// A chain tagged these panels with another view (a build, L5 step 3; `ui.select_view`):
+/// their rows show it, as moa's (L8).
 fn views_given(state: &mut State, views: &[(PaneId, View)]) -> Option<Effect> {
     for (pane, view) in views {
         state.pane_views.insert(*pane, *view);
         for reg in state.panels.values_mut() {
             if reg.pane == Some(*pane) {
                 reg.view = *view;
+                reg.managed = true;
             }
         }
     }
@@ -867,7 +930,9 @@ pub(crate) fn client_gone(state: &mut State, conn: ConnId) {
         .map(|(_, op)| op)
         .chain(run.waiting.iter_mut());
     for op in ops {
-        if let CockpitOp::Build { tell, .. } | CockpitOp::Repair { tell } = op
+        if let CockpitOp::Build { tell, .. }
+        | CockpitOp::Repair { tell }
+        | CockpitOp::SelectView { tell, .. } = op
             && matches!(tell, Some(Tell::Reply(c, _)) if *c == conn)
         {
             *tell = None;

@@ -12,12 +12,14 @@ use crossterm::event::{
 };
 use moa_core::op::Op;
 use moa_core::panel::View;
+use moa_core::publish::PanelRow;
 use moa_core::tmux::ids::PaneId;
 use moa_platform::TmuxSocket;
 use moa_tui::run::{
     DownKey, INIT, RESTORE, claim_pane, cursor, down_key, down_line, first_ops, key_of, mouse_of,
-    reconnect_delays,
+    reconnect_delays, reconnect_ops,
 };
+use moa_view::data::Data;
 use moa_view::fixture::lantern;
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
@@ -107,11 +109,12 @@ fn a_pane_from_another_server_is_not_claimed() {
 #[test]
 fn first_ops_register_and_restore_here() {
     assert_eq!(
-        first_ops(Some(pane("%3")), Some(View::Plan), Some("/x".into())),
+        first_ops(Some(pane("%3")), Some(View::Plan), Some("/x".into()), true),
         vec![
             Op::UiPanel {
                 pane: Some("%3".into()),
                 view: Some(View::Plan),
+                placed: true,
             },
             Op::UiHere {
                 folder: Some("/x".into()),
@@ -119,14 +122,35 @@ fn first_ops_register_and_restore_here() {
         ]
     );
     assert_eq!(
-        first_ops(None, None, None),
+        first_ops(None, None, None, false),
         vec![
             Op::UiPanel {
                 pane: None,
                 view: None,
+                placed: false,
             },
             Op::UiHere { folder: None },
         ]
+    );
+}
+
+/// L8: a reconnect asks for the view moa last gave the panel, not the one it started with.
+#[test]
+fn a_reconnect_sends_the_view_it_last_followed() {
+    let mut panel = Panel::new(View::Tree);
+    let mut data = Data::default();
+    data.panels.insert(
+        "c7".into(),
+        PanelRow {
+            pane: Some("%3".into()),
+            view: View::Status,
+            managed: true,
+        },
+    );
+    assert!(panel.follow(&data, "c7"));
+    assert_eq!(
+        reconnect_ops(Some(pane("%3")), &panel, &data, true),
+        first_ops(Some(pane("%3")), Some(View::Status), None, true)
     );
 }
 

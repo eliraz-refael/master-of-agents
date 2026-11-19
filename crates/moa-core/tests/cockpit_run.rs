@@ -1041,6 +1041,7 @@ fn panels_publish_only_when_a_view_changed() {
         Op::UiPanel {
             pane: Some("%2".into()),
             view: Some(View::Tree),
+            placed: false,
         },
     );
     // `focus` keeps the tree a tree: only the commit's model.

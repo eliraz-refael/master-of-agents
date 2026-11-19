@@ -874,7 +874,7 @@ expression: all
             "type": "object"
           },
           {
-            "description": "A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`\nit shows. Without a view it gets the one this pane last had, else the picture.\nAnswers `{key, view}`.",
+            "description": "A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`\nit shows, and whether moa `placed` it (it runs with `MOA_NO_AUTOSTART`). The view moa\ntagged the tab with wins over the one asked for; without either it gets the one this\npane last had, else the picture. Answers `{key, view, managed}`: `managed` when the\nview is moa's.",
             "properties": {
               "method": {
                 "const": "ui.panel",
@@ -889,6 +889,10 @@ expression: all
                       "null"
                     ]
                   },
+                  "placed": {
+                    "default": false,
+                    "type": "boolean"
+                  },
                   "view": {
                     "anyOf": [
                       {
@@ -901,6 +905,35 @@ expression: all
                     "default": null
                   }
                 },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Gives the panel in tab `pane` (`%N`) another view: its tag, its frame and its\n`panels` row. Answers `{pane, view}`.",
+            "properties": {
+              "method": {
+                "const": "ui.select_view",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "pane": {
+                    "type": "string"
+                  },
+                  "view": {
+                    "$ref": "#/$defs/View"
+                  }
+                },
+                "required": [
+                  "pane",
+                  "view"
+                ],
                 "type": "object"
               }
             },

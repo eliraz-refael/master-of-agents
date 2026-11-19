@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use moa_core::UtcMs;
 use moa_core::op::{Done, Op};
 use moa_core::panel::View;
-use moa_core::publish::Topic;
+use moa_core::publish::{PanelRow, Topic};
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
 use moa_view::fixture::{lantern, session};
@@ -892,4 +892,42 @@ fn renaming_a_group_to_its_own_name_with_a_slash_is_no_rename() {
             new: "Private/Beacon".to_string(),
         })
     );
+}
+
+/// `data` with one `panels` row, `key`'s.
+fn panels_row(key: &str, view: View, managed: bool) -> Data {
+    let mut data = Data::default();
+    data.panels.insert(
+        key.to_string(),
+        PanelRow {
+            pane: Some("%3".into()),
+            view,
+            managed,
+        },
+    );
+    data
+}
+
+/// L8: a panel shows what its own row says, and whether moa manages it.
+#[test]
+fn a_panel_follows_its_row() {
+    let mut p = Panel::new(View::Tree);
+    assert!(!p.managed());
+    // Another panel's row changes nothing.
+    assert!(!p.follow(&panels_row("c8", View::Plan, true), "c7"));
+    assert_eq!(p.view(), View::Tree);
+    assert!(!p.managed());
+
+    let data = panels_row("c7", View::Plan, true);
+    assert!(p.follow(&data, "c7"));
+    assert_eq!(p.view(), View::Plan);
+    assert!(p.managed());
+    // The same row again changes nothing.
+    assert!(!p.follow(&data, "c7"));
+    assert!(p.managed());
+
+    // moa lets go of it: the view stays, and the panel is its own.
+    assert!(!p.follow(&panels_row("c7", View::Plan, false), "c7"));
+    assert_eq!(p.view(), View::Plan);
+    assert!(!p.managed());
 }

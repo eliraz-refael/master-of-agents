@@ -7,7 +7,7 @@
 mod assign;
 pub(crate) mod build;
 pub(crate) mod run;
-mod scene;
+pub(crate) mod scene;
 pub(crate) mod spawn;
 
 use std::collections::BTreeSet;

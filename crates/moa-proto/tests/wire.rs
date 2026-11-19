@@ -89,6 +89,7 @@ fn ui_panel_decodes() {
             call: Call::Op(Op::UiPanel {
                 pane: Some("%3".into()),
                 view: Some(moa_core::panel::View::Tree),
+                placed: false,
             })
         }
     );

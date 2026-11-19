@@ -1,19 +1,25 @@
 //! Panels: the clients that draw a view in a tab's pane. Each tells the core which pane it
 //! is and which view it shows (`ui.panel`), and which folder its selection is in
-//! (`ui.here`). The registry lives in the core's memory, by connection.
+//! (`ui.here`). The registry lives in the core's memory, by connection. A pane moa tagged
+//! with `@moa_view` shows that view, whatever the panel asked for (L8).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::effect::{Effect, Publish};
+use crate::cockpit::scene::HIDDEN;
+use crate::cockpit::spawn_tags;
+use crate::effect::{Effect, Publish, TmuxToken};
 use crate::model::UnknownValue;
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::publish::Topic;
 use crate::state::State;
 use crate::tmux::ids::PaneId;
+use crate::tmux::link::TmuxState;
+use crate::tmux::topology::Topology;
 
 /// What a panel shows.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -116,13 +122,18 @@ impl fmt::Display for View {
     }
 }
 
-/// One panel's registration: its pane (none outside moa's terminal), its view, and the
-/// folder its selection is in.
+/// One panel's registration: its pane (none outside moa's terminal), its view, the folder
+/// its selection is in, whether its view is moa's, and whether moa placed it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PanelReg {
     pub pane: Option<PaneId>,
     pub view: View,
     pub here: Option<String>,
+    /// The pane carries moa's `@moa_view`, which the view follows (L8).
+    pub managed: bool,
+    /// moa started this panel (it runs with `MOA_NO_AUTOSTART`): left untagged in `_moa`, it
+    /// gets the tags its spawn would have given it (L18).
+    pub placed: bool,
 }
 
 /// What `ui.panel` says to a tab id that isn't one (`%<digits>`).
@@ -136,39 +147,127 @@ pub(crate) fn key_of(conn: ConnId) -> String {
     format!("c{}", conn.0)
 }
 
-/// `ui.panel`: registers `conn` as the panel in `pane` showing `view`, else the view this
-/// pane last had, else the picture. A panel another connection held in that pane is dropped.
+/// A tab id as `ui.panel` and `ui.select_view` take it.
+pub(crate) fn pane_arg(pane: &str) -> Result<PaneId, OpError> {
+    pane.parse().map_err(|_| OpError(BAD_PANE.into()))
+}
+
+/// `ui.panel`: registers `conn` as the panel in `pane`. Its view is the one moa tagged the
+/// pane with, else `view`, else the view this pane last had, else the picture (L8). A panel
+/// another connection held in that pane is dropped. A panel moa placed that was never tagged
+/// is tagged now (L18).
 pub(crate) fn register(
     state: &mut State,
     conn: ConnId,
     req: ReqId,
     pane: Option<&str>,
     view: Option<View>,
+    placed: bool,
 ) -> Vec<Effect> {
-    let pane = match pane.map(str::parse::<PaneId>).transpose() {
+    let pane = match pane.map(pane_arg).transpose() {
         Ok(p) => p,
-        Err(_) => return vec![reply(conn, req, Err(OpError(BAD_PANE.into())))],
+        Err(e) => return vec![reply(conn, req, Err(e))],
     };
     let view = view
         .or_else(|| pane.and_then(|p| state.pane_views.get(&p).copied()))
         .unwrap_or(View::Picture);
     if let Some(p) = pane {
         state.panels.retain(|c, r| *c == conn || r.pane != Some(p));
-        state.pane_views.insert(p, view);
     }
     // The same panel saying again which it is keeps its folder.
     let here = state.panels.remove(&conn).and_then(|r| r.here);
-    state.panels.insert(conn, PanelReg { pane, view, here });
-    let mut fx: Vec<Effect> = publish_panels(state).into_iter().collect();
+    let mut reg = PanelReg {
+        pane,
+        view,
+        here,
+        managed: false,
+        placed,
+    };
+    let mut fx: Vec<Effect> = heal(&mut state.tmux, [&reg]).into_iter().collect();
+    resolve(&state.tmux.topology, &mut state.pane_views, &mut reg);
+    let (view, managed) = (reg.view, reg.managed);
+    state.panels.insert(conn, reg);
+    fx.extend(publish_panels(state));
     fx.push(reply(
         conn,
         req,
         Ok(Done {
             text: String::new(),
-            data: json!({"key": key_of(conn), "view": view}),
+            data: json!({"key": key_of(conn), "view": view, "managed": managed}),
         }),
     ));
     fx
+}
+
+/// `reg`'s view and `managed` from its pane's `@moa_view`, as the topology has it: a tag
+/// naming a view wins (L8). An untagged pane keeps the view it has, as its own. The pane
+/// remembers the view either way.
+fn resolve(topology: &Topology, pane_views: &mut BTreeMap<PaneId, View>, reg: &mut PanelReg) {
+    let Some(pane) = reg.pane else {
+        reg.managed = false;
+        return;
+    };
+    let tagged = topology.view_of(pane).and_then(|v| v.parse().ok());
+    reg.managed = tagged.is_some();
+    reg.view = tagged.unwrap_or(reg.view);
+    pane_views.insert(pane, reg.view);
+}
+
+/// L8: after a listing, each panel's view and `managed` read again from the tags, and
+/// `panels` published when one changed: a panel that registered before moa read its tag (a
+/// restart, a spawn just answered) is corrected.
+pub(crate) fn resolve_panels(state: &mut State) -> Option<Effect> {
+    let topology = &state.tmux.topology;
+    for reg in state.panels.values_mut() {
+        resolve(topology, &mut state.pane_views, reg);
+    }
+    publish_panels(state)
+}
+
+/// L18: the panels moa placed whose tab sits untagged in `_moa` (their spawn's answer was
+/// lost, so nothing tagged them) get the tags a spawn gives: their view, its label, and a
+/// tab that stays when the panel stops. Sent at once, and recorded as a spawn's are. A panel
+/// the user started is never tagged this way.
+fn heal<'a>(tmux: &mut TmuxState, regs: impl IntoIterator<Item = &'a PanelReg>) -> Option<Effect> {
+    let conn = tmux.conn()?;
+    let topology = &tmux.topology;
+    let orphans: Vec<(PaneId, View)> = regs
+        .into_iter()
+        .filter(|r| r.placed)
+        .filter_map(|r| Some((r.pane?, r.view)))
+        .filter(|(p, _)| {
+            topology.view_of(*p).is_none() && topology.session_name_of(*p) == Some(HIDDEN)
+        })
+        .collect();
+    if orphans.is_empty() {
+        return None;
+    }
+    let mut cmds = Vec::new();
+    for (pane, view) in orphans {
+        cmds.extend(spawn_tags(pane, view));
+        tmux.view_sent(pane, view.word());
+    }
+    Some(Effect::Tmux {
+        conn,
+        cmds,
+        token: Some(TmuxToken::Tags),
+    })
+}
+
+/// What every listing does for the panels: [`heal`], then [`resolve_panels`].
+pub(crate) fn listed(state: &mut State) -> Vec<Effect> {
+    let healed = heal(&mut state.tmux, state.panels.values());
+    healed.into_iter().chain(resolve_panels(state)).collect()
+}
+
+/// Another tmux server: its pane ids name other tabs, so no panel has its tab any more
+/// (L8), as the views the old tabs had go.
+pub(crate) fn server_changed(state: &mut State) -> Option<Effect> {
+    for reg in state.panels.values_mut() {
+        reg.pane = None;
+        reg.managed = false;
+    }
+    publish_panels(state)
 }
 
 /// `ui.here`: the folder the panel's selection is in. Not published.
