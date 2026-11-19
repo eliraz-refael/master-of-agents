@@ -15,6 +15,7 @@ set -s  terminal-features[24] "foot*:RGB"
 set -s  escape-time 10          # near-zero Esc delay for TUIs (0 can leak DA replies on attach)
 set -s  focus-events on         # agents get focus in/out
 set -s  extended-keys on        # Shift+Enter etc. reach the agents
+{{MOUSE}}
 
 # --- Windows and history -------------------------------------------------------
 set -g  base-index 1            # agent windows start at 1

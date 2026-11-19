@@ -115,7 +115,7 @@ fn server(tb: &TempBrain) -> TmuxLink {
     let paths = tb.paths();
     std::fs::create_dir_all(paths.brain_dir(B)).unwrap();
     let moa_tmux = paths.moa_tmux(B);
-    write_if_changed(&moa_tmux, &conf::moa_tmux(B)).unwrap();
+    write_if_changed(&moa_tmux, &conf::moa_tmux(B, true)).unwrap();
     write_if_changed(&paths.tmux_conf(B), &conf::tmux_conf(&moa_tmux)).unwrap();
     let conf = paths.tmux_conf(B).to_string_lossy().into_owned();
     let home = tb.root().to_string_lossy().into_owned();

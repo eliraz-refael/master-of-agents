@@ -8,14 +8,20 @@ publish = false
 
 [dependencies]
 moa-view = { path = "../moa-view" }
+moa-client = { path = "../moa-client" }
 moa-core = { path = "../moa-core" }
+moa-platform = { path = "../moa-platform" }
+moa-proto = { path = "../moa-proto" }
+futures-util.workspace = true
 jiff.workspace = true
 unicode-segmentation.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [dev-dependencies]
 insta.workspace = true
+tempfile.workspace = true
 # The tests draw the Lantern fixture.
 moa-view = { path = "../moa-view", features = ["fixture"] }
 

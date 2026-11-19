@@ -21,6 +21,7 @@ moa-platform = { path = "../moa-platform" }
 moa-proto = { path = "../moa-proto" }
 moa-store = { path = "../moa-store" }
 moa-tmux = { path = "../moa-tmux" }
+moa-tui = { path = "../moa-tui" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -510,3 +510,42 @@ fn sleep_after_hours_parses() {
         );
     }
 }
+
+/// V11: moa's terminal turns the mouse on unless `[ui] mouse = false`; anything but a boolean
+/// is refused.
+#[test]
+fn ui_mouse_parses() {
+    let mouse = |text: &str| Config::parse(text, home()).map(|c| c.ui.mouse);
+    assert!(mouse("").unwrap(), "absent is on");
+    assert!(Config::default().ui.mouse, "and so is the default config");
+    assert!(mouse("[ui]\n").unwrap());
+    assert!(mouse("[ui]\nmouse = true\n").unwrap());
+    assert!(!mouse("[ui]\nmouse = false\n").unwrap());
+    let refused = "moa.toml: mouse in [ui] must be true or false";
+    for bad in ["\"no\"", "0", "1", "\"false\"", "[true]"] {
+        assert_eq!(err(&format!("[ui]\nmouse = {bad}\n")), refused, "{bad}");
+    }
+}
+
+/// A near miss is judged by the known name's length: for a short name, one edit that keeps
+/// the first letter, so a short table of its own (`[api]`, `[tui]`, `[x]`) is skipped, not
+/// taken for `[ui]`.
+#[test]
+fn a_short_table_is_not_taken_for_ui() {
+    for other in ["api", "cli", "tui", "x", "ab", "iu"] {
+        let text = format!("[{other}]\nx = 1\n");
+        let config = Config::parse(&text, home()).unwrap_or_else(|e| panic!("{other}: {e}"));
+        assert_eq!(config.skipped_tables, vec![other.to_string()]);
+    }
+    for near in ["uii", "ux", "u", "UI", "Ui"] {
+        assert_eq!(
+            err(&format!("[{near}]\nx = 1\n")),
+            format!("moa.toml: [{near}] isn't a table moa knows; did you mean [ui]?"),
+        );
+    }
+    // The long names still take two edits.
+    assert_eq!(
+        err("[setp]\nx = 1\n"),
+        "moa.toml: [setp] isn't a table moa knows; did you mean [setup]?"
+    );
+}

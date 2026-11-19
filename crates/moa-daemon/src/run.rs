@@ -114,10 +114,10 @@ fn remove_socket(sock: &Path) {
 
 /// Writes the brain's two tmux config files when their text changed (T6), and says where
 /// its server is. The brain's folder is checked like the other private folders.
-fn tmux_link(paths: &Paths, b: &str) -> Result<TmuxLink, DaemonError> {
+fn tmux_link(paths: &Paths, b: &str, mouse: bool) -> Result<TmuxLink, DaemonError> {
     ensure_private_dir(&paths.brain_dir(b))?;
     let moa_tmux = paths.moa_tmux(b);
-    write_if_changed(&moa_tmux, &conf::moa_tmux(b))?;
+    write_if_changed(&moa_tmux, &conf::moa_tmux(b, mouse))?;
     write_if_changed(&paths.tmux_conf(b), &conf::tmux_conf(&moa_tmux))?;
     Ok(TmuxLink {
         socket: paths.tmux_socket(b)?,
@@ -206,7 +206,7 @@ async fn bring_up(
         }
         // T21: until the switch-over, only a sandbox's own server is ever touched.
         let tmux = if paths.is_sandboxed() {
-            Some(tmux_link(paths, b)?)
+            Some(tmux_link(paths, b, config.ui.mouse)?)
         } else {
             tracing::info!("the terminal link waits for the switch-over");
             None

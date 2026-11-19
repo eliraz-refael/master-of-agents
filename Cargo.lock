@@ -1055,6 +1055,7 @@ dependencies = [
  "moa-store",
  "moa-testkit",
  "moa-tmux",
+ "moa-tui",
  "predicates",
  "rusqlite",
  "serde",
@@ -1215,11 +1216,17 @@ name = "moa-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "futures-util",
  "insta",
  "jiff",
+ "moa-client",
  "moa-core",
+ "moa-platform",
+ "moa-proto",
  "moa-view",
  "ratatui",
+ "tempfile",
+ "tokio",
  "unicode-segmentation",
 ]
 

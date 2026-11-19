@@ -97,6 +97,7 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "shutdown",
     "sql",
     "service",
+    "panel",
     "hook",
     "help",
     "ls",
@@ -194,11 +195,26 @@ pub struct SetupConfig {
     pub skipped: Vec<AccountName>,
 }
 
+/// `[ui]`: how moa's terminal behaves.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UiConfig {
+    /// moa's terminal turns the mouse on (V11). With `false` moa says nothing about the
+    /// mouse, so the user's own setting stands.
+    pub mouse: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> UiConfig {
+        UiConfig { mouse: true }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Config {
     pub brains: BTreeMap<BrainName, BrainConfig>,
     pub accounts: BTreeMap<AccountName, AccountConfig>,
     pub setup: SetupConfig,
+    pub ui: UiConfig,
     /// Top-level tables moa doesn't know, for the caller to log as a warning.
     pub skipped_tables: Vec<String>,
 }
@@ -211,6 +227,15 @@ struct RawConfig {
     accounts: BTreeMap<String, RawAccount>,
     #[serde(default)]
     setup: RawSetup,
+    #[serde(default)]
+    ui: RawUi,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawUi {
+    /// Checked by hand, so any value gets the one plain line.
+    mouse: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -297,7 +322,7 @@ fn expand_one(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, 
     expand(s, what, place, home)
 }
 
-const TABLES: [&str; 3] = ["brains", "accounts", "setup"];
+const TABLES: [&str; 4] = ["brains", "accounts", "setup", "ui"];
 
 /// Levenshtein distance, for catching a misspelt table name.
 fn distance(a: &str, b: &str) -> usize {
@@ -315,6 +340,20 @@ fn distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+/// Whether `key` is a misspelling of the table `known`: two edits for a long name; for a
+/// short one, one edit that keeps the first letter, so a short table of its own (`[api]`,
+/// `[tui]`, `[x]`) isn't taken for `[ui]`. Case is ignored.
+fn near_miss(key: &str, known: &str) -> bool {
+    // A difference only in case is no edit at all: `[UI]` is `[ui]` misspelt.
+    let key = key.to_lowercase();
+    let d = distance(&key, known);
+    if known.chars().count() <= 4 {
+        d <= 1 && key.chars().next() == known.chars().next()
+    } else {
+        d <= 2
+    }
+}
+
 fn expand_all(
     v: &[String],
     what: &str,
@@ -330,7 +369,7 @@ impl Config {
         let table: toml::Table = toml::from_str(text).map_err(|e| toml_problem(text, &e))?;
         let mut skipped_tables = Vec::new();
         for key in table.keys().filter(|k| !TABLES.contains(&k.as_str())) {
-            if let Some(known) = TABLES.iter().find(|t| distance(key, t) <= 2) {
+            if let Some(known) = TABLES.iter().find(|t| near_miss(key, t)) {
                 return Err(problem(format_args!(
                     "[{key}] isn't a table moa knows; did you mean [{known}]?"
                 )));
@@ -431,6 +470,11 @@ impl Config {
                 },
             );
         }
+        config.ui.mouse = match &raw.ui.mouse {
+            None => UiConfig::default().mouse,
+            Some(toml::Value::Boolean(on)) => *on,
+            Some(_) => return Err(problem("mouse in [ui] must be true or false")),
+        };
         config.setup.skipped = raw
             .setup
             .skipped
