@@ -14,7 +14,7 @@ moa-proto = { path = "../moa-proto" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "io-util", "time", "process", "rt"] }
+tokio = { workspace = true, features = ["net", "io-util", "time", "process", "rt", "sync"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
