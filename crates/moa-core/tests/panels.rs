@@ -1120,6 +1120,12 @@ fn select_view_leaves_the_spot_alone() {
         assert_eq!(the_reply(&fx), Err(OpError(said)));
         assert!(st.tmux().queries().next().is_none(), "no chain");
     }
+    // A spare empty slot parked in `_moa` stays one: a vacate swaps it into the spot.
+    panes.push(pane_line(5, 105, 1, "empty-slot"));
+    let fx = select_from_listing(&b, &mut st, "%5", panes);
+    let said = "%5 is a spare agent spot; it can't show another view".to_string();
+    assert_eq!(the_reply(&fx), Err(OpError(said)));
+    assert!(st.tmux().queries().next().is_none(), "no chain");
     for view in [View::EmptySlot, View::Picker] {
         let fx = send_on(&b, &mut st, 7, 2, select_view("%3", view));
         let said = format!("{view} can't be chosen for a panel");
@@ -1237,6 +1243,45 @@ fn an_untagged_panel_moa_placed_is_tagged_as_it_registers() {
     let fx = send_on(&b, &mut st, 8, 1, placed_panel("%4", View::Tree, true));
     assert!(tags_sent(&fx).is_empty(), "{fx:?}");
     assert_eq!(the_reply(&fx).unwrap().data["managed"], false);
+}
+
+/// L17: healing waits while a cockpit operation runs, since a listing taken before its chain
+/// could retag a pane after the chain ran. The orphan stays untagged, and the first listing
+/// once the queue is idle heals it.
+#[test]
+fn healing_waits_for_the_cockpit_queue() {
+    let (b, mut st) = listed_up();
+    // A `ui.select_view` of `%3`, its chain in flight.
+    let (n, _) = the_ask(&send_on(&b, &mut st, 7, 1, select_view("%3", View::Plan)));
+    let (n, _) = the_ask(&answer_lists(&b, &mut st, n, the_panes()));
+
+    let fx = send_on(&b, &mut st, 8, 1, placed_panel("%6", View::Tree, true));
+    assert!(tags_sent(&fx).is_empty(), "{fx:?}");
+    let changed = TmuxIn::Notification(Notification::SessionsChanged);
+    feed(&b, &mut st, changed.clone());
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert!(tags_sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.tmux().topology.view_of(PaneId(6)), None);
+
+    // The chain answered, the queue idle: the next listing heals it.
+    answer(&b, &mut st, n, Ok(Vec::new()));
+    feed(&b, &mut st, changed);
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert_eq!(tags_sent(&fx), spawn_tags(PaneId(6), View::Tree));
+}
+
+/// A `ui.select_view` refused after its asker left has nobody to hear it: it is logged.
+#[test]
+fn a_select_view_refused_after_its_asker_left_is_logged() {
+    let (b, mut st) = listed_up();
+    let (n, _) = the_ask(&send_on(&b, &mut st, 7, 1, select_view("%4", View::Plan)));
+    handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+    let fx = answer_lists(&b, &mut st, n, the_panes());
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        log_lines(&fx),
+        [(LogLevel::Warn, "%4 isn't a moa panel".to_string())]
+    );
 }
 
 /// A placed panel that registered before moa listed its tab is tagged at that listing.

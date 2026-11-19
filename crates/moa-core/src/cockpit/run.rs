@@ -75,9 +75,10 @@ pub(crate) enum CockpitOp {
     },
     /// Brings the agent in `pane` to the screen (L11): swapped into the spot when the
     /// cockpit has one, else its tab selected. `focus` and the tree's Enter, and an `open`
-    /// or `resume` once its tab is bound (`tell: None`: those are answered by the launch).
-    /// Never replaced, and never replaces a waiting operation: each runs in its turn.
-    Show { pane: PaneId, tell: Option<Tell> },
+    /// or `resume` once its tab is bound, whose `tells` are the focus requests that waited
+    /// for the tab (the launch's own caller was answered by it). Never replaced, and never
+    /// replaces a waiting operation: each runs in its turn.
+    Show { pane: PaneId, tells: Vec<Tell> },
 }
 
 /// Which pane a build selects once it is done (L6 step 7).
@@ -172,28 +173,31 @@ enum Next {
     Chain(Vec<Cmd>, Then),
 }
 
-/// Whom `op` answers.
-fn tell_of(op: &CockpitOp) -> Option<Tell> {
+/// Whom `op` answers: none for an operation nobody asked for, or whose asker left.
+fn tells_of(op: &CockpitOp) -> Vec<Tell> {
     match op {
         CockpitOp::Build { tell, .. }
         | CockpitOp::Repair { tell }
-        | CockpitOp::SelectView { tell, .. }
-        | CockpitOp::Show { tell, .. } => tell.clone(),
-        CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => None,
+        | CockpitOp::SelectView { tell, .. } => tell.iter().cloned().collect(),
+        CockpitOp::Show { tells, .. } => tells.clone(),
+        CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => Vec::new(),
     }
 }
 
-/// `text` as `op`'s refusal: said to whoever asked, or logged for an operation nobody did.
+/// `result`, told to each of `tells`.
+fn told_all(state: &State, tells: Vec<Tell>, result: &Result<Done, OpError>) -> Vec<Effect> {
+    tells
+        .into_iter()
+        .filter_map(|tell| told(state, Some(tell), result.clone()))
+        .collect()
+}
+
+/// `text` as `op`'s refusal: said to whoever asked, or logged when nobody is left to hear it
+/// (an operation nobody asked for, or one whose asker left).
 fn refused(op: &CockpitOp, text: String) -> Said {
-    match op {
-        CockpitOp::Build { .. }
-        | CockpitOp::Repair { .. }
-        | CockpitOp::SelectView { .. }
-        | CockpitOp::Show { tell: Some(_), .. } => Said::Reply(Err(OpError(text))),
-        CockpitOp::Lazy
-        | CockpitOp::Refill
-        | CockpitOp::Vacate { .. }
-        | CockpitOp::Show { tell: None, .. } => Said::Logged(text),
+    match tells_of(op).is_empty() {
+        true => Said::Logged(text),
+        false => Said::Reply(Err(OpError(text))),
     }
 }
 
@@ -279,7 +283,7 @@ fn build_kind(op: &CockpitOp) -> Option<bool> {
 pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     if state.tmux.conn().is_none() && !matches!(op, CockpitOp::Vacate { .. }) {
         let no = Err(OpError(NO_TERMINAL.into()));
-        return told(state, tell_of(&op), no).into_iter().collect();
+        return told_all(state, tells_of(&op), &no);
     }
     let mut fx = Vec::new();
     let kind = build_kind(&op);
@@ -294,7 +298,7 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
                 Some(true) => REPLACED_GOTO,
                 _ => REPLACED,
             };
-            fx.extend(told(state, tell_of(&old), Err(OpError(why.into()))));
+            fx.extend(told_all(state, tells_of(&old), &Err(OpError(why.into()))));
         }
         _ => waiting.push_back(op),
     }
@@ -307,9 +311,13 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
 /// keeps its place behind it. Otherwise there is no spot, and the session's tab is selected
 /// at once (4b).
 pub(crate) fn shows_queued(state: &State) -> bool {
-    state.tmux.topology.cockpit().is_some()
-        || state.cockpit.in_flight.is_some()
-        || !state.cockpit.waiting.is_empty()
+    state.tmux.topology.cockpit().is_some() || !idle(state)
+}
+
+/// Nothing runs in the queue and nothing waits: a command sent now can't land between an
+/// operation's listing and its chain.
+pub(crate) fn idle(state: &State) -> bool {
+    state.cockpit.in_flight.is_none() && state.cockpit.waiting.is_empty()
 }
 
 /// `layout.apply`: the layout built, then the reply.
@@ -453,7 +461,10 @@ fn finish(state: &mut State, said: Said) -> Vec<Effect> {
     run.reset_op();
     let mut fx = Vec::new();
     match said {
-        Said::Reply(result) => fx.extend(told(state, op.as_ref().and_then(tell_of), result)),
+        Said::Reply(result) => {
+            let tells = op.as_ref().map(tells_of).unwrap_or_default();
+            fx.extend(told_all(state, tells, &result));
+        }
         Said::Logged(text) => fx.push(log(LogLevel::Warn, text)),
         Said::Applied(_) | Said::Nothing => {}
     }
@@ -481,14 +492,15 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         let mut fx = vec![log(LogLevel::Warn, text.clone())];
         let said = match &state.cockpit.in_flight {
             // An operation nobody asked for has the log line only.
-            Some((_, op)) if tell_of(op).is_some() => refused(op, text),
+            Some((_, op)) if !tells_of(op).is_empty() => refused(op, text),
             _ => Said::Nothing,
         };
         fx.extend(finish(state, said));
         return fx;
     }
     forget_running(state);
-    let mut fx = crate::panel::listed(state);
+    // The operation's own listing: a panel healed now is tagged before its chain goes out.
+    let mut fx = crate::panel::listed(state, true);
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     let Some((_, op)) = state.cockpit.in_flight.clone() else {
         return fx;
@@ -612,14 +624,19 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
         }
         CockpitOp::SelectView { pane, view, .. } => {
             // Only a pane moa tagged as a panel; never the spot (its empty slot or its agent),
-            // an agent's or a stranger's.
+            // a spare empty slot parked for it (a vacate's), an agent's or a stranger's.
             let at = scene.pane(*pane);
             if at.is_some_and(|at| matches!(at.role, Role::Spot(_))) {
                 let text = format!("{pane} is the agent spot; it can't show another view");
                 return Next::Done(refused(op, text));
             }
-            if at.and_then(|at| at.panel_view()).is_none() {
-                return Next::Done(refused(op, format!("{pane} isn't a moa panel")));
+            match at.and_then(|at| at.panel_view()) {
+                None => return Next::Done(refused(op, format!("{pane} isn't a moa panel"))),
+                Some(View::EmptySlot) => {
+                    let text = format!("{pane} is a spare agent spot; it can't show another view");
+                    return Next::Done(refused(op, text));
+                }
+                Some(_) => {}
             }
             let done = Done {
                 text: String::new(),
@@ -952,7 +969,7 @@ fn drop_all(state: &mut State) -> (Vec<Effect>, bool) {
     for op in ops {
         match op {
             CockpitOp::Vacate { .. } => state.cockpit.waiting.push_back(op),
-            op => fx.extend(told(state, tell_of(&op), Err(OpError(LOST.into())))),
+            op => fx.extend(told_all(state, tells_of(&op), &Err(OpError(LOST.into())))),
         }
     }
     (fx, dropped)
@@ -1025,13 +1042,17 @@ pub(crate) fn client_gone(state: &mut State, conn: ConnId) {
         .map(|(_, op)| op)
         .chain(run.waiting.iter_mut());
     for op in ops {
-        if let CockpitOp::Build { tell, .. }
-        | CockpitOp::Repair { tell }
-        | CockpitOp::SelectView { tell, .. }
-        | CockpitOp::Show { tell, .. } = op
-            && matches!(tell, Some(Tell::Reply(c, _)) if *c == conn)
-        {
-            *tell = None;
+        let gone = |tell: &Tell| matches!(tell, Tell::Reply(c, _) if *c == conn);
+        match op {
+            CockpitOp::Build { tell, .. }
+            | CockpitOp::Repair { tell }
+            | CockpitOp::SelectView { tell, .. } => {
+                if tell.as_ref().is_some_and(gone) {
+                    *tell = None;
+                }
+            }
+            CockpitOp::Show { tells, .. } => tells.retain(|t| !gone(t)),
+            CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => {}
         }
     }
 }

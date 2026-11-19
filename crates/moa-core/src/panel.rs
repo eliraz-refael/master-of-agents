@@ -154,7 +154,7 @@ pub(crate) fn pane_arg(pane: &str) -> Result<PaneId, OpError> {
 /// `ui.panel`: registers `conn` as the panel in `pane`. Its view is the one moa tagged the
 /// pane with, else `view`, else the view this pane last had, else the picture (L8). A panel
 /// another connection held in that pane is dropped. A panel moa placed that was never tagged
-/// is tagged now (L18).
+/// is tagged now (L18), unless a cockpit operation runs.
 pub(crate) fn register(
     state: &mut State,
     conn: ConnId,
@@ -182,7 +182,11 @@ pub(crate) fn register(
         managed: false,
         placed,
     };
-    let mut fx: Vec<Effect> = heal(&mut state.tmux, [&reg]).into_iter().collect();
+    // Not while a cockpit operation runs: the next listing heals it then (L17).
+    let mut fx: Vec<Effect> = match crate::cockpit::run::idle(state) {
+        true => heal(&mut state.tmux, [&reg]).into_iter().collect(),
+        false => Vec::new(),
+    };
     resolve(&state.tmux.topology, &mut state.pane_views, &mut reg);
     let (view, managed) = (reg.view, reg.managed);
     state.panels.insert(conn, reg);
@@ -253,9 +257,13 @@ fn heal<'a>(tmux: &mut TmuxState, regs: impl IntoIterator<Item = &'a PanelReg>) 
     })
 }
 
-/// What every listing does for the panels: [`heal`], then [`resolve_panels`].
-pub(crate) fn listed(state: &mut State) -> Vec<Effect> {
-    let healed = heal(&mut state.tmux, state.panels.values());
+/// What every listing does for the panels: [`heal`] when `heal` (a listing taken while a
+/// cockpit chain may be in flight doesn't: its retag could land after the chain's), then
+/// [`resolve_panels`]. An orphan stays untagged, so a later listing heals it.
+pub(crate) fn listed(state: &mut State, heal_now: bool) -> Vec<Effect> {
+    let healed = heal_now
+        .then(|| heal(&mut state.tmux, state.panels.values()))
+        .flatten();
     healed.into_iter().chain(resolve_panels(state)).collect()
 }
 

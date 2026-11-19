@@ -850,10 +850,22 @@ pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec
     let mut tx = Tx::new(now);
     let mut logs = Vec::new();
     let mut after = Vec::new();
-    for Settled { id, launching, end } in settled {
+    for Settled {
+        id,
+        mut launching,
+        end,
+    } in settled
+    {
         let (result, went) = match end {
             OpenEnd::Bound { pane, pid } => bind(
-                state, &mut tx, id, pane, pid, &launching, &mut logs, &mut after,
+                state,
+                &mut tx,
+                id,
+                pane,
+                pid,
+                &mut launching,
+                &mut logs,
+                &mut after,
             ),
             OpenEnd::Failed(why) => {
                 // tmux's first line and ids only: no record contents.
@@ -954,7 +966,8 @@ type Answers = (Result<Done, OpError>, Option<Done>);
 
 /// Binds the session to its new pane and tags the pane with it, then brings it to the
 /// screen when asked (after the commit, in `after`). The binding is stamped with the
-/// launch's own time.
+/// launch's own time. A show through the cockpit's queue takes the launch's focus waiters,
+/// which it answers itself.
 #[allow(clippy::too_many_arguments)]
 fn bind(
     state: &mut State,
@@ -962,7 +975,7 @@ fn bind(
     id: SessionId,
     pane: PaneId,
     pid: i64,
-    launching: &Launching,
+    launching: &mut Launching,
     logs: &mut Vec<Effect>,
     after: &mut Vec<Effect>,
 ) -> Answers {
@@ -1020,8 +1033,8 @@ fn bind(
         );
         return (Err(OpError(text)), None);
     }
-    // With a cockpit, the tab is shown through its queue once tagged (L11): the caller and
-    // the waiters are answered here all the same.
+    // With a cockpit, the tab is shown through its queue once tagged (L11). The caller is
+    // answered here; the focus requests that waited for the tab hear what the show did.
     let queued = launching.focus && shows_queued(state);
     let mut cmds = vec![set_pane_option(pane, "@moa_session", &id.to_string())];
     if launching.focus && !queued {
@@ -1034,7 +1047,11 @@ fn bind(
     });
     state.tmux.tag_sent(pane, id);
     if queued {
-        after.extend(queue(state, CockpitOp::Show { pane, tell: None }));
+        let tells = std::mem::take(&mut launching.waiters)
+            .into_iter()
+            .map(|(conn, req)| Tell::Reply(conn, req))
+            .collect();
+        after.extend(queue(state, CockpitOp::Show { pane, tells }));
     }
     let went = went_to(state, &s);
     (Ok(launched_reply(state, launching.kind, s)), Some(went))
@@ -1097,7 +1114,8 @@ pub(crate) fn shown(state: &State, id: SessionId, swapped: bool) -> Done {
 /// its own since nothing is saved, then the answer.
 pub(crate) fn show(state: &mut State, pane: PaneId, tell: Option<Tell>) -> Vec<Effect> {
     if shows_queued(state) {
-        return queue(state, CockpitOp::Show { pane, tell });
+        let tells = tell.into_iter().collect();
+        return queue(state, CockpitOp::Show { pane, tells });
     }
     let Some(conn) = state.tmux().conn() else {
         return told(state, tell, Err(OpError(NO_TERMINAL.into())))

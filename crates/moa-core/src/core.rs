@@ -277,7 +277,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             }
             if link_listed {
                 // Each panel's view is read again from the tags (L8).
-                more.extend(panel::listed(state));
+                // Healing waits while a cockpit operation runs (L17): this listing may be
+                // older than the chain in flight, and the next listing heals.
+                let heal = cockpit::run::idle(state);
+                more.extend(panel::listed(state, heal));
                 more.extend(cockpit::run::link_listed(state));
             }
             match mailbox {
