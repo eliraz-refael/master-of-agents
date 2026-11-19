@@ -1,10 +1,13 @@
 //! A throwaway `MOA_ROOT` on a short `/tmp` path, for tests that run a real daemon. Dropping
-//! it stops the daemons it started, then the terminal servers under it.
+//! it stops the daemons it started, then the terminal servers under it, and removes the root.
+//! It holds each brain's start lock from before the daemons stop until the root is removed,
+//! so no client starts a daemon there meanwhile.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,6 +25,8 @@ use crate::{Scenario, SpikeFixture, TMUX_NOT_FOUND, wait_for};
 
 /// How long a daemon has to let go of its lock after `shutdown`.
 const STOP_WAIT: Duration = Duration::from_secs(3);
+/// How long a client may hold a start lock: its daemon has 10 s to say it is ready.
+const START_WAIT: Duration = Duration::from_secs(10);
 
 pub struct TempBrain {
     pub dir: TempDir,
@@ -260,40 +265,67 @@ fn lock_is_free(lock: &Path) -> bool {
     }
 }
 
+/// Takes `brain`'s start lock, the one a client holds while it starts a daemon, waiting as
+/// long as a start may take. `None` when it can't be had: the teardown goes on without it.
+fn hold_start_lock(paths: &Paths, brain: &str) -> Option<fs::File> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(paths.start_lock(brain))
+        .ok()?;
+    wait_for(START_WAIT, || file.try_lock().is_ok().then_some(()))?;
+    Some(file)
+}
+
 impl Drop for TempBrain {
-    /// Stops every daemon with a lock under this root: asks it to `shutdown`, waits for the
-    /// lock to be free, and sends SIGTERM to the pid it reported if it still holds it. Then
-    /// kills the terminal server of every brain it found (by its lock or its `tmux-<b>`
-    /// socket), once the daemons have taken their hooks down. Errors are ignored.
+    /// Takes the start lock of every brain it finds (by its lock, its start lock or its
+    /// `tmux-<b>` socket), so no client starts a daemon while the root is taken down; a start
+    /// already under way is let finish first. Then stops every daemon: asks it to
+    /// `shutdown`, waits for its lock to be free, and sends SIGTERM to the pid it reported
+    /// if it still holds it. Then kills the terminal servers, once the daemons have taken
+    /// their hooks down, and removes the root while the start locks are still held. Errors
+    /// are ignored.
+    ///
+    /// L15: a client that starts a daemon here (a panel's first connect, late) would leave
+    /// it running under a removed root. One that waited on a start lock finds the root gone.
     fn drop(&mut self) {
         let paths = self.paths();
         let Ok(entries) = fs::read_dir(paths.run_dir()) else {
             return;
         };
-        let mut brains = BTreeSet::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if let Some(brain) = name.strip_prefix("tmux-") {
-                brains.insert(brain.to_string());
-            }
-            let Some(brain) = name.strip_suffix(".lock") else {
-                continue;
-            };
-            brains.insert(brain.to_string());
+        let brains: BTreeSet<String> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let brain = name
+                    .strip_prefix("tmux-")
+                    .or_else(|| name.strip_suffix(".lock"))
+                    .or_else(|| name.strip_suffix(".start"))?;
+                Some(brain.to_string())
+            })
+            .collect();
+        let _starts: Vec<fs::File> = brains
+            .iter()
+            .filter_map(|brain| hold_start_lock(&paths, brain))
+            .collect();
+        for brain in &brains {
+            let lock = paths.lock(brain);
             let pid = paths.socket(brain).ok().and_then(|s| ask_to_stop(&s));
-            let free = wait_for(STOP_WAIT, || lock_is_free(&entry.path()).then_some(()));
+            let free = wait_for(STOP_WAIT, || lock_is_free(&lock).then_some(()));
             if free.is_none()
                 && let Some(pid) = pid
             {
                 kill_term(pid);
-                let _ = wait_for(STOP_WAIT, || lock_is_free(&entry.path()).then_some(()));
+                let _ = wait_for(STOP_WAIT, || lock_is_free(&lock).then_some(()));
             }
         }
-        for brain in brains {
-            self.kill_tmux(&brain);
+        for brain in &brains {
+            self.kill_tmux(brain);
         }
+        // `TempDir` would remove it only after the start locks are let go.
+        let _ = fs::remove_dir_all(self.dir.path());
     }
 }

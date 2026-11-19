@@ -78,6 +78,10 @@ pub enum ClientError {
     /// What the daemon said when it couldn't start, with where its log is.
     #[error("couldn't start moa: {0}")]
     Start(String),
+    /// The root folder doesn't exist: starting a daemon would bring it back, with a daemon
+    /// in it that no one stops (L15).
+    #[error("moa's folder {} is gone", .0.display())]
+    RootGone(PathBuf),
     #[error("{0}")]
     Paths(#[from] PathsError),
     #[error("{}", .0.message)]
@@ -478,6 +482,10 @@ async fn start(opts: &ClientOptions, exe: &Path, sock: &Path) -> Result<UnixStre
     let (paths, brain) = (&opts.paths, &opts.brain);
     let b = brain.as_str();
     paths.check_v1_allowed()?;
+    // A user's root always exists; one that is gone was a test's, and making the run
+    // folder would bring it back with a daemon no one stops.
+    let gone = || ClientError::RootGone(paths.home().to_path_buf());
+    let root = root_id(paths.home()).ok_or_else(gone)?;
     ensure_private_dir(&paths.run_dir())?;
     ensure_private_dir(&paths.log_dir())?;
     let lock = File::options()
@@ -491,6 +499,12 @@ async fn start(opts: &ClientOptions, exe: &Path, sock: &Path) -> Result<UnixStre
     let _lock = tokio::task::spawn_blocking(move || lock.lock().map(|()| lock))
         .await
         .map_err(io::Error::other)??;
+    // The root may have gone while we waited (a test's teardown holds the start lock while
+    // it removes it), or gone and come back by our own `ensure_private_dir`: either way the
+    // lock we hold is on a removed file, and a daemon started now would be no one's.
+    if root_id(paths.home()) != Some(root) {
+        return Err(gone());
+    }
 
     // Whoever held the lock before us may have started it.
     match UnixStream::connect(sock).await {
@@ -546,6 +560,16 @@ async fn start(opts: &ClientOptions, exe: &Path, sock: &Path) -> Result<UnixStre
             .await
             .map_err(|e| start_error(paths, brain, &format!("it didn't answer: {e}"))),
     }
+}
+
+/// The root folder's identity (device and inode), or `None` when it isn't a folder: a root
+/// removed and made again has a new one.
+fn root_id(root: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(root)
+        .ok()
+        .filter(std::fs::Metadata::is_dir)
+        .map(|m| (m.dev(), m.ino()))
 }
 
 /// Connects, retrying while nothing listens yet, for up to `limit`.

@@ -107,6 +107,26 @@ async fn autostart_refuses_an_unswitched_real_home() {
     assert_eq!(spawn::launches(), before);
 }
 
+/// L15: a root that is gone (a test's `TempBrain` dropped before a late first connect) is
+/// never brought back by a daemon started into it. (Counts this process's launches, so it
+/// needs nextest's process per test.)
+#[tokio::test]
+async fn autostart_refuses_a_root_that_is_gone() {
+    // The brain stays held, so its teardown would stop a daemon started by mistake.
+    let tb = TempBrain::new(None);
+    let o = opts(&tb, true);
+    std::fs::remove_dir(tb.root()).unwrap();
+    let before = spawn::launches();
+    let err = Client::connect(o).await.err().expect("refused");
+    assert!(matches!(err, ClientError::RootGone(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        format!("moa's folder {} is gone", tb.root().display())
+    );
+    assert_eq!(spawn::launches(), before);
+    assert!(!tb.root().exists());
+}
+
 #[tokio::test]
 async fn temp_brain_stops_its_daemons() {
     let tb = TempBrain::new(None);

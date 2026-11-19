@@ -9,6 +9,7 @@ pub mod read;
 pub mod sessions;
 pub mod suggestions;
 pub mod tasks;
+pub mod term;
 
 use crate::Now;
 use crate::core::Tx;
