@@ -523,10 +523,32 @@ fn the_terminal_key_opens_in_the_panels_here() {
     opens_in(&b, &mut st, &fx, "⌨ a", "/r/work/a");
 }
 
-/// Until 5b gives a panel the agent spot's folder (V6).
+/// A panel with no folder of its own opens a terminal in the folder of the agent in the
+/// spot, else at home (L11).
 #[test]
-fn a_panel_with_no_here_opens_at_home() {
+fn the_terminal_key_falls_back_to_the_spots_folder() {
     let b = TypicalBrain::new();
+    let mut snapshot = b.snapshot();
+    let mut s = session(A, Lifecycle::Live);
+    s.cwd = Some("/r/work/a".into());
+    snapshot.sessions.push(s);
+    snapshot.pane_bindings.push(binding(A, "%7", true));
+    // The tree `%3` in the cockpit, beside Lantern's agent `%7` in the spot.
+    let tree = "P %3 @1 $0 1 1 0 1  0 tree".to_string();
+    let spot = format!("P %7 @1 $0 1 1 0 1 {A} 0 agent");
+    let mut st = with_panel(&b, deps(&b), snapshot);
+    link_listed(&b, &mut st, &[tree.clone(), spot]);
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ a", "/r/work/a");
+
+    // The empty slot in the spot: home.
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    let slot = "P %8 @1 $0 1 1 0 1  0 empty-slot".to_string();
+    link_listed(&b, &mut st, &[tree, slot]);
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
+
+    // No cockpit: home.
     let mut st = with_panel(&b, deps(&b), b.snapshot());
     let fx = terminal_key(&b, &mut st, "%3");
     opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));

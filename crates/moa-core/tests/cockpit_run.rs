@@ -1,6 +1,6 @@
 //! The cockpit queue (L17) through `handle`: layout switching, `goto`, Repair and the lazy
-//! cockpit (L6, L9, L12, L13, L18). Every operation takes a listing of its own, sends one
-//! chain, and the next starts only once that chain is answered.
+//! cockpit (L6, L9, L12, L13, L18), and the agent spot's swap (L11). Every operation takes a
+//! listing of its own, sends one chain, and the next starts only once that chain is answered.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,12 +9,13 @@ use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Down, Effect, Input, LogLevel, Publish, TmuxIn, TmuxToken, handle_checked};
 use moa_core::layout::{CURRENT_KEY, Leaf};
+use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::panel::View;
 use moa_core::publish::{CoreEvent, Topic};
-use moa_core::state::{CallerInfo, Deps, PanelLaunch, State};
+use moa_core::state::{CallerInfo, Deps, PanelLaunch, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
-use moa_core::tmux::ids::{ClientName, Generation};
+use moa_core::tmux::ids::{ClientName, Generation, PaneId};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
@@ -1061,4 +1062,278 @@ fn panels_publish_only_when_a_view_changed() {
         panic!("{fx:?}")
     };
     assert_eq!(m.topics[&Topic::Panels]["c1"]["view"], "status");
+}
+
+// --- The agent spot (L11) ---
+
+/// Lantern: live in `/r/work/a`, its agent in `%9`.
+const L: &str = "00000000-0000-4000-8000-0000000000b1";
+/// Kite: live, its agent in `%8`.
+const K: &str = "00000000-0000-4000-8000-0000000000b2";
+
+fn sid(s: &str) -> SessionId {
+    s.parse().unwrap()
+}
+
+fn live(id: &str, title: &str) -> Session {
+    Session {
+        id: sid(id),
+        agent_kind: AgentKind::Claude,
+        account: Some("acct-a".into()),
+        cwd: Some("/r/work/a".into()),
+        start_cwd: Some("/r/work/a".into()),
+        project_id: None,
+        title: Some(title.into()),
+        title_locked: false,
+        group_path: None,
+        lifecycle: Lifecycle::Live,
+        activity: Activity::Idle,
+        activity_at: Some(UtcMs(1)),
+        activity_why: None,
+        last_prompt: None,
+        last_turn_end_at: None,
+        seen_at: Some(UtcMs(1)),
+        asleep_at: None,
+        archived_at: None,
+        location: Location::Here,
+        resume_failed: false,
+        created_at: UtcMs(1),
+        last_seen_at: Some(UtcMs(1)),
+    }
+}
+
+fn bound_to(id: &str, pane: &str) -> PaneBinding {
+    PaneBinding {
+        session_id: sid(id),
+        server_pid: 10,
+        server_start: 1000,
+        socket: "moa".into(),
+        pane_id: pane.into(),
+        pane_pid: 4242,
+        bound_at: UtcMs(1),
+        tracked: true,
+    }
+}
+
+/// The agent of session `id` in `%pane`, in a tab of its own (`@pane` in `moa`).
+fn agent_tab(pane: u32, id: &str) -> String {
+    format!("P %{pane} @{pane} $0 1 0 0 0 {id} 0 ")
+}
+
+/// The agent of session `id` in `%pane`, in the cockpit's spot.
+fn agent_spot(pane: u32, id: &str) -> String {
+    format!("P %{pane} @1 $0 1 1 0 1 {id} 0 agent")
+}
+
+/// `up()` with Lantern bound to `%9` and Kite to `%8`, the tabs reconciled, and the link's
+/// listing showing `panes` (a user's terminal attached).
+fn with_agents(panes: &[String]) -> State {
+    let deps = Deps {
+        home: PathBuf::from("/h"),
+        panel: PanelLaunch {
+            exe: PathBuf::from("/x/moa"),
+            env: Vec::new(),
+        },
+        ..Deps::default()
+    };
+    let snapshot = Snapshot {
+        sessions: vec![live(L, "Lantern"), live(K, "Kite")],
+        pane_bindings: vec![bound_to(L, "%9"), bound_to(K, "%8")],
+        ..Snapshot::default()
+    };
+    let mut st = State::new(BrainName::default_brain(), Config::default()).with_deps(deps);
+    handle_checked(&mut st, Input::Startup(Box::new(snapshot)), now());
+    feed(&mut st, connected());
+    feed(&mut st, refresh(lists(panes, true)));
+    handle_checked(&mut st, Input::StartDrained, now());
+    let asked: Vec<u64> = st.tmux().queries().collect();
+    let [n] = asked[..] else {
+        panic!("one pane query, not {asked:?}");
+    };
+    let info = |pane: &str, id: &str| format!("I\t{pane}\t4242\t0\t\t\t{id}\t/r/work/a");
+    let start = |pane: &str| format!("S\t{pane}\t/opt/claude");
+    feed(
+        &mut st,
+        answer(
+            n,
+            vec![
+                Ok(vec![info("%9", L), info("%8", K)]),
+                Ok(vec![start("%9"), start("%8")]),
+            ],
+        ),
+    );
+    assert!(st.tmux().reconciled());
+    assert!(st.tmux().queries().next().is_none());
+    st
+}
+
+/// `focus` built with the empty slot `%5` in the spot; Lantern `%9` and Kite `%8` in tabs.
+fn focus_and_tabs() -> Vec<String> {
+    let mut panes = focus_built();
+    panes.push(agent_tab(9, L));
+    panes.push(agent_tab(8, K));
+    panes
+}
+
+fn focus(st: &mut State, req: u64, q: &str) -> Vec<Effect> {
+    send(st, req, Op::SessionFocus { q: q.into() })
+}
+
+/// The tags of the agent in the spot: `agent`, `● <title>`, and no frame (L10).
+fn agent_tags(pane: &str, title: &str) -> Vec<String> {
+    vec![
+        format!("set-option -p -t {pane} @moa_view agent"),
+        format!("set-option -p -t {pane} @moa_label ● {title}"),
+        format!("set-option -p -u -t {pane} @moa_framed"),
+        format!("set-option -p -u -t {pane} window-style"),
+        format!("set-option -p -u -t {pane} window-active-style"),
+    ]
+}
+
+/// `focus` of a session in a tab of its own swaps it into the spot, the empty slot going
+/// back to `_moa`, then selects it: one chain from a fresh listing, nothing started. The
+/// topology knows the new spot as soon as the chain's `Ok` comes (L17).
+#[test]
+fn focus_swaps_into_the_spot() {
+    let mut st = with_agents(&focus_and_tabs());
+    let starts = panel_starts(&st);
+    let fx = focus(&mut st, 1, L);
+    let n = the_listing(&fx);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+
+    let fx = feed(&mut st, answer(n, lists(&focus_and_tabs(), true)));
+    let (n, chain) = the_chain(&fx);
+    let mut want = vec![
+        "swap-pane -d -s %9 -t %5".to_string(),
+        "break-pane -d -s %5 -t =_moa:".to_string(),
+    ];
+    want.extend(agent_tags("%9", "Lantern"));
+    want.extend(selects("%9"));
+    assert_eq!(chain, want);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Ok(Done {
+                text: "brought it into the cockpit".into(),
+                data: serde_json::json!({ "id": sid(L), "title": "Lantern" }),
+            })
+        )]
+    );
+    assert_eq!(panel_starts(&st), starts);
+    assert!(st.tmux().queries().next().is_none(), "nothing waits");
+    // Before any listing: Lantern is the spot's agent, and the slot is still the slot.
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("agent"));
+    assert_eq!(st.tmux().topology.view_of(PaneId(5)), Some("empty-slot"));
+}
+
+/// Another agent in the spot goes back to the tab the newcomer leaves, named by its title,
+/// and loses the spot's tags.
+#[test]
+fn focus_sends_the_spots_agent_back_to_a_tab() {
+    let mut panes = focus_built();
+    panes[3] = agent_spot(8, K);
+    panes.push(parked(5, "empty-slot"));
+    panes.push(agent_tab(9, L));
+    let mut st = with_agents(&panes);
+    let n = the_listing(&focus(&mut st, 1, L));
+    let (n, chain) = the_chain(&feed(&mut st, answer(n, lists(&panes, true))));
+    let mut want = vec![
+        "swap-pane -d -s %9 -t %8".to_string(),
+        "rename-window -t %8 -- Kite".to_string(),
+        "set-option -p -u -t %8 @moa_view".to_string(),
+        "set-option -p -u -t %8 @moa_label".to_string(),
+    ];
+    want.extend(agent_tags("%9", "Lantern"));
+    want.extend(selects("%9"));
+    assert_eq!(chain, want);
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(reply_text(&fx), Ok("brought it into the cockpit".into()));
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("agent"));
+    assert_eq!(st.tmux().topology.view_of(PaneId(8)), None);
+}
+
+/// A layout with no spot: 4b's select and 4b's reply, from the operation's own listing.
+#[test]
+fn focus_with_no_spot_selects_its_tab() {
+    let mut panes = cockpit_built();
+    panes.push(agent_tab(9, L));
+    let mut st = with_agents(&panes);
+    let n = the_listing(&focus(&mut st, 1, L));
+    let (n, chain) = the_chain(&feed(&mut st, answer(n, lists(&panes, true))));
+    assert_eq!(chain, selects("%9"));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Ok(Done {
+                text: "went to Lantern".into(),
+                data: serde_json::json!({ "id": sid(L), "title": "Lantern" }),
+            })
+        )]
+    );
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), None);
+}
+
+#[test]
+fn focusing_the_spots_agent_only_selects_it() {
+    let mut panes = focus_built();
+    panes[3] = agent_spot(9, L);
+    panes.push(parked(5, "empty-slot"));
+    let mut st = with_agents(&panes);
+    let n = the_listing(&focus(&mut st, 1, L));
+    let (n, chain) = the_chain(&feed(&mut st, answer(n, lists(&panes, true))));
+    assert_eq!(chain, selects("%9"));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(reply_text(&fx), Ok("went to Lantern".into()));
+}
+
+/// A focus waits behind a layout switch already queued and plans from the scene that switch
+/// left; neither replaces the other.
+#[test]
+fn a_focus_waits_for_a_layout_switch() {
+    let mut st = with_agents(&focus_and_tabs());
+    let n = the_listing(&apply(&mut st, 1, "focus"));
+    let fx = focus(&mut st, 2, L);
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&focus_and_tabs(), true))));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(reply_text(&fx), Ok("layout focus applied".into()));
+    let n = the_listing(&fx);
+    let (n, chain) = the_chain(&feed(&mut st, answer(n, lists(&focus_and_tabs(), true))));
+    assert_eq!(chain[0], "swap-pane -d -s %9 -t %5");
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(reply_text(&fx), Ok("brought it into the cockpit".into()));
+}
+
+/// The session's tab closed before its turn came: said, and nothing is sent.
+#[test]
+fn a_focus_whose_tab_went_says_so() {
+    let mut st = with_agents(&focus_and_tabs());
+    let n = the_listing(&focus(&mut st, 1, L));
+    let fx = feed(&mut st, answer(n, lists(&focus_built(), true)));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        reply_text(&fx),
+        Err("its tab closed before moa could show it".into())
+    );
+}
+
+/// tmux refusing the swap is said in plain words, and nothing is recorded.
+#[test]
+fn a_swap_tmux_refuses_says_why() {
+    let mut st = with_agents(&focus_and_tabs());
+    let n = the_listing(&focus(&mut st, 1, L));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&focus_and_tabs(), true))));
+    let fx = feed(&mut st, answer(n, vec![Err("can't find pane: %9".into())]));
+    assert_eq!(
+        reply_text(&fx),
+        Err("moa couldn't bring it to the screen: can't find pane: %9".into())
+    );
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), None);
 }

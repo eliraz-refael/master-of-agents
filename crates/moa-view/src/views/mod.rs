@@ -13,6 +13,7 @@ use crate::line::{Item, Line, Tone};
 use crate::text::{self, SPIN, clean, cut, short_account};
 
 pub mod activity;
+pub mod empty_slot;
 pub mod picture;
 pub mod plan;
 pub mod projects;
@@ -38,7 +39,8 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Projects => projects::build(data, ctx, ui, width),
         View::Activity => activity::build(data, ctx, ui, width),
         View::Picture => picture::build(data, ctx, ui, width),
-        View::Console | View::Picker | View::EmptySlot | View::Help | View::Setup => {
+        View::EmptySlot => empty_slot::build(width),
+        View::Console | View::Picker | View::Help | View::Setup => {
             let words = not_yet(view).unwrap_or_default();
             vec![Line::plain(cut(words, usize::from(width)), Tone::Dim)]
         }
@@ -51,10 +53,10 @@ pub fn not_yet(view: View) -> Option<&'static str> {
     match view {
         View::Console => Some("the console isn't in this build yet"),
         View::Picker => Some("finding a session isn't in this build yet"),
-        View::EmptySlot => Some("the agent spot isn't in this build yet"),
         View::Help => Some("help isn't in this build yet"),
         View::Setup => Some("setup isn't in this build yet"),
-        View::Tree
+        View::EmptySlot
+        | View::Tree
         | View::Plan
         | View::Status
         | View::Today

@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::cut;
 use super::launch::{WENT_AWAY, WINDOW_NAME_CUT, focus_cmds, warn};
+use crate::cockpit::Scene;
 use crate::effect::{Effect, LogLevel};
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::state::State;
@@ -53,16 +54,16 @@ pub(crate) fn told(
 }
 
 /// `Ctrl-a $` (V6): a terminal "here", by the key's pane. A panel's pane opens in its
-/// `ui.here` (home until 5b gives it the agent spot's folder), an agent's in its session's
-/// folder, and any other pane (an agent's whose session has no folder too) where tmux says
-/// it is, asked on the link ([`here_answered`]).
+/// `ui.here`, else in the folder of the agent in the spot (L11), else at home; an agent's
+/// in its session's folder, and any other pane (an agent's whose session has no folder too)
+/// where tmux says it is, asked on the link ([`here_answered`]).
 /// A key from the menu has no pane: home.
 pub(crate) fn term_key(state: &mut State, pane: Option<PaneId>, client: ClientName) -> Vec<Effect> {
     let Some(pane) = pane else {
         return term_here(state, client, None);
     };
     if let Some(panel) = state.panel_in(pane) {
-        let here = panel.here.clone();
+        let here = panel.here.clone().or_else(|| spot_folder(state));
         return term_here(state, client, here.as_deref());
     }
     // An agent's tab whose session has no folder is asked about like any other tab.
@@ -81,6 +82,14 @@ pub(crate) fn term_key(state: &mut State, pane: Option<PaneId>, client: ClientNa
         .ask(Asked::Here { client }, vec![cmd])
         .into_iter()
         .collect()
+}
+
+/// The folder of the session whose agent is in the cockpit's spot, as the topology last
+/// showed it: none with no cockpit, or the empty slot there.
+fn spot_folder(state: &State) -> Option<String> {
+    let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
+    let id = scene.spot()?.agent()?;
+    state.session(id)?.cwd.clone()
 }
 
 /// tmux said where a key's pane is: the terminal opens there. A pane that went is an error

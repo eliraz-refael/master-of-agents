@@ -1,0 +1,9 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: text
+---
+
+  no agent here yet
+
+  press Enter on a session in the tree
+  to bring it into this spot

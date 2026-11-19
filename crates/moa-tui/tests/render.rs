@@ -153,6 +153,18 @@ fn every_view_at_every_width() {
     }
 }
 
+/// The empty slot draws unframed: its four dim lines, no title and no key hints.
+#[test]
+fn the_empty_slot_at_40_and_80() {
+    for width in [40, 80] {
+        let buf = T::new(View::EmptySlot).drawn(width, HEIGHT);
+        let text = screen_text(&buf);
+        insta::assert_snapshot!(format!("empty-slot@{width}"), text);
+        assert!(!text.contains('╭'), "{text}");
+        assert!(!text.contains("agent spot"), "no title: {text}");
+    }
+}
+
 // ---------- cells at 80 (V12, V11) ----------
 
 #[test]
@@ -298,7 +310,7 @@ fn tiny_sizes_draw_without_panicking() {
     let outside = Style::new().fg(Color::Indexed(9)).bg(Color::Indexed(4));
     let mut filled = Cell::new("#");
     filled.set_style(outside);
-    for (name, view) in VIEWS {
+    for (name, view) in VIEWS.into_iter().chain([("empty-slot", View::EmptySlot)]) {
         for w in 0..=12 {
             for h in 0..=4 {
                 let screen = T::new(view).screen(w, h);
