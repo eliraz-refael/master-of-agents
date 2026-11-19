@@ -1230,6 +1230,33 @@ fn focus_swaps_into_the_spot() {
     assert_eq!(st.tmux().topology.view_of(PaneId(5)), Some("empty-slot"));
 }
 
+/// `Ctrl-a $` in a panel right after a focus, before any listing, opens in the folder of the
+/// agent just swapped into the spot (L11, L17).
+#[test]
+fn the_terminal_key_follows_the_swap_at_once() {
+    let mut st = with_agents(&focus_and_tabs());
+    send(
+        &mut st,
+        9,
+        Op::UiPanel {
+            pane: Some("%2".into()),
+            view: Some(View::Tree),
+            placed: false,
+        },
+    );
+    let n = the_listing(&focus(&mut st, 1, L));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&focus_and_tabs(), true))));
+    feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    let fx = message(&mut st, &format!("moa:key terminal %2 $0 {TTY}"));
+    let [(_, cmds)] = &queries(&fx)[..] else {
+        panic!("one new tab: {fx:?}");
+    };
+    let argv = cmds[0].argv();
+    assert_eq!(cmds[0].name(), "new-window");
+    let at = argv.iter().position(|a| a == "-c").expect("a folder");
+    assert_eq!(argv[at + 1], "/r/work/a");
+}
+
 /// Another agent in the spot goes back to the tab the newcomer leaves, named by its title,
 /// and loses the spot's tags.
 #[test]

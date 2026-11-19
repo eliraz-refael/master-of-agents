@@ -1004,6 +1004,51 @@ fn a_resumed_session_lands_in_the_spot() {
     );
 }
 
+/// A resumed session whose tab closed before its show's turn: nobody to answer (the caller
+/// heard already), so the show is logged, and nothing is sent.
+#[test]
+fn a_resumed_tab_that_closed_before_its_show_is_logged() {
+    let mut r = World::new().reconciled();
+    let panes = vec!["P %5 @1 $0 1 1 0 1  0 empty-slot".to_string()];
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: cockpit_lists(&panes),
+        },
+    );
+    r.launched(1, false);
+    r.bound("%7");
+    let n = r.st.tmux().queries().next().expect("the show's listing");
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: cockpit_lists(&panes),
+        },
+    );
+    let logged: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some((l.level, l.message.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [(
+            moa_core::effect::LogLevel::Warn,
+            "its tab closed before moa could show it"
+        )]
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert!(r.st.tmux().queries().next().is_none(), "nothing sent");
+}
+
 /// R10.
 #[test]
 fn resume_refuses_before_reconcile() {

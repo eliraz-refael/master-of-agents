@@ -930,6 +930,47 @@ fn selects(fx: &[Effect]) -> Vec<&Cmd> {
         .collect()
 }
 
+/// With a cockpit up, an open's tab is tagged alone and shown through the cockpit's queue
+/// (L11): its listing is asked in place of the selects, and the caller is answered as before.
+#[test]
+fn with_a_cockpit_an_open_is_shown_through_the_queue() {
+    let (b, mut st) = typical();
+    // The link's own listing: the cockpit `@1` in session `moa`, with its empty slot.
+    feed(
+        &b,
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: vec![
+                Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
+                Ok(vec!["P %5 @1 $0 1 1 0 1  0 empty-slot".into()]),
+                Ok(vec!["C 1 $1 client-9".into()]),
+            ],
+        },
+    );
+    let id = the_open(&send(&b, &mut st, 1, open_op(&lantern(&b)))).0;
+    let fx = bound(&b, &mut st, id, "%7");
+    let (_, cmds) = tagged_at(&fx, "%7").expect("the pane is tagged");
+    assert_eq!(
+        cmds,
+        [Cmd::new("set-option").args(["-p", "-t", "%7", "@moa_session", &id.to_string()])]
+    );
+    assert!(selects(&fx).is_empty(), "{fx:?}");
+    let listings: Vec<_> = fx
+        .iter()
+        .filter(|e| {
+            matches!(e, Effect::Tmux { cmds, token: Some(TmuxToken::Query(_)), .. }
+                if *cmds == moa_core::tmux::topology::refresh_cmds())
+        })
+        .collect();
+    assert_eq!(listings.len(), 1, "{fx:?}");
+    assert!(
+        matches!(&replies(&fx)[..], [(ReqId(1), Ok(d))] if d.text.starts_with("opened lantern")),
+        "{fx:?}"
+    );
+}
+
 /// An open brings its tab to the screen once the pane is bound, right after tagging it;
 /// `--bg` leaves the screen as it is.
 #[test]

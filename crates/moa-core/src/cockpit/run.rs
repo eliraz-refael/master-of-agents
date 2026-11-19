@@ -626,9 +626,9 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
         }
         CockpitOp::Show { pane, .. } => {
             // Its tab closed while the show waited (or holds no agent now): nothing moves. A
-            // launch's show has nobody to tell; its caller heard already.
+            // launch's show has nobody to tell (its caller heard already): it is logged.
             let Some(id) = scene.pane(*pane).and_then(|at| at.agent()) else {
-                return Next::Done(Said::Reply(Err(OpError(GONE.into()))));
+                return Next::Done(refused(op, GONE.into()));
             };
             let then = |tags, swapped| Then {
                 tags,

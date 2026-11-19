@@ -1104,16 +1104,18 @@ pub(crate) fn show(state: &mut State, pane: PaneId, tell: Option<Tell>) -> Vec<E
             .into_iter()
             .collect();
     };
-    let result = match bound_session(state, pane) {
-        Some(id) => Ok(shown(state, id, false)),
-        None => Err(OpError(GONE.into())),
+    // A pane no session is bound to any more isn't selected.
+    let Some(id) = bound_session(state, pane) else {
+        return told(state, tell, Err(OpError(GONE.into())))
+            .into_iter()
+            .collect();
     };
     let mut fx = vec![Effect::Tmux {
         conn,
         cmds: focus_cmds(pane).to_vec(),
         token: None,
     }];
-    fx.extend(told(state, tell, result));
+    fx.extend(told(state, tell, Ok(shown(state, id, false))));
     fx
 }
 
