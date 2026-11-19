@@ -18,6 +18,7 @@ use moa_proto::{
 use serde::Serialize;
 use serde_json::json;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_util::codec::{Framed, LinesCodec};
 
@@ -177,12 +178,15 @@ async fn first_ops_are_answered_before_the_snapshot() {
 
 #[tokio::test]
 async fn a_slow_reply_doesnt_hold_back_pushes() {
+    // Op 1's reply is held until the client has seen what came after it.
+    let (seen, held) = oneshot::channel::<()>();
     let (_dir, opts) = scripted(|mut s| async move {
         s.subscribed(&snapshot(1)).await;
         let (one, _) = s.request().await;
         let (two, _) = s.request().await;
         s.notice("patch", &patch(2)).await;
         s.answer(&two, &done("two")).await;
+        held.await.unwrap();
         s.answer(&one, &done("one")).await;
         let _ = s.framed.next().await;
     });
@@ -198,6 +202,7 @@ async fn a_slow_reply_doesnt_hold_back_pushes() {
             result: Ok(done("two")),
         }
     );
+    seen.send(()).unwrap();
     assert_eq!(
         next(&mut live).await,
         LiveMsg::Reply {
@@ -205,6 +210,50 @@ async fn a_slow_reply_doesnt_hold_back_pushes() {
             result: Ok(done("one")),
         }
     );
+}
+
+/// The daemon reads nothing while an op is in flight. Ops queued behind a slow one fill the
+/// socket, and the daemon keeps pushing: the pushes still arrive, and dropping the `Live`
+/// still hangs up. Sizes are well past any socket buffer (8 KiB on macOS, ~200 KiB on Linux).
+#[tokio::test]
+async fn a_write_that_waits_doesnt_stop_the_reading() {
+    const OPS: usize = 256;
+    const PUSHES: u64 = 256;
+    let big = "x".repeat(4096);
+    let push = move |rev: u64| Patch {
+        rev,
+        upsert: BTreeMap::from([(Topic::Panels, vec![json!({"key": "c1", "pad": big})])]),
+        delete: BTreeMap::new(),
+    };
+    let pushed = push.clone();
+    let (hung_up, eof) = oneshot::channel::<()>();
+    let (_dir, opts) = scripted(move |mut s| async move {
+        s.subscribed(&snapshot(1)).await;
+        // The slow op: never answered, and nothing more is read while it is in flight.
+        let _ = s.request().await;
+        for rev in 2..2 + PUSHES {
+            s.notice("patch", &pushed(rev)).await;
+        }
+        // Now read to the end: the client must hang up.
+        while let Some(Ok(_)) = s.framed.next().await {}
+        hung_up.send(()).unwrap();
+    });
+    let client = Client::connect(opts).await.unwrap();
+    let (mut live, _, _) = client.live(&[Topic::Panels], vec![]).await.unwrap();
+    live.send(Op::SessionFocus { q: "s1".into() });
+    for _ in 0..OPS {
+        live.send(Op::UiHere {
+            folder: Some(format!("/{}", "y".repeat(4096))),
+        });
+    }
+    for rev in 2..2 + PUSHES {
+        assert_eq!(next(&mut live).await, LiveMsg::Patch(push(rev)));
+    }
+    drop(live);
+    timeout(WAIT, eof)
+        .await
+        .expect("the server sees the client hang up within 10 s")
+        .unwrap();
 }
 
 /// Review Focus 4: a write the daemon read but never answered may have been saved.

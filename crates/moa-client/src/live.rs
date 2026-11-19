@@ -3,13 +3,18 @@
 //! arriving in order.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::future::poll_fn;
+use std::task::{Context, Poll, ready};
 
+use futures_util::{SinkExt, StreamExt};
 use moa_core::op::{Done, Op};
 use moa_proto::{CoreEvent, Id, Patch, ServerLine, SnapshotMsg, Topic};
 use serde_json::Value;
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+use tokio_util::codec::{Framed, LinesCodec, LinesCodecError};
 
-use crate::{Client, ClientError, Wire, decode};
+use crate::{Client, ClientError, Wire, decode, server_line};
 
 /// What a [`Live`] connection hands its user.
 #[derive(Clone, PartialEq, Debug)]
@@ -23,11 +28,15 @@ pub enum LiveMsg {
         tag: u64,
         result: Result<Done, String>,
     },
-    /// The connection has ended. Said once, after every reply still owed.
+    /// The connection has ended. Said once, after every reply still owed. An op sent after
+    /// the end is answered at once, so its reply can come after this.
     Closed,
 }
 
 /// A subscribed connection. Dropping it closes the connection.
+///
+/// Pushes wait in an unbounded queue until [`Live::recv`] takes them, so the panel loop must
+/// drain `recv` on every wake.
 pub struct Live {
     ops: mpsc::UnboundedSender<(u64, Op)>,
     msgs: mpsc::UnboundedReceiver<LiveMsg>,
@@ -84,6 +93,8 @@ impl Client {
 
 impl Live {
     /// Sends `op` without waiting and returns its tag: 1 for the first, then one more for each.
+    /// Once the connection has ended, the op is answered at once (`try again`), which can be
+    /// after [`LiveMsg::Closed`].
     pub fn send(&mut self, op: Op) -> u64 {
         self.tag += 1;
         if self.ops.send((self.tag, op)).is_err() {
@@ -128,15 +139,60 @@ fn push(method: &str, params: Value) -> Result<Option<LiveMsg>, ClientError> {
     })
 }
 
-/// An op written and not yet answered.
+/// An op sent and not yet answered.
 struct Owed {
     tag: u64,
     writes: bool,
 }
 
+/// Request lines waiting to be written.
+struct Outbox {
+    lines: VecDeque<(Id, String)>,
+    /// Some lines were handed to the connection but not flushed yet.
+    unflushed: bool,
+    /// Writing still works.
+    open: bool,
+}
+
+impl Outbox {
+    /// Writes as much as the connection takes now, without waiting for the rest. `Ready(Ok)`
+    /// once everything queued is written.
+    fn poll_write(
+        &mut self,
+        framed: &mut Framed<UnixStream, LinesCodec>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), LinesCodecError>> {
+        while !self.lines.is_empty() {
+            ready!(SinkExt::<String>::poll_ready_unpin(framed, cx))?;
+            if let Some((_, line)) = self.lines.pop_front() {
+                framed.start_send_unpin(line)?;
+                self.unflushed = true;
+            }
+        }
+        if self.unflushed {
+            ready!(SinkExt::<String>::poll_flush_unpin(framed, cx))?;
+            self.unflushed = false;
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// What woke the connection's task.
+// Made and matched at once, one per wake; boxing the op would only add an allocation.
+#[allow(clippy::large_enum_variant)]
+enum Wake {
+    /// An op from the `Live`, or `None` once it was dropped.
+    Op(Option<(u64, Op)>),
+    /// A line read, or the end of the connection.
+    Line(Option<Result<String, LinesCodecError>>),
+    WriteFailed,
+}
+
 /// Owns the connection until it ends or the [`Live`] is dropped: writes ops as they come,
-/// and hands on replies and pushes as they are read. When the connection ends, every reply
-/// still owed is answered with why there is none, and then the channel closes.
+/// and hands on replies and pushes as they are read. Reading never waits for a write: the
+/// daemon reads nothing while an op is in flight, so ops queued behind a slow one can fill
+/// the socket, and the daemon's pushes must still be read. When the connection ends, every
+/// reply still owed is answered with why there is none, and then the channel closes.
 async fn run(
     mut wire: Wire,
     mut ops: mpsc::UnboundedReceiver<(u64, Op)>,
@@ -147,29 +203,53 @@ async fn run(
     };
     // By request id, which counts up, so the first is the oldest.
     let mut owed: BTreeMap<Id, Owed> = BTreeMap::new();
-    // Whether writing still works.
-    let mut open = true;
+    let mut out = Outbox {
+        lines: VecDeque::new(),
+        unflushed: false,
+        open: true,
+    };
     loop {
-        tokio::select! {
-            op = ops.recv() => {
-                // `None`: the `Live` was dropped, and nobody is listening.
-                let Some((tag, op)) = op else { return };
-                if !open {
+        let wake = poll_fn(|cx| {
+            if out.open && matches!(out.poll_write(&mut wire.framed, cx), Poll::Ready(Err(_))) {
+                return Poll::Ready(Wake::WriteFailed);
+            }
+            if let Poll::Ready(op) = ops.poll_recv(cx) {
+                return Poll::Ready(Wake::Op(op));
+            }
+            wire.framed.poll_next_unpin(cx).map(Wake::Line)
+        })
+        .await;
+        match wake {
+            // The `Live` was dropped, and nobody is listening.
+            Wake::Op(None) => return,
+            Wake::Op(Some((tag, op))) => {
+                if !out.open {
                     reply(tag, Err(ClientError::Stopped { wrote: false }.to_string()));
                     continue;
                 }
-                match wire.send_op(&op).await {
-                    Ok(id) => {
-                        owed.insert(id, Owed { tag, writes: op.writes() });
+                match wire.op_line(&op) {
+                    Ok((id, line)) => {
+                        let writes = op.writes();
+                        owed.insert(id.clone(), Owed { tag, writes });
+                        out.lines.push_back((id, line));
                     }
-                    // It never reached the daemon; replies to earlier ops may still come.
-                    Err(e) => {
-                        open = false;
-                        reply(tag, Err(e.to_string()));
+                    Err(e) => reply(tag, Err(e.to_string())),
+                }
+            }
+            // Lines still queued never left. Those handed to the connection may have reached
+            // the daemon, so they stay owed; replies to them may still come.
+            Wake::WriteFailed => {
+                out.open = false;
+                for (id, _) in out.lines.drain(..) {
+                    if let Some(o) = owed.remove(&id) {
+                        reply(
+                            o.tag,
+                            Err(ClientError::Stopped { wrote: false }.to_string()),
+                        );
                     }
                 }
             }
-            line = wire.read() => match line {
+            Wake::Line(next) => match server_line(next) {
                 Ok(Some(ServerLine::Result { id, value })) => {
                     if let Some(o) = owed.remove(&id) {
                         reply(o.tag, decode(value).map_err(|e| e.to_string()));
@@ -197,7 +277,8 @@ async fn run(
             },
         }
     }
-    // Ended. Ops sent from now on are answered by `Live::send` itself.
+    // Ended. Ops sent from now on are answered by `Live::send` itself; those already sent are
+    // drained here, so each is answered before `Closed`.
     ops.close();
     for o in owed.into_values() {
         reply(
@@ -205,7 +286,7 @@ async fn run(
             Err(ClientError::Stopped { wrote: o.writes }.to_string()),
         );
     }
-    while let Ok((tag, _)) = ops.try_recv() {
+    while let Some((tag, _)) = ops.recv().await {
         reply(tag, Err(ClientError::Stopped { wrote: false }.to_string()));
     }
 }

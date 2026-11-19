@@ -171,6 +171,33 @@ fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ClientError> {
         .map_err(|e| invalid(format!("moa sent a reply this client can't read: {e}")))
 }
 
+/// What a failed write means: a gone daemon never got the request.
+fn write_error(e: LinesCodecError) -> ClientError {
+    match e {
+        LinesCodecError::Io(e) if is_gone(&e) => ClientError::Stopped { wrote: false },
+        LinesCodecError::Io(e) => e.into(),
+        e => invalid(e),
+    }
+}
+
+/// A line read from the connection, or `None` when it has ended.
+fn server_line(
+    next: Option<Result<String, LinesCodecError>>,
+) -> Result<Option<ServerLine>, ClientError> {
+    match next {
+        None => Ok(None),
+        Some(Ok(line)) => decode_server_line(&line).map(Some).map_err(|e| {
+            invalid(format!(
+                "moa sent something that isn't a reply: {}",
+                e.message
+            ))
+        }),
+        Some(Err(LinesCodecError::Io(e))) if is_gone(&e) => Ok(None),
+        Some(Err(LinesCodecError::Io(e))) => Err(e.into()),
+        Some(Err(e)) => Err(invalid(e)),
+    }
+}
+
 /// The line protocol over one connection.
 struct Wire {
     framed: Framed<UnixStream, LinesCodec>,
@@ -188,43 +215,39 @@ impl Wire {
         }
     }
 
-    /// Writes a request and returns its id.
-    async fn send(&mut self, method: &str, params: Value) -> Result<Id, ClientError> {
+    /// A request's line, with the next id.
+    fn request_line(&mut self, method: &str, params: Value) -> (Id, String) {
         self.next += 1;
         let id = Id::Num(self.next);
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        match self.framed.send(line.to_string()).await {
-            Ok(()) => Ok(id),
-            Err(LinesCodecError::Io(e)) if is_gone(&e) => {
-                Err(ClientError::Stopped { wrote: false })
-            }
-            Err(LinesCodecError::Io(e)) => Err(e.into()),
-            Err(e) => Err(invalid(e)),
-        }
+        (id, line.to_string())
+    }
+
+    /// An op's request line, with the next id.
+    fn op_line(&mut self, op: &Op) -> Result<(Id, String), ClientError> {
+        let mut wire = serde_json::to_value(op).map_err(io::Error::other)?;
+        let method = wire["method"].as_str().unwrap_or_default().to_string();
+        let params = wire["params"].take();
+        Ok(self.request_line(&method, params))
+    }
+
+    /// Writes a request and returns its id.
+    async fn send(&mut self, method: &str, params: Value) -> Result<Id, ClientError> {
+        let (id, line) = self.request_line(method, params);
+        self.framed.send(line).await.map_err(write_error)?;
+        Ok(id)
     }
 
     /// Writes an op as a request and returns its id.
     async fn send_op(&mut self, op: &Op) -> Result<Id, ClientError> {
-        let mut wire = serde_json::to_value(op).map_err(io::Error::other)?;
-        let method = wire["method"].as_str().unwrap_or_default().to_string();
-        let params = wire["params"].take();
-        self.send(&method, params).await
+        let (id, line) = self.op_line(op)?;
+        self.framed.send(line).await.map_err(write_error)?;
+        Ok(id)
     }
 
     /// The next line, or `None` when the connection has ended.
     async fn read(&mut self) -> Result<Option<ServerLine>, ClientError> {
-        match self.framed.next().await {
-            None => Ok(None),
-            Some(Ok(line)) => decode_server_line(&line).map(Some).map_err(|e| {
-                invalid(format!(
-                    "moa sent something that isn't a reply: {}",
-                    e.message
-                ))
-            }),
-            Some(Err(LinesCodecError::Io(e))) if is_gone(&e) => Ok(None),
-            Some(Err(LinesCodecError::Io(e))) => Err(e.into()),
-            Some(Err(e)) => Err(invalid(e)),
-        }
+        server_line(self.framed.next().await)
     }
 
     /// Sends a request and waits for the reply that carries its id; notices that arrive
