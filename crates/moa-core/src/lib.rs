@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod change;
+pub mod cockpit;
 pub mod config;
 mod core;
 pub mod due;
