@@ -1,6 +1,6 @@
 //! `layout.set`'s write of `layouts.json`: the daemon runs the core's `WriteFile` before the
 //! reply, through a temporary file and a rename, and a write that fails refuses the request
-//! with nothing published (L2).
+//! and reads the file again, so the entry that wasn't saved is never published (L2).
 
 use std::future::Future;
 use std::io;
@@ -111,8 +111,9 @@ async fn a_failed_write_refuses_the_request() {
     within(core.barrier()).await;
     // One answer: the op's own reply went with its publish.
     assert!(rx.try_recv().is_err());
-    // Nothing was said about the entry that wasn't saved.
-    assert_eq!(model.borrow().rev, rev);
+    // Nothing was said about the entry that wasn't saved: the file is read again, so the
+    // core's own model (published now, or with the next change) doesn't hold it either.
+    assert!(model.borrow().rev > rev, "the file read again is published");
     assert!(!model.borrow().topics[&Topic::Layouts].contains_key("mine"));
     assert!(!file.exists());
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);

@@ -517,6 +517,14 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
     refused(cmd("rename-window", &["-t", "%1", "-v fix"]), rename);
     refused(cmd("rename-window", &["-t", "%1", "--"]), rename);
     refused(cmd("rename-window", &["-t", "%1", "--", "x", "y"]), rename);
+    // tmux expands the name as a format: a `#` must come doubled, as `literal_format` writes it.
+    let format = "rename-window's name must keep # literal (##)";
+    refused(cmd("rename-window", &["-t", "%1", "--", "#(id)"]), format);
+    refused(cmd("rename-window", &["-t", "%1", "--", "a###"]), format);
+    assert_eq!(
+        cmd("rename-window", &["-t", "%1", "--", "shell ##1"]).check(),
+        Ok(())
+    );
     // `select-window` and `select-pane` name a pane by its id, like every other move.
     let select = "select-window and select-pane need -t and a tab id";
     for name in ["select-window", "select-pane"] {

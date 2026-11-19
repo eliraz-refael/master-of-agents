@@ -45,6 +45,7 @@ const RESIZE: &str = "resize-pane needs a tab id, and -x or -y with a size";
 const RESPAWN: &str = "respawn-pane needs -k, a tab id and a command";
 const RESPAWN_ENV: &str = "a tab's environment can't hold a newline";
 const RENAME: &str = "rename-window needs a tab id, then -- and a name";
+const RENAME_FORMAT: &str = "rename-window's name must keep # literal (##)";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
 /// What a chain is called where a name is asked for (a log line). It is no tmux command.
@@ -215,9 +216,16 @@ impl Cmd {
             },
             "respawn-pane" => check_respawn(&self.args),
             // A name is free text (an agent's title): after `--`, one that starts with `-` is
-            // still a name, never flags.
+            // still a name, never flags. tmux expands it as a format, so it must have been
+            // through [`literal_format`]: a lone `#` (`#(…)` runs a shell) is refused.
             "rename-window" => match self.args.as_slice() {
-                [t, a, dashes, _] if t == "-t" && is_pane_id(a) && dashes == "--" => Ok(()),
+                [t, a, dashes, name] if t == "-t" && is_pane_id(a) && dashes == "--" => {
+                    if name.replace("##", "").contains('#') {
+                        Err(Refused(RENAME_FORMAT))
+                    } else {
+                        Ok(())
+                    }
+                }
                 _ => Err(Refused(RENAME)),
             },
             _ => Ok(()),

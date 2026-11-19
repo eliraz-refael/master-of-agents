@@ -358,6 +358,11 @@ impl Core {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         let line = format!("couldn't save {name}: {e}");
                         tracing::warn!("{line}");
+                        // The core already holds the unsaved layout: read the file again, or
+                        // the next publish of any topic would show it.
+                        if let Some(p) = moa_core::layout::reread(&mut self.state) {
+                            held.push(Held::Publish(p));
+                        }
                         if let Some((conn, req)) = req {
                             held.push(Held::Reply {
                                 conn,

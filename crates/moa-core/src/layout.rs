@@ -373,6 +373,16 @@ fn merged(text: &str) -> Result<Layouts, String> {
     })
 }
 
+/// After the daemon couldn't write `layouts.json` for a `set`: the file read again, so the
+/// state and the model drop the layout that wasn't saved, and the `layouts` model that says
+/// so, when it changed.
+pub fn reread(state: &mut State) -> Option<crate::effect::Publish> {
+    state.layouts = crate::ops::layout::read(state);
+    state
+        .publish_changed(crate::publish::Topic::Layouts)
+        .map(crate::effect::Publish::Model)
+}
+
 /// The brain's current layout: the meta value, else `cockpit`. A name the file no longer has,
 /// or a broken entry, falls back to `cockpit` too.
 pub fn current_layout(state: &State) -> String {
