@@ -12,8 +12,8 @@ use moa_tmux::conf::{hooks, moa_tmux, tmux_conf, unhooks};
 
 #[test]
 fn the_generated_config_is_stable() {
-    insta::assert_snapshot!("moa_tmux_default", moa_tmux("default"));
-    insta::assert_snapshot!("moa_tmux_work", moa_tmux("work"));
+    insta::assert_snapshot!("moa_tmux_default", moa_tmux("default", true));
+    insta::assert_snapshot!("moa_tmux_work", moa_tmux("work", true));
     insta::assert_snapshot!(
         "tmux_conf",
         tmux_conf(Path::new("/r/.local/share/moa/default/moa.tmux"))
@@ -28,7 +28,7 @@ fn the_generated_config_is_stable() {
 #[test]
 fn the_current_window_pill_shows_failed() {
     assert!(
-        moa_tmux("default").contains("#{?#{==:#{@moa_state},failed},#[fg=#d57780]✗ ,"),
+        moa_tmux("default", true).contains("#{?#{==:#{@moa_state},failed},#[fg=#d57780]✗ ,"),
         "the pill has no branch for failed"
     );
     // And tmux reads the branch as meant: the pill renders the cross.
@@ -40,6 +40,25 @@ fn the_current_window_pill_shows_failed() {
         .tmux(&["display-message", "-p", "#{T:status-left}"])
         .unwrap();
     assert!(left.contains("✗ "), "{left}");
+}
+
+/// V11: moa's file turns the mouse on, so tmux hands a panel its clicks, motion and wheel;
+/// with `[ui] mouse = false` it says nothing about the mouse, leaving the user's own setting.
+#[test]
+fn moa_tmux_turns_the_mouse_on_unless_told_not_to() {
+    let on = moa_tmux("default", true);
+    let lines: Vec<&str> = on.lines().filter(|l| l.contains("mouse")).collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("set -g  mouse on"), "{lines:?}");
+    let off = moa_tmux("default", false);
+    assert!(
+        !off.lines().any(|l| l.contains("mouse")),
+        "no mouse line at all"
+    );
+    // And tmux takes it.
+    let sb = Sandbox::start().unwrap();
+    load(&sb);
+    assert_eq!(sb.tmux(&["show-options", "-gv", "mouse"]).unwrap(), "on");
 }
 
 /// Sources `tmux_conf` on a server whose home holds the user's three possible config files,
@@ -80,7 +99,7 @@ fn tmux_conf_loads_the_users_files_as_tmux_would_then_moas() {
 
 fn write_conf(sb: &Sandbox) -> PathBuf {
     let path = sb.home().join("moa.tmux");
-    std::fs::write(&path, moa_tmux("default")).unwrap();
+    std::fs::write(&path, moa_tmux("default", true)).unwrap();
     path
 }
 

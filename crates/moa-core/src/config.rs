@@ -97,6 +97,7 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "shutdown",
     "sql",
     "service",
+    "panel",
     "hook",
     "help",
     "ls",
@@ -194,11 +195,26 @@ pub struct SetupConfig {
     pub skipped: Vec<AccountName>,
 }
 
+/// `[ui]`: how moa's terminal behaves.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UiConfig {
+    /// moa's terminal turns the mouse on (V11). With `false` moa says nothing about the
+    /// mouse, so the user's own setting stands.
+    pub mouse: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> UiConfig {
+        UiConfig { mouse: true }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Config {
     pub brains: BTreeMap<BrainName, BrainConfig>,
     pub accounts: BTreeMap<AccountName, AccountConfig>,
     pub setup: SetupConfig,
+    pub ui: UiConfig,
     /// Top-level tables moa doesn't know, for the caller to log as a warning.
     pub skipped_tables: Vec<String>,
 }
@@ -211,6 +227,15 @@ struct RawConfig {
     accounts: BTreeMap<String, RawAccount>,
     #[serde(default)]
     setup: RawSetup,
+    #[serde(default)]
+    ui: RawUi,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawUi {
+    /// Checked by hand, so any value gets the one plain line.
+    mouse: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -297,7 +322,7 @@ fn expand_one(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, 
     expand(s, what, place, home)
 }
 
-const TABLES: [&str; 3] = ["brains", "accounts", "setup"];
+const TABLES: [&str; 4] = ["brains", "accounts", "setup", "ui"];
 
 /// Levenshtein distance, for catching a misspelt table name.
 fn distance(a: &str, b: &str) -> usize {
@@ -431,6 +456,11 @@ impl Config {
                 },
             );
         }
+        config.ui.mouse = match &raw.ui.mouse {
+            None => true,
+            Some(toml::Value::Boolean(on)) => *on,
+            Some(_) => return Err(problem("mouse in [ui] must be true or false")),
+        };
         config.setup.skipped = raw
             .setup
             .skipped

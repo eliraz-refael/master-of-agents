@@ -339,6 +339,12 @@ impl Panel {
         self.hover.take().is_some()
     }
 
+    /// Whether a prompt is being answered: the footer is its editor, and the terminal's
+    /// cursor stands after it.
+    pub fn prompting(&self) -> bool {
+        self.prompt.is_some()
+    }
+
     /// Pasted text goes to the prompt being answered, if any.
     pub fn paste(&mut self, text: &str) {
         if let Some(prompt) = &mut self.prompt {

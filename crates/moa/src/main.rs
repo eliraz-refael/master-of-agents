@@ -10,6 +10,7 @@ mod ctl;
 mod daemon;
 mod front;
 mod hook;
+mod panel;
 mod service;
 mod sql;
 
@@ -35,6 +36,8 @@ enum Command {
     Daemon(daemon::DaemonArgs),
     /// Say whether the brain's moa is running, and who you are to it.
     Status(ctl::StatusArgs),
+    /// Show a live view of the brain in this terminal: its sessions, plan, status and more.
+    Panel(panel::PanelArgs),
     /// Stop the brain's moa.
     Shutdown(ctl::BrainArgs),
     /// A read-only SQL shell on a brain: one statement, or one per line on stdin.
@@ -78,6 +81,7 @@ fn main() -> ExitCode {
         Some(Command::Daemon(args)) => return daemon::daemon(&args),
         Some(Command::Status(args)) => return ctl::status(&args),
         Some(Command::Shutdown(args)) => return ctl::shutdown(&args),
+        Some(Command::Panel(args)) => panel::panel(&args),
         Some(Command::Sql(args)) => sql::sql(&args),
         Some(Command::Service(args)) => service::service(&args),
         None => {

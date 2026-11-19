@@ -46,7 +46,7 @@ impl Here {
         Ok(Here { paths, cwd })
     }
 
-    fn caller(&self) -> CallerInfo {
+    pub(crate) fn caller(&self) -> CallerInfo {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         CallerInfo {
             moa_session: var("MOA_SESSION"),
@@ -60,12 +60,12 @@ impl Here {
         load_config(&self.paths).map_err(|e| e.to_string())
     }
 
-    fn config(&self) -> Result<Config, String> {
+    pub(crate) fn config(&self) -> Result<Config, String> {
         self.paths.check_v1_allowed().map_err(|e| e.to_string())?;
         load_config(&self.paths).map_err(|e| e.to_string())
     }
 
-    fn options(&self, brain: BrainName) -> ClientOptions {
+    pub(crate) fn options(&self, brain: BrainName) -> ClientOptions {
         ClientOptions {
             paths: self.paths.clone(),
             brain,

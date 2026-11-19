@@ -510,3 +510,19 @@ fn sleep_after_hours_parses() {
         );
     }
 }
+
+/// V11: moa's terminal turns the mouse on unless `[ui] mouse = false`; anything but a boolean
+/// is refused.
+#[test]
+fn ui_mouse_parses() {
+    let mouse = |text: &str| Config::parse(text, home()).map(|c| c.ui.mouse);
+    assert!(mouse("").unwrap(), "absent is on");
+    assert!(Config::default().ui.mouse, "and so is the default config");
+    assert!(mouse("[ui]\n").unwrap());
+    assert!(mouse("[ui]\nmouse = true\n").unwrap());
+    assert!(!mouse("[ui]\nmouse = false\n").unwrap());
+    let refused = "moa.toml: mouse in [ui] must be true or false";
+    for bad in ["\"no\"", "0", "1", "\"false\"", "[true]"] {
+        assert_eq!(err(&format!("[ui]\nmouse = {bad}\n")), refused, "{bad}");
+    }
+}
