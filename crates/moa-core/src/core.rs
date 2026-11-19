@@ -224,10 +224,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
             }
             // The panes that started are tagged; the queue (L17) will read the views that
-            // didn't. A spawn the link lost started nothing moa knows of.
+            // didn't. A spawn the link lost may have started panels moa knows nothing of:
+            // the log says so.
             for (views, answers) in spawns {
-                if let Some(answers) = answers {
-                    more.extend(cockpit::spawn::spawned(state, &views, answers).0);
+                match answers {
+                    Some(answers) => more.extend(cockpit::spawn::spawned(state, &views, answers).0),
+                    None => more.push(cockpit::spawn::spawn_lost(&views)),
                 }
             }
             if connected {

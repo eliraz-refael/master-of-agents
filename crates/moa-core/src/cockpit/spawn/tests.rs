@@ -110,7 +110,7 @@ fn tagged(fx: &[Effect]) -> Vec<Vec<String>> {
             Effect::Tmux {
                 conn: 1,
                 cmds,
-                token: None,
+                token: Some(TmuxToken::Tags),
             } => Some(words(cmds)),
             _ => None,
         })
@@ -144,6 +144,45 @@ fn spawning_runs_moa_panel_with_its_view_and_brain() {
     assert_eq!(st.panel_starts, 1);
     // The topology knows the panel's view before any listing shows it.
     assert_eq!(st.tmux.topology.view_of(PaneId(12)), Some("tree"));
+    // The tags save nothing: they go out at once, never held behind a commit that may fail.
+    let tags = fx
+        .iter()
+        .find(|e| matches!(e, Effect::Tmux { .. }))
+        .unwrap();
+    assert!(tags.runs_at_once() && !tags.is_heard(), "{tags:?}");
+}
+
+/// The tags' answer comes back only to be checked: a refusal is logged, and nothing else
+/// happens.
+#[test]
+fn a_tag_tmux_refused_is_logged() {
+    let mut st = linked(&[]);
+    let tags = |results| TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Tags,
+        results,
+    };
+    let fx = handle(
+        &mut st,
+        Input::Tmux(tags(vec![Ok(Vec::new()), Ok(Vec::new())])),
+        now(),
+    );
+    assert!(logs(&fx).is_empty(), "{fx:?}");
+    let fx = handle(
+        &mut st,
+        Input::Tmux(tags(vec![
+            Ok(Vec::new()),
+            Err("can't find pane: %12".into()),
+        ])),
+        now(),
+    );
+    assert_eq!(
+        logs(&fx),
+        [(
+            LogLevel::Warn,
+            "tmux didn't tag a panel moa started: can't find pane: %12".to_string()
+        )]
+    );
 }
 
 #[test]
@@ -231,11 +270,18 @@ fn an_answer_moa_cant_read_starts_no_panel() {
             format!("the {view} panel couldn't start: {why}"),
         )
     };
+    // A window tmux opened is said to be there, with what tmux answered.
+    let opened = |view: &str, answer: &str| {
+        (
+            LogLevel::Warn,
+            format!("the {view} panel's window opened, but tmux answered {answer}, not one tab id"),
+        )
+    };
     assert_eq!(
         logs(&fx),
         [
-            why("tree", "tmux's answer didn't parse"),
-            why("plan", "tmux's answer didn't parse"),
+            opened("tree", r#"["%1", "%2"]"#),
+            opened("plan", r#"["x"]"#),
             why("status", "tmux didn't answer"),
         ]
     );
@@ -272,11 +318,21 @@ fn a_failure_tmux_gave_no_words_for_still_says_why() {
 #[test]
 fn a_spawn_the_link_lost_tags_nothing() {
     let mut st = linked(&[]);
-    sent(&mut st, &[View::Tree]);
+    sent(&mut st, &[View::Tree, View::Plan]);
     let fx = handle(&mut st, Input::Tmux(TmuxIn::Down(Down::Lost)), now());
     assert!(tagged(&fx).is_empty(), "{fx:?}");
     assert_eq!(st.panel_starts, 0);
     assert_eq!(st.tmux.queries().count(), 0);
+    // tmux may have started them all the same: the log says so.
+    assert_eq!(
+        logs(&fx),
+        [(
+            LogLevel::Warn,
+            "moa lost its terminal before tmux said whether these panels started, so they \
+             may be running: tree, plan"
+                .to_string()
+        )]
+    );
 }
 
 /// A listing asked before the tags went out (the new window's own notification asks one)

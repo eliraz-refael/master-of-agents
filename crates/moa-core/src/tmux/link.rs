@@ -386,6 +386,41 @@ pub(crate) fn log(level: LogLevel, message: String) -> Effect {
     Effect::Log(LogLine { level, message })
 }
 
+/// Moa's tags that a listing doesn't show yet, kept in `topology` (`put`) while it lists
+/// their pane and shows no tag of that kind there (`shown`). A tag is sent only once tmux has
+/// answered with its pane, so a listing without the pane was asked after it was gone: its
+/// tag goes too. One the listing shows, or another one it shows instead, is the listing's.
+fn keep_until_listed<T>(
+    sent: &mut BTreeMap<PaneId, T>,
+    topology: &mut Topology,
+    shown: impl Fn(&Topology, PaneId) -> bool,
+    put: impl Fn(&mut Topology, PaneId, &T),
+) {
+    sent.retain(|pane, tag| {
+        let keep = !shown(topology, *pane) && topology.has_pane(*pane);
+        if keep {
+            put(topology, *pane, tag);
+        }
+        keep
+    });
+}
+
+/// tmux answered the tags on panes moa just started: only a refusal says anything.
+fn tags_answered(results: &[Result<Vec<String>, String>]) -> Vec<Effect> {
+    results
+        .iter()
+        .filter_map(|r| r.as_ref().err())
+        .map(|e| {
+            let why = e.lines().map(str::trim).find(|l| !l.is_empty());
+            let why = why.unwrap_or("tmux gave no reason");
+            log(
+                LogLevel::Warn,
+                format!("tmux didn't tag a panel moa started: {why}"),
+            )
+        })
+        .collect()
+}
+
 /// The pane a `moa:hook pane-exited` or `pane-died` message names, if `input` is one.
 pub(crate) fn exited_pane(input: &TmuxIn) -> Option<PaneId> {
     let TmuxIn::Notification(Notification::Message(m)) = input else {
@@ -467,6 +502,7 @@ impl TmuxState {
                     // `answered` took it.
                     TmuxToken::Query(_) => Vec::new(),
                     TmuxToken::Ping(n) => self.pinged(n, &results),
+                    TmuxToken::Tags => tags_answered(&results),
                 }
             }
         }
@@ -952,25 +988,20 @@ impl TmuxState {
         match results {
             [Ok(sessions), Ok(panes), Ok(clients)] => {
                 self.topology = Topology::from_lists(sessions, panes, clients);
-                // A tag the listing shows (or another one it shows instead) is the listing's
-                // from now on; one it doesn't show yet may have been sent after it was asked.
-                // A tag is sent only once tmux has answered with its pane, so a listing
-                // without the pane was asked after it was gone: its tag goes too.
+                // A tag the listing doesn't show yet may have been sent after it was asked.
                 let topology = &mut self.topology;
-                self.sent_tags.retain(|pane, id| {
-                    let keep = topology.moa_session(*pane).is_none() && topology.has_pane(*pane);
-                    if keep {
-                        topology.tag(*pane, *id);
-                    }
-                    keep
-                });
-                self.sent_views.retain(|pane, view| {
-                    let keep = topology.view_of(*pane).is_none() && topology.has_pane(*pane);
-                    if keep {
-                        topology.set_view(*pane, view);
-                    }
-                    keep
-                });
+                keep_until_listed(
+                    &mut self.sent_tags,
+                    topology,
+                    |t, p| t.moa_session(p).is_some(),
+                    |t, p, id| t.tag(p, *id),
+                );
+                keep_until_listed(
+                    &mut self.sent_views,
+                    topology,
+                    |t, p| t.view_of(p).is_some(),
+                    |t, p, view| t.set_view(p, view),
+                );
             }
             // No information: what was known stays.
             _ => fx.push(log(

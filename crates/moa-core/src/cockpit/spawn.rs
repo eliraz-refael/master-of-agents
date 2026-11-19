@@ -4,7 +4,7 @@
 
 use super::build::{keep_on_exit, view_tags};
 use super::scene::HIDDEN;
-use crate::effect::{Effect, LogLevel};
+use crate::effect::{Effect, LogLevel, TmuxToken};
 use crate::panel::View;
 use crate::state::State;
 use crate::tmux::cmd::{Cmd, literal_format};
@@ -68,9 +68,10 @@ pub(crate) fn spawn(state: &mut State, views: Vec<View>, seq: u64) -> Option<Eff
 }
 
 /// tmux answered the spawn of `views`, one answer per command (L18): every pane that
-/// started is tagged (all in one `Tmux` effect), recorded in the topology at once and
-/// counted in `panel_starts`. Gives the effects and the views that didn't start, each of
-/// which is logged with tmux's words.
+/// started is tagged (all in one `Tmux` effect, sent at once: the tags save nothing),
+/// recorded in the topology at once and counted in `panel_starts`. Gives the effects and the
+/// views that didn't start, each of which is logged with tmux's words. A window tmux opened
+/// without naming one pane counts as not started, and the log says it opened.
 pub(crate) fn spawned(
     state: &mut State,
     views: &[View],
@@ -84,27 +85,29 @@ pub(crate) fn spawned(
         _ => None,
     };
     for view in views {
-        let why = match answers.next() {
+        let word = view.word();
+        let line = match answers.next() {
             Some(Ok(lines)) => match started(&lines) {
                 Some(pane) => {
                     cmds.extend(spawn_tags(pane, *view));
-                    state.tmux.view_sent(pane, view.word());
+                    state.tmux.view_sent(pane, word);
                     state.panel_starts += 1;
                     continue;
                 }
-                None => "tmux's answer didn't parse".to_string(),
+                // Debug-quoted, so whatever tmux printed stays on one line.
+                None => format!(
+                    "the {word} panel's window opened, but tmux answered {lines:?}, not one tab id"
+                ),
             },
             // tmux's first words, or a reason all the same.
-            Some(Err(e)) => match e.lines().map(str::trim).find(|l| !l.is_empty()) {
-                Some(line) => line.to_string(),
-                None => "tmux gave no reason".to_string(),
-            },
-            None => "tmux didn't answer".to_string(),
+            Some(Err(e)) => {
+                let why = e.lines().map(str::trim).find(|l| !l.is_empty());
+                let why = why.unwrap_or("tmux gave no reason");
+                format!("the {word} panel couldn't start: {why}")
+            }
+            None => format!("the {word} panel couldn't start: tmux didn't answer"),
         };
-        fx.push(log(
-            LogLevel::Warn,
-            format!("the {} panel couldn't start: {why}", view.word()),
-        ));
+        fx.push(log(LogLevel::Warn, line));
         failed.push(*view);
     }
     if let (Some(conn), false) = (state.tmux.conn(), cmds.is_empty()) {
@@ -113,11 +116,25 @@ pub(crate) fn spawned(
             Effect::Tmux {
                 conn,
                 cmds,
-                token: None,
+                token: Some(TmuxToken::Tags),
             },
         );
     }
     (fx, failed)
+}
+
+/// The link went before tmux answered the spawn of `views`: tmux may have started them all
+/// the same, so the log says which. Nothing else is known of them.
+pub(crate) fn spawn_lost(views: &[View]) -> Effect {
+    let words: Vec<&str> = views.iter().map(|v| v.word()).collect();
+    log(
+        LogLevel::Warn,
+        format!(
+            "moa lost its terminal before tmux said whether these panels started, so they \
+             may be running: {}",
+            words.join(", ")
+        ),
+    )
 }
 
 #[cfg(test)]
