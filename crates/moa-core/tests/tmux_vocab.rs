@@ -69,6 +69,12 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             "kill-pane",
             "select-window",
             "select-pane",
+            "swap-pane",
+            "join-pane",
+            "break-pane",
+            "resize-pane",
+            "respawn-pane",
+            "rename-window",
         ];
         if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");
@@ -360,8 +366,17 @@ fn topology_apply() {
         Notification::LayoutChange {
             window: WindowId(2),
         },
+        // A rename of a window or session the lists don't hold yet.
+        Notification::WindowRenamed {
+            window: WindowId(5),
+            name: "moa".into(),
+        },
+        Notification::SessionRenamed {
+            session: TmuxSessionId(7),
+            name: "moa".into(),
+        },
+        // A rename whose arguments didn't parse.
         Notification::Other("session-renamed"),
-        // The cockpit is a window by its name.
         Notification::Other("window-renamed"),
         Notification::Other("unlinked-window-renamed"),
     ] {
@@ -393,4 +408,153 @@ fn a_detached_user_hides_everything_and_refresh_lists_three_queries() {
         .collect();
     assert_eq!(names, ["list-sessions", "list-panes", "list-clients"]);
     assert!(refresh_cmds().iter().all(|c| c.check().is_ok()));
+}
+
+/// L4: the commands that move panes name panes by id and sessions exactly, so a prefix
+/// never matches a stranger; each takes only its own shape.
+#[test]
+fn the_pane_moving_commands_take_only_their_safe_shapes() {
+    let cmd = |name: &'static str, args: &[&str]| Cmd::new(name).args(args.iter().copied());
+    for ok in [
+        cmd("swap-pane", &["-d", "-s", "%1", "-t", "%2"]),
+        cmd("join-pane", &["-d", "-h", "-s", "%1", "-t", "%2"]),
+        cmd("join-pane", &["-d", "-v", "-s", "%1", "-t", "%2"]),
+        cmd("break-pane", &["-d", "-s", "%1", "-t", "=moa:"]),
+        cmd("break-pane", &["-d", "-s", "%1", "-t", "=_moa:"]),
+        cmd(
+            "break-pane",
+            &["-d", "-s", "%1", "-t", "=moa:", "-n", "⌨ shell #1"],
+        ),
+        cmd("resize-pane", &["-t", "%1", "-x", "30%"]),
+        cmd("resize-pane", &["-t", "%1", "-y", "12"]),
+        cmd(
+            "respawn-pane",
+            &["-k", "-t", "%1", "/opt/moa", "panel", "empty-slot"],
+        ),
+        cmd(
+            "respawn-pane",
+            &[
+                "-k", "-t", "%1", "-c", "/w", "-e", "A=b", "-e", "C=d", "/opt/moa", "panel",
+            ],
+        ),
+        cmd("rename-window", &["-t", "%1", "Tide tables"]),
+    ] {
+        assert_eq!(ok.check(), Ok(()), "{}", ok.line());
+    }
+    let refused = |c: Cmd, why: &str| {
+        assert_eq!(c.check().map_err(|r| r.0), Err(why), "{}", c.line());
+    };
+    let swap = "swap-pane needs -d and two tab ids";
+    refused(cmd("swap-pane", &["-s", "%1", "-t", "%2"]), swap);
+    refused(cmd("swap-pane", &["-d", "-s", "%1", "-t", "moa"]), swap);
+    refused(
+        cmd("swap-pane", &["-d", "-s", "%1", "-t", "%2", "-Z"]),
+        swap,
+    );
+    let join = "join-pane needs -d, -h or -v, and two tab ids";
+    refused(
+        cmd("join-pane", &["-d", "-h", "-s", "%1", "-t", "moa"]),
+        join,
+    );
+    refused(cmd("join-pane", &["-d", "-s", "%1", "-t", "%2"]), join);
+    refused(cmd("join-pane", &["-h", "-s", "%1", "-t", "%2"]), join);
+    refused(
+        cmd("join-pane", &["-d", "-b", "-s", "%1", "-t", "%2"]),
+        join,
+    );
+    let brk = "break-pane needs -d, a tab id, and =moa: or =_moa:";
+    refused(cmd("break-pane", &["-d", "-s", "%1", "-t", "moa:"]), brk);
+    refused(cmd("break-pane", &["-d", "-s", "%1", "-t", "_moa2:"]), brk);
+    refused(cmd("break-pane", &["-d", "-s", "%1", "-t", "=_moa2:"]), brk);
+    refused(cmd("break-pane", &["-d", "-s", "%1", "-t", "=moa:1"]), brk);
+    refused(cmd("break-pane", &["-s", "%1", "-t", "=moa:"]), brk);
+    refused(cmd("break-pane", &["-d", "-s", "moa", "-t", "=moa:"]), brk);
+    refused(
+        cmd("break-pane", &["-d", "-s", "%1", "-t", "=moa:", "-n"]),
+        brk,
+    );
+    refused(
+        cmd("break-pane", &["-d", "-s", "%1", "-t", "=moa:", "-P"]),
+        brk,
+    );
+    let resize = "resize-pane needs a tab id, and -x or -y with a size";
+    refused(cmd("resize-pane", &["-t", "%1"]), resize);
+    refused(cmd("resize-pane", &["-t", "%1", "-Z"]), resize);
+    refused(cmd("resize-pane", &["-t", "moa", "-x", "30"]), resize);
+    refused(cmd("resize-pane", &["-t", "%1", "-x", "30%%"]), resize);
+    refused(cmd("resize-pane", &["-t", "%1", "-x", "%"]), resize);
+    refused(cmd("resize-pane", &["-t", "%1", "-x", "+3"]), resize);
+    let respawn = "respawn-pane needs -k, a tab id and a command";
+    refused(cmd("respawn-pane", &["-t", "%1", "/opt/moa"]), respawn);
+    refused(
+        cmd("respawn-pane", &["-k", "-t", "moa", "/opt/moa"]),
+        respawn,
+    );
+    refused(cmd("respawn-pane", &["-k", "-t", "%1"]), respawn);
+    refused(
+        cmd("respawn-pane", &["-k", "-t", "%1", "-c", "/w"]),
+        respawn,
+    );
+    // A word after the flags that tmux would read as another flag.
+    refused(
+        cmd("respawn-pane", &["-k", "-t", "%1", "-t", "%2", "/opt/moa"]),
+        respawn,
+    );
+    refused(
+        cmd(
+            "respawn-pane",
+            &["-k", "-t", "%1", "-e", "A=b\nc", "/opt/moa"],
+        ),
+        "a tab's environment can't hold a newline",
+    );
+    let rename = "rename-window needs a tab id and a name";
+    refused(cmd("rename-window", &["-t", "moa", "x"]), rename);
+    refused(cmd("rename-window", &["-t", "%1"]), rename);
+    refused(cmd("rename-window", &["-t", "%1", "x", "y"]), rename);
+    refused(
+        cmd("move-window", &["-s", "%1", "-t", "=moa:"]),
+        "that isn't a command moa sends",
+    );
+}
+
+/// L4: a chain is one line, ` ; `-joined, checked part by part, and answered as one.
+#[test]
+fn a_chain_is_one_line_and_checks_every_part() {
+    let select = Cmd::new("select-pane").args(["-t", "%1"]);
+    let swap = Cmd::new("swap-pane").args(["-d", "-s", "%1", "-t", "%2"]);
+    let chain = Cmd::chain(vec![select.clone(), swap.clone()]);
+    assert_eq!(chain.line(), "select-pane -t %1 ; swap-pane -d -s %1 -t %2");
+    assert_eq!(chain.check(), Ok(()));
+    assert!(chain.nests());
+    assert_eq!(chain.parts(), [select.clone(), swap.clone()]);
+    // A plain command is its own one part.
+    assert_eq!(swap.parts(), std::slice::from_ref(&swap));
+    assert!(!swap.nests());
+    // A chain in a chain is its parts.
+    let nested = Cmd::chain(vec![chain.clone(), select.clone()]);
+    assert_eq!(
+        nested.parts(),
+        [select.clone(), swap.clone(), select.clone()]
+    );
+    // A `;` inside an argument is the argument's, never a separator.
+    let semi = Cmd::chain(vec![Cmd::new("rename-window").args(["-t", "%1", "a ; b"])]);
+    assert_eq!(semi.line(), "rename-window -t %1 'a ; b'");
+
+    let bad = Cmd::new("swap-pane").args(["-s", "%1", "-t", "%2"]);
+    assert_eq!(
+        Cmd::chain(vec![select.clone(), bad])
+            .check()
+            .map_err(|r| r.0),
+        Err("swap-pane needs -d and two tab ids")
+    );
+    assert_eq!(
+        Cmd::chain(vec![select, Cmd::new("move-window")])
+            .check()
+            .map_err(|r| r.0),
+        Err("that isn't a command moa sends")
+    );
+    assert_eq!(
+        Cmd::chain(Vec::new()).check().map_err(|r| r.0),
+        Err("a chain needs at least one command")
+    );
 }

@@ -187,6 +187,11 @@ pub(crate) enum Asked {
 /// link went before tmux answered.
 pub(crate) type Answer = Result<Vec<Vec<String>>, ()>;
 
+/// A query's answer per command (L18): each command's lines, or tmux's error text. A chain
+/// is one command, so one entry.
+#[allow(dead_code)] // Unused until the cockpit's queries (scene, spawn, chain) answer with it.
+pub(crate) type Answers = Vec<Result<Vec<String>, String>>;
+
 /// How many unbound pane exits are remembered.
 const EXITED_KEPT: usize = 64;
 

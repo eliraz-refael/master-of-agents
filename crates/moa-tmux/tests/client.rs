@@ -322,6 +322,42 @@ async fn a_tagged_batch_with_source_file_keeps_its_results_aligned() {
     client.close().await;
 }
 
+/// L4: tmux runs a chain's commands in order and skips the rest of the line after a
+/// failure. The chain is one result, its first error's text, and the next command's reply
+/// is still its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chain_stops_at_its_first_error() {
+    let sb = Sandbox::start().unwrap();
+    let (client, mut events, _) = connect(&sb).await;
+    let set = |name: &str| Cmd::new("set-option").args(["-p", "-t", "%0", name, "1"]);
+    let chain = Cmd::chain(vec![
+        set("@a"),
+        Cmd::new("swap-pane").args(["-d", "-s", "%0", "-t", "%999"]),
+        set("@b"),
+    ]);
+    client.send(vec![chain, display("next")], Some(4));
+    let (tag, results) = next_replies(&mut events).await;
+    assert_eq!(tag, 4);
+    assert_eq!(results.len(), 2, "{results:?}");
+    match &results[0] {
+        Err(CmdError::Tmux(t)) => assert!(t.contains("%999"), "{t}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(results[1], Ok(vec!["next".to_string()]));
+    let option = |name: &str| sb.tmux(&["show-options", "-p", "-t", "%0", "-qv", name]);
+    assert_eq!(option("@a").unwrap(), "1");
+    assert_eq!(option("@b").unwrap(), "");
+    // A chain that runs to its end is `Ok`, with no lines.
+    let fine = Cmd::chain(vec![set("@b"), display("not returned")]);
+    assert_eq!(client.run(&fine).await, Ok(vec![]));
+    assert_eq!(option("@b").unwrap(), "1");
+    assert_eq!(
+        client.run(&display("after")).await,
+        Ok(vec!["after".into()])
+    );
+    client.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_source_file_command_that_fails_at_run_time_is_an_error() {
     let sb = Sandbox::start().unwrap();

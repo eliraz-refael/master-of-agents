@@ -35,10 +35,21 @@ pub enum Notification {
     LayoutChange {
         window: WindowId,
     },
+    /// `%window-renamed` and `%unlinked-window-renamed`: the window's new name.
+    WindowRenamed {
+        window: WindowId,
+        name: String,
+    },
+    /// `%session-renamed`: the session's new name.
+    SessionRenamed {
+        session: TmuxSessionId,
+        name: String,
+    },
     /// `%message`, verbatim.
     Message(String),
     Exit,
-    /// A known name moa doesn't use ("window-renamed", "output", ...).
+    /// A known name moa doesn't use ("output", "pane-mode-changed", ...), or one whose
+    /// arguments didn't parse.
     Other(&'static str),
     /// An unknown `%name`: the name only.
     Unknown(String),
