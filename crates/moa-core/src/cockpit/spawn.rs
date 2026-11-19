@@ -29,7 +29,7 @@ pub(crate) fn panel_argv(state: &State, view: View) -> Vec<String> {
 /// L7: one `new-window` per view, parked in `_moa`, each printing its pane. It opens at
 /// home, since `moa panel` refuses a folder that's gone and `_moa`'s is wherever moa first
 /// ran. The environment goes explicitly: `MOA_BRAIN`, then the daemon's (`MOA_ROOT` when
-/// sandboxed).
+/// sandboxed). Public only so the daemon's real-tmux test can run these very commands.
 pub fn spawn_cmds(state: &State, views: &[View]) -> Vec<Cmd> {
     let deps = state.deps();
     let home = deps.home.display().to_string();
@@ -52,6 +52,7 @@ pub fn spawn_cmds(state: &State, views: &[View]) -> Vec<Cmd> {
 
 /// L7's tags for a panel just started in `pane`: its view, its label, and a pane that stays
 /// when its program stops, saying so. Its frame comes with the build that places it (L10).
+/// Public only so the daemon's real-tmux test can run these very commands.
 pub fn spawn_tags(pane: PaneId, view: View) -> Vec<Cmd> {
     let mut cmds = view_tags(pane, view).to_vec();
     cmds.extend(keep_on_exit(pane));
@@ -77,21 +78,27 @@ pub(crate) fn spawned(
 ) -> (Vec<Effect>, Vec<View>) {
     let mut answers = answers.into_iter();
     let (mut cmds, mut failed, mut fx) = (Vec::new(), Vec::new(), Vec::new());
+    // The pane a spawn printed: one line, a pane id.
+    let started = |lines: &[String]| match lines {
+        [line] => line.parse::<PaneId>().ok(),
+        _ => None,
+    };
     for view in views {
         let why = match answers.next() {
-            Some(Ok(lines)) => match lines.as_slice() {
-                [line] => match line.parse::<PaneId>() {
-                    Ok(pane) => {
-                        cmds.extend(spawn_tags(pane, *view));
-                        state.tmux.view_sent(pane, view.word());
-                        state.panel_starts += 1;
-                        continue;
-                    }
-                    Err(_) => "tmux's answer didn't parse".to_string(),
-                },
-                _ => "tmux's answer didn't parse".to_string(),
+            Some(Ok(lines)) => match started(&lines) {
+                Some(pane) => {
+                    cmds.extend(spawn_tags(pane, *view));
+                    state.tmux.view_sent(pane, view.word());
+                    state.panel_starts += 1;
+                    continue;
+                }
+                None => "tmux's answer didn't parse".to_string(),
             },
-            Some(Err(e)) => e.lines().next().unwrap_or("").to_string(),
+            // tmux's first words, or a reason all the same.
+            Some(Err(e)) => match e.lines().map(str::trim).find(|l| !l.is_empty()) {
+                Some(line) => line.to_string(),
+                None => "tmux gave no reason".to_string(),
+            },
             None => "tmux didn't answer".to_string(),
         };
         fx.push(log(

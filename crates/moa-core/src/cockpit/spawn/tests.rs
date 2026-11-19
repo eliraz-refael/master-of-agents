@@ -225,7 +225,48 @@ fn an_answer_moa_cant_read_starts_no_panel() {
     assert_eq!(failed, views);
     assert!(tagged(&fx).is_empty(), "{fx:?}");
     assert_eq!(st.panel_starts, 0);
-    assert_eq!(logs(&fx).len(), 3, "{fx:?}");
+    let why = |view: &str, why: &str| {
+        (
+            LogLevel::Warn,
+            format!("the {view} panel couldn't start: {why}"),
+        )
+    };
+    assert_eq!(
+        logs(&fx),
+        [
+            why("tree", "tmux's answer didn't parse"),
+            why("plan", "tmux's answer didn't parse"),
+            why("status", "tmux didn't answer"),
+        ]
+    );
+}
+
+/// An error with no words still says why, never ending on a bare colon.
+#[test]
+fn a_failure_tmux_gave_no_words_for_still_says_why() {
+    let mut st = linked(&[]);
+    let views = [View::Tree, View::Plan, View::Today];
+    let answers = vec![
+        Err(String::new()),
+        Err("\n".into()),
+        Err("  no space for new pane  \nmore".into()),
+    ];
+    let (fx, failed) = spawned(&mut st, &views, answers);
+    assert_eq!(failed, views);
+    let why = |view: &str, why: &str| {
+        (
+            LogLevel::Warn,
+            format!("the {view} panel couldn't start: {why}"),
+        )
+    };
+    assert_eq!(
+        logs(&fx),
+        [
+            why("tree", "tmux gave no reason"),
+            why("plan", "tmux gave no reason"),
+            why("today", "no space for new pane"),
+        ]
+    );
 }
 
 #[test]

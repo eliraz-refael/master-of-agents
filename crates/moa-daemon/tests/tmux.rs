@@ -12,7 +12,6 @@ use moa_core::cockpit::{spawn_cmds, spawn_tags};
 use moa_core::config::{BrainName, Config};
 use moa_core::panel::View;
 use moa_core::state::{Deps, PanelLaunch, State};
-use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{PaneId, WindowId};
 use moa_core::tmux::panes::{PANE_INFO, PANE_START, Tag, parse_panes};
 use moa_core::tmux::topology::{self, Topology};
@@ -21,6 +20,7 @@ use moa_platform::Paths;
 use moa_store::actor::Fault;
 use moa_testkit::brain::TypicalBrain;
 use moa_testkit::{TempBrain, ids, wait_for};
+use moa_tmux::client::{CONNECT_WAIT, ConnectOptions, ControlClient};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -479,32 +479,29 @@ fn the_cockpit_flag_names_the_moa_window() {
 /// L7 on a real server: a panel starts parked in `_moa`, in a window named by its view, in
 /// `-c`'s folder, with its view, brain and root; its tags land; and when its program stops
 /// the pane stays, saying how to bring it back. `exe` stands in for moa: it writes what it
-/// was started with, then sleeps until the test stops it.
-#[test]
-fn a_spawned_panel_runs_in_the_hidden_session() {
+/// was started with, then sleeps until the test stops it. The commands go as the daemon's
+/// link sends them, each a quoted line over a control client, and the program and the home
+/// are in folders whose names have a space, as a home on macOS can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawned_panel_runs_in_the_hidden_session() {
     use std::os::unix::fs::PermissionsExt;
     let tb = TempBrain::new(None);
     let tmux = |args: &[&str]| {
         tb.tmux(B, args)
             .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
     };
-    // Runs a command moa would send, word for word.
-    let send = |cmd: &Cmd| {
-        assert_eq!(cmd.check(), Ok(()), "{}", cmd.line());
-        let mut args = vec![cmd.name()];
-        args.extend(cmd.argv().iter().map(String::as_str));
-        tmux(&args)
-    };
-    let home = tb.root().join("panel-home");
+    let home = tb.root().join("panel home");
     std::fs::create_dir_all(&home).unwrap();
     let said = tb.root().join("said");
-    let exe = tb.root().join("moa-stand-in");
+    let bin = tb.root().join("moa bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("moa");
     std::fs::write(
         &exe,
         format!(
             "#!/bin/sh\n\
-             {{ pwd -P; echo \"$MOA_BRAIN\"; echo \"$MOA_ROOT\"; echo \"$*\"; }} > {said}.tmp\n\
-             mv {said}.tmp {said}\n\
+             {{ pwd -P; echo \"$MOA_BRAIN\"; echo \"$MOA_ROOT\"; echo \"$*\"; }} > '{said}.tmp'\n\
+             mv '{said}.tmp' '{said}'\n\
              exec sleep 30\n",
             said = said.display()
         ),
@@ -539,9 +536,22 @@ fn a_spawned_panel_runs_in_the_hidden_session() {
     let [spawn] = &spawn_cmds(&state, &[View::Tree])[..] else {
         panic!("one command per panel");
     };
-    let pane: PaneId = send(spawn).parse().expect("a pane id");
+    let socket = tb.paths().tmux_socket(B).unwrap();
+    let (ctl, _events, _) = ControlClient::connect(&ConnectOptions {
+        tmux: moa_testkit::tmux_path().unwrap_or_else(|e| panic!("{e}")),
+        socket: socket.args().to_vec(),
+        env: tb.env(),
+        wait: CONNECT_WAIT,
+    })
+    .await
+    .expect("a control client");
+    // The client checks each command, then writes its line (`Cmd::line`).
+    let pane: PaneId = match &ctl.run(spawn).await.expect("the panel's window")[..] {
+        [line] => line.parse().expect("a pane id"),
+        other => panic!("not one pane: {other:?}"),
+    };
     for tag in spawn_tags(pane, View::Tree) {
-        send(&tag);
+        ctl.run(&tag).await.expect("a tag");
     }
 
     let target = pane.to_string();
@@ -581,4 +591,5 @@ fn a_spawned_panel_runs_in_the_hidden_session() {
         screen.contains("panel stopped · Ctrl-a r brings it back"),
         "{screen}"
     );
+    ctl.close().await;
 }
