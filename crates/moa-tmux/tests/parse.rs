@@ -107,7 +107,10 @@ fn tail_frames() -> Vec<Frame> {
         }),
         reply(1, false, &["after-1"]),
         Frame::Notification(Notification::WindowAdd { window: win(3) }),
-        Frame::Notification(Notification::Other("unlinked-window-renamed")),
+        Frame::Notification(Notification::WindowRenamed {
+            window: win(3),
+            name: "w3".into(),
+        }),
         Frame::Notification(Notification::Exit),
     ]
 }
@@ -129,7 +132,10 @@ fn v38_frames() -> Vec<Frame> {
         reply(0, false, &[]),
         Frame::Notification(Notification::SessionsChanged),
         Frame::Notification(Notification::SessionChanged { session: sess(1) }),
-        Frame::Notification(Notification::Other("window-renamed")),
+        Frame::Notification(Notification::WindowRenamed {
+            window: win(1),
+            name: "tmux".into(),
+        }),
         reply(1, false, &["V 3.8 14229 1794852795 client-14231"]),
     ];
     v.extend(tail_frames());
@@ -229,7 +235,38 @@ fn notifications_parse() {
         ),
         ("%exit", Exit),
         ("%exit too far behind", Exit),
-        ("%window-renamed @1 bash", Other("window-renamed")),
+        // A name is the rest of the line, spaces and all (L16).
+        (
+            "%window-renamed @1 bash",
+            WindowRenamed {
+                window: win(1),
+                name: "bash".into(),
+            },
+        ),
+        (
+            "%unlinked-window-renamed @4 Tide tables  #1",
+            WindowRenamed {
+                window: win(4),
+                name: "Tide tables  #1".into(),
+            },
+        ),
+        (
+            "%window-renamed @4 ",
+            WindowRenamed {
+                window: win(4),
+                name: String::new(),
+            },
+        ),
+        (
+            "%session-renamed $2 Harbor work",
+            SessionRenamed {
+                session: sess(2),
+                name: "Harbor work".into(),
+            },
+        ),
+        ("%window-renamed x moa", Other("window-renamed")),
+        ("%window-renamed @1", Other("window-renamed")),
+        ("%session-renamed @1 moa", Other("session-renamed")),
         ("%zap 1", Unknown("zap".into())),
         ("%window-add x", Other("window-add")),
         ("%window-add", Other("window-add")),
@@ -352,7 +389,10 @@ fn samples() -> Vec<(&'static str, Notification)> {
         ),
         (
             "%window-renamed @1 x",
-            Notification::Other("window-renamed"),
+            Notification::WindowRenamed {
+                window: win(1),
+                name: "x".into(),
+            },
         ),
         (
             "%window-pane-changed @0 %3",

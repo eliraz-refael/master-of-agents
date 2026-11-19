@@ -9,8 +9,9 @@ use crate::model::SessionId;
 
 pub const LIST_SESSIONS: &str = "S #{session_id} #{session_name}";
 /// The flag before `@moa_session` is the cockpit's: the window named `moa` in the session
-/// named `moa`, as tmux sees it (its index depends on `base-index`).
-pub const LIST_PANES: &str = "P #{pane_id} #{window_id} #{session_id} #{pane_active} #{window_active} #{window_zoomed_flag} #{&&:#{==:#{session_name},moa},#{==:#{window_name},moa}} #{@moa_session}";
+/// named `moa`, as tmux sees it (its index depends on `base-index`). After the tag, whether
+/// the pane is dead, and its `@moa_view` tag last, since it is free text.
+pub const LIST_PANES: &str = "P #{pane_id} #{window_id} #{session_id} #{pane_active} #{window_active} #{window_zoomed_flag} #{&&:#{==:#{session_name},moa},#{==:#{window_name},moa}} #{@moa_session} #{pane_dead} #{@moa_view}";
 pub const LIST_CLIENTS: &str = "C #{client_control_mode} #{session_id} #{client_name}";
 
 /// The three queries that rebuild a `Topology`, in the order `from_lists` takes them.
@@ -46,7 +47,16 @@ pub struct Topology {
     clients: BTreeMap<ClientName, TmuxSessionId>,
     moa_sessions: BTreeMap<PaneId, SessionId>,
     cockpits: BTreeSet<WindowId>,
+    /// Each window's session, from the pane lines: a rename is judged by it.
+    window_sessions: BTreeMap<WindowId, TmuxSessionId>,
+    /// `@moa_view`, the panel a pane shows (or `agent` for the agent spot).
+    views: BTreeMap<PaneId, String>,
+    /// The panes whose program has exited and that tmux keeps (`remain-on-exit`).
+    dead: BTreeSet<PaneId>,
 }
+
+/// The name of the session that holds the cockpit, and of the cockpit window in it.
+const COCKPIT: &str = "moa";
 
 /// Replace a value, saying whether it differed.
 fn put<K: Ord, V: PartialEq>(map: &mut BTreeMap<K, V>, k: K, v: V) -> Applied {
@@ -85,7 +95,8 @@ impl Topology {
     }
 
     fn add_pane(&mut self, line: &str) {
-        let mut f = line.split(' ');
+        // Eleven fields, the last of which (`@moa_view`) keeps any spaces it has.
+        let mut f = line.splitn(11, ' ');
         let (Some("P"), Some(pane), Some(window), Some(session)) =
             (f.next(), f.next(), f.next(), f.next())
         else {
@@ -96,8 +107,11 @@ impl Topology {
         else {
             return;
         };
-        // An unset `@moa_session` prints as an empty last field.
+        // An unset `@moa_session` or `@moa_view` prints as an empty field. Lines from before
+        // the last two fields read as alive and untagged.
         let moa = f.next().and_then(|s| s.parse::<SessionId>().ok());
+        let dead = f.next() == Some("1");
+        let view = f.next().filter(|v| !v.is_empty());
         let (Ok(pane), Ok(window), Ok(session)) = (pane.parse(), window.parse(), session.parse())
         else {
             return;
@@ -117,6 +131,51 @@ impl Topology {
         if let Some(m) = moa {
             self.moa_sessions.insert(pane, m);
         }
+        self.window_sessions.insert(window, session);
+        if dead {
+            self.dead.insert(pane);
+        }
+        if let Some(v) = view {
+            self.views.insert(pane, v.to_string());
+        }
+    }
+
+    /// The window is renamed: it is the cockpit when its new name and its session's are both
+    /// `moa`. A window the lists don't hold yet is read again.
+    fn window_renamed(&mut self, w: WindowId, name: &str) -> Applied {
+        let Some(session) = self.window_sessions.get(&w) else {
+            return Applied::Refresh;
+        };
+        let cockpit = name == COCKPIT && self.sessions.get(session).is_some_and(|n| n == COCKPIT);
+        let changed = if cockpit {
+            self.cockpits.insert(w)
+        } else {
+            self.cockpits.remove(&w)
+        };
+        if changed {
+            Applied::Changed
+        } else {
+            Applied::Same
+        }
+    }
+
+    /// The session is renamed. Renamed away from `moa`, none of its windows is the cockpit;
+    /// renamed to `moa`, which of them is named `moa` takes a listing, since the lists carry
+    /// no window names.
+    fn session_renamed(&mut self, s: TmuxSessionId, name: &str) -> Applied {
+        let Some(old) = self.sessions.get(&s) else {
+            return Applied::Refresh;
+        };
+        if old == name {
+            return Applied::Same;
+        }
+        self.sessions.insert(s, name.to_string());
+        if name == COCKPIT {
+            return Applied::Refresh;
+        }
+        let in_session = &self.window_sessions;
+        self.cockpits.retain(|w| in_session.get(w) != Some(&s));
+        Applied::Changed
     }
 
     pub fn apply(&mut self, n: &Notification) -> Applied {
@@ -149,12 +208,16 @@ impl Topology {
                     Applied::Same
                 }
             }
+            // A renamed session changes what `session_named` answers, and a renamed window
+            // which window is the cockpit (by name: `moa` in the session `moa`). Both are
+            // applied from the notification, with no listing (L16).
+            Notification::WindowRenamed { window, name } => self.window_renamed(*window, name),
+            Notification::SessionRenamed { session, name } => self.session_renamed(*session, name),
             Notification::WindowAdd { .. }
             | Notification::WindowClose { .. }
             | Notification::SessionsChanged
             | Notification::LayoutChange { .. }
-            // A renamed session changes what `session_named` answers, and a renamed window
-            // which window is the cockpit (by name: `moa` in the session `moa`).
+            // A rename whose arguments didn't parse.
             | Notification::Other(
                 "session-renamed" | "window-renamed" | "unlinked-window-renamed",
             ) => Applied::Refresh,
@@ -217,6 +280,35 @@ impl Topology {
         self.cockpits.contains(&w)
     }
 
+    /// The cockpit window, if there is one (the first, should two be named `moa`).
+    pub fn cockpit(&self) -> Option<WindowId> {
+        self.cockpits.first().copied()
+    }
+
+    /// The panes in window `w`; none for a window the lists don't hold.
+    pub fn panes_in(&self, w: WindowId) -> impl Iterator<Item = PaneId> + '_ {
+        self.windows
+            .get(&w)
+            .into_iter()
+            .flat_map(|w| w.panes.iter().copied())
+    }
+
+    /// The name of the session that holds pane `p`.
+    pub fn session_name_of(&self, p: PaneId) -> Option<&str> {
+        let session = self.window_sessions.get(&self.window_of(p)?)?;
+        self.sessions.get(session).map(String::as_str)
+    }
+
+    /// A pane's `@moa_view` tag, as tmux printed it: a view's name, or `agent`.
+    pub fn view_of(&self, p: PaneId) -> Option<&str> {
+        self.views.get(&p).map(String::as_str)
+    }
+
+    /// Whether the pane's program has exited and tmux keeps the pane (`#{pane_dead}`).
+    pub fn is_dead(&self, p: PaneId) -> bool {
+        self.dead.contains(&p)
+    }
+
     /// Records that `p` is tagged with session `id`, as moa just set it.
     pub fn tag(&mut self, p: PaneId, id: SessionId) {
         self.moa_sessions.insert(p, id);
@@ -249,7 +341,7 @@ mod tests {
     /// `@moa_session` values, with spaces doubled or missing; or any text at all.
     fn line() -> impl Strategy<Value = String> {
         prop_oneof![
-            "[SPC]?( {0,2}[%@$]?[0-9a-f-]{0,40}){0,9} ?",
+            "[SPC]?( {0,2}[%@$]?[0-9a-f-]{0,40}){0,12} ?",
             "[ %@$SPC0-9]{0,30}",
             ".*",
         ]

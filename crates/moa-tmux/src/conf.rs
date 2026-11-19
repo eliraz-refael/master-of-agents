@@ -95,7 +95,7 @@ fn menu() -> String {
 
 /// The mouse line (V11): panels take clicks, motion and the wheel, which tmux forwards only
 /// with the mouse on.
-const MOUSE_ON: &str = "set -g  mouse on               # panels take clicks, hover and the wheel; [ui] mouse = false in moa.toml leaves it to you\n";
+const MOUSE_ON: &str = "set -g  mouse on                # panels take clicks, hover and the wheel; [ui] mouse = false in moa.toml leaves it to you\n";
 
 /// moa's options, status line, key table and menu for `brain`. With `mouse` false the file
 /// says nothing about the mouse: `mouse off` would override a user who turns it on.

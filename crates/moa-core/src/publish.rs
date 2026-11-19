@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::layout::{current_layout, leaves};
 use crate::live::{DisplayState, display_state};
 use crate::panel::{View, key_of};
 use crate::state::State;
@@ -25,6 +26,7 @@ pub enum Topic {
     Status,
     Brain,
     Panels,
+    Layouts,
 }
 
 impl Topic {
@@ -39,6 +41,7 @@ impl Topic {
         Topic::Status,
         Topic::Brain,
         Topic::Panels,
+        Topic::Layouts,
     ];
 }
 
@@ -71,6 +74,25 @@ pub struct BrainRow {
 pub struct PanelRow {
     pub pane: Option<String>,
     pub view: View,
+}
+
+/// A `layouts` row (key: its name): its place in the layouts' order (the rows are by name),
+/// the layout's leaves in order, whether it is the brain's current one, and why it can't be
+/// used, when it can't (no leaves then).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LayoutRow {
+    pub name: String,
+    pub index: usize,
+    pub leaves: Vec<String>,
+    pub current: bool,
+    pub error: Option<String>,
+}
+
+/// The `layouts` row with key `""` (no layout can be named that), there while
+/// `layouts.json` doesn't parse.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LayoutFileRow {
+    pub error: String,
 }
 
 /// One published rows-by-key map per topic. Unchanged topics keep the same `Arc` across revs.
@@ -210,10 +232,50 @@ impl State {
             .collect()
     }
 
+    /// Every layout, in order.
+    pub(crate) fn layout_rows(&self) -> Vec<LayoutRow> {
+        let current = current_layout(self);
+        self.layouts
+            .names()
+            .enumerate()
+            .map(|(index, name)| {
+                let (leaves, error) = match self.layouts.node(name) {
+                    Ok(node) => (leaves(&node).iter().map(|l| l.to_string()).collect(), None),
+                    Err(e) => (Vec::new(), Some(e.to_string())),
+                };
+                LayoutRow {
+                    name: name.to_string(),
+                    index,
+                    leaves,
+                    current: name == current,
+                    error,
+                }
+            })
+            .collect()
+    }
+
+    fn layouts_rows(&self) -> BTreeMap<String, Value> {
+        let rows = self.layout_rows();
+        // A hand-written entry named `""` is listed (as broken), but `""` is the file's row.
+        let mut by_name = by_key(
+            rows.iter()
+                .filter(|r| !r.name.is_empty())
+                .map(|r| (r.name.clone(), r)),
+        );
+        if let Some(error) = &self.layouts.file_error {
+            let row = LayoutFileRow {
+                error: error.clone(),
+            };
+            by_name.insert(String::new(), keyed("", &row));
+        }
+        by_name
+    }
+
     fn build(&self, topic: Topic) -> BTreeMap<String, Value> {
         match topic {
             Topic::Brain => self.brain_rows(),
             Topic::Panels => self.panels_rows(),
+            Topic::Layouts => self.layouts_rows(),
             Topic::Sessions => self.sessions_rows(),
             Topic::Status => self.status_rows(),
             Topic::Groups => by_key(self.groups().map(|g| (g.path.clone(), g))),

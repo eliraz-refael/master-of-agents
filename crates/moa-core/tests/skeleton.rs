@@ -482,6 +482,14 @@ fn op_methods_match_the_variants() {
         Op::UiHere {
             folder: Some("/x".into()),
         },
+        Op::LayoutList(NoParams),
+        Op::LayoutShow {
+            name: "cockpit".into(),
+        },
+        Op::LayoutSet {
+            name: "mine".into(),
+            layout: serde_json::json!({"panel": "tree"}),
+        },
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
     // be serialized or parsed.
@@ -524,6 +532,7 @@ const WRITES: &[&str] = &[
     "project.add",
     "suggest",
     "suggestion.answer",
+    "layout.set",
 ];
 
 #[test]
@@ -560,6 +569,7 @@ fn ops_without_params_take_missing_null_or_empty_params() {
         ("brief", Op::Brief(NoParams)),
         ("attention", Op::Attention(NoParams)),
         ("suggestion.ls", Op::SuggestionLs(NoParams)),
+        ("layout.list", Op::LayoutList(NoParams)),
     ] {
         for text in [
             format!(r#"{{"method":"{method}"}}"#),

@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use crate::UtcMs;
 use crate::change::Change;
 use crate::config::{AccountName, BrainName, Config, caller_store};
 use crate::effect::RefuseWrites;
+use crate::layout::{self, Layouts};
 use crate::model::*;
 use crate::op::{ConnId, Op};
 use crate::panel::{PanelReg, View};
@@ -175,6 +177,11 @@ pub struct Deps {
     /// (`moa_agents::claude::newest_conversation`): directory reads only, for `adopt` when the
     /// agent's argv names none (R21).
     pub newest_conversation: fn(&Path, &Path, &[String], Option<UtcMs>) -> Option<String>,
+    /// A text file's contents, `None` when there is no file: `layouts.json`, read at start
+    /// and again at every layout op (L2).
+    pub read_text: fn(&Path) -> io::Result<Option<String>>,
+    /// Where `layouts.json` is: `~/.config/moa/layouts.json`, shared by every brain.
+    pub layouts_file: PathBuf,
 }
 
 fn identity(p: &Path) -> PathBuf {
@@ -207,6 +214,8 @@ impl Default for Deps {
             transcript: |_, _| TranscriptCheck::Present(PathBuf::new()),
             is_dir: |_| true,
             newest_conversation: |_, _, _, _| None,
+            read_text: |_| Ok(None),
+            layouts_file: PathBuf::new(),
         }
     }
 }
@@ -293,6 +302,9 @@ pub struct State {
     /// The view each tab last showed in a panel while this daemon ran: a panel that comes
     /// back to a tab without naming a view gets it again.
     pub(crate) pane_views: BTreeMap<PaneId, View>,
+    /// `layouts.json` as last read, merged with the presets. Kept in memory: every layout op
+    /// reads the file again.
+    pub(crate) layouts: Layouts,
 }
 
 impl State {
@@ -330,6 +342,7 @@ impl State {
             not_found: BTreeMap::new(),
             panels: BTreeMap::new(),
             pane_views: BTreeMap::new(),
+            layouts: layout::presets(),
         }
     }
 

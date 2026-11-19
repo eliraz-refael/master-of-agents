@@ -18,7 +18,7 @@ use moa_core::state::{LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
-use moa_core::tmux::topology::refresh_cmds;
+use moa_core::tmux::topology::{Applied, Topology, refresh_cmds};
 use moa_core::{Now, UtcMs};
 
 const SID: &str = "00000000-0000-4000-8000-000000000001";
@@ -445,4 +445,108 @@ fn structural_changes_refresh() {
         );
         assert_eq!(refreshes(&fx), 0, "{m}");
     }
+}
+
+fn renamed(window: u32, name: &str) -> Notification {
+    Notification::WindowRenamed {
+        window: WindowId(window),
+        name: name.into(),
+    }
+}
+
+/// L16: a rename is applied from its notification, with no listing. The cockpit is the
+/// window named `moa` in the session named `moa`, so a rename can make one or end one.
+#[test]
+fn renames_apply_without_a_listing() {
+    let sessions = ["S $0 moa".to_string(), "S $1 _moa".to_string()];
+    let panes = [
+        "P %1 @1 $0 1 1 0 1 ".to_string(),
+        "P %2 @2 $0 1 0 0 0 ".to_string(),
+        "P %3 @3 $1 1 1 0 0 ".to_string(),
+    ];
+    let mut t = Topology::from_lists(&sessions, &panes, &[]);
+    assert_eq!(t.cockpit(), Some(WindowId(1)));
+    // The cockpit's window takes another name: there is no cockpit.
+    assert_eq!(t.apply(&renamed(1, "Tide tables")), Applied::Changed);
+    assert!(!t.is_cockpit(WindowId(1)));
+    assert_eq!(t.cockpit(), None);
+    // `%unlinked-window-renamed @2 moa`, a window in the session `moa`: the cockpit.
+    assert_eq!(t.apply(&renamed(2, "moa")), Applied::Changed);
+    assert!(t.is_cockpit(WindowId(2)));
+    assert_eq!(t.cockpit(), Some(WindowId(2)));
+    assert_eq!(t.apply(&renamed(2, "moa")), Applied::Same);
+    // A window named `moa` in another session isn't one.
+    assert_eq!(t.apply(&renamed(3, "moa")), Applied::Same);
+    assert!(!t.is_cockpit(WindowId(3)));
+    // Renamed away, it isn't any more.
+    assert_eq!(t.apply(&renamed(2, "Kite")), Applied::Changed);
+    assert!(!t.is_cockpit(WindowId(2)));
+
+    // The session `moa` renamed: no window in it is the cockpit, and the name moves.
+    assert_eq!(t.apply(&renamed(2, "moa")), Applied::Changed);
+    let session = |name: &str| Notification::SessionRenamed {
+        session: TmuxSessionId(0),
+        name: name.into(),
+    };
+    assert_eq!(t.apply(&session("Harbor")), Applied::Changed);
+    assert!(!t.is_cockpit(WindowId(2)));
+    assert_eq!(t.cockpit(), None);
+    assert_eq!(t.session_named("Harbor"), Some(TmuxSessionId(0)));
+    assert_eq!(t.session_named("moa"), None);
+    assert_eq!(t.session_name_of(PaneId(2)), Some("Harbor"));
+    assert_eq!(t.apply(&session("Harbor")), Applied::Same);
+    // Renamed back to `moa`, which of its windows is named `moa` takes a listing: the lists
+    // carry no window names.
+    assert_eq!(t.apply(&session("moa")), Applied::Refresh);
+
+    // Through the link, a rename sends no listing.
+    let mut s = started();
+    up(
+        &mut s,
+        &["P %1 @1 $0 1 1 0 1 ", &format!("P %3 @2 $0 1 0 0 0 {SID}")],
+        USER,
+    );
+    for (n, cockpit) in [(renamed(1, "Kite"), None), (renamed(2, "moa"), Some(2))] {
+        let fx = feed(&mut s, TmuxIn::Notification(n.clone()));
+        assert_eq!(refreshes(&fx), 0, "{n:?}");
+        assert_eq!(s.tmux().topology.cockpit(), cockpit.map(WindowId), "{n:?}");
+    }
+}
+
+/// L16: the listing reads each pane's `@moa_view` tag and whether it is dead.
+#[test]
+fn the_listing_reads_tags_and_liveness() {
+    let mut s = started();
+    up(
+        &mut s,
+        &[
+            "P %1 @1 $0 1 1 0 1  1 tree",
+            &format!("P %3 @1 $0 0 1 0 1 {SID} 0 agent"),
+            "P %4 @3 $1 1 1 0 0  0 ",
+            // 4b's lines, before the two fields: alive and untagged.
+            "P %5 @4 $0 1 0 0 0 ",
+        ],
+        USER,
+    );
+    let t = &s.tmux().topology;
+    assert_eq!(t.view_of(PaneId(1)), Some("tree"));
+    assert!(t.is_dead(PaneId(1)));
+    assert_eq!(t.view_of(PaneId(3)), Some("agent"));
+    assert!(!t.is_dead(PaneId(3)));
+    assert_eq!(t.moa_session(PaneId(3)), Some(sid()));
+    for p in [4, 5, 9] {
+        assert_eq!(t.view_of(PaneId(p)), None, "%{p}");
+        assert!(!t.is_dead(PaneId(p)), "%{p}");
+    }
+    assert_eq!(t.cockpit(), Some(WindowId(1)));
+    let cockpit: Vec<PaneId> = t.panes_in(WindowId(1)).collect();
+    assert_eq!(cockpit, [PaneId(1), PaneId(3)]);
+    assert_eq!(t.panes_in(WindowId(9)).count(), 0);
+    assert_eq!(t.session_name_of(PaneId(3)), Some("moa"));
+    assert_eq!(t.session_name_of(PaneId(4)), Some("_moa"));
+    assert_eq!(t.session_name_of(PaneId(9)), None);
+    assert!(
+        moa_core::tmux::topology::LIST_PANES
+            .ends_with(" #{@moa_session} #{pane_dead} #{@moa_view}")
+    );
 }

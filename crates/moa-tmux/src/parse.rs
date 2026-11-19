@@ -271,6 +271,21 @@ fn typed(name: &'static str, rest: &str) -> Option<Notification> {
         "layout-change" => Notification::LayoutChange {
             window: arg()?.parse::<WindowId>().ok()?,
         },
+        // The name is the rest of the line, spaces and all.
+        "window-renamed" | "unlinked-window-renamed" => {
+            let (window, name) = rest.split_once(' ')?;
+            Notification::WindowRenamed {
+                window: window.parse::<WindowId>().ok()?,
+                name: name.to_string(),
+            }
+        }
+        "session-renamed" => {
+            let (session, name) = rest.split_once(' ')?;
+            Notification::SessionRenamed {
+                session: session.parse::<TmuxSessionId>().ok()?,
+                name: name.to_string(),
+            }
+        }
         "message" => Notification::Message(rest.to_string()),
         "exit" => Notification::Exit,
         _ => return None,

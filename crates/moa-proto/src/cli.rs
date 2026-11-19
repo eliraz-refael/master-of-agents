@@ -545,9 +545,22 @@ impl Verb {
                 }
             }
             Verb::Restart { id } => Op::SessionRestart { q: id.clone() },
+            // `set` joins the words after the name with spaces, as the spike did.
+            Verb::Layout { op, args } => match (op, args.as_slice()) {
+                (LayoutOp::List, []) => Op::LayoutList(NoParams),
+                (LayoutOp::Show, [name]) => Op::LayoutShow { name: name.clone() },
+                (LayoutOp::Set, [name, json @ ..]) if !json.is_empty() => Op::LayoutSet {
+                    name: name.clone(),
+                    layout: serde_json::from_str(&json.join(" "))
+                        .map_err(|e| VerbError::Usage(format!("layout: {e}")))?,
+                },
+                (LayoutOp::List, _) => return usage("usage: moa layout list"),
+                (LayoutOp::Show, _) => return usage("usage: moa layout show NAME"),
+                (LayoutOp::Set, _) => return usage("usage: moa layout set NAME JSON"),
+                (LayoutOp::Apply, _) => return Err(VerbError::NotYet(self.name())),
+            },
             // Listed one by one, so a new verb can't become "not yet" by default.
             Verb::Goto { .. }
-            | Verb::Layout { .. }
             | Verb::Peers
             | Verb::Ask { .. }
             | Verb::Reply { .. }

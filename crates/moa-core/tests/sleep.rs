@@ -756,48 +756,36 @@ fn sleep_with_writes_refused_kills_nothing() {
 }
 
 /// The cockpit is the window named `moa` in the session `moa`: a window renamed into it or
-/// out of it is looked at again (the Task 4 minor).
+/// out of it is looked at again (the Task 4 minor), straight from the notification, with no
+/// listing (5b's L16).
 #[test]
 fn a_renamed_window_moves_the_cockpit() {
     let mut r = World::new().up();
     let due = r.due;
-    let refreshes = |fx: &[Effect]| {
-        fx.iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    Effect::Tmux {
-                        token: Some(TmuxToken::Refresh),
-                        ..
-                    }
-                )
-            })
-            .count()
+    let rename = |r: &mut Rig, window: u32, name: &str| {
+        let n = Notification::WindowRenamed {
+            window: WindowId(window),
+            name: name.into(),
+        };
+        let fx = feed(&r.b, &mut r.st, TmuxIn::Notification(n));
+        let refreshes = fx.iter().filter(|e| {
+            matches!(
+                e,
+                Effect::Tmux {
+                    token: Some(TmuxToken::Refresh),
+                    ..
+                }
+            )
+        });
+        assert_eq!(refreshes.count(), 0, "{fx:?}");
     };
-    // S's tab's window is renamed `moa` (the cockpit's own got another name first).
-    let fx = feed(
-        &r.b,
-        &mut r.st,
-        TmuxIn::Notification(Notification::Other("unlinked-window-renamed")),
-    );
-    assert_eq!(refreshes(&fx), 1, "{fx:?}");
-    feed(
-        &r.b,
-        &mut r.st,
-        lists(&[
-            "P %0 @1 $0 1 1 0 0 ".into(),
-            format!("P %1 @2 $0 1 0 0 1 {S}"),
-        ]),
-    );
+    // The cockpit's own window gets another name, and S's tab's window is renamed `moa`.
+    rename(&mut r, 1, "Kite");
+    rename(&mut r, 2, "moa");
     assert_eq!(r.why(due), Some("in the cockpit"));
     // And back.
-    let fx = feed(
-        &r.b,
-        &mut r.st,
-        TmuxIn::Notification(Notification::Other("window-renamed")),
-    );
-    assert_eq!(refreshes(&fx), 1, "{fx:?}");
-    feed(&r.b, &mut r.st, lists(&base_panes()));
+    rename(&mut r, 2, "Tide tables");
+    rename(&mut r, 1, "moa");
     assert_eq!(r.why(due), None);
 }
 

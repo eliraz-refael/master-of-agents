@@ -184,6 +184,18 @@ pub enum Op {
         #[serde(default)]
         folder: Option<String>,
     },
+    /// The layouts in `layouts.json` and the presets, the brain's current one marked.
+    #[serde(rename = "layout.list")]
+    LayoutList(NoParams),
+    /// One layout's JSON.
+    #[serde(rename = "layout.show")]
+    LayoutShow { name: String },
+    /// Saves `layout` as `name` in `layouts.json`, once it validates.
+    #[serde(rename = "layout.set")]
+    LayoutSet {
+        name: String,
+        layout: serde_json::Value,
+    },
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -326,6 +338,9 @@ impl Op {
         "tmux.ensure",
         "ui.panel",
         "ui.here",
+        "layout.list",
+        "layout.show",
+        "layout.set",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -350,7 +365,8 @@ impl Op {
             | Op::NoteAdd { .. }
             | Op::ProjectAdd { .. }
             | Op::Suggest { .. }
-            | Op::SuggestionAnswer { .. } => true,
+            | Op::SuggestionAnswer { .. }
+            | Op::LayoutSet { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -362,6 +378,8 @@ impl Op {
             | Op::TermOpen { .. }
             | Op::UiPanel { .. }
             | Op::UiHere { .. }
+            | Op::LayoutList(_)
+            | Op::LayoutShow { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -399,6 +417,9 @@ impl Op {
             Op::TmuxEnsure { .. } => "tmux.ensure",
             Op::UiPanel { .. } => "ui.panel",
             Op::UiHere { .. } => "ui.here",
+            Op::LayoutList(_) => "layout.list",
+            Op::LayoutShow { .. } => "layout.show",
+            Op::LayoutSet { .. } => "layout.set",
             Op::DebugPanic => "debug.panic",
         }
     }

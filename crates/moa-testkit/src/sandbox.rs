@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -15,6 +16,15 @@ pub const TMUX_NOT_FOUND: &str =
 /// The tmux on `PATH`, or the "not found" error.
 pub fn tmux_path() -> io::Result<PathBuf> {
     moa_platform::which("tmux", std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND))
+}
+
+/// The tmux [`Sandbox::tmux`] runs: looked up on `PATH` once per test process, not on every
+/// command.
+fn sandbox_tmux() -> io::Result<&'static Path> {
+    static TMUX: OnceLock<Option<PathBuf>> = OnceLock::new();
+    TMUX.get_or_init(|| tmux_path().ok())
+        .as_deref()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND))
 }
 
@@ -86,19 +96,12 @@ impl Sandbox {
     /// Run a tmux command against the sandbox server; stdout with trailing newlines
     /// trimmed, or `Err` carrying stderr on a non-zero exit.
     pub fn tmux(&self, args: &[&str]) -> io::Result<String> {
-        let out = Command::new("tmux")
+        let out = Command::new(sandbox_tmux()?)
             .args(["-u", "-L", &self.name])
             .args(args)
             .env_clear()
             .envs(self.env())
-            .output()
-            .map_err(|e| {
-                if e.kind() == io::ErrorKind::NotFound {
-                    io::Error::new(io::ErrorKind::NotFound, TMUX_NOT_FOUND)
-                } else {
-                    e
-                }
-            })?;
+            .output()?;
         if !out.status.success() {
             return Err(io::Error::other(
                 String::from_utf8_lossy(&out.stderr).into_owned(),

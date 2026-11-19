@@ -223,6 +223,9 @@ struct Sentinel {
     text: String,
     /// The first error among the absorbed blocks.
     error: Option<String>,
+    /// Whether the command sources a file, so a file's parse error is its own (a chain of
+    /// moves never parses one).
+    sources: bool,
 }
 
 /// What the writer and the reader share. The writer pushes a command's slot before it
@@ -511,7 +514,7 @@ async fn write_loop(
         let mut results: Vec<Option<Reply>> = Vec::with_capacity(cmds.len());
         let mut lines = String::new();
         let mut written = Vec::new();
-        let mut sentinels: Vec<Option<String>> = Vec::new();
+        let mut sentinels: Vec<Option<Sentinel>> = Vec::new();
         for (i, cmd) in cmds.iter().enumerate() {
             match cmd.check() {
                 Ok(()) => {
@@ -519,15 +522,21 @@ async fn write_loop(
                     written.push(i);
                     lines.push_str(&cmd.line());
                     lines.push('\n');
-                    // A command that runs others gets one block per command it ran; a
-                    // sentinel right after marks where they end.
+                    // A command that runs others (`source-file`, a chain) gets one block per
+                    // command it ran; a sentinel right after marks where they end. A chain
+                    // stops at its first failure, and the sentinel, on its own line, still
+                    // runs.
                     sentinels.push(cmd.nests().then(|| {
                         nonce += 1;
                         let text = format!("moa:sentinel {nonce}");
                         let probe = Cmd::new("display-message").args(["-p", text.as_str()]);
                         lines.push_str(&probe.line());
                         lines.push('\n');
-                        text
+                        Sentinel {
+                            text,
+                            error: None,
+                            sources: cmd.parts().iter().any(|p| p.name() == "source-file"),
+                        }
                     }));
                 }
                 Err(r) => results.push(Some(Err(CmdError::Refused(r.0)))),
@@ -555,7 +564,7 @@ async fn write_loop(
                 sh.pending.push_back(Slot {
                     batch: Arc::clone(&batch),
                     index,
-                    sentinel: sentinel.map(|text| Sentinel { text, error: None }),
+                    sentinel,
                 });
             }
             sh.events.clone()
@@ -650,7 +659,8 @@ fn handle(frame: Frame, shared: &Mutex<Shared>, events: &mpsc::UnboundedSender<E
             };
             if let Some(s) = &mut front.sentinel {
                 if error || lines != [s.text.as_str()] {
-                    // One of the blocks of the command that nests. tmux keeps its config
+                    // One of the blocks of the command that nests, whose first error is its
+                    // answer (a chain's has no blocks after it). tmux keeps its config
                     // parse errors server-wide (`cfg_causes`), so another client's parse
                     // error can be blamed on our `source-file`, or ours on theirs. That
                     // stays inside this one slot and never shifts the FIFO.
@@ -689,12 +699,13 @@ fn handle(frame: Frame, shared: &Mutex<Shared>, events: &mpsc::UnboundedSender<E
     }
 }
 
-/// A file that didn't parse fails the command that nests, which is at the front. tmux keeps
-/// config parse errors server-wide (`cfg_causes`), so this may also be another client's
-/// error; it is still only ever applied to the one source-file slot.
+/// A file that didn't parse fails the command that sources it, when that is at the front.
+/// tmux keeps config parse errors server-wide (`cfg_causes`), so this may also be another
+/// client's error; it is still only ever applied to the one source-file slot.
 fn file_error(shared: &Mutex<Shared>) {
     let mut sh = lock(shared);
-    if let Some(s) = sh.pending.front_mut().and_then(|f| f.sentinel.as_mut()) {
+    let front = sh.pending.front_mut().and_then(|f| f.sentinel.as_mut());
+    if let Some(s) = front.filter(|s| s.sources) {
         s.error
             .get_or_insert_with(|| "the file has an error".to_string());
     }
@@ -726,6 +737,60 @@ mod tests {
     fn a_failed_wait_reaps_before_it_flags() {
         let failed = io::Error::from(io::ErrorKind::InvalidInput);
         assert_eq!(reaper_steps(Err(failed)), ["reap", "flag"]);
+    }
+
+    /// A file's parse error, said outside any block (a bare line before 3.8, `%config-error`
+    /// from 3.8), fails only a command that sources a file. A chain at the front stays `Ok`.
+    #[test]
+    fn a_file_error_fails_only_a_command_that_sources_one() {
+        for (sources, want) in [
+            (false, Ok(vec![])),
+            (true, Err(CmdError::Tmux("the file has an error".into()))),
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let batch = Arc::new(Batch(Mutex::new(BatchState {
+                results: vec![None],
+                remaining: 1,
+                done: Some(Done::Tag(1)),
+            })));
+            let text = "moa:sentinel 1".to_string();
+            let slot = Slot {
+                batch,
+                index: 0,
+                sentinel: Some(Sentinel {
+                    text: text.clone(),
+                    error: None,
+                    sources,
+                }),
+            };
+            let shared = Mutex::new(Shared {
+                pending: VecDeque::from([slot]),
+                gone: false,
+                events: Some(tx.clone()),
+            });
+            let block = |lines: Vec<String>| Frame::Reply {
+                flags: 1,
+                error: false,
+                lines,
+            };
+            for frame in [
+                block(vec![]),
+                Frame::Stray,
+                Frame::Notification(Notification::Other("config-error")),
+                block(vec![]),
+                block(vec![text]),
+            ] {
+                handle(frame, &shared, &tx);
+            }
+            let mut replies = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                if let Event::Replies { tag, results } = ev {
+                    replies.push((tag, results));
+                }
+            }
+            assert_eq!(replies, [(1, vec![want])], "sources {sources}");
+            assert!(lock(&shared).pending.is_empty());
+        }
     }
 
     #[test]

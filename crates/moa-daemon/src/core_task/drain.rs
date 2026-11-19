@@ -343,12 +343,38 @@ impl Core {
             }
         };
         debug_assert!(check_order(&effects).is_ok(), "effects out of order");
+        // The request whose file couldn't be written: what the op says after the write isn't
+        // true, so its publish and reply are skipped up to that reply.
+        let mut unsaved: Option<(ConnId, ReqId)> = None;
         for effect in effects {
             if effect.runs_at_once() {
                 self.run_now(effect);
                 continue;
             }
             match effect {
+                // Run here, before the effects after it.
+                Effect::WriteFile { path, text, req } => {
+                    if let Err(e) = write_file(&path, &text) {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let line = format!("couldn't save {name}: {e}");
+                        tracing::warn!("{line}");
+                        // The core already holds the unsaved layout: read the file again, or
+                        // the next publish of any topic would show it.
+                        if let Some(p) = moa_core::layout::reread(&mut self.state) {
+                            held.push(Held::Publish(p));
+                        }
+                        if let Some((conn, req)) = req {
+                            held.push(Held::Reply {
+                                conn,
+                                req,
+                                result: Err(OpError(line)),
+                            });
+                            unsaved = Some((conn, req));
+                        }
+                    }
+                }
+                Effect::Publish(_) if unsaved.is_some() => {}
+                Effect::Reply { conn, req, .. } if unsaved == Some((conn, req)) => unsaved = None,
                 Effect::Persist(changes) => batch.extend(changes),
                 Effect::Backup { day } => self.due_backups.push(day),
                 Effect::Publish(p) => held.push(Held::Publish(p)),
@@ -510,6 +536,42 @@ impl Drop for Core {
         }
         lock(&self.conns).clear();
     }
+}
+
+/// Writes `text` to `path` through a temporary file in the same folder and a rename, making
+/// the folder when it's missing. A `path` that is a link is written through it, at its
+/// target, which the write makes when it's missing (its folder isn't made): the rename would
+/// otherwise put a plain file in the link's place.
+fn write_file(path: &Path, text: &str) -> io::Result<()> {
+    let target = through_links(path)?;
+    if target == path
+        && let Some(dir) = path.parent()
+    {
+        std::fs::create_dir_all(dir)?;
+    }
+    moa_platform::fs::write_if_changed(&target, text).map(|_| ())
+}
+
+/// The most links followed from one path.
+const MAX_LINKS: usize = 8;
+
+/// The file at the end of `path`'s links (`path` itself when it isn't one), which may not
+/// exist yet. A relative link is read from its own folder.
+fn through_links(path: &Path) -> io::Result<PathBuf> {
+    let mut at = path.to_path_buf();
+    for _ in 0..=MAX_LINKS {
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(&at)?;
+                // An absolute `to` replaces the folder in `join`.
+                at = at.parent().map_or_else(|| to.clone(), |dir| dir.join(&to));
+            }
+            Ok(_) => return Ok(at),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(at),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("its links go round in a circle"))
 }
 
 /// The carried-over items, then what is already waiting, up to [`DRAIN_CAP`]. A `stop` ends
