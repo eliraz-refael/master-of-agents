@@ -991,11 +991,16 @@ impl TmuxState {
             // The log lines never carry the message text.
             Notification::Message(m) => match Mailbox::parse(m) {
                 Ok(Mailbox::Hook(_)) => self.refresh(),
-                Ok(Mailbox::Key { action, client, .. }) => vec![Effect::Tmux {
-                    conn,
-                    cmds: vec![notice(&client, action.not_yet())],
-                    token: None,
-                }],
+                // The keys the core acts on never get here (`keys::run`).
+                Ok(Mailbox::Key { action, client, .. }) => action
+                    .not_yet()
+                    .map(|text| Effect::Tmux {
+                        conn,
+                        cmds: vec![notice(&client, text)],
+                        token: None,
+                    })
+                    .into_iter()
+                    .collect(),
                 Ok(Mailbox::Prompt { .. }) => vec![log(
                     LogLevel::Info,
                     "a prompt answer arrived that nothing waits for".into(),

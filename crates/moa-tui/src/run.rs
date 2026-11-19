@@ -43,7 +43,8 @@ use crate::theme::{self, Theme};
 /// What a panel needs to run.
 #[derive(Clone, Debug)]
 pub struct PanelOptions {
-    /// How to reach the brain's daemon. Its `autostart` is used for the first connect only.
+    /// How to reach the brain's daemon. Its `autostart` is used for the first connect only;
+    /// without one, a first connect that fails waits and tries again, as a reconnect does.
     pub client: ClientOptions,
     /// The view asked for; without one the daemon picks (V3).
     pub view: Option<View>,
@@ -702,9 +703,12 @@ impl Loop {
                 self.link = Link::Mismatch;
                 self.panel.note(MISMATCH);
             }
-            Err(Failed::Down(line)) if !self.linked_once => {
+            Err(Failed::Down(line))
+                if !self.linked_once && self.opts.client.autostart.is_some() =>
+            {
                 // The first connect, which could start the daemon, says why it couldn't and
-                // that a key tries again.
+                // that a key tries again. One that couldn't (a panel moa placed) waits for the
+                // daemon as a reconnect does.
                 self.panel.note(&down_line(Some(&line)));
                 self.link = Link::Down(Some(line));
             }

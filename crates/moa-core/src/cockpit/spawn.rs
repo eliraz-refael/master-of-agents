@@ -26,10 +26,15 @@ pub(crate) fn panel_argv(state: &State, view: View) -> Vec<String> {
     ]
 }
 
-/// A panel's environment, as `-e` flags: `MOA_BRAIN`, then the daemon's (`MOA_ROOT` when
-/// sandboxed).
+/// Set on every panel moa places itself: its first connect never starts moa, which may have
+/// just been stopped on purpose; it waits for moa as a reconnecting panel does.
+pub const NO_AUTOSTART: &str = "MOA_NO_AUTOSTART";
+
+/// A panel's environment, as `-e` flags: `MOA_BRAIN`, `MOA_NO_AUTOSTART`, then the daemon's
+/// (`MOA_ROOT` when sandboxed, `MOA_REAL_HOME` when it may use the real home).
 fn panel_env(state: &State) -> Vec<String> {
-    std::iter::once(("MOA_BRAIN", state.brain().as_str()))
+    [("MOA_BRAIN", state.brain().as_str()), (NO_AUTOSTART, "1")]
+        .into_iter()
         .chain(
             state
                 .deps()

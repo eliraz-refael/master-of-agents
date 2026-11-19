@@ -513,8 +513,6 @@ fn a_panel_comes_back_after_moa_restarts() {
     let pane = r.tree(&["Kite", "Harbor"]);
     r.select(&pane, "Harbor");
 
-    // The cockpit's panels have connected: none of them starts moa again (L15).
-    cockpit_panels_connected(&r.tb);
     shutdown(&r.tb);
     r.shows(
         &pane,
@@ -568,4 +566,44 @@ fn a_panel_started_at_the_end_leaves_nothing_behind() {
     let gone = wait_for(SHOWS, || (!pid_alive(server)).then_some(()));
     assert!(gone.is_some(), "the terminal server outlived its root");
     assert!(!root.exists());
+}
+
+/// A panel moa placed itself (`MOA_NO_AUTOSTART`, as every cockpit panel has) never starts
+/// moa: with moa stopped, its first connect waits as a reconnect does, and it links once
+/// moa runs again. One started by hand still starts moa.
+#[test]
+fn a_panel_moa_placed_never_starts_moa() {
+    let r = rig();
+    shutdown(&r.tb);
+    let free = || {
+        fs::File::open(r.tb.paths().lock(B))
+            .is_ok_and(|f| f.try_lock().is_ok())
+            .then_some(())
+    };
+    assert!(wait_for(SHOWS, free).is_some(), "moa didn't stop");
+
+    let cmd = format!("'{MOA}' panel tree");
+    let placed = tmux(
+        &r.tb,
+        &[
+            "new-window",
+            "-d",
+            "-t",
+            "=moa:",
+            "-e",
+            "MOA_NO_AUTOSTART=1",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &cmd,
+        ],
+    );
+    r.shows(&placed, &["moa isn't running; trying again…"]);
+    assert!(free().is_some(), "the placed panel started moa");
+
+    // One started by hand starts it, and the placed one links then.
+    panel_tab(&r.tb, "tree");
+    let held = wait_for(SHOWS, || free().is_none().then_some(()));
+    assert!(held.is_some(), "a panel started by hand didn't start moa");
+    r.shows(&placed, &[TREE_HINT]);
 }

@@ -524,10 +524,15 @@ fn repair_respawns_dead_panels_then_applies_from_a_new_listing() {
     let [(n, cmds)] = &queries(&fx)[..] else {
         panic!("{fx:?}")
     };
+    for c in cmds {
+        assert_eq!(c.check(), Ok(()), "{}", c.line());
+    }
     let respawns: Vec<_> = cmds.iter().flat_map(lines).collect();
     assert_eq!(
         respawns,
-        ["respawn-pane -k -t %7 -c /h -e MOA_BRAIN=default /x/moa panel plan --brain default"]
+        [
+            "respawn-pane -k -t %7 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel plan --brain default"
+        ]
     );
     let fx = feed(&mut st, answer(*n, vec![Ok(Vec::new())]));
     assert_eq!(panel_starts(&st), before + 1);
@@ -791,4 +796,126 @@ fn an_unknown_layout_is_refused_at_once() {
     );
     // The queue goes on.
     the_listing(&apply(&mut st, 2, "focus"));
+}
+
+/// A goto never takes a waiting layout switch's place, nor a switch a goto's: only a build
+/// of the same kind replaces another.
+#[test]
+fn a_goto_and_a_layout_key_never_replace_each_other() {
+    let mut st = up();
+    let first = the_listing(&key(&mut st, "layout-1"));
+    for k in ["layout-2", "tree"] {
+        let fx = key(&mut st, k);
+        assert!(
+            queries(&fx).is_empty() && notices(&fx).is_empty(),
+            "{k}: {fx:?}"
+        );
+    }
+    // Each kind replaces its own.
+    for k in ["layout-3", "console"] {
+        let fx = key(&mut st, k);
+        assert_eq!(
+            notices(&fx),
+            ["moa: replaced by a later layout request"],
+            "{k}"
+        );
+    }
+    // In order: `classic`, then the goto to the console.
+    let (n, _) = the_chain(&feed(
+        &mut st,
+        answer(first, lists(&shell_and_parked(), true)),
+    ));
+    let next = the_listing(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    let (n, _) = the_chain(&feed(
+        &mut st,
+        answer(next, lists(&shell_and_parked(), true)),
+    ));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(notices(&fx), ["moa: layout classic applied"]);
+    let next = the_listing(&fx);
+    let (n, lines) = the_chain(&feed(&mut st, answer(next, lists(&cockpit_built(), true))));
+    assert_eq!(lines, selects("%3"));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(notices(&fx), ["moa: console"]);
+}
+
+/// L2: a `cockpit` entry that `layouts.json` breaks falls back to the preset, for
+/// `layout apply` with no name and for `goto`, as it does for the lazy build.
+#[test]
+fn a_broken_current_layout_falls_back_to_the_preset() {
+    let deps = Deps {
+        home: PathBuf::from("/h"),
+        panel: PanelLaunch {
+            exe: PathBuf::from("/x/moa"),
+            env: Vec::new(),
+        },
+        read_text: |_| {
+            Ok(Some(
+                r#"{"layouts": {"cockpit": {"panel": "nope"}}}"#.into(),
+            ))
+        },
+        ..Deps::default()
+    };
+    for op in [
+        Op::LayoutApply { name: None },
+        Op::Goto {
+            panel: Leaf::Panel(View::Tree),
+        },
+    ] {
+        let mut st =
+            State::new(BrainName::default_brain(), Config::default()).with_deps(deps.clone());
+        handle_checked(&mut st, Input::Startup(Box::default()), now());
+        feed(&mut st, connected());
+        feed(&mut st, refresh(lists(&[], false)));
+        let n = the_listing(&send(&mut st, 1, op.clone()));
+        let (n, lines) = the_chain(&feed(&mut st, answer(n, lists(&shell_and_parked(), true))));
+        assert!(
+            lines.iter().any(|l| l.starts_with("join-pane")),
+            "{op:?}: {lines:?}"
+        );
+        let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+        assert!(reply_text(&fx).is_ok(), "{op:?}: {fx:?}");
+    }
+}
+
+/// A chain's answer for an operation a reload dropped is ignored: nothing is saved or said,
+/// and the operation in flight goes on.
+#[test]
+fn a_stale_chain_answer_is_ignored() {
+    let mut st = up();
+    let n = the_listing(&apply(&mut st, 1, "focus"));
+    let (old, _) = the_chain(&feed(&mut st, answer(n, lists(&shell_and_parked(), true))));
+    let fx = handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::default(),
+            refuse_writes: None,
+        },
+        now(),
+    );
+    assert_eq!(reply_text(&fx), Err(LOST.into()));
+    let n = the_listing(&apply(&mut st, 2, "triage"));
+    let fx = feed(&mut st, answer(old, vec![Ok(Vec::new())]));
+    assert!(replies(&fx).is_empty() && queries(&fx).is_empty(), "{fx:?}");
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Persist(_))));
+    assert_eq!(st.meta(CURRENT_KEY), None);
+    // The one in flight still plans from its own listing.
+    the_chain(&feed(&mut st, answer(n, lists(&shell_and_parked(), true))));
+}
+
+/// L13: `c t p g` say where they went, once there.
+#[test]
+fn the_goto_keys_say_where_they_went() {
+    for (k, panes) in [
+        ("console", cockpit_built()),
+        ("tree", cockpit_built()),
+        ("plan", cockpit_built()),
+        ("agent", focus_built()),
+    ] {
+        let mut st = up();
+        let n = the_listing(&key(&mut st, k));
+        let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&panes, true))));
+        let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+        assert_eq!(notices(&fx), [format!("moa: {k}")], "{k}");
+    }
 }

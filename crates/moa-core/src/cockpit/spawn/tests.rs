@@ -133,7 +133,7 @@ fn spawning_runs_moa_panel_with_its_view_and_brain() {
     assert_eq!(
         cmds,
         [
-            "new-window -d -P -F #{pane_id} -c /h -t =_moa: -n tree -e MOA_BRAIN=default \
+            "new-window -d -P -F #{pane_id} -c /h -t =_moa: -n tree -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 \
           -e MOA_ROOT=/r /x/moa panel tree --brain default"
         ]
     );
@@ -192,7 +192,7 @@ fn outside_the_sandbox_no_moa_root_is_passed() {
     assert_eq!(
         cmds,
         [
-            "new-window -d -P -F #{pane_id} -c /h -t =_moa: -n console -e MOA_BRAIN=default \
+            "new-window -d -P -F #{pane_id} -c /h -t =_moa: -n console -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 \
           /x/moa panel console --brain default"
         ]
     );

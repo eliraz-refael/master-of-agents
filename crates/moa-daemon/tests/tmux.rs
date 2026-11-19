@@ -500,7 +500,7 @@ async fn a_spawned_panel_runs_in_the_hidden_session() {
         &exe,
         format!(
             "#!/bin/sh\n\
-             {{ pwd -P; echo \"$MOA_BRAIN\"; echo \"$MOA_ROOT\"; echo \"$*\"; }} > '{said}.tmp'\n\
+             {{ pwd -P; echo \"$MOA_BRAIN\"; echo \"$MOA_ROOT\"; echo \"$MOA_NO_AUTOSTART\"; echo \"$*\"; }} > '{said}.tmp'\n\
              mv '{said}.tmp' '{said}'\n\
              exec sleep 30\n",
             said = said.display()
@@ -571,6 +571,7 @@ async fn a_spawned_panel_runs_in_the_hidden_session() {
             folder.to_str().unwrap(),
             "default",
             "/r",
+            "1",
             "panel tree --brain default"
         ]
     );

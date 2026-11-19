@@ -53,7 +53,10 @@ pub fn panel(args: &PanelArgs) -> Result<(), String> {
     );
     let mut client = here.options(brain);
     client.client = "panel";
-    client.autostart = Some(exe);
+    // A panel moa placed itself never starts moa (it may have been stopped on purpose): its
+    // first connect waits for moa as a reconnect does. One started by hand starts it.
+    let placed = std::env::var_os(moa_core::cockpit::NO_AUTOSTART).is_some_and(|v| !v.is_empty());
+    client.autostart = (!placed).then_some(exe);
     client.on_mismatch = OnMismatch::Accept;
     let opts = PanelOptions {
         client,

@@ -46,7 +46,7 @@ fn moa_key(tb: &TempBrain, term: &Terminal, key: &str, says: &str) {
 
 /// The notice a daemon key shows in this build.
 fn notice(a: KeyAction) -> String {
-    format!("moa: {}", a.not_yet())
+    format!("moa: {}", a.not_yet().unwrap())
 }
 
 fn launches(tb: &TempBrain) -> u64 {
@@ -95,7 +95,7 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
     let before = launches(&tb);
 
     // `$` opens a tab now (slice 5a's Task 14 tests it end to end), and the cockpit's keys
-    // act (cockpit_e2e.rs): the rest still say they're coming.
+    // act (cockpit_run.rs in moa-core): the rest still say they're coming.
     for a in [
         KeyAction::Find,
         KeyAction::FindOther,
@@ -205,7 +205,6 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
     let tb = typical();
     let term = open(&tb, &[], &[]);
     came_up(&tb, &term);
-    cockpit_panels_connected(&tb);
 
     // A clean stop.
     shutdown(&tb);

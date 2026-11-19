@@ -113,7 +113,7 @@ fn expected(client: &str, a: KeyAction) -> Vec<String> {
     ["-c", client, "-d", "4000", "-l"]
         .into_iter()
         .map(String::from)
-        .chain([format!("moa: {}", a.not_yet())])
+        .chain([format!("moa: {}", a.not_yet().unwrap())])
         .collect()
 }
 

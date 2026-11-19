@@ -287,7 +287,7 @@ fn a_vacate_leaves_the_spot_whole() {
     let (n, lines) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
     assert_eq!(
         lines[0],
-        "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default /x/moa panel empty-slot --brain default"
+        "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
     );
     assert!(lines.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
     assert_eq!(st.panel_starts, 0);
@@ -351,4 +351,31 @@ fn a_listing_older_than_a_chain_keeps_its_tags() {
     assert_eq!(st.tmux.topology.view_of(PaneId(2)), Some("status"));
     // A tag the chain unset is the listing's again once it shows one.
     assert_eq!(st.tmux.topology.view_of(PaneId(9)), Some("agent"));
+}
+
+/// A vacate queued again after a lost link may find its chain already ran: the pane is the
+/// empty slot now, and it is left alone. So is any pane that isn't an agent's.
+#[test]
+fn a_vacate_run_again_kills_no_panel() {
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9));
+    // Its chain goes out, and tmux runs it, but the link goes before the answer.
+    the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
+    feed(&mut st, TmuxIn::Down(Down::Lost));
+    let n = the_listing(&feed(&mut st, connected(10)));
+    let mut slot = lantern_in_the_spot(false);
+    slot[2] = pane(9, 1, 0, true, "", "empty-slot");
+    let fx = feed(&mut st, answer(n, lists(slot)));
+    assert!(queries(&fx).is_empty(), "the empty slot stays: {fx:?}");
+    assert!(st.cockpit.in_flight.is_none());
+
+    // A panel parked, or a shell, is never killed by a vacate either.
+    for view in ["tree", ""] {
+        let mut st = up();
+        let n = the_listing(&vacate_of(&mut st, 9));
+        let mut panes = kite_in_its_tab();
+        panes[3] = pane(9, 7, 0, false, "", view);
+        let fx = feed(&mut st, answer(n, lists(panes)));
+        assert!(queries(&fx).is_empty(), "{view:?}: {fx:?}");
+    }
 }

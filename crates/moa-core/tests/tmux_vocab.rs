@@ -233,7 +233,8 @@ fn every_action_has_a_word_key_label_and_notice() {
         assert!(keys.insert(a.key()), "{a:?}");
         assert!(!a.label().is_empty());
         for word in ["tmux", "pane", "window"] {
-            assert!(!a.not_yet().contains(word), "{a:?}: {}", a.not_yet());
+            let text = a.not_yet().unwrap_or_default();
+            assert!(!text.contains(word), "{a:?}: {text}");
         }
         // Whole words: "Repair panels" is fine.
         let label = a.label().to_lowercase();
@@ -251,6 +252,20 @@ fn every_action_has_a_word_key_label_and_notice() {
     assert_eq!(KeyAction::from_word("layout-0"), None);
     assert_eq!(KeyAction::Layout(2).label(), "Layout: focus (agent)");
     assert_eq!(KeyAction::FindOther.not_yet(), KeyAction::Find.not_yet());
+    // The keys the core acts on say nothing is coming (L13).
+    let coming: Vec<KeyAction> = KeyAction::ALL
+        .into_iter()
+        .filter(|a| a.not_yet().is_some())
+        .collect();
+    assert_eq!(
+        coming,
+        [
+            KeyAction::Find,
+            KeyAction::FindOther,
+            KeyAction::New,
+            KeyAction::Help
+        ]
+    );
 }
 
 const MOA_SESSION: &str = "0b9e6c6e-2a43-4a7e-9d51-6e3f0d3c8a11";

@@ -93,6 +93,15 @@ pub(crate) struct CockpitRun {
     lazy_armed: bool,
 }
 
+impl CockpitRun {
+    /// What an operation keeps while it runs, cleared as one starts or ends.
+    fn reset_op(&mut self) {
+        self.step = Step::Listing;
+        self.replanned = false;
+        self.restarted = None;
+    }
+}
+
 #[derive(Debug, Default)]
 enum Step {
     #[default]
@@ -216,20 +225,29 @@ fn in_cockpit(scene: &Scene, leaf: Leaf) -> Option<PaneId> {
     }
 }
 
+/// The kind of build `op` is, if it is one: a layout switch, or a `goto`. Only a build of
+/// the same kind replaces a waiting one, so a `goto` never drops a switch, nor a switch a
+/// `goto`.
+fn build_kind(op: &CockpitOp) -> Option<bool> {
+    match op {
+        CockpitOp::Build { select, .. } => Some(matches!(select, Select::Leaf(_))),
+        _ => None,
+    }
+}
+
 /// Runs `op` after those queued before it, now if none is. A build replaces a waiting
-/// build, which is told so. With no link, only a vacate waits; the rest are refused.
+/// build of its kind, which is told so. With no link, only a vacate waits; the rest are
+/// refused.
 pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     if state.tmux.conn().is_none() && !matches!(op, CockpitOp::Vacate { .. }) {
         let no = Err(OpError(NO_TERMINAL.into()));
         return told(state, tell_of(&op), no).into_iter().collect();
     }
     let mut fx = Vec::new();
+    let kind = build_kind(&op);
     let waiting = &mut state.cockpit.waiting;
-    match waiting
-        .iter()
-        .position(|w| matches!(w, CockpitOp::Build { .. }))
-    {
-        Some(i) if matches!(op, CockpitOp::Build { .. }) => {
+    match waiting.iter().position(|w| build_kind(w) == kind) {
+        Some(i) if kind.is_some() => {
             let old = std::mem::replace(&mut waiting[i], op);
             fx.extend(told(state, tell_of(&old), Err(OpError(REPLACED.into()))));
         }
@@ -301,9 +319,7 @@ fn start(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     run.seq += 1;
     let seq = run.seq;
     run.in_flight = Some((seq, op));
-    run.step = Step::Listing;
-    run.replanned = false;
-    run.restarted = None;
+    run.reset_op();
     // A named layout that isn't there is said at once.
     if let Some((
         _,
@@ -343,9 +359,7 @@ fn lost_now(state: &mut State) -> Vec<Effect> {
 fn finish(state: &mut State, said: Said) -> Vec<Effect> {
     let run = &mut state.cockpit;
     let op = run.in_flight.take().map(|(_, op)| op);
-    run.step = Step::Listing;
-    run.replanned = false;
-    run.restarted = None;
+    run.reset_op();
     let mut fx = Vec::new();
     match said {
         Said::Reply(result) => fx.extend(told(state, op.as_ref().and_then(tell_of), result)),
@@ -388,10 +402,13 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             if !scene.moa_session {
                 return Next::Done(refused(op, NO_TERMINAL.into()));
             }
-            let layout = name.clone().unwrap_or_else(|| current(state).0);
-            let node = match state.layouts.node(&layout) {
-                Ok(node) => node,
-                Err(e) => return Next::Done(refused(op, layout_refused(state, e))),
+            // No name is the current layout, a broken entry falling back to the preset (L2).
+            let (layout, node) = match name {
+                None => current(state),
+                Some(name) => match state.layouts.node(name) {
+                    Ok(node) => (name.clone(), node),
+                    Err(e) => return Next::Done(refused(op, layout_refused(state, e))),
+                },
             };
             match select {
                 Select::Default => build(state, op, scene, layout, &node, Some(*select)),
@@ -471,6 +488,11 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                     false => Vec::new(),
                 };
                 Next::Chain(chain.parts().to_vec(), then(tags, u32::from(respawned)))
+            } else if at.agent().is_none() {
+                // Not an agent's any more: its chain already ran (a vacate queued again after
+                // a lost link or a reload finds the empty slot it left), or the pane is
+                // someone else's. Nothing is killed.
+                Next::Done(Said::Nothing)
             } else {
                 Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), 0))
             }
@@ -725,9 +747,7 @@ fn drop_all(state: &mut State) -> (Vec<Effect>, bool) {
     let run = &mut state.cockpit;
     // A spawn the link lost is logged with its panels (`spawn_lost`): once is enough.
     let spawning = matches!(run.step, Step::Spawning);
-    run.step = Step::Listing;
-    run.replanned = false;
-    run.restarted = None;
+    run.reset_op();
     let in_flight = run.in_flight.take().map(|(_, op)| op);
     let dropped = !spawning
         && in_flight

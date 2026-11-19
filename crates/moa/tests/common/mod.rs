@@ -401,11 +401,3 @@ pub fn panels(tb: &TempBrain) -> Vec<Value> {
             .unwrap_or_default()
     })
 }
-
-/// Waits for the cockpit a terminal's attach built (L9) to have its three panels
-/// connected. A panel's first connect starts moa when it isn't running (L15), so a test
-/// that stops moa waits for them first.
-pub fn cockpit_panels_connected(tb: &TempBrain) {
-    let connected = wait_for(SHOWS, || (panels(tb).len() >= 3).then_some(()));
-    assert!(connected.is_some(), "panels: {:?}", panels(tb));
-}
