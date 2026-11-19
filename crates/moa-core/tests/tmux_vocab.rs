@@ -437,7 +437,11 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
                 "-k", "-t", "%1", "-c", "/w", "-e", "A=b", "-e", "C=d", "/opt/moa", "panel",
             ],
         ),
-        cmd("rename-window", &["-t", "%1", "Tide tables"]),
+        // A name that starts with `-` is an option's value here, and tmux takes it as one.
+        cmd("break-pane", &["-d", "-s", "%1", "-t", "=moa:", "-n", "-x"]),
+        // `--` always, so a title that starts with `-` is a name and never flags.
+        cmd("rename-window", &["-t", "%1", "--", "Tide tables"]),
+        cmd("rename-window", &["-t", "%1", "--", "-v fix"]),
     ] {
         assert_eq!(ok.check(), Ok(()), "{}", ok.line());
     }
@@ -507,10 +511,27 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
         ),
         "a tab's environment can't hold a newline",
     );
-    let rename = "rename-window needs a tab id and a name";
-    refused(cmd("rename-window", &["-t", "moa", "x"]), rename);
-    refused(cmd("rename-window", &["-t", "%1"]), rename);
-    refused(cmd("rename-window", &["-t", "%1", "x", "y"]), rename);
+    let rename = "rename-window needs a tab id, then -- and a name";
+    refused(cmd("rename-window", &["-t", "moa", "--", "x"]), rename);
+    refused(cmd("rename-window", &["-t", "%1", "x"]), rename);
+    refused(cmd("rename-window", &["-t", "%1", "-v fix"]), rename);
+    refused(cmd("rename-window", &["-t", "%1", "--"]), rename);
+    refused(cmd("rename-window", &["-t", "%1", "--", "x", "y"]), rename);
+    // `select-window` and `select-pane` name a pane by its id, like every other move.
+    let select = "select-window and select-pane need -t and a tab id";
+    for name in ["select-window", "select-pane"] {
+        assert_eq!(cmd(name, &["-t", "%3"]).check(), Ok(()), "{name}");
+        for args in [
+            &["-t", "moa"][..],
+            &["-t", "=moa:"],
+            &["-t", "@1"],
+            &["-t", "%3x"],
+            &["-Z", "-t", "%3"],
+            &["-t", "%3", "-Z"],
+        ] {
+            refused(cmd(name, args), select);
+        }
+    }
     refused(
         cmd("move-window", &["-s", "%1", "-t", "=moa:"]),
         "that isn't a command moa sends",
@@ -537,8 +558,11 @@ fn a_chain_is_one_line_and_checks_every_part() {
         [select.clone(), swap.clone(), select.clone()]
     );
     // A `;` inside an argument is the argument's, never a separator.
-    let semi = Cmd::chain(vec![Cmd::new("rename-window").args(["-t", "%1", "a ; b"])]);
-    assert_eq!(semi.line(), "rename-window -t %1 'a ; b'");
+    let semi = Cmd::chain(vec![
+        Cmd::new("rename-window").args(["-t", "%1", "--", "a ; b"]),
+    ]);
+    assert_eq!(semi.line(), "rename-window -t %1 -- 'a ; b'");
+    assert_eq!(semi.check(), Ok(()));
 
     let bad = Cmd::new("swap-pane").args(["-s", "%1", "-t", "%2"]);
     assert_eq!(

@@ -739,6 +739,60 @@ mod tests {
         assert_eq!(reaper_steps(Err(failed)), ["reap", "flag"]);
     }
 
+    /// A file's parse error, said outside any block (a bare line before 3.8, `%config-error`
+    /// from 3.8), fails only a command that sources a file. A chain at the front stays `Ok`.
+    #[test]
+    fn a_file_error_fails_only_a_command_that_sources_one() {
+        for (sources, want) in [
+            (false, Ok(vec![])),
+            (true, Err(CmdError::Tmux("the file has an error".into()))),
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let batch = Arc::new(Batch(Mutex::new(BatchState {
+                results: vec![None],
+                remaining: 1,
+                done: Some(Done::Tag(1)),
+            })));
+            let text = "moa:sentinel 1".to_string();
+            let slot = Slot {
+                batch,
+                index: 0,
+                sentinel: Some(Sentinel {
+                    text: text.clone(),
+                    error: None,
+                    sources,
+                }),
+            };
+            let shared = Mutex::new(Shared {
+                pending: VecDeque::from([slot]),
+                gone: false,
+                events: Some(tx.clone()),
+            });
+            let block = |lines: Vec<String>| Frame::Reply {
+                flags: 1,
+                error: false,
+                lines,
+            };
+            for frame in [
+                block(vec![]),
+                Frame::Stray,
+                Frame::Notification(Notification::Other("config-error")),
+                block(vec![]),
+                block(vec![text]),
+            ] {
+                handle(frame, &shared, &tx);
+            }
+            let mut replies = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                if let Event::Replies { tag, results } = ev {
+                    replies.push((tag, results));
+                }
+            }
+            assert_eq!(replies, [(1, vec![want])], "sources {sources}");
+            assert!(lock(&shared).pending.is_empty());
+        }
+    }
+
     #[test]
     fn version_ok_table() {
         for v in ["3.4", "3.4a", "3.8", "3.10", "4.0", "next-3.9", "master"] {

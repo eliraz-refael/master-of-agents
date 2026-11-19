@@ -37,14 +37,14 @@ const OWN_CONFIG: &str = "moa only sources its own config";
 const NEEDS_D_P: &str = "new-window needs -d and -P";
 const ENV_NEWLINE: &str = "a new window's environment can't hold a newline";
 const ONE_PANE: &str = "kill-pane needs exactly one tab id";
-const NEEDS_T: &str = "select-window and select-pane need -t";
+const NEEDS_T: &str = "select-window and select-pane need -t and a tab id";
 const SWAP: &str = "swap-pane needs -d and two tab ids";
 const JOIN: &str = "join-pane needs -d, -h or -v, and two tab ids";
 const BREAK: &str = "break-pane needs -d, a tab id, and =moa: or =_moa:";
 const RESIZE: &str = "resize-pane needs a tab id, and -x or -y with a size";
 const RESPAWN: &str = "respawn-pane needs -k, a tab id and a command";
 const RESPAWN_ENV: &str = "a tab's environment can't hold a newline";
-const RENAME: &str = "rename-window needs a tab id and a name";
+const RENAME: &str = "rename-window needs a tab id, then -- and a name";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
 /// What a chain is called where a name is asked for (a log line). It is no tmux command.
@@ -94,14 +94,16 @@ impl Cmd {
         }
     }
 
+    /// Panics on a chain: its line is its parts', so an argument would be silently lost.
     pub fn arg(mut self, a: impl Into<String>) -> Cmd {
-        debug_assert!(self.parts.is_none(), "a chain takes no arguments");
+        assert!(self.parts.is_none(), "a chain takes no arguments");
         self.args.push(a.into());
         self
     }
 
+    /// Panics on a chain, like [`Cmd::arg`].
     pub fn args<S: Into<String>>(mut self, a: impl IntoIterator<Item = S>) -> Cmd {
-        debug_assert!(self.parts.is_none(), "a chain takes no arguments");
+        assert!(self.parts.is_none(), "a chain takes no arguments");
         self.args.extend(a.into_iter().map(Into::into));
         self
     }
@@ -163,14 +165,11 @@ impl Cmd {
                 [t, pane] if t == "-t" && is_pane_id(pane) => Ok(()),
                 _ => Err(Refused(ONE_PANE)),
             },
-            "select-window" | "select-pane" => {
-                let mut it = self.args.iter();
-                if it.any(|a| a == "-t") && it.next().is_some() {
-                    Ok(())
-                } else {
-                    Err(Refused(NEEDS_T))
-                }
-            }
+            // The pane, by its id: its window, or the pane in it.
+            "select-window" | "select-pane" => match self.args.as_slice() {
+                [t, pane] if t == "-t" && is_pane_id(pane) => Ok(()),
+                _ => Err(Refused(NEEDS_T)),
+            },
             // The commands that move panes (L4) name panes by id and sessions exactly, so a
             // prefix never matches a stranger, and `-d` keeps the user's view where it is.
             "swap-pane" => match self.args.as_slice() {
@@ -215,8 +214,10 @@ impl Cmd {
                 _ => Err(Refused(RESIZE)),
             },
             "respawn-pane" => check_respawn(&self.args),
+            // A name is free text (an agent's title): after `--`, one that starts with `-` is
+            // still a name, never flags.
             "rename-window" => match self.args.as_slice() {
-                [t, a, _] if t == "-t" && is_pane_id(a) => Ok(()),
+                [t, a, dashes, _] if t == "-t" && is_pane_id(a) && dashes == "--" => Ok(()),
                 _ => Err(Refused(RENAME)),
             },
             _ => Ok(()),
@@ -434,11 +435,27 @@ mod tests {
             for args in [&[][..], &["-t"], &["-Z"]] {
                 assert_eq!(
                     Cmd::new(name).args(args.iter().copied()).check(),
-                    Err(Refused("select-window and select-pane need -t")),
+                    Err(Refused(
+                        "select-window and select-pane need -t and a tab id"
+                    )),
                     "{name} {args:?}"
                 );
             }
         }
+    }
+
+    /// A chain's line is its parts', so an argument given to the chain itself would be lost:
+    /// that is a bug in the caller, in every build.
+    #[test]
+    #[should_panic(expected = "a chain takes no arguments")]
+    fn a_chain_takes_no_argument() {
+        let _ = Cmd::chain(vec![Cmd::new("select-pane").args(["-t", "%1"])]).arg("-Z");
+    }
+
+    #[test]
+    #[should_panic(expected = "a chain takes no arguments")]
+    fn a_chain_takes_no_arguments() {
+        let _ = Cmd::chain(vec![Cmd::new("select-pane").args(["-t", "%1"])]).args(["-Z"]);
     }
 
     #[test]

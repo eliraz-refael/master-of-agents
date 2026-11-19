@@ -358,6 +358,40 @@ async fn a_chain_stops_at_its_first_error() {
     client.close().await;
 }
 
+/// Window names are agent titles, free text: one that starts with `-` is still a name. After
+/// `--` for `rename-window`, and as the value of `break-pane -n`, tmux takes it as written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_that_starts_with_a_dash_is_a_name() {
+    let sb = Sandbox::start().unwrap();
+    sb.tmux(&["new-session", "-d", "-s", "moa"]).unwrap();
+    let split = || {
+        sb.tmux(&["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "%0"])
+            .unwrap()
+    };
+    let (a, b) = (split(), split());
+    let (client, _events, _) = connect(&sb).await;
+    let chain = Cmd::chain(vec![
+        Cmd::new("rename-window").args(["-t", "%0", "--", "-v fix"]),
+        Cmd::new("break-pane").args(["-d", "-s", &a, "-t", "=moa:", "-n", "-x"]),
+        Cmd::new("break-pane").args(["-d", "-s", &b, "-t", "=moa:", "-n", "-v fix"]),
+    ]);
+    assert_eq!(client.run(&chain).await, Ok(vec![]));
+    let name = |pane: &str| {
+        sb.tmux(&["display-message", "-p", "-t", pane, "#{window_name}"])
+            .unwrap()
+    };
+    assert_eq!(name("%0"), "-v fix");
+    assert_eq!(name(&a), "-x");
+    assert_eq!(name(&b), "-v fix");
+    let session = |pane: &str| {
+        sb.tmux(&["display-message", "-p", "-t", pane, "#{session_name}"])
+            .unwrap()
+    };
+    assert_eq!(session(&a), "moa");
+    assert_eq!(session(&b), "moa");
+    client.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_source_file_command_that_fails_at_run_time_is_an_error() {
     let sb = Sandbox::start().unwrap();
