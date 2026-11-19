@@ -172,3 +172,56 @@ fn nothing_animates_off_screen() {
     assert!(screen.animate);
     assert_eq!(screen.brand.expect("the brand").text, "moa ⠋");
 }
+
+#[test]
+fn a_panel_never_wakes_for_a_time_already_past() {
+    let ctx = ctx();
+    let size = Size { w: 80, h: 16 };
+
+    // Seen and active at the start of time: its age saturates and never changes.
+    let mut row = session(1, "idle", ago(MINUTE));
+    row["last_seen_at"] = json!(i64::MIN);
+    row["activity_at"] = json!(i64::MIN);
+    let d = data(vec![row], Vec::new());
+    for view in [View::Tree, View::Status] {
+        let screen = Panel::new(view).screen(&d, &ctx, size);
+        assert!(
+            screen.wake_at.is_none_or(|t| t > NOW),
+            "{view:?} wakes at {:?}, before now",
+            screen.wake_at
+        );
+    }
+
+    // `next_ago_change` itself is always after now.
+    for from in [
+        i64::MIN,
+        i64::MIN + 1,
+        -1,
+        0,
+        NOW.0 - 3 * MINUTE,
+        NOW.0,
+        i64::MAX,
+    ] {
+        let next = moa_view::text::next_ago_change(UtcMs(from), NOW);
+        assert!(next > NOW, "from {from}: {next:?}");
+    }
+}
+
+#[test]
+fn a_brand_with_no_row_to_show_on_never_animates() {
+    let ctx = ctx();
+    let d = data(vec![session(1, "working", ago(MINUTE))], Vec::new());
+    let mut panel = Panel::new(View::Picture);
+    let tall = Size { w: 80, h: 24 };
+    panel.key(Key::Char('5'), &d, &ctx, tall);
+    assert!(panel.screen(&d, &ctx, tall).animate, "the brand spins");
+
+    let flat = panel.screen(&d, &ctx, Size { w: 80, h: 0 });
+    assert_eq!(flat.brand, None, "no row for the tabs");
+    assert!(!flat.animate);
+    assert_eq!(flat.wake_at, None);
+
+    let one = panel.screen(&d, &ctx, Size { w: 80, h: 1 });
+    assert!(one.brand.is_some(), "the tab row shows at height 1");
+    assert!(one.animate);
+}

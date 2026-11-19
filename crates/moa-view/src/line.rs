@@ -9,6 +9,8 @@ use moa_core::model::{ProjectId, SessionId, SuggestionId, TaskId};
 /// What a span means; `moa-tui` maps each to a colour (V12).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Tone {
+    /// The terminal's default colour, as the frame is drawn (V12): the picture's rule.
+    Frame,
     Text,
     Dim,
     Head,
@@ -31,6 +33,7 @@ impl Tone {
     /// Its name in a model snapshot.
     pub fn word(self) -> &'static str {
         match self {
+            Tone::Frame => "frame",
             Tone::Text => "text",
             Tone::Dim => "dim",
             Tone::Head => "head",

@@ -10,7 +10,7 @@ use moa_view::data::Data;
 use moa_view::fixture::lantern;
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
-use moa_view::line::{Item, Line, Tone, debug_lines};
+use moa_view::line::{Item, Line, Span, Tone, debug_lines};
 use moa_view::panel::{Out, Panel, Screen, debug_screen};
 use moa_view::views::{self, ViewUi};
 
@@ -220,9 +220,17 @@ fn the_strip_flashes_rows_under_4_seconds() {
             "09:59 ✦Fix login needs you",
         ]
     );
+    // The rule is the frame's colour with only ` activity ` dim, as the spike drew it.
     let rule = screen.rule.clone().expect("a rule above the strip");
-    assert!(rule.text().starts_with("─ activity ─"), "{}", rule.text());
     assert_eq!(moa_view::text::width(&rule.text()), 80);
+    assert_eq!(rule.spans.len(), 3, "{rule:?}");
+    assert_eq!(rule.spans[0], Span::new("─", Tone::Frame));
+    assert_eq!(rule.spans[1], Span::new(" activity ", Tone::Dim));
+    assert_eq!(rule.spans[2], Span::new("─".repeat(69), Tone::Frame));
+    let narrow = views::picture::rule(5);
+    assert_eq!(narrow.text(), "─ act");
+    assert_eq!(narrow.spans.len(), 2);
+    assert!(views::picture::rule(0).spans.is_empty());
 
     let fresh = &screen.strip[6];
     let at = data.activity[&ActivityId(8)].at;

@@ -489,8 +489,15 @@ fn check_line(line: &Line, max: usize, what: &str) -> Result<(), TestCaseError> 
     Ok(())
 }
 
-fn check(screen: &Screen) -> Result<(), TestCaseError> {
+/// Checks a frame built at `now`: safe text, lines within their parts, and a wake-up that is
+/// never already past (V10).
+fn check(screen: &Screen, now: UtcMs) -> Result<(), TestCaseError> {
     let g = screen.geometry;
+    prop_assert!(
+        screen.wake_at.is_none_or(|t| t > now),
+        "wakes at {:?}, not after {now:?}",
+        screen.wake_at
+    );
     if let Some(title) = &screen.title {
         prop_assert!(!title.chars().any(bad), "title {title:?}");
     }
@@ -527,7 +534,7 @@ proptest! {
     ) {
         for &view in View::ALL {
             let mut panel = Panel::new(view);
-            check(&panel.screen(&data, &ctx, size))?;
+            check(&panel.screen(&data, &ctx, size), ctx.now)?;
             for input in &inputs {
                 match input {
                     Input::Key(k) => {
@@ -542,7 +549,7 @@ proptest! {
                     Input::Paste(text) => panel.paste(text),
                     Input::Reply(text) => panel.replied(Err(text.clone())),
                 }
-                check(&panel.screen(&data, &ctx, size))?;
+                check(&panel.screen(&data, &ctx, size), ctx.now)?;
             }
         }
     }

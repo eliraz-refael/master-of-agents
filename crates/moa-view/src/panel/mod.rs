@@ -383,7 +383,9 @@ impl Panel {
             let tab = self.ui.tab % picture::TABS.len();
             tabs = Some((picture::tab_names(), tab));
             let line = picture::brand(data, ctx);
-            brand = picture::brand_fits(tab, &line, g.tabs.map_or(0, |r| r.w)).then_some(line);
+            // A tab row with no cells shows no brand, so nothing spins for it.
+            let row = g.tabs.filter(|r| r.h > 0).map_or(0, |r| r.w);
+            brand = picture::brand_fits(tab, &line, row).then_some(line);
             if let Some(r) = g.strip {
                 rule = Some(picture::rule(r.w));
                 strip = picture::strip(data, ctx, r.w, r.h);
@@ -392,7 +394,11 @@ impl Panel {
         // Only what is on screen moves or changes (V10).
         let visible = || body.iter().map(|(l, _)| l).chain(&strip).chain(&brand);
         let animate = visible().any(|l| l.animated);
-        let wake_at = visible().filter_map(|l| l.changes_at).min();
+        // A deadline already past would wake the panel again at once, forever.
+        let wake_at = visible()
+            .filter_map(|l| l.changes_at)
+            .filter(|t| *t > ctx.now)
+            .min();
         Screen {
             title: g.framed.then(|| self.view.label().to_string()),
             tabs,

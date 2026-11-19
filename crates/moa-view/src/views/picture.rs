@@ -128,13 +128,25 @@ pub fn strip(data: &Data, ctx: &Ctx, width: u16, rows: u16) -> Vec<Line> {
         .collect()
 }
 
-/// The rule above the strip: `─ activity ───…`, `width` cells wide.
-pub fn rule(width: u16) -> Line {
-    let width = usize::from(width);
-    Line::plain(
-        cut(&format!("─ activity {}", "─".repeat(width)), width),
-        Tone::Dim,
-    )
+/// The rule above the strip: `─ activity ───…`, `cells` wide, the line in the frame's colour
+/// and only ` activity ` dim (the spike's `hline` with its dim label).
+pub fn rule(cells: u16) -> Line {
+    let mut left = usize::from(cells);
+    let parts = [
+        ("─".to_string(), Tone::Frame),
+        (" activity ".to_string(), Tone::Dim),
+        ("─".repeat(left), Tone::Frame),
+    ];
+    let mut spans = Vec::new();
+    for (text, tone) in parts {
+        let text = cut(&text, left);
+        if text.is_empty() {
+            break;
+        }
+        left -= width(&text);
+        spans.push(Span::new(text, tone));
+    }
+    Line::new(spans)
 }
 
 /// The brand (V21): `moa <spinner>` while any session is working or waiting or one of the

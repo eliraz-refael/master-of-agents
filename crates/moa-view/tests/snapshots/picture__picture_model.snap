@@ -18,7 +18,7 @@ brand: [brain*]moa ⠸
   [dim]  ◷ Order copies  (someone else) ⟨[dim]3 Dec⟩  ‹task›
   
   [head*]- ────────────────────────────────────────────────────────────────── 1 waiting
-rule: [dim]─ activity ─────────────────────────────────────────────────────────────────────
+rule: [frame]─[dim] activity [frame]─────────────────────────────────────────────────────────────────────
 strip: [you]09:09  added to today: "Fix the login loop"
 strip: [dim]09:16  linked session 5e550002 → Lantern
 strip: [you]09:27  task "Proofread chapter 1": active → done
