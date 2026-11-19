@@ -34,39 +34,6 @@ fn option(tb: &TempBrain, name: &str) -> String {
     tmux(tb, &["show-options", "-gqv", name])
 }
 
-/// `format` for the client on `term`'s pty, or `None` while it isn't attached.
-fn client_field(tb: &TempBrain, term: &Terminal, format: &str) -> Option<String> {
-    let list = tmux(
-        tb,
-        &["list-clients", "-F", &format!("#{{client_name}} {format}")],
-    );
-    let prefix = format!("{} ", term.tty());
-    list.lines()
-        .find_map(|l| l.strip_prefix(&prefix))
-        .map(str::to_string)
-}
-
-/// Waits until `term`'s client is in key table `table`.
-fn key_table_becomes(tb: &TempBrain, term: &Terminal, table: &str) {
-    let seen = wait_for(SHOWS, || {
-        (client_field(tb, term, "#{client_key_table}").as_deref() == Some(table)).then_some(())
-    });
-    assert!(
-        seen.is_some(),
-        "the keys never became {table}: {:?}",
-        client_field(tb, term, "#{client_key_table}")
-    );
-}
-
-/// Ctrl-a, once the last key is done, then waits for moa's keys. Ctrl-a also clears the last
-/// notice, so the mark that follows sees only what the next key draws.
-fn ctrl_a(tb: &TempBrain, term: &Terminal) {
-    key_table_becomes(tb, term, "root");
-    term.press(b"\x01");
-    key_table_becomes(tb, term, "moa");
-    term.mark();
-}
-
 /// Ctrl-a then `key`; `says` shows within 2 s.
 fn moa_key(tb: &TempBrain, term: &Terminal, key: &str, says: &str) {
     ctrl_a(tb, term);

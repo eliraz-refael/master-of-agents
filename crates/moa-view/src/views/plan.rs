@@ -153,12 +153,18 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
         lines.push(Line::new(Vec::new()));
         let text = format!("no open tasks: {}", quiet.join(", "));
         for line in text::wrap(&text, width.saturating_sub(1).max(10)) {
-            lines.push(Line::plain(cut(&line, width), Tone::Dim));
+            // Which projects were active in the last 7 days changes with the day.
+            let mut line = Line::plain(cut(&line, width), Tone::Dim);
+            line.changes_at = Some(midnight);
+            lines.push(line);
         }
     }
     lines.push(Line::new(Vec::new()));
     lines.push(Line::plain(
-        cut("↵ or click: jump to its session · d done · x drop", width),
+        cut(
+            "↵ or click: jump to its session · d done · x drop · a archive · n/N new",
+            width,
+        ),
         Tone::Dim,
     ));
     lines

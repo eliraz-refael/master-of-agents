@@ -287,8 +287,8 @@ fn adopted(m: &Model, id: &str) -> Value {
     m.topics[&Topic::Sessions][id]["adopted"].clone()
 }
 
-#[test]
-fn session_rows_say_adopted() {
+/// A brain with sessions A, B and C bound as their ids' comment says.
+fn adopted_brain() -> (TypicalBrain, State) {
     let b = TypicalBrain::new();
     let mut snapshot = b.snapshot();
     // A is asleep, so its tab going changes nothing but its binding.
@@ -305,7 +305,13 @@ fn session_rows_say_adopted() {
         session_plugin: PathBuf::from(PLUGIN),
         ..Deps::default()
     };
-    let mut st = loaded_with(&b, TOML, deps, snapshot);
+    let st = loaded_with(&b, TOML, deps, snapshot);
+    (b, st)
+}
+
+#[test]
+fn session_rows_say_adopted() {
+    let (b, mut st) = adopted_brain();
     let m = st.model();
     assert_eq!(adopted(&m, A), json!(true));
     assert_eq!(adopted(&m, B), json!(false));
@@ -321,6 +327,42 @@ fn session_rows_say_adopted() {
     let ms = models(&fx);
     assert!(!ms.is_empty(), "{fx:?}");
     assert_eq!(adopted(ms[ms.len() - 1], A), json!(false));
+}
+
+/// The `adopted` flag rides on the session rows, and the `R` key and its hint read it: a
+/// change to a binding alone, with no change to its session, still republishes `sessions`.
+#[test]
+fn a_binding_change_alone_republishes_sessions() {
+    for change in [
+        Change::PaneBinding(binding(A, "%5", false)),
+        Change::DeletePaneBinding(sid(A)),
+    ] {
+        assert!(change.topics().contains(&Topic::Sessions), "{change:?}");
+    }
+
+    let (b, mut st) = adopted_brain();
+    assert_eq!(adopted(&st.model(), A), json!(true));
+    link_up(&b, &mut st);
+    let fx = feed(
+        &b,
+        &mut st,
+        TmuxIn::Notification(Notification::Message("moa:hook pane-exited %5".into())),
+    );
+    let changed = changes(&fx);
+    assert!(
+        changed
+            .iter()
+            .any(|c| matches!(c, Change::DeletePaneBinding(id) if *id == sid(A))),
+        "{fx:?}"
+    );
+    assert!(
+        !changed.iter().any(|c| matches!(c, Change::Session(_))),
+        "only the binding changes: {fx:?}"
+    );
+    let published = models(&fx)
+        .into_iter()
+        .any(|m| adopted(m, A) == json!(false));
+    assert!(published, "sessions wasn't republished: {fx:?}");
 }
 
 // --- Ctrl-a $ (V6) ---

@@ -20,4 +20,4 @@ expression: "debug_lines(&plan(&data, &ctx, 80))"
 
 [dim]no open tasks: Harbor
 
-[dim]↵ or click: jump to its session · d done · x drop
+[dim]↵ or click: jump to its session · d done · x drop · a archive · n/N new

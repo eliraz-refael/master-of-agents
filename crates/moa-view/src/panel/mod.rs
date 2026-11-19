@@ -127,6 +127,23 @@ struct Prompt {
     ask: Ask,
 }
 
+/// A line in the footer. A broadcast event's ends at its deadline and is drawn dim; any
+/// other (a reply, an error, the connection's) stays in the warning tone until a key.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Message {
+    text: String,
+    until: Option<UtcMs>,
+}
+
+impl Message {
+    fn sticky(text: impl Into<String>) -> Message {
+        Message {
+            text: text.into(),
+            until: None,
+        }
+    }
+}
+
 /// A y/N question and the op `y` sends, fixed when it was asked (V8).
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Confirm {
@@ -144,8 +161,8 @@ pub struct Panel {
     lines: Vec<Line>,
     prompt: Option<Prompt>,
     confirm: Option<Confirm>,
-    /// A reply or a note, until the next key.
-    message: Option<String>,
+    /// A reply or a note, until the next key; an event's, until its deadline too.
+    message: Option<Message>,
     /// The item under the pointer, kept by identity like the selection (V11).
     hover: Option<Item>,
     /// Where the pointer was last seen.
@@ -153,6 +170,9 @@ pub struct Panel {
 }
 
 const CANCELLED: &str = "cancelled";
+
+/// How long a broadcast event stays in the footer, in milliseconds.
+pub const EVENT_SHOWN_MS: i64 = 8_000;
 
 /// The body width a view is built for: at least 10 cells (V2).
 fn build_width(g: &Geometry) -> u16 {
@@ -374,12 +394,32 @@ impl Panel {
             .rev()
             .map(str::trim)
             .find(|l| !l.is_empty())
-            .map(str::to_string);
+            .map(Message::sticky);
     }
 
-    /// A line for the footer from the panel's loop (the connection, say), until the next key.
+    /// A line for the footer from the panel's loop (the connection, say, or an error event),
+    /// until the next key.
     pub fn note(&mut self, text: &str) {
-        self.message = Some(text.to_string());
+        self.message = Some(Message::sticky(text));
+    }
+
+    /// A broadcast event that came at `now`: the footer shows it, dim, for
+    /// [`EVENT_SHOWN_MS`] or until a key. It never hides a line that stays until a key.
+    pub fn event(&mut self, text: &str, now: UtcMs) {
+        if self.message.as_ref().is_some_and(|m| m.until.is_none()) {
+            return;
+        }
+        self.message = Some(Message {
+            text: text.to_string(),
+            until: Some(UtcMs(now.0.saturating_add(EVENT_SHOWN_MS))),
+        });
+    }
+
+    /// The message the footer may show at `now`: none once an event's deadline has passed.
+    fn message_at(&self, now: UtcMs) -> Option<&Message> {
+        self.message
+            .as_ref()
+            .filter(|m| m.until.is_none_or(|t| now < t))
     }
 
     /// The frame to draw now.
@@ -413,9 +453,16 @@ impl Panel {
         // Only what is on screen moves or changes (V10).
         let visible = || body.iter().map(|(l, _)| l).chain(&strip).chain(&brand);
         let animate = visible().any(|l| l.animated);
+        // An event in the footer goes at its deadline.
+        let footer_ends = if self.typing() {
+            None
+        } else {
+            self.message_at(ctx.now).and_then(|m| m.until)
+        };
         // A deadline already past would wake the panel again at once, forever.
         let wake_at = visible()
             .filter_map(|l| l.changes_at)
+            .chain(footer_ends)
             .filter(|t| *t > ctx.now)
             .min();
         Screen {
@@ -425,7 +472,7 @@ impl Panel {
             body,
             rule,
             strip,
-            footer: self.footer(data, g.footer.w),
+            footer: self.footer(data, ctx.now, g.footer.w),
             animate,
             wake_at,
             geometry: g,
@@ -452,7 +499,7 @@ impl Panel {
 
     /// The footer: the prompt, else the question, else the message, else the count of rows
     /// that couldn't be read (V18), else the key hints.
-    fn footer(&self, data: &Data, width: u16) -> Span {
+    fn footer(&self, data: &Data, now: UtcMs, width: u16) -> Span {
         if let Some(prompt) = &self.prompt {
             let shown = prompt.editor.shown(usize::from(width).saturating_sub(1));
             return Span::bold(shown, Tone::Text);
@@ -460,8 +507,13 @@ impl Panel {
         if let Some(confirm) = &self.confirm {
             return Span::new(clean(&confirm.question), Tone::Warn);
         }
-        if let Some(message) = &self.message {
-            return Span::new(clean(message), Tone::Warn);
+        if let Some(message) = self.message_at(now) {
+            let tone = if message.until.is_some() {
+                Tone::Dim
+            } else {
+                Tone::Warn
+            };
+            return Span::new(clean(&message.text), tone);
         }
         let unreadable = data.unreadable();
         if unreadable > 0 {
@@ -512,7 +564,7 @@ impl Panel {
     }
 
     fn say(&mut self, text: &str) -> Vec<Out> {
-        self.message = Some(text.to_string());
+        self.message = Some(Message::sticky(text));
         Vec::new()
     }
 

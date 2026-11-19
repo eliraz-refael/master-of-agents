@@ -297,15 +297,25 @@ codegen, no npm (R4 §2.1).
   so slow clients skip intermediate states and the Core never blocks.
 - `event {kind, …}` for discrete things (turn done, needs you, toast, error), via `broadcast`;
   a lagging client gets a fresh snapshot.
-- Topics: `brain`, `sessions` (with derived display state and "why"), `groups`, `projects`,
-  `tasks`, `suggestions`, `asks`, `activity` (tail), `feed` (console, paged), `status`
-  (counts), `layouts`, `accounts` (setup state), `terminals`.
+- Topics: `brain` (one row: name, folders, the accounts with a launcher, `open_account`, and
+  `folded`, the tree's saved folds), `sessions` (with derived display state and "why"),
+  `groups`, `projects`, `tasks`, `suggestions`, `asks`, `activity` (tail), `feed` (console,
+  paged), `status` (counts), `layouts`, `accounts` (setup state), `terminals`, `panels` (the
+  registered panels, `{key, pane, view}`; a reassigned view rides this topic, so a lagging
+  panel can't miss it).
 - Methods mirror the agent-facing verbs (section 6.10): `session.open|resume|focus|close|
   archive|sleep|set|adopt|find|ls`, `group.add|rename|rm`, `term.open`, `layout.list|show|
   apply|set`, `goto`, `brief`, `attention`, `project.show|add`, `note.add`,
   `task.ls|add|set`, `suggest`, `suggestion.answer|ls`, `peers`, `ask`, `reply`, `asks`,
   `setup.*`, `brain.*`, `import.herdr`, `console.prompt|cancel|command|permission|new|auto|
-  sleep_after`, `ui.here` (a panel's selected folder), `ui.select_view`, `status`, `upgrade`.
+  sleep_after`, `status`, `upgrade`. The panels' own: `ui.panel {pane?, view?}` → `{key,
+  view}` registers a panel on every connect (the view asked for, else the pane's last one in
+  this daemon's life, else `picture`; kept in the daemon's memory, dropped when the
+  connection closes, a pane's newest connection wins); `ui.here {folder?}` records its
+  selected folder, sent when it changes and on every connect, not published (`Ctrl-a $`
+  reads it); `ui.select_view` reassigns a view; `group.fold {path, collapsed}` folds or
+  unfolds one tree path (a group, a project's node or `Loose`) in the saved folds, never
+  writing `groups`, with no activity row.
 - Long requests (`ask`, `reply`, `session.focus` that waits for a pane) simply reply later on
   the open connection. No asker-side loops.
 - Results are structured JSON; the CLI renders text (and `--json` passes it through).
@@ -822,7 +832,9 @@ something animated is visible. Measured 7.8 ms exec-to-frame (R4 §6.3).
   `pane-border-status top` with `@moa_label` for unframed panes.
 
 **Views** (parity, R1 §2.3): tree (header counts; nested groups with `├─ └─ │` guides; empty
-groups; fold; rows with glyph, title, account ≥ 34 cols, path ≥ 76 cols, age; keys `n` new
+groups; fold, saved in the brain (one `meta` value, the sorted list of folded paths, which
+a group rename moves and a delete drops), so folds outlive a panel restart and agree across
+tree panels; rows with glyph, title, account ≥ 34 cols, path ≥ 76 cols, age; keys `n` new
 (prefilled from the group's latest session, title, account), `+` group, `m` move, `r` rename
 (groups rename their subtree), `D` delete empty group, `a` archive, `x` close with y/N),
 plan (date and "✓ N done today"; per project sorted by needs-you, priority, you-tasks, due,

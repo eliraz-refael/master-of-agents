@@ -264,3 +264,106 @@ pub fn tab_shows(tb: &TempBrain, pane: &str) -> String {
         tb.log_tail(B, 60)
     )
 }
+
+/// `format` for the client on `term`'s pty, or `None` while it isn't attached.
+pub fn client_field(tb: &TempBrain, term: &Terminal, format: &str) -> Option<String> {
+    let list = tmux(
+        tb,
+        &["list-clients", "-F", &format!("#{{client_name}} {format}")],
+    );
+    let prefix = format!("{} ", term.tty());
+    list.lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .map(str::to_string)
+}
+
+/// Waits until `term`'s client is in key table `table`.
+#[track_caller]
+pub fn key_table_becomes(tb: &TempBrain, term: &Terminal, table: &str) {
+    let seen = wait_for(SHOWS, || {
+        (client_field(tb, term, "#{client_key_table}").as_deref() == Some(table)).then_some(())
+    });
+    assert!(
+        seen.is_some(),
+        "the keys never became {table}: {:?}",
+        client_field(tb, term, "#{client_key_table}")
+    );
+}
+
+/// Ctrl-a, once the last key is done, then waits for moa's keys. Ctrl-a also clears the last
+/// notice, so the mark that follows sees only what the next key draws.
+#[track_caller]
+pub fn ctrl_a(tb: &TempBrain, term: &Terminal) {
+    key_table_becomes(tb, term, "root");
+    term.press(b"\x01");
+    key_table_becomes(tb, term, "moa");
+    term.mark();
+}
+
+/// A tab running `moa panel <view>` in the root's terminal server, out of sight; its pane.
+pub fn panel_tab(tb: &TempBrain, view: &str) -> String {
+    let cmd = format!("'{MOA}' panel {view}");
+    tmux(
+        tb,
+        &[
+            "new-window",
+            "-d",
+            "-t",
+            "=moa:",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &cmd,
+        ],
+    )
+}
+
+/// What `pane` shows, as text.
+pub fn screen_of(tb: &TempBrain, pane: &str) -> String {
+    tmux(tb, &["capture-pane", "-p", "-t", pane])
+}
+
+/// The terminal cell, 1-based as a mouse report gives it, three columns into the row of
+/// `pane` that shows `line_text` (the first cell of a framed view's body). Placed from tmux's
+/// own `#{pane_left}`/`#{pane_top}` and the row's place in `capture-pane`.
+///
+/// Only the framed view's list rows are searched: below the frame's top line and the view's
+/// header line, and above the blank line, the footer and the frame's bottom line. A footer
+/// message or prompt that names `line_text` is never the row clicked.
+#[track_caller]
+pub fn cell_of(tb: &TempBrain, pane: &str, line_text: &str) -> (u32, u32) {
+    let at = tmux(
+        tb,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{pane_left} #{pane_top} #{pane_height}",
+        ],
+    );
+    let at: Vec<u32> = at.split(' ').map(|n| n.parse().unwrap()).collect();
+    let [left, top, height] = at[..] else {
+        panic!("{pane}'s place: {at:?}");
+    };
+    // The frame's top line (0) and the header (1); the body ends where the blank line
+    // before the footer begins (`height - 3`).
+    let rows = 2..usize::try_from(height.saturating_sub(3)).unwrap();
+    let screen = screen_of(tb, pane);
+    let row = screen
+        .lines()
+        .enumerate()
+        .find(|(i, l)| rows.contains(i) && l.contains(line_text))
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| panic!("{pane}'s rows don't show {line_text:?}:\n{screen}"));
+    (left + 3, top + u32::try_from(row).unwrap() + 1)
+}
+
+/// A left press and release on `term`, on the row of `pane` that shows `line_text`. The
+/// panel's tab is brought up for the attached client first, so the click lands on it.
+#[track_caller]
+pub fn click(tb: &TempBrain, term: &Terminal, pane: &str, line_text: &str) {
+    tmux(tb, &["select-window", "-t", pane]);
+    let (x, y) = cell_of(tb, pane, line_text);
+    term.press(format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m").as_bytes());
+}

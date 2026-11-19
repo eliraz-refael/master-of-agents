@@ -97,6 +97,11 @@ fn projects_sort_needs_you_first_then_priority_then_you_tasks_then_due_then_name
     let quiet = line_with(&lines, "no open tasks:");
     assert_eq!(quiet.text(), "no open tasks: Harbor");
     assert_eq!(quiet.spans[0].tone, Tone::Dim);
+    // Which projects count as recent changes with the day.
+    assert_eq!(
+        quiet.changes_at,
+        Some(moa_core::time::start_of_next_day(ctx.today, &ctx.tz))
+    );
     assert!(
         !texts(&lines).iter().any(|l| l.contains("Beacon")),
         "an idea with no activity isn't listed"
@@ -278,7 +283,7 @@ fn an_empty_plan_says_so() {
             "Fri 13 Nov",
             "  nothing tracked yet: moa fills this in as sessions report",
             "",
-            "↵ or click: jump to its session · d done · x drop",
+            "↵ or click: jump to its session · d done · x drop · a archive · n/N new",
         ]
     );
     assert_eq!(lines[1].spans[0].tone, Tone::Dim);

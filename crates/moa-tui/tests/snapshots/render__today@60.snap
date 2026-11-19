@@ -16,5 +16,5 @@ expression: screen_text(&buf)
 │                                                          │
 │ WORKING                                                  │
 │                                                          │
-│ j/k · ⏎ open · y/n suggestion                            │
+│ j/k · ⏎ open · y/n suggestion · a archive · x close · n/N│
 ╰──────────────────────────────────────────────────────────╯

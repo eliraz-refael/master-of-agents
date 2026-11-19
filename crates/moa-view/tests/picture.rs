@@ -199,7 +199,13 @@ fn the_tabs_rows_keep_their_views_keys() {
     t.key(Key::Char('5'));
     assert_eq!(hint(&mut t), "1-6/tab · j/k scroll · q");
     t.key(Key::Char('6'));
-    assert_eq!(hint(&mut t), "⏎/click jump · j/k · Ctrl-a / find");
+    let status = hint(&mut t);
+    assert_eq!(status, moa_view::keys::hint(View::Status, false));
+    // Its sessions take `a`, `x`, `n` and `N`.
+    assert!(
+        status.contains("a archive") && status.contains("x close") && status.contains("n/N new"),
+        "{status}"
+    );
     t.key(Key::Char('4'));
     assert!(
         hint(&mut t).starts_with("⏎/click open · n new"),
