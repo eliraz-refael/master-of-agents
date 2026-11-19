@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, VecDeque};
 use serde_json::json;
 
 use super::assign::view_of;
-use super::build::panel_tags;
+use super::build::{occupant_stays, panel_tags};
 use super::scene::{AGENT, Role, Scene};
 use super::spawn::{respawn, respawn_tail, spawn, spawned};
 use super::{Plan, plan, swap_in, vacate};
@@ -134,6 +134,8 @@ struct Then {
     tags: Vec<(PaneId, Option<&'static str>)>,
     /// The panes it takes `@moa_session` off, recorded at once too.
     untagged: Vec<PaneId>,
+    /// A swap into the spot: where it puts the panes, recorded at once too.
+    moved: Option<Moved>,
     /// A build's live panels given another view: their rows change.
     views: Option<Vec<(PaneId, View)>>,
     /// The panels it starts in place.
@@ -141,6 +143,15 @@ struct Then {
     /// The layout it builds, for its error.
     layout: String,
     ok: Said,
+}
+
+/// Where a swap into the spot (L11) puts the panes: `pane` takes the spot's place, and the
+/// spot's occupant takes `pane`'s old one when it `stays` there, else it goes to a new tab.
+#[derive(Clone, Copy, Debug)]
+struct Moved {
+    pane: PaneId,
+    spot: PaneId,
+    stays: bool,
 }
 
 /// How an operation ends.
@@ -518,6 +529,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                             Then {
                                 tags: Vec::new(),
                                 untagged: Vec::new(),
+                                moved: None,
                                 views: None,
                                 starts: 0,
                                 layout,
@@ -574,6 +586,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let then = |tags, untagged, starts| Then {
                 tags,
                 untagged,
+                moved: None,
                 views: None,
                 starts,
                 layout: String::new(),
@@ -617,6 +630,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 Then {
                     tags: vec![(*pane, Some(view.word()))],
                     untagged: Vec::new(),
+                    moved: None,
                     views: Some(vec![(*pane, *view)]),
                     starts: 0,
                     layout: String::new(),
@@ -630,29 +644,33 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let Some(id) = scene.pane(*pane).and_then(|at| at.agent()) else {
                 return Next::Done(refused(op, GONE.into()));
             };
-            let then = |tags, swapped| Then {
+            let then = |tags, moved: Option<Moved>| Then {
                 tags,
                 untagged: Vec::new(),
+                moved,
                 views: None,
                 starts: 0,
                 layout: String::new(),
-                ok: Said::Reply(Ok(shown(state, id, swapped))),
+                ok: Said::Reply(Ok(shown(state, id, moved.is_some()))),
             };
-            match swap_in(scene, *pane, |id| title(state, id)) {
-                Some(chain) => {
+            let swap = swap_in(scene, *pane, |id| title(state, id));
+            match (swap, scene.spot(), scene.pane(*pane)) {
+                (Some(chain), Some(old), Some(at)) => {
                     let mut cmds = chain.parts().to_vec();
                     cmds.extend(focus_cmds(*pane));
                     // The spot's new agent, and its old occupant: an empty slot stays one,
                     // parked; an agent goes back to a tab, without the spot's view.
-                    let mut tags = vec![(*pane, Some(AGENT))];
-                    if let Some(old) = scene.spot() {
-                        let view = old.agent().is_none().then(|| View::EmptySlot.word());
-                        tags.push((old.pane, view));
-                    }
-                    Next::Chain(cmds, then(tags, true))
+                    let view = old.agent().is_none().then(|| View::EmptySlot.word());
+                    let tags = vec![(*pane, Some(AGENT)), (old.pane, view)];
+                    let moved = Moved {
+                        pane: *pane,
+                        spot: old.pane,
+                        stays: occupant_stays(old, at),
+                    };
+                    Next::Chain(cmds, then(tags, Some(moved)))
                 }
                 // No spot, or it is the spot already: 4b's select.
-                None => Next::Chain(focus_cmds(*pane).to_vec(), then(Vec::new(), false)),
+                _ => Next::Chain(focus_cmds(*pane).to_vec(), then(Vec::new(), None)),
             }
         }
     }
@@ -739,6 +757,7 @@ fn build(
         Then {
             tags,
             untagged: Vec::new(),
+            moved: None,
             views: Some(b.views),
             starts: 0,
             layout,
@@ -839,6 +858,14 @@ pub(crate) fn chain_answered(
                     state.tmux.views_set(&then.tags);
                     for pane in &then.untagged {
                         state.tmux.untag_sent(*pane);
+                    }
+                    // Straight into the topology: any listing answered after this `Ok` was
+                    // run after the chain, so it shows the panes where the chain put them.
+                    if let Some(m) = then.moved {
+                        state.tmux.topology.swapped(m.pane, m.spot);
+                        if !m.stays {
+                            state.tmux.topology.lifted(m.spot);
+                        }
                     }
                     state.panel_starts += then.starts;
                     let said = match then.ok {

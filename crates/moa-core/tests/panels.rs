@@ -554,6 +554,39 @@ fn the_terminal_key_falls_back_to_the_spots_folder() {
     opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
 }
 
+/// A stale `agent` tag on a pane outside the cockpit (left by a chain that stopped half
+/// way) never picks the folder: only the cockpit's spot does.
+#[test]
+fn a_stale_agent_tag_outside_the_cockpit_never_picks_the_folder() {
+    let b = TypicalBrain::new();
+    let mut snapshot = b.snapshot();
+    for (id, cwd) in [(A, "/r/work/a"), (B, "/r/work/b")] {
+        let mut s = session(id, Lifecycle::Live);
+        s.cwd = Some(cwd.into());
+        snapshot.sessions.push(s);
+    }
+    snapshot
+        .pane_bindings
+        .extend([binding(A, "%7", true), binding(B, "%6", true)]);
+    // B's tab `%6`, in window `@0` (listed first), still tagged `agent`.
+    let stale = format!("P %6 @0 $0 1 0 0 0 {B} 0 agent");
+    let tree = "P %3 @1 $0 1 1 0 1  0 tree".to_string();
+
+    // Lantern in the spot: its folder.
+    let spot = format!("P %7 @1 $0 1 1 0 1 {A} 0 agent");
+    let mut st = with_panel(&b, deps(&b), snapshot.clone());
+    link_listed(&b, &mut st, &[stale.clone(), tree.clone(), spot]);
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ a", "/r/work/a");
+
+    // The empty slot in the spot: home.
+    let slot = "P %8 @1 $0 1 1 0 1  0 empty-slot".to_string();
+    let mut st = with_panel(&b, deps(&b), snapshot);
+    link_listed(&b, &mut st, &[stale, tree, slot]);
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
+}
+
 /// The menu's item has no pane.
 #[test]
 fn the_terminal_menu_item_opens_at_home() {

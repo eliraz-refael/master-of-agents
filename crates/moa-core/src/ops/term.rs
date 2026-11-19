@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::cut;
 use super::launch::{WENT_AWAY, WINDOW_NAME_CUT, focus_cmds, warn};
-use crate::cockpit::AGENT;
+use crate::cockpit::Scene;
 use crate::effect::{Effect, LogLevel};
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::state::State;
@@ -85,14 +85,12 @@ pub(crate) fn term_key(state: &mut State, pane: Option<PaneId>, client: ClientNa
 }
 
 /// The folder of the session whose agent is in the cockpit's spot: none with no cockpit,
-/// or the empty slot there. The spot's agent is the pane tagged `agent`, a tag a swap's
-/// `Ok` records at once (L17), so it is right before the next listing moves the panes.
+/// or the empty slot there. Only a pane tagged `agent` in the cockpit counts, never a stale
+/// tag elsewhere. A swap's `Ok` records both the tag and where it put the panes (L17), so
+/// this is right before the next listing.
 fn spot_folder(state: &State) -> Option<String> {
-    let topology = &state.tmux.topology;
-    let id = topology
-        .panes()
-        .filter(|p| topology.view_of(*p) == Some(AGENT))
-        .find_map(|p| bound_session(state, p).or_else(|| topology.moa_session(p)))?;
+    let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
+    let id = scene.spot()?.agent()?;
     state.session(id)?.cwd.clone()
 }
 

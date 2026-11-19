@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use jiff::tz::TimeZone;
+use moa_core::cockpit::{Place, Role, Scene};
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Down, Effect, Input, LogLevel, Publish, TmuxIn, TmuxToken, handle_checked};
 use moa_core::layout::{CURRENT_KEY, Leaf};
@@ -15,7 +16,7 @@ use moa_core::panel::View;
 use moa_core::publish::{CoreEvent, Topic};
 use moa_core::state::{CallerInfo, Deps, PanelLaunch, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
-use moa_core::tmux::ids::{ClientName, Generation, PaneId};
+use moa_core::tmux::ids::{ClientName, Generation, PaneId, WindowId};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
@@ -1228,6 +1229,21 @@ fn focus_swaps_into_the_spot() {
     // Before any listing: Lantern is the spot's agent, and the slot is still the slot.
     assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("agent"));
     assert_eq!(st.tmux().topology.view_of(PaneId(5)), Some("empty-slot"));
+    // And where the chain put them: Lantern in the spot, the slot out of the cockpit (its
+    // new tab in `_moa` waits for a listing).
+    let scene = Scene::read(&st.tmux().topology, |_| None);
+    let spot = scene.spot().expect("a spot");
+    assert_eq!(
+        (spot.pane, spot.role),
+        (PaneId(9), Role::Spot(Some(sid(L))))
+    );
+    assert!(
+        scene
+            .pane(PaneId(5))
+            .is_none_or(|at| at.place != Place::Cockpit),
+        "{scene:?}"
+    );
+    assert_eq!(st.tmux().topology.window_of(PaneId(9)), Some(WindowId(1)));
 }
 
 /// `Ctrl-a $` in a panel right after a focus, before any listing, opens in the folder of the
@@ -1281,6 +1297,12 @@ fn focus_sends_the_spots_agent_back_to_a_tab() {
     assert_eq!(reply_text(&fx), Ok("brought it into the cockpit".into()));
     assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("agent"));
     assert_eq!(st.tmux().topology.view_of(PaneId(8)), None);
+    // Kite is in the tab Lantern left, and Lantern in the spot, before any listing.
+    let scene = Scene::read(&st.tmux().topology, |_| None);
+    assert_eq!(scene.spot().map(|at| at.pane), Some(PaneId(9)));
+    let kite = scene.pane(PaneId(8)).expect("Kite's tab");
+    assert_eq!((kite.window, kite.place), (WindowId(9), Place::Moa));
+    assert_eq!(kite.role, Role::Agent(sid(K)));
 }
 
 /// A layout with no spot: 4b's select and 4b's reply, from the operation's own listing.
