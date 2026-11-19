@@ -506,7 +506,7 @@ pub(crate) fn untag_pane(state: &mut State, tx: &mut Tx, pane: PaneId) {
 }
 
 /// What takes moa's tags off `pane`: the session tag, then the adopted mark.
-fn untag_cmds(pane: PaneId) -> [Cmd; 2] {
+pub(crate) fn untag_cmds(pane: PaneId) -> [Cmd; 2] {
     [
         unset_pane_option(pane, "@moa_session"),
         unset_pane_option(pane, "@moa_adopted"),
