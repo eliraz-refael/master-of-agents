@@ -340,6 +340,18 @@ fn distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+/// Whether `key` is a misspelling of the table `known`: two edits for a long name; for a
+/// short one, one edit that keeps the first letter, so a short table of its own (`[api]`,
+/// `[tui]`, `[x]`) isn't taken for `[ui]`.
+fn near_miss(key: &str, known: &str) -> bool {
+    let d = distance(key, known);
+    if known.chars().count() <= 4 {
+        d <= 1 && key.chars().next() == known.chars().next()
+    } else {
+        d <= 2
+    }
+}
+
 fn expand_all(
     v: &[String],
     what: &str,
@@ -355,7 +367,7 @@ impl Config {
         let table: toml::Table = toml::from_str(text).map_err(|e| toml_problem(text, &e))?;
         let mut skipped_tables = Vec::new();
         for key in table.keys().filter(|k| !TABLES.contains(&k.as_str())) {
-            if let Some(known) = TABLES.iter().find(|t| distance(key, t) <= 2) {
+            if let Some(known) = TABLES.iter().find(|t| near_miss(key, t)) {
                 return Err(problem(format_args!(
                     "[{key}] isn't a table moa knows; did you mean [{known}]?"
                 )));
@@ -457,7 +469,7 @@ impl Config {
             );
         }
         config.ui.mouse = match &raw.ui.mouse {
-            None => true,
+            None => UiConfig::default().mouse,
             Some(toml::Value::Boolean(on)) => *on,
             Some(_) => return Err(problem("mouse in [ui] must be true or false")),
         };

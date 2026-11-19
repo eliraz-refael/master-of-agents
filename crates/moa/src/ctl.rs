@@ -46,7 +46,7 @@ impl Here {
         Ok(Here { paths, cwd })
     }
 
-    pub(crate) fn caller(&self) -> CallerInfo {
+    fn caller(&self) -> CallerInfo {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         CallerInfo {
             moa_session: var("MOA_SESSION"),

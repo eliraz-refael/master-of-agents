@@ -345,6 +345,17 @@ impl Panel {
         self.prompt.is_some()
     }
 
+    /// Whether the next key is typed into the footer: a prompt's editor or a y/N question.
+    pub fn typing(&self) -> bool {
+        self.prompt.is_some() || self.confirm.is_some()
+    }
+
+    /// Whether `k` quits this panel when nothing is being typed: Ctrl-c anywhere, `q` in the
+    /// picture.
+    pub fn quits(&self, k: Key) -> bool {
+        keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
+    }
+
     /// Pasted text goes to the prompt being answered, if any.
     pub fn paste(&mut self, text: &str) {
         if let Some(prompt) = &mut self.prompt {

@@ -15,7 +15,8 @@ use moa_core::panel::View;
 use moa_core::tmux::ids::PaneId;
 use moa_platform::TmuxSocket;
 use moa_tui::run::{
-    INIT, RESTORE, claim_pane, cursor, first_ops, key_of, mouse_of, reconnect_delays,
+    DownKey, INIT, RESTORE, claim_pane, cursor, down_key, down_line, first_ops, key_of, mouse_of,
+    reconnect_delays,
 };
 use moa_view::fixture::lantern;
 use moa_view::geometry::Size;
@@ -248,4 +249,46 @@ fn the_cursor_follows_the_prompt() {
 
     panel.key(Key::Esc, &data, &ctx, size);
     assert!(!panel.prompting());
+}
+
+/// While moa is down and the panel waits for a key: what types into the footer still types,
+/// `q` in the picture (and Ctrl-c anywhere) quits, and any other key tries again.
+#[test]
+fn a_key_while_down_types_quits_or_tries_again() {
+    let (data, ctx) = lantern();
+    let size = Size { w: 80, h: 16 };
+    let mut picture = Panel::new(View::Picture);
+    assert_eq!(down_key(&picture, Key::Char('q')), DownKey::Quit);
+    assert_eq!(down_key(&picture, Key::Ctrl('c')), DownKey::Quit);
+    assert_eq!(down_key(&picture, Key::Char('j')), DownKey::Retry);
+    picture.key(Key::Char('2'), &data, &ctx, size);
+    assert_eq!(down_key(&picture, Key::Char('q')), DownKey::Quit, "any tab");
+
+    let mut tree = Panel::new(View::Tree);
+    assert_eq!(
+        down_key(&tree, Key::Char('q')),
+        DownKey::Retry,
+        "q isn't the tree's"
+    );
+    assert_eq!(down_key(&tree, Key::Ctrl('c')), DownKey::Quit);
+    tree.key(Key::Char('+'), &data, &ctx, size);
+    assert!(tree.prompting());
+    for k in [Key::Char('q'), Key::Char('x'), Key::Esc, Key::Enter] {
+        assert_eq!(down_key(&tree, k), DownKey::Panel, "{k:?}");
+    }
+    assert_eq!(down_key(&tree, Key::Ctrl('c')), DownKey::Quit);
+}
+
+/// After a first connect that failed, the footer says why and that a key tries again; once
+/// reconnecting gave up, it says that.
+#[test]
+fn the_down_line_is_honest() {
+    assert_eq!(
+        down_line(Some("moa couldn't start: no such file")),
+        "moa couldn't start: no such file; press any key to try again"
+    );
+    assert_eq!(
+        down_line(None),
+        "moa isn't running: press any key to try again"
+    );
 }

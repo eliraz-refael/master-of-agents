@@ -67,6 +67,8 @@ const MISMATCH: &str = "this panel is from another build of moa; close it and ru
 const TRYING: &str = "moa isn't running; trying again…";
 /// The footer once reconnecting has given up.
 const GAVE_UP: &str = "moa isn't running: press any key to try again";
+/// The footer for an op sent while the first connect is under way.
+const CONNECTING: &str = "not connected to moa yet; try again in a moment";
 
 /// The animation tick (V10).
 const TICK: Duration = Duration::from_millis(100);
@@ -95,6 +97,39 @@ pub fn claim_pane(
     let theirs = canonical(Path::new(path));
     let ours = canonical(&socket.path(tmux_tmpdir, uid));
     (theirs == ours).then_some(pane)
+}
+
+/// What a key does while moa is down and the panel waits for a key to try again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DownKey {
+    /// Ctrl-c, or `q` in the picture.
+    Quit,
+    /// A prompt or a question is open: the key is typed there, as usual.
+    Panel,
+    /// Any other key tries again.
+    Retry,
+}
+
+/// How `panel` takes `key` while the connection is down.
+pub fn down_key(panel: &Panel, key: Key) -> DownKey {
+    if key == Key::Ctrl('c') {
+        DownKey::Quit
+    } else if panel.typing() {
+        DownKey::Panel
+    } else if panel.quits(key) {
+        DownKey::Quit
+    } else {
+        DownKey::Retry
+    }
+}
+
+/// The footer while the panel waits for a key to try again: why the first connect failed,
+/// else that reconnecting gave up.
+pub fn down_line(why: Option<&str>) -> String {
+    match why {
+        Some(why) => format!("{why}; press any key to try again"),
+        None => GAVE_UP.to_string(),
+    }
 }
 
 /// What every connect sends first (V13): which panel this is, then its selection's folder.
@@ -192,7 +227,9 @@ fn restore() {
 }
 
 /// The terminal, taken for as long as this lives: given back when it drops (a quit, Ctrl-c,
-/// an error) and, through the panic hook, before a panic's message is printed.
+/// an error) and, through the panic hook, before a panic's message is printed. Any panic
+/// ends the panel, even one in a task the runtime would survive (the connection's): a
+/// panel never goes on drawing into a terminal it gave back.
 struct Taken;
 
 impl Taken {
@@ -205,6 +242,7 @@ impl Taken {
         std::panic::set_hook(Box::new(move |info| {
             restore();
             previous(info);
+            std::process::exit(101);
         }));
         let mut out = io::stdout();
         out.write_all(INIT.as_bytes())?;
@@ -294,8 +332,9 @@ enum Link {
         waited: usize,
         sleep: Pin<Box<Sleep>>,
     },
-    /// Waiting for a key to try again.
-    Down,
+    /// Waiting for a key to try again: why the first connect failed, or `None` once
+    /// reconnecting gave up.
+    Down(Option<String>),
     /// Another build: the panel says so and sends nothing.
     Mismatch,
 }
@@ -319,7 +358,7 @@ async fn link_wake(link: &mut Link) -> Wake {
             sleep.as_mut().await;
             Wake::Retry
         }
-        Link::Down | Link::Mismatch => pending().await,
+        Link::Down(_) | Link::Mismatch => pending().await,
     }
 }
 
@@ -356,10 +395,6 @@ async fn next_wake(
 /// The wall clock now.
 fn now() -> UtcMs {
     UtcMs(jiff::Timestamp::now().as_millisecond())
-}
-
-fn is_dir(p: &Path) -> bool {
-    p.is_dir()
 }
 
 /// How long until `at`, from `now`: never less than nothing, never more than a day.
@@ -406,7 +441,7 @@ impl Loop {
             theme,
             panel,
             data: Data::default(),
-            link: Link::Down,
+            link: Link::Down(None),
             delays: reconnect_delays(),
             asked: BTreeSet::new(),
             told_here: None,
@@ -426,7 +461,7 @@ impl Loop {
             self.opts.tz.clone(),
             tick,
             self.opts.home.clone(),
-            is_dir,
+            Path::is_dir,
         )
     }
 
@@ -452,13 +487,12 @@ impl Loop {
     }
 
     /// The footer's line for a connection that isn't up, if any.
-    fn link_line(&self) -> Option<&'static str> {
-        match self.link {
+    fn link_line(&self) -> Option<String> {
+        match &self.link {
             Link::Up { .. } | Link::Connecting { .. } => None,
-            Link::Waiting { .. } => Some(TRYING),
-            // A first connect that failed says why itself.
-            Link::Down => self.linked_once.then_some(GAVE_UP),
-            Link::Mismatch => Some(MISMATCH),
+            Link::Waiting { .. } => Some(TRYING.to_string()),
+            Link::Down(why) => Some(down_line(why.as_deref())),
+            Link::Mismatch => Some(MISMATCH.to_string()),
         }
     }
 
@@ -481,8 +515,8 @@ impl Loop {
                     }
                     // Nothing is sent to another build; elsewhere the footer says why.
                     _ => {
-                        let line = self.link_line().unwrap_or(TRYING);
-                        self.panel.note(line);
+                        let line = self.link_line();
+                        self.panel.note(line.as_deref().unwrap_or(CONNECTING));
                     }
                 },
             }
@@ -520,21 +554,26 @@ impl Loop {
                 let Some(key) = key_of(k) else {
                     return Turn::Go(false);
                 };
-                if key == Key::Ctrl('c') {
+                if matches!(self.link, Link::Down(_)) {
+                    match down_key(&self.panel, key) {
+                        DownKey::Quit => return Turn::Quit,
+                        DownKey::Retry => {
+                            self.hush();
+                            self.connect(0);
+                            return Turn::Go(true);
+                        }
+                        DownKey::Panel => {}
+                    }
+                } else if key == Key::Ctrl('c') {
                     return Turn::Quit;
-                }
-                if matches!(self.link, Link::Down) {
-                    // Any key tries again.
-                    self.hush();
-                    self.connect(0);
-                    return Turn::Go(true);
                 }
                 let outs = self.panel.key(key, &self.data, &ctx, self.size);
                 if self.act(outs) {
                     return Turn::Quit;
                 }
-                if let Some(line) = self.link_line() {
-                    self.panel.note(line);
+                // The footer's editor or question keeps the footer while it is open.
+                if let Some(line) = self.link_line().filter(|_| !self.panel.typing()) {
+                    self.panel.note(&line);
                 }
                 true
             }
@@ -549,7 +588,7 @@ impl Loop {
                 }
                 // A click clears the footer; the connection's line stays.
                 if let Some(line) = self.link_line().filter(|_| redraw) {
-                    self.panel.note(line);
+                    self.panel.note(&line);
                 }
                 redraw
             }
@@ -612,7 +651,7 @@ impl Loop {
                 self.panel.note(TRYING);
             }
             None => {
-                self.link = Link::Down;
+                self.link = Link::Down(None);
                 self.panel.note(GAVE_UP);
             }
         }
@@ -663,9 +702,10 @@ impl Loop {
                 self.panel.note(MISMATCH);
             }
             Err(Failed::Down(line)) if !self.linked_once => {
-                // The first connect, which could start the daemon, says why it couldn't.
-                self.link = Link::Down;
-                self.panel.note(&line);
+                // The first connect, which could start the daemon, says why it couldn't and
+                // that a key tries again.
+                self.panel.note(&down_line(Some(&line)));
+                self.link = Link::Down(Some(line));
             }
             Err(Failed::Down(_)) => self.wait(waited),
         }
@@ -730,7 +770,14 @@ impl Loop {
             (false, true) => self.tick = None,
             _ => {}
         }
-        self.deadline = wake_at.map(|at| Box::pin(sleep_until(Instant::now() + until(at, now()))));
+        // A deadline that stays is moved in place rather than built again each frame.
+        match (wake_at, &mut self.deadline) {
+            (None, _) => self.deadline = None,
+            (Some(at), Some(d)) => d.as_mut().reset(Instant::now() + until(at, now())),
+            (Some(at), None) => {
+                self.deadline = Some(Box::pin(sleep_until(Instant::now() + until(at, now()))));
+            }
+        }
         Ok(())
     }
 }
