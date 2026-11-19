@@ -548,9 +548,11 @@ from a choice, and both resume. A tab moa kills (sleep, close, restart) takes it
 it, but a hook that agent sent between the commit and the kill can arrive after the commit,
 stamped later: while the session isn't bound to that tab, any event from it but its end is
 history only, so a late SessionStart can't bring back a session moa just put to sleep or
-closed. A kill that was lost leaves the tab bound, and its agent's events count again.
-Liveness still comes from pane events, never from a hook's last event (lesson 3). moa's own
-ACP session carries `MOA_SESSION=moa` and is never listed as a worker (lesson 31).
+closed. If the kill is lost, the tab counts again once the session is bound to it again: at
+once when a failed batch's reload restores the binding, or when reconcile or `adopt` rebinds
+it after the link drops. Liveness still comes from pane events, never from a hook's last event
+(lesson 3). moa's own ACP session carries `MOA_SESSION=moa` and is never listed as a worker
+(lesson 31).
 
 **Multi-account resume [C11]** (R5 §8.3):
 1. Resume uses the launcher of the store the current conversation was **recorded** in, never
