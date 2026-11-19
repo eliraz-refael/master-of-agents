@@ -342,9 +342,11 @@ fn distance(a: &str, b: &str) -> usize {
 
 /// Whether `key` is a misspelling of the table `known`: two edits for a long name; for a
 /// short one, one edit that keeps the first letter, so a short table of its own (`[api]`,
-/// `[tui]`, `[x]`) isn't taken for `[ui]`.
+/// `[tui]`, `[x]`) isn't taken for `[ui]`. Case is ignored.
 fn near_miss(key: &str, known: &str) -> bool {
-    let d = distance(key, known);
+    // A difference only in case is no edit at all: `[UI]` is `[ui]` misspelt.
+    let key = key.to_lowercase();
+    let d = distance(&key, known);
     if known.chars().count() <= 4 {
         d <= 1 && key.chars().next() == known.chars().next()
     } else {

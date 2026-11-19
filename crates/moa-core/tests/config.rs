@@ -537,7 +537,7 @@ fn a_short_table_is_not_taken_for_ui() {
         let config = Config::parse(&text, home()).unwrap_or_else(|e| panic!("{other}: {e}"));
         assert_eq!(config.skipped_tables, vec![other.to_string()]);
     }
-    for near in ["uii", "ux", "u"] {
+    for near in ["uii", "ux", "u", "UI", "Ui"] {
         assert_eq!(
             err(&format!("[{near}]\nx = 1\n")),
             format!("moa.toml: [{near}] isn't a table moa knows; did you mean [ui]?"),
