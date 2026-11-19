@@ -534,14 +534,39 @@ impl Drop for Core {
 }
 
 /// Writes `text` to `path` through a temporary file in the same folder and a rename, making
-/// the folder when it's missing. A `path` that is a link is written through it, at its target:
-/// the rename would otherwise put a plain file in the link's place.
+/// the folder when it's missing. A `path` that is a link is written through it, at its
+/// target, which the write makes when it's missing (its folder isn't made): the rename would
+/// otherwise put a plain file in the link's place.
 fn write_file(path: &Path, text: &str) -> io::Result<()> {
-    let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if let Some(dir) = path.parent() {
+    let target = through_links(path)?;
+    if target == path
+        && let Some(dir) = path.parent()
+    {
         std::fs::create_dir_all(dir)?;
     }
-    moa_platform::fs::write_if_changed(path, text).map(|_| ())
+    moa_platform::fs::write_if_changed(&target, text).map(|_| ())
+}
+
+/// The most links followed from one path.
+const MAX_LINKS: usize = 8;
+
+/// The file at the end of `path`'s links (`path` itself when it isn't one), which may not
+/// exist yet. A relative link is read from its own folder.
+fn through_links(path: &Path) -> io::Result<PathBuf> {
+    let mut at = path.to_path_buf();
+    for _ in 0..=MAX_LINKS {
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(&at)?;
+                // An absolute `to` replaces the folder in `join`.
+                at = at.parent().map_or_else(|| to.clone(), |dir| dir.join(&to));
+            }
+            Ok(_) => return Ok(at),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(at),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("its links go round in a circle"))
 }
 
 /// The carried-over items, then what is already waiting, up to [`DRAIN_CAP`]. A `stop` ends

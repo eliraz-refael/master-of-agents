@@ -34,8 +34,15 @@ fn read_text(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
+type ReadText = fn(&Path) -> io::Result<Option<String>>;
+
 /// A core whose `layouts.json` is `file`.
 async fn core_with(brain: &TypicalBrain, file: &Path) -> CoreHandle {
+    core_reading(brain, file, read_text).await
+}
+
+/// A core whose `layouts.json` is `file`, read with `read_text`.
+async fn core_reading(brain: &TypicalBrain, file: &Path, read_text: ReadText) -> CoreHandle {
     let time = FakeTime::new(brain.now().wall);
     within(CoreHandle::start(CoreOptions {
         brain: BrainName::default_brain(),
@@ -163,4 +170,56 @@ async fn a_linked_file_is_written_through_its_link() {
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
     assert_eq!(saved, json!({"layouts": {"mine": {"panel": "tree"}}}));
+}
+
+/// A link whose target isn't there yet (a relative one, too) makes the target and stays a link.
+#[tokio::test]
+async fn a_link_to_a_missing_file_makes_its_target() {
+    let brain = TypicalBrain::new();
+    let dir = config_dir(&brain);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+    let file = dir.join("layouts.json");
+    std::os::unix::fs::symlink("dotfiles/layouts.json", &file).unwrap();
+    let core = core_with(&brain, &file).await;
+
+    set_mine(&core).await.0.expect("saved");
+    let link = std::fs::symlink_metadata(&file).unwrap();
+    assert!(link.file_type().is_symlink());
+    let target = dir.join("dotfiles/layouts.json");
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(saved, json!({"layouts": {"mine": {"panel": "tree"}}}));
+}
+
+/// Links that go round in a circle are refused, and nothing is written. (A real read of the
+/// file fails first and the core refuses; this core reads no file, so the write is tried.)
+#[tokio::test]
+async fn a_link_loop_is_refused() {
+    let brain = TypicalBrain::new();
+    let dir = config_dir(&brain);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("layouts.json");
+    std::os::unix::fs::symlink("other.json", &file).unwrap();
+    std::os::unix::fs::symlink("layouts.json", dir.join("other.json")).unwrap();
+    let core = core_reading(&brain, &file, |_| Ok(None)).await;
+
+    let refused = set_mine(&core).await.0.expect_err("refused");
+    assert!(
+        refused.0.starts_with("couldn't save layouts.json: "),
+        "{}",
+        refused.0
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    names.sort();
+    assert_eq!(names, [file.clone(), dir.join("other.json")]);
+    assert!(names.iter().all(|p| {
+        std::fs::symlink_metadata(p)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    }));
 }
