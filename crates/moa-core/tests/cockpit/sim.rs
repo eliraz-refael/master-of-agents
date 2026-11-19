@@ -250,6 +250,11 @@ impl World {
         Ok(())
     }
 
+    /// Takes `p` out of its window; a window left empty closes. Its session never does,
+    /// though tmux ends a session whose last window closes. moa never needs that: `_moa`
+    /// keeps the `/bin/sh -s` window the link attaches to (the front door makes it, and the
+    /// engine never moves it), and `moa` always keeps the cockpit. Don't rely on an empty
+    /// session surviving here.
     fn take_out(&mut self, p: PaneId) {
         let (wi, pi) = self.where_is(p).unwrap();
         self.windows[wi].panes.remove(pi);

@@ -136,11 +136,14 @@ impl Scene {
         self.panes.iter().find(|at| at.pane == p)
     }
 
-    /// The spot's occupant: the first cockpit pane that is one.
+    /// The spot's occupant: an agent before an empty slot, should the user's own moves have
+    /// left both in the cockpit; else the first listed.
     pub fn spot(&self) -> Option<&PaneAt> {
-        self.panes
-            .iter()
-            .find(|at| at.place == Place::Cockpit && matches!(at.role, Role::Spot(_)))
+        let spot = |agent: bool| {
+            self.in_cockpit()
+                .find(|at| matches!(at.role, Role::Spot(id) if id.is_some() == agent))
+        };
+        spot(true).or_else(|| spot(false))
     }
 
     /// The panes in the cockpit, in the listing's order.

@@ -5,7 +5,7 @@
 //! The core runs them one at a time, each from its own listing (L17).
 
 mod assign;
-mod build;
+pub(crate) mod build;
 mod scene;
 
 use std::collections::BTreeSet;

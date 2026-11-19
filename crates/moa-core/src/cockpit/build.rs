@@ -27,6 +27,15 @@ fn cut(title: String) -> String {
     title.chars().take(TITLE_CHARS).collect()
 }
 
+/// An agent's tab name: its title, cut. Never `moa`, which in session `moa` would read as
+/// the cockpit (after a rebuild made the cockpit a newer window than the agent's tab).
+fn tab_name(title: String) -> String {
+    match cut(title) {
+        name if name == MOA => format!("{MOA} (agent)"),
+        name => name,
+    }
+}
+
 fn swap(src: PaneId, dst: PaneId) -> Cmd {
     Cmd::new("swap-pane").args(["-d", "-s", &src.to_string(), "-t", &dst.to_string()])
 }
@@ -78,7 +87,7 @@ fn frame(pane: PaneId, framed: bool) -> Vec<Cmd> {
 }
 
 /// A panel's tags (L10): its view, its label, and its frame.
-fn panel_tags(pane: PaneId, view: View) -> Vec<Cmd> {
+pub(crate) fn panel_tags(pane: PaneId, view: View) -> Vec<Cmd> {
     let mut cmds = vec![
         set_pane_option(pane, "@moa_view", view.word()),
         set_pane_option(pane, "@moa_label", &literal_format(view.label())),
@@ -98,7 +107,7 @@ fn agent_tags(pane: PaneId, title: &str) -> Vec<Cmd> {
 }
 
 /// A panel's pane stays when its program stops, and says so (L7).
-fn keep_on_exit(pane: PaneId) -> Vec<Cmd> {
+pub(crate) fn keep_on_exit(pane: PaneId) -> Vec<Cmd> {
     vec![
         set_pane_option(pane, "remain-on-exit", "on"),
         set_pane_option(pane, "remain-on-exit-format", STOPPED),
@@ -130,7 +139,7 @@ fn go_home(at: &PaneAt, title: &dyn Fn(SessionId) -> String) -> Vec<Cmd> {
         return vec![break_to(p, HIDDEN, None)];
     }
     if let Some(id) = at.agent() {
-        let mut cmds = vec![break_to(p, MOA, Some(&cut(title(id))))];
+        let mut cmds = vec![break_to(p, MOA, Some(&tab_name(title(id))))];
         cmds.extend(untag_agent(p));
         return cmds;
     }
@@ -229,10 +238,18 @@ pub(crate) fn chain(
         None => cmds.push(break_to(keeper, MOA, Some(MOA))),
         Some(_) if at(keeper).place == Place::Cockpit => {}
         Some(_) => {
-            // A cockpit pane the layout doesn't use first, a stranger first of those.
+            // A cockpit pane the layout doesn't use first, a stranger first of those. Among
+            // the ones it uses, a panel before the spot's agent: should the chain stop
+            // before C's join brings it back, C waits in `_moa`, and an agent mustn't.
             let c = scene
                 .in_cockpit()
-                .min_by_key(|c| (assigned.contains(&c.pane), c.role != Role::Other))
+                .min_by_key(|c| {
+                    (
+                        assigned.contains(&c.pane),
+                        c.agent().is_some(),
+                        c.role != Role::Other,
+                    )
+                })
                 .expect("a window holds a pane");
             cmds.push(swap(keeper, c.pane));
             // 3. C now sits where the keeper was. In the wrong session, it goes home at
@@ -287,7 +304,7 @@ pub(crate) fn swap_in(
                 "-t",
                 &spot.pane.to_string(),
                 "--",
-                &literal_format(&cut(title(old))),
+                &literal_format(&tab_name(title(old))),
             ]));
             cmds.extend(untag_agent(spot.pane));
         }

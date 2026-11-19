@@ -17,13 +17,16 @@ use proptest::prelude::*;
 
 use sim::{Kind, PaneSt, World};
 
-const TITLES: [&str; 6] = [
+/// Session `n`'s title is the `n`th. `moa` comes early, so the proptest's agents get it.
+const TITLES: [&str; 8] = [
     "Lantern",
     "Kite",
-    "Harbor",
+    "moa",
     "Beacon",
     "fix #12",
     "a title well past twenty-four characters",
+    "🚀 תיקון באג בדף הבית של האתר",
+    "Harbor",
 ];
 
 fn sid(n: u128) -> SessionId {
@@ -347,6 +350,94 @@ fn titles_are_cut_to_24_characters() {
     assert!(lines(&b.chain).contains(&format!("break-pane -d -s %3 -t =moa: -n {cut}")));
 }
 
+/// The cut counts characters, so a title in Hebrew, or with an emoji, is never cut inside one.
+#[test]
+fn a_multibyte_title_is_cut_on_a_character() {
+    let w = focus_built(spot_agent(7));
+    let b = built(plan(&w.scene(), &node("cockpit"), title));
+    let cut: String = TITLES[6].chars().take(24).collect();
+    assert_eq!(cut.chars().count(), 24);
+    assert!(cut.len() > 24, "the cut is past byte 24");
+    assert!(TITLES[6].starts_with(&cut));
+    assert!(lines(&b.chain).contains(&format!("break-pane -d -s %3 -t =moa: -n {cut}")));
+    let focus = built(plan(&w.scene(), &node("focus"), title));
+    assert!(lines(&focus.chain).contains(&format!("set-option -p -t %3 @moa_label ● {cut}")));
+}
+
+/// A tab named `moa` in session `moa` would read as the cockpit, so an agent titled `moa`
+/// never gets one; its frame still says `● moa`.
+#[test]
+fn an_agent_titled_moa_never_names_a_tab_moa() {
+    // Session 3 is titled `moa`.
+    let w = focus_built(spot_agent(3));
+    let home = built(plan(&w.scene(), &node("cockpit"), title));
+    assert!(
+        lines(&home.chain).contains(&"break-pane -d -s %3 -t =moa: -n moa (agent)".to_string())
+    );
+    let mut out = w.clone();
+    out.run(&home.chain).unwrap();
+    assert_eq!(out.cockpit_leaves(), vec![p(1), p(4), p(2)]);
+    let focus = built(plan(&w.scene(), &node("focus"), title));
+    assert!(lines(&focus.chain).contains(&"set-option -p -t %3 @moa_label ● moa".to_string()));
+
+    let mut w = w;
+    let tab = w.window("moa", "Lantern");
+    w.put(tab, p(9), PaneSt::agent(sid(1)));
+    let swap = swap_in(&w.scene(), p(9), title).unwrap();
+    assert!(lines(&swap).contains(&"rename-window -t %3 -- moa (agent)".to_string()));
+    w.run(&swap).unwrap();
+    let cockpits = w
+        .windows
+        .iter()
+        .filter(|x| x.session == "moa" && x.name == "moa");
+    assert_eq!(cockpits.count(), 1);
+}
+
+/// When the keeper must come in and every cockpit pane is needed, a panel is swapped out
+/// for it, never the spot's agent: a chain that stops before the joins leaves the agent on
+/// screen.
+#[test]
+fn the_keeper_swap_never_parks_the_spots_agent() {
+    let mut w = World::new();
+    let c = w.cockpit();
+    let agent = w.pane(c, spot_agent(1));
+    let console = w.pane(c, PaneSt::panel(View::Console));
+    let plan_pane = w.pane(c, PaneSt::panel(View::Plan));
+    let tree = w.park(View::Tree);
+    let b = built(plan(&w.scene(), &node("focus"), title));
+    let l = lines(&b.chain);
+    assert_eq!(l[0], format!("swap-pane -d -s {tree} -t {console}"));
+    for n in 1..=l.len() {
+        let mut cut = w.clone();
+        cut.run_first(&b.chain, n).unwrap();
+        assert!(cut.in_cockpit(agent), "cut after {n} commands");
+    }
+    w.run(&b.chain).unwrap();
+    assert_eq!(w.cockpit_leaves(), vec![tree, plan_pane, agent, console]);
+}
+
+/// Two spot roles in the cockpit (the user's own moves): the agent is the spot.
+#[test]
+fn the_spot_is_the_agent_before_an_empty_slot() {
+    let mut w = World::new();
+    let c = w.cockpit();
+    let slot = w.pane(c, PaneSt::panel(View::EmptySlot));
+    let agent = w.pane(c, spot_agent(1));
+    for view in [View::Tree, View::Plan, View::Console] {
+        w.park(view);
+    }
+    let scene = w.scene();
+    assert_eq!(scene.pane(slot).map(|s| s.role), Some(Role::Spot(None)));
+    assert_eq!(scene.spot().map(|s| s.pane), Some(agent));
+    let b = built(plan(&scene, &node("focus"), title));
+    assert_eq!(b.spot, Some(agent));
+    // The slot is the keeper swap's C: the tree's place in `_moa` is already its home.
+    assert_eq!(lines(&b.chain)[0], format!("swap-pane -d -s %3 -t {slot}"));
+    w.run(&b.chain).unwrap();
+    assert_eq!(w.session_of(slot), Some("_moa"));
+    assert_eq!(w.cockpit_leaves(), vec![p(3), p(4), agent, p(5)]);
+}
+
 #[test]
 fn no_moa_session_builds_nothing() {
     let mut w = World::new();
@@ -632,7 +723,7 @@ fn world_of(spec: &Spec) -> World {
     let mut splits = 0;
     for split in &spec.agents {
         let session = id();
-        let tab = w.window("moa", &title(session));
+        let tab = w.window("moa", &format!("{} tab", title(session)));
         w.pane(tab, PaneSt::agent(session));
         if *split && splits < 2 {
             splits += 1;
@@ -641,7 +732,7 @@ fn world_of(spec: &Spec) -> World {
     }
     if spec.tagged_outside {
         let session = id();
-        let tab = w.window("moa", &title(session));
+        let tab = w.window("moa", &format!("{} tab", title(session)));
         let label = format!("● {}", title(session));
         w.pane(
             tab,
