@@ -179,9 +179,9 @@ impl Rig {
                 let rows = self.colours(pane);
                 let bar = rows.iter().position(|l| l.contains(SEL_BG))?;
                 let want = rows.iter().position(|l| plain(l).contains(text))?;
-                Some((rows, bar, want))
+                Some((bar, want))
             });
-            let Some((rows, bar, want)) = found else {
+            let Some((bar, want)) = found else {
                 panic!(
                     "{pane} draws no bar, or no {text:?}\n{}",
                     tab_shows(&self.tb, pane)
@@ -192,7 +192,12 @@ impl Rig {
             }
             let key = if want > bar { "j" } else { "k" };
             tmux(&self.tb, &["send-keys", "-t", pane, key]);
-            let moved = wait_for(SHOWS, || (self.colours(pane) != rows).then_some(()));
+            // The key has landed once the bar is on another row.
+            let moved = wait_for(SHOWS, || {
+                let rows = self.colours(pane);
+                let now = rows.iter().position(|l| l.contains(SEL_BG));
+                now.filter(|now| *now != bar)
+            });
             assert!(
                 moved.is_some(),
                 "{key} left the bar on row {bar}, not {text:?}'s {want}\n{}",
@@ -257,26 +262,28 @@ impl Rig {
     }
 
     /// `Ctrl-a $` on the terminal with `pane` the active pane of the tab it shows: a new
-    /// terminal tab named `name` comes up, in `dir`.
+    /// terminal tab named `name` comes up, in `dir`. A tab has its name from the moment tmux
+    /// makes it, but its shell moves into the folder only once it runs, so the wait is for a
+    /// new tab of that name in `dir`.
     #[track_caller]
     fn terminal_key_opens(&self, pane: &str, name: &str, dir: &Path) {
         tmux(&self.tb, &["select-window", "-t", pane]);
         tmux(&self.tb, &["select-pane", "-t", pane]);
         self.client_shows(pane);
-        let before = self.tabs_named(name).len();
+        let in_dir = |tabs: &[PathBuf]| tabs.iter().filter(|p| *p == dir).count();
+        let before = in_dir(&self.tabs_named(name));
         ctrl_a(&self.tb, &self.term);
         self.term.press(b"$");
         let opened = wait_for(SHOWS, || {
-            let tabs = self.tabs_named(name);
-            (tabs.len() > before).then(|| tabs.last().cloned())?
+            (in_dir(&self.tabs_named(name)) > before).then_some(())
         });
-        let opened = opened.unwrap_or_else(|| {
-            panic!(
-                "Ctrl-a $ opened no {name:?} tab\n{}",
-                what_happened(&self.tb, &self.term)
-            )
-        });
-        assert_eq!(opened, *dir);
+        assert!(
+            opened.is_some(),
+            "Ctrl-a $ opened no {name:?} tab in {}: the {name:?} tabs are in {:?}\n{}",
+            dir.display(),
+            self.tabs_named(name),
+            what_happened(&self.tb, &self.term)
+        );
     }
 
     /// The daemon's launches so far.
@@ -388,12 +395,14 @@ fn hover_marks_the_row_under_the_pointer_and_focus_out_clears_it() {
     let kite = r.session("a", "Kite", None);
     let harbor = r.session("b", "Harbor", None);
     let pane = r.tree(&["Kite", "Harbor"]);
-    // The panel's tab, split: the panel is active first, then the other half is.
+    // The panel's tab, split with the new half on the left, so the panel stands away from
+    // the terminal's first column. The panel is active first, then the other half is.
     let other = tmux(
         &r.tb,
         &[
             "split-window",
             "-h",
+            "-b",
             "-d",
             "-t",
             &pane,
@@ -406,9 +415,23 @@ fn hover_marks_the_row_under_the_pointer_and_focus_out_clears_it() {
     tmux(&r.tb, &["select-pane", "-t", &other]);
     tmux(&r.tb, &["select-window", "-t", &pane]);
     r.client_shows(&pane);
-    let active = |p: &str| tmux(&r.tb, &["display-message", "-p", "-t", p, "#{pane_active}"]);
-    assert_eq!(active(&pane), "0");
-    // The panel's rows move with its new width: it shows the titles again.
+    let field = |p: &str, f: &str| tmux(&r.tb, &["display-message", "-p", "-t", p, f]);
+    assert_eq!(field(&pane, "#{pane_active}"), "0");
+    let left: u32 = field(&pane, "#{pane_left}").parse().unwrap();
+    assert!(left > 0, "the panel is at the terminal's first column");
+    // The panel has drawn itself at its new width: its frame's top right corner is in its
+    // last column.
+    let width: usize = field(&pane, "#{pane_width}").parse().unwrap();
+    let redrawn = wait_for(SHOWS, || {
+        let screen = screen_of(&r.tb, &pane);
+        let top = screen.lines().next()?;
+        (top.chars().count() == width && top.ends_with('╮')).then_some(())
+    });
+    assert!(
+        redrawn.is_some(),
+        "the panel never drew itself {width} wide\n{}",
+        tab_shows(&r.tb, &pane)
+    );
     r.shows(&pane, &["Kite", "Harbor"]);
 
     // 1. tmux asked the terminal for every mouse event, motion included.
@@ -431,7 +454,11 @@ fn hover_marks_the_row_under_the_pointer_and_focus_out_clears_it() {
     };
     r.mouse(35, cell_of(&r.tb, &pane, target));
     r.row_becomes(&pane, HOVER_BG, Some(target));
-    assert_eq!(active(&pane), "0", "the pointer made the panel active");
+    assert_eq!(
+        field(&pane, "#{pane_active}"),
+        "0",
+        "the pointer made the panel active"
+    );
 
     // 3. A click there opens that session's tab.
     click(&r.tb, &r.term, &pane, target);
@@ -469,14 +496,34 @@ fn panels_launch_nothing_in_the_daemon() {
     click(&r.tb, &r.term, &pane, "Kite");
     r.client_shows(&r.session_pane(&kite.id));
 
+    // Twenty moves back and forth over the two sessions' rows, ending on the one the bar
+    // isn't on (the bar wins over the mark): that row is marked, so the moves reached the
+    // panel.
     tmux(&r.tb, &["select-window", "-t", &pane]);
     r.client_shows(&pane);
-    let at = cell_of(&r.tb, &pane, "Harbor");
-    r.mouse(65, at);
-    r.mouse(64, at);
-    for i in 0..20 {
-        let (x, y) = at;
-        r.mouse(35, (x + i % 4, y - i % 2));
+    let bar = r.row_on(&pane, SEL_BG).unwrap_or_default();
+    let target = if bar.contains("Kite") {
+        "Harbor"
+    } else {
+        "Kite"
+    };
+    let rows = [
+        cell_of(&r.tb, &pane, "Kite"),
+        cell_of(&r.tb, &pane, "Harbor"),
+    ];
+    for i in 0..19u32 {
+        let (x, y) = rows[(i % 2) as usize];
+        r.mouse(35, (x + i % 4, y));
+    }
+    r.mouse(35, cell_of(&r.tb, &pane, target));
+    r.row_becomes(&pane, HOVER_BG, Some(target));
+    // A key no view uses clears the mark; each turn of the wheel marks the row under the
+    // pointer again, so the wheel reached the panel too.
+    for wheel in [65, 64] {
+        tmux(&r.tb, &["send-keys", "-t", &pane, "z"]);
+        r.row_becomes(&pane, HOVER_BG, None);
+        r.mouse(wheel, cell_of(&r.tb, &pane, target));
+        r.row_becomes(&pane, HOVER_BG, Some(target));
     }
     tmux(&r.tb, &["send-keys", "-t", &pane, "r"]);
     r.shows(&pane, &["rename session:"]);
