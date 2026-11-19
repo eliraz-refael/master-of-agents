@@ -1243,6 +1243,42 @@ fn a_reload_that_lost_a_restarts_commit_answers_it() {
     assert!(is_asleep(r.s()), "{:?}", r.s());
 }
 
+/// The batch that held the restart's commit failed, so its kill never went out: the reload
+/// brings S back bound to its adopted tab, %5, the tab the restart had queued to kill. %5 is
+/// S's tab again, so its agent's events count again: a turn it starts is applied.
+#[test]
+fn a_tab_the_session_is_bound_to_again_isnt_a_killed_tab() {
+    let mut r = World::new().reconciled();
+    let s = r.s().clone();
+    let binding = r.st.binding(s_id()).cloned().unwrap();
+    let convs: Vec<Conversation> = r.st.conversations_of(s_id()).cloned().collect();
+    r.committed(1);
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(s);
+    snap.conversations.extend(convs);
+    snap.pane_bindings.push(binding.clone());
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    assert_eq!(r.st.binding(s_id()), Some(&binding));
+
+    hook(
+        &mut r,
+        false,
+        HookKind::TurnStarted {
+            prompt: "go on".into(),
+        },
+        1000,
+        900,
+    );
+    assert_eq!(r.s().activity, Activity::Working, "{:?}", r.s());
+}
+
 /// A reload that kept the restart's commit (another batch failed) leaves its launch
 /// waiting: its kill and window went out, and tmux's answer binds the new tab.
 #[test]

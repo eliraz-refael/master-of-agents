@@ -276,8 +276,12 @@ pub struct State {
     /// `restart`), and the server it was on. Its agent dies with it, but a hook that agent
     /// sent between the commit and the kill can still arrive after the commit, stamped later
     /// than it: a start would bring the session back with no tab. So any event from that
-    /// tab but an end is history only ([`crate::hooks`]). tmux never reuses a tab id on one
-    /// server. Kept in memory: a daemon restart forgets it.
+    /// tab but an end is history only ([`crate::hooks`]), while the session isn't bound to
+    /// it: a lost kill leaves the tab the session's. tmux never reuses a tab id on one
+    /// server. A hook names its tab but not its server, so an agent in another tmux, in a
+    /// tab with the same id, is taken for the killed one. Kept in memory: a daemon restart
+    /// forgets it, and a late start that reaches the new daemon after its first reconcile
+    /// brings the session back with no tab until the next one.
     pub(crate) killed: BTreeMap<SessionId, (Generation, PaneId)>,
     /// The sessions a look at the tabs found no agent of ([`crate::wake`]), each with the
     /// server and the panes that look listed. Their events ask no look again until they

@@ -176,12 +176,14 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
         }
     };
     // Saved: a start is a new agent, one an empty look at the tabs didn't see
-    // ([`crate::wake`]); and one that lifts the restart's fence lifts it now. Like the key,
-    // these are kept only once the event is.
+    // ([`crate::wake`]), unless it comes from a tab moa killed; and one that lifts the
+    // restart's fence lifts it now. Like the key, these are kept only once the event is.
     if !matches!(applied, Applied::Dropped(_))
         && matches!(env.kind, HookKind::SessionStarted { .. })
     {
-        state.not_found.remove(&id);
+        if !from_a_killed_tab(state, id, env) {
+            state.not_found.remove(&id);
+        }
         if lifts_fence(state, id, env) {
             state.restarted.remove(&id);
         }
@@ -204,9 +206,12 @@ fn lifts_fence(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
 }
 
 /// Whether `env` comes from the tab moa last killed for session `id` (sleep, close or
-/// restart: [`State::killed`]), unless the link is up on another server, where that id
-/// may name a new tab. Its agent dies with the tab, but a hook it sent between the commit
-/// and the kill arrives after the commit, and may be stamped later than it.
+/// restart: [`State::killed`]), while the session isn't bound to that tab, and unless the
+/// link is up on another server, where that id may name a new tab. Its agent dies with the
+/// tab, but a hook it sent between the commit and the kill arrives after the commit, and may
+/// be stamped later than it. A kill can be lost (its batch failed, or the link went), and
+/// then a reload, reconcile or `adopt` binds the session to the tab again: its agent runs,
+/// and its events count again.
 fn from_a_killed_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
     let Some(pane) = env.pane.as_deref().and_then(|p| p.parse::<PaneId>().ok()) else {
         return false;
@@ -218,7 +223,9 @@ fn from_a_killed_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
         &state.tmux().link,
         Link::Up { generation, .. } if generation != killed_on
     );
-    *killed == pane && !other_server
+    *killed == pane
+        && !other_server
+        && state.binding(id).and_then(|b| b.pane_id.parse().ok()) != Some(pane)
 }
 
 /// Whether end `env` comes from the tab session `id`'s restart killed (R24), which isn't

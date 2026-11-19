@@ -968,6 +968,37 @@ fn the_slept_agents_late_start_is_history_only() {
     }
 }
 
+/// A tab id names a tab only on its own server. Once the link is up on a new terminal
+/// server, a start from a tab with the killed tab's id is a new agent there, and brings S
+/// back.
+#[test]
+fn a_killed_tabs_id_on_a_new_server_counts_again() {
+    let mut r = World::new().up();
+    let fx = r.sleep_op(1, &[S], None, false);
+    assert_eq!(kills(&fx), [&kill("%1")], "{fx:?}");
+    let slept_at = r.b.now().wall;
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Connected {
+            conn: 2,
+            generation: Generation {
+                pid: 20,
+                start: 2000,
+            },
+            version: "3.5a".into(),
+            ctl: ClientName("client-9".into()),
+            socket: "moa".into(),
+        },
+    );
+    assert!(is_asleep(r.s()));
+
+    let late = UtcMs(slept_at.0 + 1000);
+    start_from(&mut r, "%1", late, UtcMs(late.0 + 1000), 101);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live, "{:?}", r.s());
+    assert_eq!(r.s().asleep_at, None);
+}
+
 #[test]
 fn sleep_idle_dry_run() {
     // S has been idle an hour.
