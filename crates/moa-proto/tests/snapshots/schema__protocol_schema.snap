@@ -921,6 +921,75 @@ expression: all
               "params"
             ],
             "type": "object"
+          },
+          {
+            "description": "The layouts in `layouts.json` and the presets, the brain's current one marked.",
+            "properties": {
+              "method": {
+                "const": "layout.list",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One layout's JSON.",
+            "properties": {
+              "method": {
+                "const": "layout.show",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Saves `layout` as `name` in `layouts.json`, once it validates.",
+            "properties": {
+              "method": {
+                "const": "layout.set",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "layout": true,
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "layout"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1106,7 +1175,8 @@ expression: all
           "activity",
           "status",
           "brain",
-          "panels"
+          "panels",
+          "layouts"
         ],
         "type": "string"
       },
@@ -1312,6 +1382,12 @@ expression: all
             },
             "type": "array"
           },
+          "layouts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "panels": {
             "items": {
               "type": "string"
@@ -1372,6 +1448,10 @@ expression: all
             "type": "array"
           },
           "groups": {
+            "items": true,
+            "type": "array"
+          },
+          "layouts": {
             "items": true,
             "type": "array"
           },
@@ -1436,6 +1516,10 @@ expression: all
             "type": "array"
           },
           "groups": {
+            "items": true,
+            "type": "array"
+          },
+          "layouts": {
             "items": true,
             "type": "array"
           },

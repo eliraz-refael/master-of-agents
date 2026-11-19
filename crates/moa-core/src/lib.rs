@@ -8,6 +8,7 @@ pub mod due;
 pub mod effect;
 pub mod hook;
 mod hooks;
+pub mod layout;
 pub mod live;
 pub mod model;
 pub mod names;

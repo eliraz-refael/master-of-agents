@@ -222,6 +222,8 @@ async fn bring_up(
             transcript: moa_agents::claude::find_transcript,
             is_dir: std::path::Path::is_dir,
             newest_conversation: moa_agents::claude::newest_conversation,
+            read_text,
+            layouts_file: paths.config_dir().join("layouts.json"),
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),
@@ -252,6 +254,15 @@ async fn bring_up(
             remove_socket(&sock);
             Err(e)
         }
+    }
+}
+
+/// A text file's contents; `None` when there is no file.
+fn read_text(path: &Path) -> io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 

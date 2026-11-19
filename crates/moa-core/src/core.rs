@@ -83,6 +83,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 }
                 fx.push(Effect::Persist(changes));
             }
+            state.layouts = ops::layout::read(state);
             fx.extend(publish_all(state));
             fx.extend(state.tmux.startup());
             fx
@@ -304,6 +305,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::UiHere { folder },
             ..
         } => panel::here(state, conn, req, folder),
+        // `layouts.json` is read again first, and only the daemon writes it: nothing is saved.
+        Input::Client {
+            conn,
+            req,
+            op: op @ (Op::LayoutList(_) | Op::LayoutShow { .. } | Op::LayoutSet { .. }),
+            ..
+        } => ops::layout::run(state, conn, req, op),
         // Answered once tmux says how the new tab turned out. Every tab opens detached
         // (`-d`); unless `bg`, it is brought to the screen once it is bound.
         Input::Client {

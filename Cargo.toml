@@ -36,6 +36,7 @@ sha2 = "0.10"
 shell-words = "1"
 toml = "1.2.1"
 schemars = "1"
+indexmap = { version = "2", features = ["serde"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 unicode-width = "0.2"

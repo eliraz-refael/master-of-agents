@@ -109,7 +109,7 @@ impl Data {
             Topic::Activity => self.activity.clear(),
             Topic::Brain => self.brain = None,
             Topic::Panels => self.panels.clear(),
-            Topic::Asks | Topic::Status => {}
+            Topic::Asks | Topic::Status | Topic::Layouts => {}
         }
         self.unreadable.retain(|(t, _)| *t != topic);
         self.upsert(topic, rows);
@@ -143,7 +143,7 @@ impl Data {
                 self.brain.is_some()
             }
             Topic::Panels => put(&mut self.panels, Some(key.to_string()), row),
-            Topic::Asks | Topic::Status => true,
+            Topic::Asks | Topic::Status | Topic::Layouts => true,
         }
     }
 
@@ -165,7 +165,7 @@ impl Data {
                 // The topic's one row.
                 Topic::Brain => self.brain = None,
                 Topic::Panels => drop_key(&mut self.panels, Some(key.clone())),
-                Topic::Asks | Topic::Status => {}
+                Topic::Asks | Topic::Status | Topic::Layouts => {}
             }
             self.unreadable.remove(&(topic, key.clone()));
         }

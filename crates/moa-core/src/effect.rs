@@ -182,6 +182,14 @@ pub enum Effect {
     TmuxConnect {
         tmux: Option<PathBuf>,
     },
+    /// Writes `text` to `path` (`layouts.json`), through a temporary file in the same folder
+    /// and a rename, before the effects after it. When it fails, the op's `Publish` and
+    /// `Reply` after it are skipped and `req` is refused: `couldn't save <file>: <error>`.
+    WriteFile {
+        path: PathBuf,
+        text: String,
+        req: Option<(ConnId, ReqId)>,
+    },
 }
 
 impl Effect {

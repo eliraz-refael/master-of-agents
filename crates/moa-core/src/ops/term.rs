@@ -220,7 +220,7 @@ pub(crate) fn term_opened(
 }
 
 /// `path` with `home` (as given, or `canonical`) written `~`.
-fn with_tilde(path: &str, home: &Path, canonical: fn(&Path) -> PathBuf) -> String {
+pub(crate) fn with_tilde(path: &str, home: &Path, canonical: fn(&Path) -> PathBuf) -> String {
     let path = Path::new(path);
     for home in [home.to_path_buf(), canonical(home)] {
         match path.strip_prefix(&home) {

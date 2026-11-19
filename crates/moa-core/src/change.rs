@@ -1,6 +1,7 @@
 //! A `Change` is one edit to one row. The store turns it into SQL and the state applies it in
 //! memory, so both stay in step.
 
+use crate::layout::CURRENT_KEY;
 use crate::model::{
     ActivityRow, Ask, Conversation, Event, FeedEntry, Group, MoaThread, Nag, Note, PaneBinding,
     Project, Session, SessionId, SpikePane, Suggestion, Task,
@@ -71,7 +72,8 @@ impl Change {
             | Change::Feed(_)
             | Change::Nag(_)
             | Change::DeleteSpikePane(_) => &[],
-            // Folds are the only meta the views read.
+            // The views read two meta values: the current layout, and the folds.
+            Change::Meta { key, .. } if key == CURRENT_KEY => &[Topic::Layouts],
             Change::Meta { .. } => &[Topic::Brain],
         }
     }

@@ -242,11 +242,31 @@ fn verb_names_match_clap_and_the_enum() {
     assert_eq!(each, listed);
 }
 
+/// `set` joins the words after the name with spaces, as the spike did (L3).
+#[test]
+fn layout_verbs_parse() {
+    assert_eq!(op(&["layout", "list"]), Op::LayoutList(NoParams));
+    assert_eq!(
+        op(&["layout", "show", "cockpit"]),
+        Op::LayoutShow {
+            name: "cockpit".into()
+        }
+    );
+    assert_eq!(
+        op(&["layout", "set", "mine", "{\"panel\":", "\"tree\"}"]),
+        Op::LayoutSet {
+            name: "mine".into(),
+            layout: serde_json::json!({"panel": "tree"}),
+        }
+    );
+    assert_eq!(err(&["layout", "show"]), "usage: moa layout show NAME");
+}
+
 #[test]
 fn later_verbs_say_not_yet() {
     assert_eq!(err(&["peers"]), "moactl peers isn't in this build yet");
     assert_eq!(
-        err(&["layout", "list"]),
+        err(&["layout", "apply", "focus"]),
         "moactl layout isn't in this build yet"
     );
     assert_eq!(err(&["setup"]), "moactl setup isn't in this build yet");

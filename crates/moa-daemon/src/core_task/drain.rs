@@ -343,12 +343,33 @@ impl Core {
             }
         };
         debug_assert!(check_order(&effects).is_ok(), "effects out of order");
+        // The request whose file couldn't be written: what the op says after the write isn't
+        // true, so its publish and reply are skipped up to that reply.
+        let mut unsaved: Option<(ConnId, ReqId)> = None;
         for effect in effects {
             if effect.runs_at_once() {
                 self.run_now(effect);
                 continue;
             }
             match effect {
+                // Run here, before the effects after it.
+                Effect::WriteFile { path, text, req } => {
+                    if let Err(e) = write_file(&path, &text) {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let line = format!("couldn't save {name}: {e}");
+                        tracing::warn!("{line}");
+                        if let Some((conn, req)) = req {
+                            held.push(Held::Reply {
+                                conn,
+                                req,
+                                result: Err(OpError(line)),
+                            });
+                            unsaved = Some((conn, req));
+                        }
+                    }
+                }
+                Effect::Publish(_) if unsaved.is_some() => {}
+                Effect::Reply { conn, req, .. } if unsaved == Some((conn, req)) => unsaved = None,
                 Effect::Persist(changes) => batch.extend(changes),
                 Effect::Backup { day } => self.due_backups.push(day),
                 Effect::Publish(p) => held.push(Held::Publish(p)),
@@ -510,6 +531,15 @@ impl Drop for Core {
         }
         lock(&self.conns).clear();
     }
+}
+
+/// Writes `text` to `path` through a temporary file in the same folder and a rename, making
+/// the folder when it's missing.
+fn write_file(path: &Path, text: &str) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    moa_platform::fs::write_if_changed(path, text).map(|_| ())
 }
 
 /// The carried-over items, then what is already waiting, up to [`DRAIN_CAP`]. A `stop` ends

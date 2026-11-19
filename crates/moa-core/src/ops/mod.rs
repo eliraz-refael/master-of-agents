@@ -4,6 +4,7 @@
 pub mod adopt;
 pub mod groups;
 pub mod launch;
+pub mod layout;
 pub mod projects;
 pub mod read;
 pub mod sessions;
@@ -73,7 +74,10 @@ pub(crate) fn run(
         | Op::SessionRestart { .. }
         | Op::TermOpen { .. }
         | Op::UiPanel { .. }
-        | Op::UiHere { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::UiHere { .. }
+        | Op::LayoutList(_)
+        | Op::LayoutShow { .. }
+        | Op::LayoutSet { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }
