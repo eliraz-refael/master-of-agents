@@ -11,7 +11,7 @@ use std::time::Duration;
 use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
 use moa_core::model::AgentKind;
-use moa_core::state::Deps;
+use moa_core::state::{Deps, PanelLaunch};
 use moa_platform::fs::write_if_changed;
 use moa_platform::{Paths, WallTimer, ZoneWatch, ensure_private_dir, which};
 use moa_tmux::conf;
@@ -126,6 +126,19 @@ fn tmux_link(paths: &Paths, b: &str, mouse: bool) -> Result<TmuxLink, DaemonErro
     })
 }
 
+/// How the core starts a panel (L7): this program, and `MOA_ROOT` only when sandboxed, so
+/// a sandboxed panel talks to this daemon, never the real one.
+fn panel_launch(paths: &Paths) -> io::Result<PanelLaunch> {
+    let env = match paths.is_sandboxed() {
+        true => vec![("MOA_ROOT".to_string(), paths.home().display().to_string())],
+        false => Vec::new(),
+    };
+    Ok(PanelLaunch {
+        exe: std::env::current_exe()?,
+        env,
+    })
+}
+
 /// The plugin's folder as `CLAUDE_CODE_PLUGIN_DIRS` needs it: absolute, since Claude Code
 /// skips a relative entry without a word.
 fn session_plugin_dir(paths: &Paths) -> io::Result<PathBuf> {
@@ -224,6 +237,7 @@ async fn bring_up(
             newest_conversation: moa_agents::claude::newest_conversation,
             read_text,
             layouts_file: paths.config_dir().join("layouts.json"),
+            panel: panel_launch(paths)?,
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

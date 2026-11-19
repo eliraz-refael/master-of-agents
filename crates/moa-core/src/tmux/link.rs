@@ -20,6 +20,7 @@ use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::ops::adopt::AdoptArgs;
 use crate::ops::launch::ResumeAsk;
 use crate::ops::term::Tell;
+use crate::panel::View;
 use crate::state::State;
 
 /// An op that needs a tab, while moa's terminal isn't linked.
@@ -139,6 +140,10 @@ pub struct TmuxState {
     /// released, so a listing can predate the tag: these stay in the topology until one
     /// shows it (R18 reads the tag).
     sent_tags: BTreeMap<PaneId, SessionId>,
+    /// The `@moa_view` tags moa set on panels it just started that no listing has shown
+    /// yet, by pane: a listing the new window's own notification asked for can predate them
+    /// (L7). Kept as `sent_tags` are.
+    sent_views: BTreeMap<PaneId, &'static str>,
 }
 
 /// What a pane query was asked for: who reads its answer.
@@ -181,6 +186,12 @@ pub(crate) enum Asked {
         id: SessionId,
         events: Vec<HookEnvelope>,
     },
+    /// Panels started parked, one `new-window` per view, for the cockpit operation `seq`
+    /// (L7, L17): each started pane is tagged once tmux says which it is.
+    Spawn {
+        views: Vec<View>,
+        seq: u64,
+    },
 }
 
 /// A pane query's answer: each command's lines, or `Err` when any command failed or the
@@ -189,8 +200,17 @@ pub(crate) type Answer = Result<Vec<Vec<String>>, ()>;
 
 /// A query's answer per command (L18): each command's lines, or tmux's error text. A chain
 /// is one command, so one entry.
-#[allow(dead_code)] // Unused until the cockpit's queries (scene, spawn, chain) answer with it.
 pub(crate) type Answers = Vec<Result<Vec<String>, String>>;
+
+/// A query's answers as one [`Answer`]: `None` (the link went before tmux answered) or any
+/// command that failed fails it.
+pub(crate) fn all_lines(answers: Option<Answers>) -> Answer {
+    answers
+        .ok_or(())?
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())
+}
 
 /// How many unbound pane exits are remembered.
 const EXITED_KEPT: usize = 64;
@@ -263,6 +283,7 @@ impl Default for TmuxState {
             unfinished_reconciles: 0,
             reconcile_given_up: false,
             sent_tags: BTreeMap::new(),
+            sent_views: BTreeMap::new(),
         }
     }
 }
@@ -458,6 +479,7 @@ impl TmuxState {
         self.refresh = Refresh::Idle;
         // A failed commit's held tags were never sent; the refresh below shows the rest.
         self.sent_tags.clear();
+        self.sent_views.clear();
         self.written.reset();
         self.reconciled = false;
         // The ping out may have been lost with the handling that sent it: its callers wait
@@ -531,7 +553,11 @@ impl TmuxState {
         self.queries.retain(|_, a| match a {
             Asked::Resume(r) => r.conn != conn,
             Asked::Adopt { conn: c, .. } | Asked::Ls { conn: c, .. } => *c != conn,
-            Asked::Reconcile | Asked::Term { .. } | Asked::Here { .. } | Asked::Look { .. } => true,
+            Asked::Reconcile
+            | Asked::Term { .. }
+            | Asked::Here { .. }
+            | Asked::Look { .. }
+            | Asked::Spawn { .. } => true,
         });
         for asked in self.queries.values_mut() {
             if let Asked::Term { tell, .. } = asked
@@ -604,10 +630,11 @@ impl TmuxState {
         })
     }
 
-    /// The pane queries this input answers: the one tmux replied to, or every one, failed,
-    /// when the link goes down or a new connection replaces the one they were asked on. Run
-    /// before [`TmuxState::input`], like [`TmuxState::settle`].
-    pub(crate) fn answered(&mut self, input: &TmuxIn) -> Vec<(Asked, Answer)> {
+    /// The pane queries this input answers: the one tmux replied to, with each command's
+    /// answer, or every one, with `None`, when the link goes down or a new connection
+    /// replaces the one they were asked on. Run before [`TmuxState::input`], like
+    /// [`TmuxState::settle`].
+    pub(crate) fn answered(&mut self, input: &TmuxIn) -> Vec<(Asked, Option<Answers>)> {
         match input {
             TmuxIn::Replies {
                 conn,
@@ -616,10 +643,7 @@ impl TmuxState {
             } if self.conn() == Some(*conn) => self
                 .queries
                 .remove(n)
-                .map(|asked| {
-                    let lines = results.iter().cloned().collect::<Result<Vec<_>, _>>();
-                    (asked, lines.map_err(|_| ()))
-                })
+                .map(|asked| (asked, Some(results.clone())))
                 .into_iter()
                 .collect(),
             TmuxIn::Down(_) => self.all_failed(),
@@ -630,10 +654,10 @@ impl TmuxState {
         }
     }
 
-    fn all_failed(&mut self) -> Vec<(Asked, Answer)> {
+    fn all_failed(&mut self) -> Vec<(Asked, Option<Answers>)> {
         std::mem::take(&mut self.queries)
             .into_values()
-            .map(|asked| (asked, Err(())))
+            .map(|asked| (asked, None))
             .collect()
     }
 
@@ -759,6 +783,13 @@ impl TmuxState {
         self.topology.tag(pane, id);
     }
 
+    /// Moa tagged the panel it just started in `pane` with `view` (L7): the topology knows
+    /// it at once, and keeps it through listings that don't show it yet.
+    pub(crate) fn view_sent(&mut self, pane: PaneId, view: &'static str) {
+        self.sent_views.insert(pane, view);
+        self.topology.set_view(pane, view);
+    }
+
     /// Moa took the session tag off `pane`, after a saved commit: neither the topology nor
     /// the tags waiting for a listing keep it.
     pub(crate) fn untag_sent(&mut self, pane: PaneId) {
@@ -804,6 +835,7 @@ impl TmuxState {
             self.unping();
             self.reconciled = false;
             self.sent_tags.clear();
+            self.sent_views.clear();
             self.unfinished_reconciles = 0;
             self.reconcile_given_up = false;
         }
@@ -850,6 +882,7 @@ impl TmuxState {
         };
         self.topology = Topology::default();
         self.sent_tags.clear();
+        self.sent_views.clear();
         self.written.reset();
         self.refresh = Refresh::Idle;
         // Nobody is known to be attached any more: the status clock stops.
@@ -928,6 +961,13 @@ impl TmuxState {
                     let keep = topology.moa_session(*pane).is_none() && topology.has_pane(*pane);
                     if keep {
                         topology.tag(*pane, *id);
+                    }
+                    keep
+                });
+                self.sent_views.retain(|pane, view| {
+                    let keep = topology.view_of(*pane).is_none() && topology.has_pane(*pane);
+                    if keep {
+                        topology.set_view(*pane, view);
                     }
                     keep
                 });

@@ -236,6 +236,28 @@ fn the_plugin_dir_handed_to_sessions_is_absolute() {
     );
 }
 
+/// L7: a panel runs this program, and gets `MOA_ROOT` only from a sandboxed daemon.
+#[test]
+fn panels_get_moa_root_only_in_a_sandbox() {
+    let exe = std::env::current_exe().unwrap();
+    let rooted = Paths::with_root(Path::new("/tmp/moa-root"));
+    assert_eq!(
+        panel_launch(&rooted).unwrap(),
+        PanelLaunch {
+            exe: exe.clone(),
+            env: vec![("MOA_ROOT".into(), "/tmp/moa-root".into())],
+        }
+    );
+    let real = Paths::from_vars(None, Some("/h".into()), None, 501, true).unwrap();
+    assert_eq!(
+        panel_launch(&real).unwrap(),
+        PanelLaunch {
+            exe,
+            env: Vec::new()
+        }
+    );
+}
+
 /// H16: a Claude account without a launcher gets the `claude` on `PATH`; one with a
 /// launcher keeps it, and a Codex account is left alone.
 #[test]

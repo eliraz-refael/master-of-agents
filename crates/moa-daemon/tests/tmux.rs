@@ -8,6 +8,11 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use moa_core::cockpit::{spawn_cmds, spawn_tags};
+use moa_core::config::{BrainName, Config};
+use moa_core::panel::View;
+use moa_core::state::{Deps, PanelLaunch, State};
+use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{PaneId, WindowId};
 use moa_core::tmux::panes::{PANE_INFO, PANE_START, Tag, parse_panes};
 use moa_core::tmux::topology::{self, Topology};
@@ -284,6 +289,7 @@ async fn the_daemon_reconnects_after_its_client_is_detached() {
     });
     let s = status(&mut c);
     assert_eq!(s["tmux_restarts"], json!(0), "{s}");
+    assert_eq!(s["panel_starts"], json!(0), "{s}");
     assert_eq!(s["launches"].as_u64().unwrap(), before + 1, "{s}");
     assert_eq!(ensure(&mut c)["result"]["data"], json!({"running": true}));
 }
@@ -468,4 +474,111 @@ fn the_cockpit_flag_names_the_moa_window() {
             "{w} ({other} is another tab): {panes:?}"
         );
     }
+}
+
+/// L7 on a real server: a panel starts parked in `_moa`, in a window named by its view, in
+/// `-c`'s folder, with its view, brain and root; its tags land; and when its program stops
+/// the pane stays, saying how to bring it back. `exe` stands in for moa: it writes what it
+/// was started with, then sleeps until the test stops it.
+#[test]
+fn a_spawned_panel_runs_in_the_hidden_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    // Runs a command moa would send, word for word.
+    let send = |cmd: &Cmd| {
+        assert_eq!(cmd.check(), Ok(()), "{}", cmd.line());
+        let mut args = vec![cmd.name()];
+        args.extend(cmd.argv().iter().map(String::as_str));
+        tmux(&args)
+    };
+    let home = tb.root().join("panel-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let said = tb.root().join("said");
+    let exe = tb.root().join("moa-stand-in");
+    std::fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\n\
+             {{ pwd -P; echo \"$MOA_BRAIN\"; echo \"$MOA_ROOT\"; echo \"$*\"; }} > {said}.tmp\n\
+             mv {said}.tmp {said}\n\
+             exec sleep 30\n",
+            said = said.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // `_moa` opens elsewhere: the panel's folder is `-c`'s, not the session's.
+    let root = tb.root().display().to_string();
+    tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "_moa",
+        "-c",
+        &root,
+        "-x",
+        "80",
+        "-y",
+        "24",
+        "/bin/sh",
+    ]);
+
+    let deps = Deps {
+        home: home.clone(),
+        panel: PanelLaunch {
+            exe,
+            env: vec![("MOA_ROOT".into(), "/r".into())],
+        },
+        ..Deps::default()
+    };
+    let state = State::new(BrainName::default_brain(), Config::default()).with_deps(deps);
+    let [spawn] = &spawn_cmds(&state, &[View::Tree])[..] else {
+        panic!("one command per panel");
+    };
+    let pane: PaneId = send(spawn).parse().expect("a pane id");
+    for tag in spawn_tags(pane, View::Tree) {
+        send(&tag);
+    }
+
+    let target = pane.to_string();
+    let show = |format: &str| tmux(&["display-message", "-p", "-t", &target, format]);
+    assert_eq!(
+        show("#{session_name}|#{window_name}|#{@moa_view}|#{@moa_label}"),
+        "_moa|tree|tree|▤ sessions"
+    );
+    let said = wait_for(Duration::from_secs(10), || {
+        std::fs::read_to_string(&said).ok()
+    })
+    .expect("the panel started");
+    let folder = std::fs::canonicalize(&home).unwrap();
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        [
+            folder.to_str().unwrap(),
+            "default",
+            "/r",
+            "panel tree --brain default"
+        ]
+    );
+
+    // The panel stops: its pane stays, and says how to bring it back.
+    let pid = show("#{pane_pid}");
+    let killed = std::process::Command::new("kill")
+        .arg(&pid)
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let screen = wait_for(Duration::from_secs(10), || {
+        let screen = tmux(&["capture-pane", "-p", "-t", &target]);
+        (show("#{pane_dead}") == "1" && screen.contains("panel stopped")).then_some(screen)
+    })
+    .expect("the stopped panel's pane stays");
+    assert!(
+        screen.contains("panel stopped · Ctrl-a r brings it back"),
+        "{screen}"
+    );
 }

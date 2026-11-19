@@ -319,6 +319,11 @@ impl Topology {
         self.moa_sessions.remove(&p);
     }
 
+    /// Records that `p` shows `view` (`@moa_view`), as moa just set it.
+    pub fn set_view(&mut self, p: PaneId, view: &str) {
+        self.views.insert(p, view.to_string());
+    }
+
     /// The moa session a pane was tagged with (`@moa_session`), if any.
     pub fn moa_session(&self, p: PaneId) -> Option<SessionId> {
         self.moa_sessions.get(&p).copied()

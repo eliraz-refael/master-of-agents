@@ -1599,6 +1599,13 @@ expression: all
         "minimum": 0,
         "type": "integer"
       },
+      "panel_starts": {
+        "default": 0,
+        "description": "How many panels moa started or restarted while this daemon ran.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
       "pid": {
         "format": "uint32",
         "minimum": 0,

@@ -285,4 +285,5 @@ async fn tmux_ensure_says_v1_isnt_switched_over() {
         .expect("a status");
     assert_eq!(status.tmux, None);
     assert_eq!(status.tmux_restarts, 0);
+    assert_eq!(status.panel_starts, 0);
 }

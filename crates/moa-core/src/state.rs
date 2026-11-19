@@ -182,6 +182,17 @@ pub struct Deps {
     pub read_text: fn(&Path) -> io::Result<Option<String>>,
     /// Where `layouts.json` is: `~/.config/moa/layouts.json`, shared by every brain.
     pub layouts_file: PathBuf,
+    /// How a panel is started (L7).
+    pub panel: PanelLaunch,
+}
+
+/// How moa starts a panel (L7): its own program, and what each panel's environment gets
+/// besides `MOA_BRAIN`. The daemon gives its `current_exe`, and `MOA_ROOT` only when it is
+/// sandboxed (lesson 5: env goes explicitly, per pane).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct PanelLaunch {
+    pub exe: PathBuf,
+    pub env: Vec<(String, String)>,
 }
 
 fn identity(p: &Path) -> PathBuf {
@@ -216,6 +227,7 @@ impl Default for Deps {
             newest_conversation: |_, _, _, _| None,
             read_text: |_| Ok(None),
             layouts_file: PathBuf::new(),
+            panel: PanelLaunch::default(),
         }
     }
 }
@@ -232,6 +244,8 @@ pub struct StatusData {
     pub tmux: Option<TmuxLinkData>,
     /// How many times the terminal server restarted while this daemon ran.
     pub tmux_restarts: u32,
+    /// How many panels moa started or restarted while this daemon ran (L7).
+    pub panel_starts: u32,
 }
 
 /// The terminal server the daemon is linked to: its tmux version and generation.
@@ -305,6 +319,9 @@ pub struct State {
     /// `layouts.json` as last read, merged with the presets. Kept in memory: every layout op
     /// reads the file again.
     pub(crate) layouts: Layouts,
+    /// How many panels moa started, new or respawned, while this daemon ran (L7): a layout
+    /// switch that starts nothing leaves it as it was. Kept in memory.
+    pub(crate) panel_starts: u32,
 }
 
 impl State {
@@ -343,6 +360,7 @@ impl State {
             panels: BTreeMap::new(),
             pane_views: BTreeMap::new(),
             layouts: layout::presets(),
+            panel_starts: 0,
         }
     }
 
@@ -406,6 +424,7 @@ impl State {
             caller: self.caller(caller).to_string(),
             tmux,
             tmux_restarts: self.tmux.restarts,
+            panel_starts: self.panel_starts,
         }
     }
 

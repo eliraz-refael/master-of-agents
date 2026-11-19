@@ -7,10 +7,12 @@
 mod assign;
 pub(crate) mod build;
 mod scene;
+pub(crate) mod spawn;
 
 use std::collections::BTreeSet;
 
 pub use scene::{PaneAt, Place, Role, Scene};
+pub use spawn::{spawn_cmds, spawn_tags};
 
 use crate::layout::{Leaf, Node, leaves};
 use crate::model::SessionId;

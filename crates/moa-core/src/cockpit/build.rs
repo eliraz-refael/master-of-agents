@@ -84,12 +84,18 @@ fn frame(pane: PaneId, framed: bool) -> Vec<Cmd> {
         .collect()
 }
 
-/// A panel's tags (L10): its view, its label, and its frame.
-pub(crate) fn panel_tags(pane: PaneId, view: View) -> Vec<Cmd> {
-    let mut cmds = vec![
+/// A panel's view and its label: what a started panel is tagged with (L7), the frame
+/// waiting for the build.
+pub(crate) fn view_tags(pane: PaneId, view: View) -> [Cmd; 2] {
+    [
         set_pane_option(pane, "@moa_view", view.word()),
         set_pane_option(pane, "@moa_label", &literal_format(view.label())),
-    ];
+    ]
+}
+
+/// A panel's tags (L10): its view, its label, and its frame.
+pub(crate) fn panel_tags(pane: PaneId, view: View) -> Vec<Cmd> {
+    let mut cmds = view_tags(pane, view).to_vec();
     cmds.extend(frame(pane, view.framed()));
     cmds
 }

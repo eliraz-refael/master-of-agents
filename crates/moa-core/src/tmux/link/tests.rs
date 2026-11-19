@@ -95,15 +95,26 @@ fn a_query_is_answered_once() {
     );
     assert_eq!(
         t.answered(&answer),
-        [(Asked::Reconcile, Ok(vec![info.clone(), start]))]
+        [(Asked::Reconcile, Some(vec![Ok(info.clone()), Ok(start)]))]
     );
     assert!(t.answered(&answer).is_empty(), "answered once");
     assert!(t.input(answer).is_empty());
 
-    // Any command that failed fails the query.
-    let failed = replies(1, other, vec![Ok(info), Err("no server".into())]);
-    assert_eq!(t.answered(&failed), [(Asked::Reconcile, Err(()))]);
+    // Each command is answered on its own, with tmux's words (L18); taken as one answer,
+    // any command that failed fails the query.
+    let each = vec![Ok(info), Err("no server".into())];
+    let failed = replies(1, other, each.clone());
+    assert_eq!(
+        t.answered(&failed),
+        [(Asked::Reconcile, Some(each.clone()))]
+    );
     assert_eq!(t.queries().count(), 0);
+    assert_eq!(all_lines(Some(each)), Err(()));
+    assert_eq!(all_lines(None), Err(()));
+    assert_eq!(
+        all_lines(Some(vec![Ok(lines(&["a"])), Ok(Vec::new())])),
+        Ok(vec![lines(&["a"]), Vec::new()])
+    );
 }
 
 #[test]
@@ -112,7 +123,7 @@ fn a_query_is_failed_when_the_link_goes_down_or_reconnects() {
         let mut t = up(1);
         t.ask(Asked::Reconcile, list_panes()).unwrap();
         let down = TmuxIn::Down(d.clone());
-        assert_eq!(t.answered(&down), [(Asked::Reconcile, Err(()))], "{d:?}");
+        assert_eq!(t.answered(&down), [(Asked::Reconcile, None)], "{d:?}");
         t.input(down);
         assert_eq!(t.queries().count(), 0);
         assert_eq!(t.last_down, Some(d));
@@ -122,7 +133,7 @@ fn a_query_is_failed_when_the_link_goes_down_or_reconnects() {
     let n = query_of(&t.ask(Asked::Reconcile, list_panes()).unwrap(), 1);
     // The same connection again asks nothing new of it; another one does.
     assert!(t.answered(&connected(1)).is_empty());
-    assert_eq!(t.answered(&connected(2)), [(Asked::Reconcile, Err(()))]);
+    assert_eq!(t.answered(&connected(2)), [(Asked::Reconcile, None)]);
     t.input(connected(2));
     // An answer to the old connection's query that arrives late is dropped.
     assert!(t.answered(&replies(1, n, vec![Ok(Vec::new())])).is_empty());

@@ -50,6 +50,9 @@ pub struct StatusOk {
     pub tmux: Option<TmuxLinkData>,
     #[serde(default)]
     pub tmux_restarts: u32,
+    /// How many panels moa started or restarted while this daemon ran.
+    #[serde(default)]
+    pub panel_starts: u32,
 }
 
 /// Which topics a connection follows. `since` is the rev the client already holds.
