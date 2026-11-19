@@ -10,8 +10,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::cockpit::scene::HIDDEN;
-use crate::cockpit::spawn_tags;
+use crate::cockpit::{HIDDEN, spawn_tags};
 use crate::effect::{Effect, Publish, TmuxToken};
 use crate::model::UnknownValue;
 use crate::op::{ConnId, Done, OpError, ReqId};

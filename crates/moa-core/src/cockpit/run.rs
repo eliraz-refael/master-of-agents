@@ -318,7 +318,14 @@ pub(crate) fn select_view(
     pane: &str,
     view: View,
 ) -> Vec<Effect> {
+    // The empty slot is the spot's, and the picker a prompt's: neither is a panel's to pick.
     let pane = match crate::panel::pane_arg(pane) {
+        Ok(_) if matches!(view, View::EmptySlot | View::Picker) => {
+            Err(OpError(format!("{view} can't be chosen for a panel")))
+        }
+        p => p,
+    };
+    let pane = match pane {
         Ok(pane) => pane,
         Err(e) => {
             let result = Err(e);
@@ -567,8 +574,14 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             }
         }
         CockpitOp::SelectView { pane, view, .. } => {
-            // Only a pane moa tagged as a panel; never an agent's or a stranger's.
-            if scene.pane(*pane).and_then(|at| at.panel_view()).is_none() {
+            // Only a pane moa tagged as a panel; never the spot (its empty slot or its agent),
+            // an agent's or a stranger's.
+            let at = scene.pane(*pane);
+            if at.is_some_and(|at| matches!(at.role, Role::Spot(_))) {
+                let text = format!("{pane} is the agent spot; it can't show another view");
+                return Next::Done(refused(op, text));
+            }
+            if at.and_then(|at| at.panel_view()).is_none() {
                 return Next::Done(refused(op, format!("{pane} isn't a moa panel")));
             }
             let done = Done {

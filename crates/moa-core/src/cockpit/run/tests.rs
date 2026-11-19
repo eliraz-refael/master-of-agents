@@ -315,6 +315,39 @@ fn a_vacate_leaves_the_spot_whole() {
     assert!(st.cockpit.in_flight.is_none());
 }
 
+/// A vacate tmux refuses is logged as the agent's, whatever tmux's words: a vacate builds no
+/// layout, so "no space" never reads as a layout that doesn't fit.
+#[test]
+fn a_failed_vacate_says_whose_it_was() {
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(true)))));
+    let fx = feed(
+        &mut st,
+        answer(
+            n,
+            vec![Err("size or position no space for a new pane".into())],
+        ),
+    );
+    let logged: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some((l.level, l.message.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [(
+            LogLevel::Warn,
+            "the agent in %9 couldn't be taken down: size or position no space for a new pane"
+                .to_string()
+        )]
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert!(st.cockpit.in_flight.is_none());
+}
+
 /// A refill builds the current layout, selecting nothing, and a newer build never takes
 /// its place.
 #[test]

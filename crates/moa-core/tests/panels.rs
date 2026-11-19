@@ -1037,6 +1037,83 @@ fn chain_ok_records_its_tags_at_once() {
     assert!(st.tmux().queries().next().is_none());
 }
 
+/// `ui.select_view` on conn 7 for `pane`, through its listing (which shows `panes`): the
+/// reply it ends with, when it ends there.
+fn select_from_listing(
+    b: &TypicalBrain,
+    st: &mut State,
+    pane: &str,
+    panes: Vec<String>,
+) -> Vec<Effect> {
+    let fx = send_on(b, st, 7, 1, select_view(pane, View::Plan));
+    let (n, _) = the_ask(&fx);
+    answer_lists(b, st, n, panes)
+}
+
+/// The agent spot keeps its view, whoever is in it; no panel is given the empty slot's
+/// view or the picker's.
+#[test]
+fn select_view_leaves_the_spot_alone() {
+    let (b, mut st) = listed_up();
+    let mut panes = the_panes();
+    // In the cockpit: the empty slot `%8`, and Lantern's agent `%7` (should both be there).
+    panes.push("P %8 @1 $0 1 1 0 1  0 empty-slot".to_string());
+    panes.push(format!("P %7 @1 $0 1 1 0 1 {A} 0 agent"));
+    for pane in ["%8", "%7"] {
+        let fx = select_from_listing(&b, &mut st, pane, panes.clone());
+        let said = format!("{pane} is the agent spot; it can't show another view");
+        assert_eq!(the_reply(&fx), Err(OpError(said)));
+        assert!(st.tmux().queries().next().is_none(), "no chain");
+    }
+    for view in [View::EmptySlot, View::Picker] {
+        let fx = send_on(&b, &mut st, 7, 2, select_view("%3", view));
+        let said = format!("{view} can't be chosen for a panel");
+        assert_eq!(the_reply(&fx), Err(OpError(said)));
+        assert!(st.tmux().queries().next().is_none(), "no listing");
+    }
+}
+
+/// tmux refusing the retag is said in plain words, and nothing changes.
+#[test]
+fn a_select_view_tmux_refuses_says_why() {
+    let (b, mut st) = listed_up();
+    send_on(&b, &mut st, 8, 1, panel(Some("%9"), None));
+    let (n, _) = the_ask(&select_from_listing(&b, &mut st, "%9", the_panes()));
+    let fx = answer(&b, &mut st, n, Err("can't find pane: %9".into()));
+    assert_eq!(
+        the_reply(&fx),
+        Err(OpError(
+            "the panel in %9 couldn't show plan: can't find pane: %9".into()
+        ))
+    );
+    assert!(models(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("tree"));
+    assert_eq!(published_panels(&st)["c8"]["view"], "tree");
+}
+
+#[test]
+fn select_view_with_no_terminal_says_so() {
+    let (b, mut st) = loaded(TOML);
+    let fx = send_on(&b, &mut st, 7, 1, select_view("%3", View::Plan));
+    assert_eq!(
+        the_reply(&fx),
+        Err(OpError(
+            "moa isn't open in a terminal yet; run moa first".into()
+        ))
+    );
+}
+
+/// The connection that asked closed: the retag still happens, with nobody to answer.
+#[test]
+fn a_select_view_whose_asker_left_still_retags() {
+    let (b, mut st) = listed_up();
+    let (n, _) = the_ask(&select_from_listing(&b, &mut st, "%9", the_panes()));
+    handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+    let fx = answer(&b, &mut st, n, Ok(Vec::new()));
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("plan"));
+}
+
 #[test]
 fn a_new_tmux_server_clears_the_panes_of_registered_panels() {
     let (b, mut st) = listed_up();

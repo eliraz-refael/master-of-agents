@@ -149,8 +149,13 @@ fn a_reconnect_sends_the_view_it_last_followed() {
     );
     assert!(panel.follow(&data, "c7"));
     assert_eq!(
-        reconnect_ops(Some(pane("%3")), &panel, &data, true),
-        first_ops(Some(pane("%3")), Some(View::Status), None, true)
+        reconnect_ops(Some(pane("%3")), &panel, Some("/x".into()), true),
+        first_ops(
+            Some(pane("%3")),
+            Some(View::Status),
+            Some("/x".into()),
+            true
+        )
     );
 }
 

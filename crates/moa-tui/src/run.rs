@@ -156,9 +156,14 @@ pub fn first_ops(
 }
 
 /// What a reconnect sends first: the view `panel` shows now, the one moa last gave it
-/// rather than the one it started with (L8), and its selection's folder in `data`.
-pub fn reconnect_ops(pane: Option<PaneId>, panel: &Panel, data: &Data, placed: bool) -> Vec<Op> {
-    first_ops(pane, Some(panel.view()), panel.here(data), placed)
+/// rather than the one it started with (L8), and `here`, its selection's folder.
+pub fn reconnect_ops(
+    pane: Option<PaneId>,
+    panel: &Panel,
+    here: Option<String>,
+    placed: bool,
+) -> Vec<Op> {
+    first_ops(pane, Some(panel.view()), here, placed)
 }
 
 /// The waits between reconnects (V13): 250 ms doubling to 8 s, then 8 s, for at most a
@@ -489,7 +494,7 @@ impl Loop {
         let here = self.panel.here(&self.data);
         let (pane, placed) = (self.opts.pane, self.placed());
         let first = if self.linked_once {
-            reconnect_ops(pane, &self.panel, &self.data, placed)
+            reconnect_ops(pane, &self.panel, here.clone(), placed)
         } else {
             first_ops(pane, self.opts.view, here.clone(), placed)
         };
