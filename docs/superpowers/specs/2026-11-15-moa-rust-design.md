@@ -825,7 +825,7 @@ something animated is visible. Measured 7.8 ms exec-to-frame (R4 §6.3).
   brain; `layout set` writes it, and hand edits apply at the next layout command. Each brain keeps
   its current layout itself (`meta` `layout.current`, default `cockpit`), so one brain's switch
   never changes another's.
-- **moa owns a panel's view.** moa tags each panel it places (`@moa_panel <view>`, a pane option
+- **moa owns a panel's view.** moa tags each panel it places (`@moa_view <view>`, a pane option
   that survives a daemon restart). A panel that (re)connects gets the tagged view, whatever it
   asks for, and follows its row in the `panels` topic when moa reassigns it (`ui.select_view`).
 - **A panel that stops stays visible** as a pane reading "panel stopped · Ctrl-a r brings it
