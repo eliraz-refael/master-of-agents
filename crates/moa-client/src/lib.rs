@@ -78,6 +78,10 @@ pub enum ClientError {
     /// What the daemon said when it couldn't start, with where its log is.
     #[error("couldn't start moa: {0}")]
     Start(String),
+    /// The root folder doesn't exist: starting a daemon would bring it back, with a daemon
+    /// in it that no one stops (L15).
+    #[error("moa's folder {} is gone", .0.display())]
+    RootGone(PathBuf),
     #[error("{0}")]
     Paths(#[from] PathsError),
     #[error("{}", .0.message)]
@@ -478,6 +482,11 @@ async fn start(opts: &ClientOptions, exe: &Path, sock: &Path) -> Result<UnixStre
     let (paths, brain) = (&opts.paths, &opts.brain);
     let b = brain.as_str();
     paths.check_v1_allowed()?;
+    // A user's root always exists; one that is gone was a test's, and making the run
+    // folder would bring it back with a daemon no one stops.
+    if !paths.home().is_dir() {
+        return Err(ClientError::RootGone(paths.home().to_path_buf()));
+    }
     ensure_private_dir(&paths.run_dir())?;
     ensure_private_dir(&paths.log_dir())?;
     let lock = File::options()

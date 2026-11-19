@@ -13,7 +13,7 @@ use moa_client::{Client, ClientOptions, OnMismatch};
 use moa_core::config::BrainName;
 use moa_core::publish::Topic;
 use moa_core::state::CallerInfo;
-use moa_platform::{build_id_of, canonical};
+use moa_platform::{build_id_of, canonical, pid_alive};
 use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
 use serde_json::{Map, Value};
 
@@ -569,4 +569,26 @@ fn a_panel_comes_back_after_moa_restarts() {
     });
     assert!(linked.is_some(), "{}", what_happened(&r.tb, &r.term));
     r.terminal_key_opens(&pane, "⌨ b", &harbor.dir);
+}
+
+/// L15: a test that ends right after `panel_tab` takes its root down while the panel's first
+/// connect may still be under way. That connect finds moa stopped and starts a daemon of its
+/// own, which nobody stops, under a root about to be removed. Once the TempBrain is gone, no
+/// daemon holds the brain's lock and the terminal server has exited.
+#[test]
+fn a_panel_started_at_the_end_leaves_nothing_behind() {
+    let r = rig();
+    // Held open past the root: whoever holds its lock then outlived the TempBrain.
+    let lock = fs::File::open(r.tb.paths().lock(B)).unwrap();
+    let server: u32 = server_pid(&r.tb).parse().unwrap();
+    let root = r.tb.root().to_path_buf();
+    panel_tab(&r.tb, "tree");
+    drop(r);
+    assert!(
+        lock.try_lock().is_ok(),
+        "a daemon outlived {}",
+        root.display()
+    );
+    assert!(!pid_alive(server), "the terminal server outlived its root");
+    assert!(!root.exists());
 }
