@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use moa_core::UtcMs;
 use moa_core::op::{Done, Op};
 use moa_core::panel::View;
 use moa_core::publish::Topic;
@@ -11,8 +12,8 @@ use moa_view::data::Data;
 use moa_view::fixture::{lantern, session};
 use moa_view::geometry::{Rect, Size, geometry};
 use moa_view::keys::Key;
-use moa_view::line::Item;
-use moa_view::panel::{Mark, Mouse, Out, Panel, debug_screen};
+use moa_view::line::{Item, Tone};
+use moa_view::panel::{EVENT_SHOWN_MS, Mark, Mouse, Out, Panel, debug_screen};
 
 const SIZE: Size = Size { w: 80, h: 16 };
 
@@ -426,6 +427,87 @@ fn a_reply_shows_its_last_line_and_the_next_key_clears_it() {
 
     t.panel.note("moa went away; reconnecting");
     assert_eq!(t.footer(), "moa went away; reconnecting");
+}
+
+#[test]
+fn an_event_shows_dim_and_goes_at_its_deadline() {
+    // No data: no line of the tree has a deadline of its own.
+    let mut t = T::new();
+    t.data = Data::default();
+    let hint = t.hint();
+    let screen = t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert_eq!(screen.wake_at, None);
+
+    let at = t.ctx.now;
+    t.panel.event("archived Fix login", at);
+    let ends = UtcMs(at.0 + EVENT_SHOWN_MS);
+    let screen = t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert_eq!(screen.footer.text, "archived Fix login");
+    assert_eq!(screen.footer.tone, Tone::Dim);
+    assert_eq!(screen.wake_at, Some(ends));
+
+    t.ctx.now = UtcMs(ends.0 - 1);
+    assert_eq!(t.footer(), "archived Fix login");
+    t.ctx.now = ends;
+    let screen = t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert_eq!(screen.footer.text, hint);
+    assert_eq!(screen.wake_at, None);
+
+    // A newer event takes the footer, with its own deadline; a key clears it.
+    t.panel.event("renamed Kite", t.ctx.now);
+    assert_eq!(t.footer(), "renamed Kite");
+    t.char('j');
+    assert_eq!(t.footer(), hint);
+}
+
+#[test]
+fn an_error_stays_until_a_key() {
+    let mut t = T::new();
+    t.data = Data::default();
+    let hint = t.hint();
+    t.panel.replied(Err("no group Kite".to_string()));
+    // Another panel's event doesn't hide it.
+    t.panel.event("archived Fix login", t.ctx.now);
+    let screen = t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert_eq!(screen.footer.text, "no group Kite");
+    assert_eq!(screen.footer.tone, Tone::Warn);
+    assert_eq!(screen.wake_at, None, "an error has no deadline");
+    t.ctx.now = UtcMs(t.ctx.now.0 + 3_600_000);
+    assert_eq!(t.footer(), "no group Kite");
+    t.char('j');
+    assert_eq!(t.footer(), hint);
+
+    // The panel's own lines (an error event, the connection's) stay too.
+    t.panel.note("sessions stopped and was restarted");
+    t.ctx.now = UtcMs(t.ctx.now.0 + 3_600_000);
+    let screen = t.panel.screen(&t.data, &t.ctx, SIZE);
+    assert_eq!(screen.footer.text, "sessions stopped and was restarted");
+    assert_eq!(screen.footer.tone, Tone::Warn);
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn r_and_D_on_a_node_that_isnt_a_group_say_so() {
+    let mut t = T::new();
+    // Release notes (project Kite) loses its group: it sits under the project's node. Old
+    // spike loses its project too: it sits under `Loose`.
+    reshape(&mut t, RELEASE_NOTES, |row| {
+        row["group_path"] = serde_json::Value::Null;
+    });
+    reshape(&mut t, OLD_SPIKE, |row| {
+        row["group_path"] = serde_json::Value::Null;
+        row["project"] = serde_json::Value::Null;
+        row["project_id"] = serde_json::Value::Null;
+    });
+    t.panel.screen(&t.data, &t.ctx, SIZE);
+    for node in ["Kite", "Loose"] {
+        assert!(t.panel.select(&group(node)), "{node} isn't listed");
+        assert!(t.char('r').is_empty());
+        assert_eq!(t.footer(), format!("{node} isn't a group"));
+        assert!(!t.panel.typing(), "no prompt opens");
+        assert!(t.char('D').is_empty());
+        assert_eq!(t.footer(), format!("{node} isn't a group"));
+    }
 }
 
 #[test]

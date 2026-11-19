@@ -625,7 +625,8 @@ impl Loop {
                 self.follow_row();
             }
             LiveMsg::Event(CoreEvent::Error { message }) => self.panel.note(&message),
-            LiveMsg::Event(CoreEvent::Ui { text }) => self.panel.note(&text),
+            // Every panel hears it: it shows a while, dim, and goes (its deadline wakes us).
+            LiveMsg::Event(CoreEvent::Ui { text }) => self.panel.event(&text, now()),
             LiveMsg::Reply { tag, result } => {
                 if !self.asked.remove(&tag) {
                     return false;

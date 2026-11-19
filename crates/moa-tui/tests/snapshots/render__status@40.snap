@@ -16,5 +16,5 @@ expression: screen_text(&buf)
 │ quiet ──────────────────────────── 1 │
 │ ◌ Import the whole archive of o   6h │
 │                                      │
-│ ⏎/click jump · j/k · Ctrl-a / find   │
+│ ⏎/click jump · j/k · a archive · x cl│
 ╰──────────────────────────────────────╯

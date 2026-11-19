@@ -16,5 +16,5 @@ expression: screen_text(&buf)
 │   ▸ Write the back-cover text for both the paperback and │
 │     the e-book editions                                  │
 │                                                          │
-│ ⏎/click jump · d done · x drop                           │
+│ ⏎/click jump · d done · x drop · a archive · n/N new     │
 ╰──────────────────────────────────────────────────────────╯

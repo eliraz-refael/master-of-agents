@@ -174,7 +174,23 @@ fn hints_are_the_spikes() {
         hint(View::Tree, true),
         format!("{tree} · R restart under moa")
     );
-    assert_eq!(hint(View::Plan, false), "⏎/click jump · d done · x drop");
+    assert_eq!(
+        hint(View::Plan, false),
+        "⏎/click jump · d done · x drop · a archive · n/N new"
+    );
+    // Session rows take `a`, `x`, `n` and `N` in the status, today and projects views (V21).
+    assert_eq!(
+        hint(View::Status, false),
+        "⏎/click jump · j/k · a archive · x close · n/N new · Ctrl-a / find"
+    );
+    assert_eq!(
+        hint(View::Today, false),
+        "j/k · ⏎ open · y/n suggestion · a archive · x close · n/N new"
+    );
+    assert_eq!(
+        hint(View::Projects, false),
+        "⏎ expand · a archive · x close · n new session · N choose account"
+    );
     assert_eq!(hint(View::Activity, true), "j/k scroll");
     assert_eq!(
         hint(View::Picture, false),

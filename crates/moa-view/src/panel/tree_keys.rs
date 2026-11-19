@@ -12,6 +12,12 @@ use crate::line::Item;
 use crate::text::tilde;
 use crate::views::tree;
 
+/// What `r` and `D` say on a node made from a project's name, or on `Loose`: only a real
+/// group can be renamed or deleted, so nothing is asked or sent.
+fn not_a_group(name: &str) -> String {
+    format!("{name} isn't a group")
+}
+
 impl Panel {
     /// Does one of the tree's own actions to the selected item; `None` when it isn't one, or
     /// doesn't apply to it.
@@ -47,12 +53,19 @@ impl Panel {
                     return None;
                 };
                 let leaf = old.rsplit('/').next().unwrap_or_default().to_string();
+                if !tree::is_group(data, &old) {
+                    return Some(self.say(&not_a_group(&leaf)));
+                }
                 Some(self.ask("rename group:".to_string(), leaf, Ask::RenameGroup { old }))
             }
             Action::DeleteGroup => {
                 let Item::Group(path) = selected? else {
                     return None;
                 };
+                if !tree::is_group(data, &path) {
+                    let leaf = path.rsplit('/').next().unwrap_or_default();
+                    return Some(self.say(&not_a_group(leaf)));
+                }
                 Some(vec![Out::Send(Op::GroupRm { path })])
             }
             _ => None,

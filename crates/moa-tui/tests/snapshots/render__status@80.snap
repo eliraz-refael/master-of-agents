@@ -16,5 +16,5 @@ expression: screen_text(&buf)
 │ quiet ──────────────────────────────────────────────────────────────────── 1 │
 │ ◌ Import the whole archive o Lantern         6h  quiet 361m                  │
 │                                                                              │
-│ ⏎/click jump · j/k · Ctrl-a / find                                           │
+│ ⏎/click jump · j/k · a archive · x close · n/N new · Ctrl-a / find           │
 ╰──────────────────────────────────────────────────────────────────────────────╯

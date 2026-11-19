@@ -138,16 +138,17 @@ macro_rules! tree_hint {
     };
 }
 
-/// The key hints at the foot of a view (the spike's); the tree's gain `R` while an adopted
-/// session is selected. A view without a list has none.
+/// The key hints at the foot of a view (the spike's), with the keys V21 adds on session rows
+/// and rows with a project; the tree's gain `R` while an adopted session is selected. A view
+/// without a list has none.
 pub fn hint(view: View, adopted_selected: bool) -> &'static str {
     match view {
         View::Tree if adopted_selected => concat!(tree_hint!(), " · R restart under moa"),
         View::Tree => tree_hint!(),
-        View::Plan => "⏎/click jump · d done · x drop",
-        View::Status => "⏎/click jump · j/k · Ctrl-a / find",
-        View::Today => "j/k · ⏎ open · y/n suggestion",
-        View::Projects => "⏎ expand · n new session · N choose account",
+        View::Plan => "⏎/click jump · d done · x drop · a archive · n/N new",
+        View::Status => "⏎/click jump · j/k · a archive · x close · n/N new · Ctrl-a / find",
+        View::Today => "j/k · ⏎ open · y/n suggestion · a archive · x close · n/N new",
+        View::Projects => "⏎ expand · a archive · x close · n new session · N choose account",
         View::Activity => "j/k scroll",
         View::Picture => {
             "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q"
