@@ -11,7 +11,7 @@ use std::time::Duration;
 use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
 use moa_core::model::AgentKind;
-use moa_core::state::Deps;
+use moa_core::state::{Deps, PanelLaunch};
 use moa_platform::fs::write_if_changed;
 use moa_platform::{Paths, WallTimer, ZoneWatch, ensure_private_dir, which};
 use moa_tmux::conf;
@@ -126,6 +126,42 @@ fn tmux_link(paths: &Paths, b: &str, mouse: bool) -> Result<TmuxLink, DaemonErro
     })
 }
 
+/// The daemon's own program, read once and handed to everything that runs it (the session
+/// plugin's hooks, the panels): its real path, as `moa_client::own_exe` gives it. Linux
+/// names a binary replaced under a running daemon `<path> (deleted)`; the program to run is
+/// the one now at `<path>`.
+fn daemon_exe() -> io::Result<PathBuf> {
+    let exe = undeleted(std::env::current_exe()?);
+    // A replaced binary's new path may be missing for a moment: the path as read, then.
+    Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
+}
+
+/// `p` without Linux's trailing ` (deleted)`.
+fn undeleted(p: PathBuf) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    match p.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+        Some(kept) => PathBuf::from(std::ffi::OsStr::from_bytes(kept)),
+        None => p,
+    }
+}
+
+/// How the core starts a panel (L7): the daemon's program `exe`, and, explicitly (lesson 5),
+/// `MOA_ROOT` when sandboxed, so a sandboxed panel talks to this daemon, never the real one,
+/// or `MOA_REAL_HOME` when the daemon may use the real home, so the panel may too.
+fn panel_launch(paths: &Paths, exe: &Path) -> PanelLaunch {
+    let env = if paths.is_sandboxed() {
+        vec![("MOA_ROOT".to_string(), paths.home().display().to_string())]
+    } else if paths.real_home_ok() {
+        vec![("MOA_REAL_HOME".to_string(), "1".to_string())]
+    } else {
+        Vec::new()
+    };
+    PanelLaunch {
+        exe: exe.to_path_buf(),
+        env,
+    }
+}
+
 /// The plugin's folder as `CLAUDE_CODE_PLUGIN_DIRS` needs it: absolute, since Claude Code
 /// skips a relative entry without a word.
 fn session_plugin_dir(paths: &Paths) -> io::Result<PathBuf> {
@@ -135,11 +171,10 @@ fn session_plugin_dir(paths: &Paths) -> io::Result<PathBuf> {
 /// Writes the Claude Code plugin that sessions are started with, when its text changed, and
 /// says where it is. Its `hooks.json` names a command Claude runs, so its folders are checked
 /// like the other private folders: ours, real, and closed to other users.
-fn write_session_plugin(paths: &Paths) -> Result<PathBuf, DaemonError> {
-    let exe = std::env::current_exe()?;
+fn write_session_plugin(paths: &Paths, exe: &Path) -> Result<PathBuf, DaemonError> {
     let dir = session_plugin_dir(paths)?;
     ensure_private_dir(&dir)?;
-    for (rel, text) in moa_agents::claude::session_plugin(&exe) {
+    for (rel, text) in moa_agents::claude::session_plugin(exe) {
         let file = dir.join(rel);
         if let Some(parent) = file.parent() {
             ensure_private_dir(parent)?;
@@ -211,7 +246,8 @@ async fn bring_up(
             tracing::info!("the terminal link waits for the switch-over");
             None
         };
-        let session_plugin = write_session_plugin(paths)?;
+        let exe = daemon_exe()?;
+        let session_plugin = write_session_plugin(paths, &exe)?;
         let deps = Deps {
             parse_action: Some(moa_proto::cli::parse_action),
             canonical: moa_platform::canonical,
@@ -224,6 +260,7 @@ async fn bring_up(
             newest_conversation: moa_agents::claude::newest_conversation,
             read_text,
             layouts_file: paths.config_dir().join("layouts.json"),
+            panel: panel_launch(paths, &exe),
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

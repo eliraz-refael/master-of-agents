@@ -126,6 +126,9 @@ pub enum TmuxToken {
     /// number. The link answers it only when every command succeeded; otherwise, or when
     /// tmux takes too long, it drops the client and reports `Lost`.
     Ping(u64),
+    /// Tags on panes moa just started (L7). They save nothing, so they go out at once, never
+    /// held behind a commit; their answer is only checked, and a refusal logged.
+    Tags,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -170,8 +173,8 @@ pub enum Effect {
     Log(LogLine),
     /// Commands for the link's connection `conn`. Untokened, they show saved state (the
     /// status line, notices) and wait for the commit. Tokened, their answers come back as
-    /// [`TmuxIn::Replies`]: a `Refresh`, a `Query` or a `Ping` is the link's own plumbing,
-    /// and runs at once; an `Open` starts an agent that reports on its session, and waits for
+    /// [`TmuxIn::Replies`]: a `Refresh`, a `Query`, a `Ping` or `Tags` is the link's own
+    /// plumbing, and runs at once; an `Open` starts an agent that reports on its session, and waits for
     /// the commit that saves it.
     Tmux {
         conn: u64,
@@ -207,7 +210,12 @@ impl Effect {
                 | Effect::Log(_)
                 | Effect::TmuxConnect { .. }
                 | Effect::Tmux {
-                    token: Some(TmuxToken::Refresh | TmuxToken::Query(_) | TmuxToken::Ping(_)),
+                    token: Some(
+                        TmuxToken::Refresh
+                            | TmuxToken::Query(_)
+                            | TmuxToken::Ping(_)
+                            | TmuxToken::Tags
+                    ),
                     ..
                 }
         )

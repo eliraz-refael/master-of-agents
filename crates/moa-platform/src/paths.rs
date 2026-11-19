@@ -171,6 +171,11 @@ impl Paths {
         self.sandboxed
     }
 
+    /// `MOA_REAL_HOME=1` was set: v1 may use the real home before the switch-over.
+    pub fn real_home_ok(&self) -> bool {
+        self.real_home_ok
+    }
+
     /// `Ok` when sandboxed or `MOA_REAL_HOME=1`; v1 may not touch the real home yet.
     pub fn check_v1_allowed(&self) -> Result<(), PathsError> {
         if self.sandboxed || self.real_home_ok {

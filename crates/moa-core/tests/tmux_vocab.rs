@@ -84,7 +84,12 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
         Cmd::new("new-window").check().unwrap_err().0,
         "new-window needs -d and -P"
     );
-    assert!(Cmd::new("new-window").args(["-d", "-P"]).check().is_ok());
+    assert!(
+        Cmd::new("new-window")
+            .args(["-d", "-P", "-t", "=moa:"])
+            .check()
+            .is_ok()
+    );
     let prompt = Cmd::new("command-prompt");
     assert_eq!(
         prompt.clone().arg("x").check().unwrap_err().0,
@@ -551,6 +556,39 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
         cmd("move-window", &["-s", "%1", "-t", "=moa:"]),
         "that isn't a command moa sends",
     );
+}
+
+/// A new window opens in one of moa's own sessions, named exactly: never where tmux would
+/// put it on its own, and never in a session whose name only starts like moa's.
+#[test]
+fn a_new_window_opens_only_in_moas_sessions() {
+    let new_window = |target: &[&str]| {
+        Cmd::new("new-window")
+            .args(["-d", "-P", "-F", "#{pane_id}", "-n", "x", "-c", "/w"])
+            .args(target.iter().copied())
+            .args(["/opt/moa", "panel", "tree", "-t", "elsewhere"])
+            .check()
+    };
+    assert_eq!(new_window(&["-t", "=moa:"]), Ok(()));
+    assert_eq!(new_window(&["-t", "=_moa:"]), Ok(()));
+    let target = "new-window needs -t and =moa: or =_moa:";
+    for refused in [
+        &[][..],
+        &["-t", "moa"],
+        &["-t", "moa:"],
+        &["-t", "=moa"],
+        &["-t", "=moa:1"],
+        &["-t", "=_moa2:"],
+        &["-t", "%1"],
+        &["-t", "=moa:", "-t", "elsewhere"],
+        &["-t"],
+    ] {
+        assert_eq!(
+            new_window(refused).map_err(|r| r.0),
+            Err(target),
+            "{refused:?}"
+        );
+    }
 }
 
 /// L4: a chain is one line, ` ; `-joined, checked part by part, and answered as one.

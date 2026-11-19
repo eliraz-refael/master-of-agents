@@ -236,6 +236,63 @@ fn the_plugin_dir_handed_to_sessions_is_absolute() {
     );
 }
 
+/// L7: a panel runs the daemon's program, and gets `MOA_ROOT` only from a sandboxed daemon.
+#[test]
+fn panels_get_moa_root_only_in_a_sandbox() {
+    let exe = Path::new("/opt/moa/bin/moa");
+    let rooted = Paths::with_root(Path::new("/tmp/moa-root"));
+    assert_eq!(
+        panel_launch(&rooted, exe),
+        PanelLaunch {
+            exe: exe.to_path_buf(),
+            env: vec![("MOA_ROOT".into(), "/tmp/moa-root".into())],
+        }
+    );
+    let real = Paths::from_vars(None, Some("/h".into()), None, 501, false).unwrap();
+    assert_eq!(
+        panel_launch(&real, exe),
+        PanelLaunch {
+            exe: exe.to_path_buf(),
+            env: Vec::new()
+        }
+    );
+}
+
+/// Lesson 5: a daemon allowed the real home (`MOA_REAL_HOME=1`) passes that to its panels
+/// explicitly, or every `moa panel` would refuse the real home; a sandboxed one never does.
+#[test]
+fn panels_get_moa_real_home_whenever_the_daemon_has_it() {
+    let exe = Path::new("/opt/moa/bin/moa");
+    let real = Paths::from_vars(None, Some("/h".into()), None, 501, true).unwrap();
+    assert_eq!(
+        panel_launch(&real, exe).env,
+        [("MOA_REAL_HOME".to_string(), "1".to_string())]
+    );
+    let rooted = Paths::from_vars(Some("/r".into()), Some("/h".into()), None, 501, true).unwrap();
+    assert_eq!(
+        panel_launch(&rooted, exe).env,
+        [("MOA_ROOT".to_string(), "/r".to_string())]
+    );
+}
+
+/// The daemon's program, once: Linux names a binary rebuilt under a running daemon
+/// `<path> (deleted)`, and the new one is at `<path>`.
+#[test]
+fn the_daemons_program_drops_linuxs_deleted_mark() {
+    assert_eq!(
+        undeleted(PathBuf::from("/opt/moa/bin/moa (deleted)")),
+        Path::new("/opt/moa/bin/moa")
+    );
+    assert_eq!(
+        undeleted(PathBuf::from("/opt/moa/bin/moa")),
+        Path::new("/opt/moa/bin/moa")
+    );
+    // Its real path: the same file `moa_client::own_exe` names.
+    let exe = daemon_exe().unwrap();
+    assert!(exe.is_absolute(), "{exe:?}");
+    assert_eq!(exe, std::fs::canonicalize(&exe).unwrap());
+}
+
 /// H16: a Claude account without a launcher gets the `claude` on `PATH`; one with a
 /// launcher keeps it, and a Codex account is left alone.
 #[test]

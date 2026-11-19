@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use crate::change::Change;
+use crate::cockpit;
 use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn};
 use crate::hooks;
 use crate::live::{QUIET_AFTER, quiet_candidate};
@@ -159,16 +160,26 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // terminal its new tab or a key its folder, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
             let (mut adopts, mut lists, mut looks) = (Vec::new(), Vec::new(), Vec::new());
-            let mut heres = Vec::new();
-            for (asked, answer) in answers {
+            let (mut heres, mut spawns) = (Vec::new(), Vec::new());
+            for (asked, answers) in answers {
+                // A panel spawn reads each command's answer (L18); the rest read them as one.
                 match asked {
-                    Asked::Reconcile => reconciles.push(answer),
-                    Asked::Resume(ask) => resumes.push((ask, answer)),
-                    Asked::Adopt { conn, req, args } => adopts.push((conn, req, args, answer)),
-                    Asked::Ls { conn, req, all } => lists.push((conn, req, all, answer)),
-                    Asked::Term { tell, name, path } => terms.push((tell, name, path, answer)),
-                    Asked::Here { client } => heres.push((client, answer)),
-                    Asked::Look { id, events } => looks.push((id, events, answer)),
+                    Asked::Reconcile => reconciles.push(link::all_lines(answers)),
+                    Asked::Resume(ask) => resumes.push((ask, link::all_lines(answers))),
+                    Asked::Adopt { conn, req, args } => {
+                        adopts.push((conn, req, args, link::all_lines(answers)))
+                    }
+                    Asked::Ls { conn, req, all } => {
+                        lists.push((conn, req, all, link::all_lines(answers)))
+                    }
+                    Asked::Term { tell, name, path } => {
+                        terms.push((tell, name, path, link::all_lines(answers)))
+                    }
+                    Asked::Here { client } => heres.push((client, link::all_lines(answers))),
+                    Asked::Look { id, events } => {
+                        looks.push((id, events, link::all_lines(answers)))
+                    }
+                    Asked::Spawn { views, .. } => spawns.push((views, answers)),
                 }
             }
             let panes_of = |answer: link::Answer| {
@@ -211,6 +222,15 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             }
             for (id, events, answer) in looks {
                 more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
+            }
+            // The panes that started are tagged; the queue (L17) will read the views that
+            // didn't. A spawn the link lost may have started panels moa knows nothing of:
+            // the log says so.
+            for (views, answers) in spawns {
+                match answers {
+                    Some(answers) => more.extend(cockpit::spawn::spawned(state, &views, answers).0),
+                    None => more.push(cockpit::spawn::spawn_lost(&views)),
+                }
             }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));

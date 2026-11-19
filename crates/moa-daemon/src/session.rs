@@ -367,6 +367,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             caller: data.caller,
             tmux: data.tmux,
             tmux_restarts: data.tmux_restarts,
+            panel_starts: data.panel_starts,
         };
         self.say(encode_result(id, &ok)).await
     }

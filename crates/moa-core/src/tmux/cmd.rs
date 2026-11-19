@@ -35,6 +35,7 @@ const NOT_ALLOWED: &str = "that isn't a command moa sends";
 const NEEDS_B: &str = "command-prompt needs -b";
 const OWN_CONFIG: &str = "moa only sources its own config";
 const NEEDS_D_P: &str = "new-window needs -d and -P";
+const NEW_WINDOW_TARGET: &str = "new-window needs -t and =moa: or =_moa:";
 const ENV_NEWLINE: &str = "a new window's environment can't hold a newline";
 const ONE_PANE: &str = "kill-pane needs exactly one tab id";
 const NEEDS_T: &str = "select-window and select-pane need -t and a tab id";
@@ -288,18 +289,23 @@ fn check_respawn(args: &[String]) -> Result<(), Refused> {
 }
 
 /// `new-window`'s flags, read up to the command it runs: `-d` (the user's view stays put)
-/// and `-P` (it says which pane) are both there, and no `-e` value holds a newline. The
-/// command's own arguments are quoted like any other. With no command the window runs the
-/// user's shell: a terminal.
+/// and `-P` (it says which pane) are both there, every `-t` names one of moa's sessions
+/// exactly (`=moa:` or `=_moa:`, so a prefix never matches a stranger's), and no `-e` value
+/// holds a newline. The command's own arguments are quoted like any other. With no command
+/// the window runs the user's shell: a terminal.
 fn check_new_window(args: &[String]) -> Result<(), Refused> {
-    let (mut detached, mut prints) = (false, false);
+    let (mut detached, mut prints, mut target) = (false, false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-d" => detached = true,
             "-P" => prints = true,
             "-a" | "-b" | "-k" | "-S" => {}
-            "-c" | "-F" | "-n" | "-t" => {
+            "-t" => match it.next().map(String::as_str) {
+                Some("=moa:" | "=_moa:") => target = true,
+                _ => return Err(Refused(NEW_WINDOW_TARGET)),
+            },
+            "-c" | "-F" | "-n" => {
                 it.next();
             }
             "-e" => {
@@ -311,11 +317,13 @@ fn check_new_window(args: &[String]) -> Result<(), Refused> {
             _ => break,
         }
     }
-    if detached && prints {
-        Ok(())
-    } else {
-        Err(Refused(NEEDS_D_P))
+    if !(detached && prints) {
+        return Err(Refused(NEEDS_D_P));
     }
+    if !target {
+        return Err(Refused(NEW_WINDOW_TARGET));
+    }
+    Ok(())
 }
 
 /// A pane id as tmux prints it: `%` and digits.
@@ -479,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_terminal_window_has_no_command() {
-        let cmd = Cmd::new("new-window").args(["-d", "-P", "-F", "x", "-n", "t", "-c", "/w"]);
+        let cmd = Cmd::new("new-window").args(["-d", "-P", "-F", "x", "-n", "t", "-t", "=_moa:"]);
         assert_eq!(cmd.check(), Ok(()));
         let cmd = Cmd::new("new-window").args(["-d", "-P", "-c", "/w", "-t", "=moa:"]);
         assert_eq!(cmd.check(), Ok(()));
