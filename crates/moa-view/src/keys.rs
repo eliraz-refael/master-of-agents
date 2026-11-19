@@ -163,8 +163,10 @@ pub fn picture_hint(tab: View, adopted_selected: bool) -> &'static str {
     match tab {
         View::Tree | View::Status => hint(tab, adopted_selected),
         View::Plan => "1-6/tab · j/k · ⏎ jump · d done · x drop · a archive · n/N new · q",
-        View::Today => "1-6/tab · j/k · ⏎ jump · y/n suggestion · n/N new · q",
-        View::Projects => "1-6/tab · j/k · ⏎ expand/jump · n/N new · q",
+        View::Today => {
+            "1-6/tab · j/k · ⏎ jump · y/n suggestion · a archive · x close · n/N new · q"
+        }
+        View::Projects => "1-6/tab · j/k · ⏎ expand/jump · a archive · x close · n/N new · q",
         View::Activity => "1-6/tab · j/k scroll · q",
         View::Picture
         | View::Console

@@ -184,14 +184,16 @@ fn the_tabs_rows_keep_their_views_keys() {
     t.key(Key::Char('2'));
     let today = hint(&mut t);
     assert!(today.contains("y/n suggestion"), "{today}");
+    // Its waiting and working sessions take `a` and `x`.
     assert!(
-        !today.contains("x close") && !today.contains("a archive"),
+        today.contains("a archive") && today.contains("x close"),
         "{today}"
     );
     t.key(Key::Char('3'));
     let projects = hint(&mut t);
+    // An opened project's sessions take `a` and `x`.
     assert!(
-        !projects.contains("x close") && !projects.contains("a archive"),
+        projects.contains("a archive") && projects.contains("x close"),
         "{projects}"
     );
     t.key(Key::Char('5'));
