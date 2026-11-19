@@ -288,3 +288,72 @@ async fn live_says_closed_when_the_daemon_stops() {
     // Nothing after: the next receive never completes.
     assert_eq!(live.recv().now_or_never(), None);
 }
+
+const TRY_AGAIN: &str = "moa stopped before answering; try again";
+const MAY_HAVE_SAVED: &str =
+    "moa stopped before answering; it may have saved that, so check before trying again";
+
+/// A write op big enough that a few of them fill any socket buffer.
+fn big_write(id: i64) -> Op {
+    Op::TaskSet(TaskSet {
+        id,
+        status: Some("x".repeat(16 * 1024)),
+        ..TaskSet::default()
+    })
+}
+
+/// Reads to `Closed`: the replies, by tag.
+async fn replies_to_the_end(live: &mut Live) -> BTreeMap<u64, Result<Done, String>> {
+    let mut replies = BTreeMap::new();
+    loop {
+        match next(live).await {
+            LiveMsg::Reply { tag, result } => {
+                assert!(
+                    replies.insert(tag, result).is_none(),
+                    "tag {tag} answered twice"
+                );
+            }
+            LiveMsg::Closed => return replies,
+            _ => {}
+        }
+    }
+}
+
+/// Ops still queued when the connection ends never left: they say try again, not that they
+/// may have been saved. The end here is a line that isn't a reply, read while the writes
+/// wait on a full socket (a hang-up would fail the write first).
+#[tokio::test]
+async fn ops_never_written_say_try_again_when_the_connection_ends() {
+    const OPS: u64 = 128; // 2 MiB of lines, well past any socket buffer.
+    let (sent, all_sent) = oneshot::channel::<()>();
+    let (_keep, kept) = oneshot::channel::<()>();
+    let (_dir, opts) = scripted(|mut s| async move {
+        s.subscribed(&snapshot(1)).await;
+        // Op 1, the slow one: read, then nothing more is read.
+        let _ = s.request().await;
+        all_sent.await.unwrap();
+        // The client takes ops before lines, so once it reads these every op is owed.
+        s.notice("patch", &patch(2)).await;
+        s.framed.send("not a reply".to_string()).await.unwrap();
+        let _ = kept.await;
+    });
+    let client = Client::connect(opts).await.unwrap();
+    let (mut live, _, _) = client.live(&[Topic::Panels], vec![]).await.unwrap();
+    for id in 1..=OPS {
+        live.send(big_write(id as i64));
+    }
+    sent.send(()).unwrap();
+    assert_eq!(next(&mut live).await, LiveMsg::Patch(patch(2)));
+    let replies = replies_to_the_end(&mut live).await;
+    assert_eq!(replies.len() as u64, OPS, "every op is answered");
+    assert_eq!(
+        replies[&1],
+        Err(MAY_HAVE_SAVED.into()),
+        "the daemon read op 1"
+    );
+    assert_eq!(
+        replies[&OPS],
+        Err(TRY_AGAIN.into()),
+        "the last op never left"
+    );
+}

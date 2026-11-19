@@ -101,7 +101,7 @@ impl Live {
             // The connection has ended; the op never left.
             self.late.push_back(LiveMsg::Reply {
                 tag: self.tag,
-                result: Err(ClientError::Stopped { wrote: false }.to_string()),
+                result: stopped(false),
             });
         }
         self.tag
@@ -139,6 +139,11 @@ fn push(method: &str, params: Value) -> Result<Option<LiveMsg>, ClientError> {
     })
 }
 
+/// The answer to an op that got no reply: `wrote` when it may have reached the daemon.
+fn stopped(wrote: bool) -> Result<Done, String> {
+    Err(ClientError::Stopped { wrote }.to_string())
+}
+
 /// An op sent and not yet answered.
 struct Owed {
     tag: u64,
@@ -150,8 +155,6 @@ struct Outbox {
     lines: VecDeque<(Id, String)>,
     /// Some lines were handed to the connection but not flushed yet.
     unflushed: bool,
-    /// Writing still works.
-    open: bool,
 }
 
 impl Outbox {
@@ -185,14 +188,16 @@ enum Wake {
     Op(Option<(u64, Op)>),
     /// A line read, or the end of the connection.
     Line(Option<Result<String, LinesCodecError>>),
+    /// A write failed, which ends the connection.
     WriteFailed,
 }
 
 /// Owns the connection until it ends or the [`Live`] is dropped: writes ops as they come,
 /// and hands on replies and pushes as they are read. Reading never waits for a write: the
 /// daemon reads nothing while an op is in flight, so ops queued behind a slow one can fill
-/// the socket, and the daemon's pushes must still be read. When the connection ends, every
-/// reply still owed is answered with why there is none, and then the channel closes.
+/// the socket, and the daemon's pushes must still be read. The connection ends when the
+/// daemon hangs up, sends what isn't a reply, or can't be written to; then every reply still
+/// owed is answered with why there is none, and the channel closes.
 async fn run(
     mut wire: Wire,
     mut ops: mpsc::UnboundedReceiver<(u64, Op)>,
@@ -206,11 +211,10 @@ async fn run(
     let mut out = Outbox {
         lines: VecDeque::new(),
         unflushed: false,
-        open: true,
     };
     loop {
         let wake = poll_fn(|cx| {
-            if out.open && matches!(out.poll_write(&mut wire.framed, cx), Poll::Ready(Err(_))) {
+            if let Poll::Ready(Err(_)) = out.poll_write(&mut wire.framed, cx) {
                 return Poll::Ready(Wake::WriteFailed);
             }
             if let Poll::Ready(op) = ops.poll_recv(cx) {
@@ -222,33 +226,17 @@ async fn run(
         match wake {
             // The `Live` was dropped, and nobody is listening.
             Wake::Op(None) => return,
-            Wake::Op(Some((tag, op))) => {
-                if !out.open {
-                    reply(tag, Err(ClientError::Stopped { wrote: false }.to_string()));
-                    continue;
+            Wake::Op(Some((tag, op))) => match wire.op_line(&op) {
+                Ok((id, line)) => {
+                    let writes = op.writes();
+                    owed.insert(id.clone(), Owed { tag, writes });
+                    out.lines.push_back((id, line));
                 }
-                match wire.op_line(&op) {
-                    Ok((id, line)) => {
-                        let writes = op.writes();
-                        owed.insert(id.clone(), Owed { tag, writes });
-                        out.lines.push_back((id, line));
-                    }
-                    Err(e) => reply(tag, Err(e.to_string())),
-                }
-            }
-            // Lines still queued never left. Those handed to the connection may have reached
-            // the daemon, so they stay owed; replies to them may still come.
-            Wake::WriteFailed => {
-                out.open = false;
-                for (id, _) in out.lines.drain(..) {
-                    if let Some(o) = owed.remove(&id) {
-                        reply(
-                            o.tag,
-                            Err(ClientError::Stopped { wrote: false }.to_string()),
-                        );
-                    }
-                }
-            }
+                Err(e) => reply(tag, Err(e.to_string())),
+            },
+            // A connection that can't be written to has ended, even if the daemon still
+            // writes: an op handed to it would wait on a reply forever.
+            Wake::WriteFailed => break,
             Wake::Line(next) => match server_line(next) {
                 Ok(Some(ServerLine::Result { id, value })) => {
                     if let Some(o) = owed.remove(&id) {
@@ -278,15 +266,18 @@ async fn run(
         }
     }
     // Ended. Ops sent from now on are answered by `Live::send` itself; those already sent are
-    // drained here, so each is answered before `Closed`.
+    // drained here, so each is answered before `Closed`. Lines still queued never left; those
+    // handed to the connection may have reached the daemon.
     ops.close();
+    for (id, _) in out.lines.drain(..) {
+        if let Some(o) = owed.remove(&id) {
+            reply(o.tag, stopped(false));
+        }
+    }
     for o in owed.into_values() {
-        reply(
-            o.tag,
-            Err(ClientError::Stopped { wrote: o.writes }.to_string()),
-        );
+        reply(o.tag, stopped(o.writes));
     }
     while let Some((tag, _)) = ops.recv().await {
-        reply(tag, Err(ClientError::Stopped { wrote: false }.to_string()));
+        reply(tag, stopped(false));
     }
 }

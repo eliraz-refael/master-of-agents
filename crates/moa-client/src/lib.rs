@@ -234,13 +234,17 @@ impl Wire {
     /// Writes a request and returns its id.
     async fn send(&mut self, method: &str, params: Value) -> Result<Id, ClientError> {
         let (id, line) = self.request_line(method, params);
-        self.framed.send(line).await.map_err(write_error)?;
-        Ok(id)
+        self.write(id, line).await
     }
 
     /// Writes an op as a request and returns its id.
     async fn send_op(&mut self, op: &Op) -> Result<Id, ClientError> {
         let (id, line) = self.op_line(op)?;
+        self.write(id, line).await
+    }
+
+    /// Writes a request's line and hands back its id.
+    async fn write(&mut self, id: Id, line: String) -> Result<Id, ClientError> {
         self.framed.send(line).await.map_err(write_error)?;
         Ok(id)
     }
