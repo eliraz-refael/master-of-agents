@@ -44,6 +44,11 @@ fn clean_simplifies_emoji_sequences() {
     let e = "e\u{301}";
     assert_eq!(clean(e), e);
     assert_eq!(width(e), 1);
+    // A halfwidth katakana with its sound mark: ratatui measures it a cell wider than
+    // `width`, so it becomes its first code point, one cell wide either way.
+    assert_eq!(clean("ｶﾞ"), "ｶ");
+    assert_eq!(clean("ﾊﾟ"), "ﾊ");
+    assert_eq!(width(&clean("ｶﾞ")), 1);
 }
 
 #[test]

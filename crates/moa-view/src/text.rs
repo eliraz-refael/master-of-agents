@@ -79,6 +79,12 @@ fn is_tag(c: char) -> bool {
     ('\u{E0020}'..='\u{E007F}').contains(&c)
 }
 
+/// A halfwidth katakana sound mark (U+FF9E, U+FF9F): ratatui measures a grapheme holding one
+/// a cell wider than `unicode-width` over the grapheme does.
+fn is_halfwidth_mark(c: char) -> bool {
+    matches!(c, '\u{FF9E}' | '\u{FF9F}')
+}
+
 fn is_variation_selector(c: char) -> bool {
     matches!(c, '\u{FE0E}' | '\u{FE0F}')
 }
@@ -119,12 +125,15 @@ fn push_clean(out: &mut String, c: char) {
 
 /// Text safe to draw and measure (V9): control characters (`\n`, `\t`, ESC, DEL, C1) and
 /// U+2028/U+2029 become a space; U+FE0E, U+FE0F and the bidi controls are dropped; a
-/// grapheme holding a ZWJ, a skin-tone modifier or a tag character becomes its first code
-/// point; a regional indicator becomes its ASCII capital (a flag `🇮🇱` reads `IL`).
+/// grapheme holding a ZWJ, a skin-tone modifier, a tag character or a halfwidth katakana
+/// sound mark (U+FF9E, U+FF9F) becomes its first code point; a regional indicator becomes
+/// its ASCII capital (a flag `🇮🇱` reads `IL`).
 pub fn clean(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for g in s.graphemes(true) {
-        if g.chars().any(|c| c == ZWJ || is_skin_tone(c) || is_tag(c)) {
+        if g.chars()
+            .any(|c| c == ZWJ || is_skin_tone(c) || is_tag(c) || is_halfwidth_mark(c))
+        {
             match g.chars().next() {
                 // A lone joiner or tag draws nothing.
                 Some(c) if c == ZWJ || is_tag(c) => {}

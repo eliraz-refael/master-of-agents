@@ -10,9 +10,10 @@ use moa_view::geometry::Rect as Part;
 use moa_view::line::{Line, Span, Tone};
 use moa_view::panel::{Mark, Screen};
 use moa_view::text;
+use moa_view::views::picture;
 use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::Theme;
@@ -24,7 +25,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, screen: &Screen, theme: &Theme) {
     canvas.clear();
     let g = &screen.geometry;
     if g.framed {
-        canvas.frame(screen.title.as_deref());
+        canvas.frame(screen.title.as_deref(), theme.style(Tone::Frame, false));
     }
     if let Some(row) = g.tabs {
         draw_tabs(&mut canvas, row, screen, theme);
@@ -76,9 +77,9 @@ fn marked(theme: &Theme, mark: Mark, span: &Span) -> Style {
 /// A chip's style: as a span of its line, except that a padded pill (late, today) keeps its
 /// own colours on the selection bar.
 fn chip_style(theme: &Theme, mark: Mark, chip: &Span) -> Style {
-    let pill = matches!(chip.tone, Tone::Late | Tone::Today);
-    if mark == Mark::Selected && pill {
-        theme.selected().patch(plain(theme, chip))
+    // A pill sets both its colours, so no mark shows through it.
+    if matches!(chip.tone, Tone::Late | Tone::Today) {
+        plain(theme, chip)
     } else {
         marked(theme, mark, chip)
     }
@@ -90,19 +91,9 @@ fn draw_tabs(canvas: &mut Canvas<'_>, row: Part, screen: &Screen, theme: &Theme)
     if row.h == 0 {
         return;
     }
-    if let Some((names, shown)) = &screen.tabs {
-        let tabs = names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                if i == *shown {
-                    format!("[{name}]")
-                } else {
-                    format!(" {name} ")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("  ");
+    if let Some((_, shown)) = &screen.tabs {
+        // The text `brand_fits` measured, so the brand never lands on the tabs.
+        let tabs = picture::tabs_text(*shown);
         canvas.put(row.x, row.y, row.w, &tabs, theme.style(Tone::Head, true));
     }
     if let Some(brand) = &screen.brand {
@@ -260,14 +251,13 @@ impl<'b> Canvas<'b> {
         used
     }
 
-    /// The rounded frame round the whole area, in the terminal's default colour, with ` title `
-    /// in bold on its top edge at column 2. Nothing under 4 × 2.
-    fn frame(&mut self, title: Option<&str>) {
+    /// The rounded frame round the whole area in `edge` (the terminal's default colour), with
+    /// ` title ` in bold on its top edge at column 2. Nothing under 4 × 2.
+    fn frame(&mut self, title: Option<&str>, edge: Style) {
         let (w, h) = (self.area.width, self.area.height);
         if w < 4 || h < 2 {
             return;
         }
-        let edge = Style::new().fg(Color::Reset);
         let (right, bottom) = (w - 1, h - 1);
         for x in 1..right {
             self.set(x, 0, "─", edge);
@@ -292,7 +282,9 @@ impl<'b> Canvas<'b> {
 /// What to put in a grapheme's first cell, or `None` to draw it as `w` blanks: a grapheme
 /// with a control character, or one ratatui would measure otherwise than moa (and so draw
 /// out of step with the line), is drawn as its first code point when that has the same
-/// width, else as blanks.
+/// width, else as blanks. `moa_view::text::clean` already takes out every such grapheme it
+/// knows of (a halfwidth katakana sound mark among them); this is a backstop for text that
+/// missed it.
 fn drawable(g: &str, w: u16) -> Option<&str> {
     if !g.contains(char::is_control) && g.cell_width() == w {
         return Some(g);
