@@ -335,6 +335,7 @@ fn layout_list_marks_the_current_one() {
         json!({
             "key": "focus",
             "name": "focus",
+            "index": 1,
             "leaves": ["tree", "plan", "agent", "console"],
             "current": true,
             "error": null
@@ -482,4 +483,50 @@ fn layout_ops_read_the_file_again() {
     );
     let rows = layouts_topic(&fx).expect("the new entry is published");
     assert_eq!(rows["mine"]["leaves"], json!(["tree"]));
+    // The rows are by name; `index` gives the file's order back (after the presets it lacks).
+    let order: Vec<(u64, &str)> = rows
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|r| (r["index"].as_u64().unwrap(), r["name"].as_str().unwrap()))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        order,
+        [
+            (0, "cockpit"),
+            (1, "focus"),
+            (2, "classic"),
+            (3, "triage"),
+            (4, "mine")
+        ]
+    );
+}
+
+/// An empty file, and `"layouts": null`, hold no entries: the presets alone, no error, and
+/// `set` writes the file.
+#[test]
+fn an_empty_file_or_null_layouts_is_no_entries() {
+    for text in ["", "  \n", r#"{"layouts": null}"#] {
+        let l = Layouts::load(Some(text));
+        assert_eq!(l.file_error, None, "{text:?}");
+        assert_eq!(l.names().collect::<Vec<_>>(), PRESET_KEYS, "{text:?}");
+
+        let (b, mut st) = started(Some(text), &[]);
+        let fx = send(&b, &mut st, 1, set("mine", json!({"panel": "tree"})));
+        assert_eq!(
+            text_of(&fx),
+            "saved layout mine; apply it with: moa layout apply mine"
+        );
+        let Some(Effect::WriteFile { text: written, .. }) = writes(&fx).first().copied() else {
+            panic!("no write for {text:?}");
+        };
+        let saved: Value = serde_json::from_str(written).unwrap();
+        assert_eq!(
+            saved,
+            json!({"layouts": {"mine": {"panel": "tree"}}}),
+            "{text:?}"
+        );
+    }
 }

@@ -534,8 +534,10 @@ impl Drop for Core {
 }
 
 /// Writes `text` to `path` through a temporary file in the same folder and a rename, making
-/// the folder when it's missing.
+/// the folder when it's missing. A `path` that is a link is written through it, at its target:
+/// the rename would otherwise put a plain file in the link's place.
 fn write_file(path: &Path, text: &str) -> io::Result<()> {
+    let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

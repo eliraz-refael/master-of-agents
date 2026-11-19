@@ -17,6 +17,7 @@ use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, CoreOptions};
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
 use serde_json::json;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
 
 async fn within<T>(f: impl Future<Output = T>) -> T {
@@ -58,8 +59,10 @@ async fn core_with(brain: &TypicalBrain, file: &Path) -> CoreHandle {
     .expect("the core starts")
 }
 
-/// `layout set mine {"panel": "tree"}`, answered.
-async fn set_mine(core: &CoreHandle) -> Result<Done, OpError> {
+type Replies = UnboundedReceiver<(ReqId, Result<Done, OpError>)>;
+
+/// `layout set mine {"panel": "tree"}`, answered, and the connection for anything after.
+async fn set_mine(core: &CoreHandle) -> (Result<Done, OpError>, Replies) {
     let (conn, mut rx) = core.open_conn();
     core.send(
         conn,
@@ -70,7 +73,8 @@ async fn set_mine(core: &CoreHandle) -> Result<Done, OpError> {
             layout: json!({"panel": "tree"}),
         },
     );
-    within(rx.recv()).await.expect("a reply").1
+    let reply = within(rx.recv()).await.expect("a reply").1;
+    (reply, rx)
 }
 
 fn config_dir(brain: &TypicalBrain) -> PathBuf {
@@ -88,7 +92,7 @@ async fn a_failed_write_refuses_the_request() {
     let model = core.model();
     let rev = model.borrow().rev;
 
-    let refused = set_mine(&core).await;
+    let (refused, mut rx) = set_mine(&core).await;
     // Writable again before anything can fail, so the folder can be removed.
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let refused = refused.expect_err("the write fails");
@@ -98,6 +102,8 @@ async fn a_failed_write_refuses_the_request() {
         refused.0
     );
     within(core.barrier()).await;
+    // One answer: the op's own reply went with its publish.
+    assert!(rx.try_recv().is_err());
     // Nothing was said about the entry that wasn't saved.
     assert_eq!(model.borrow().rev, rev);
     assert!(!model.borrow().topics[&Topic::Layouts].contains_key("mine"));
@@ -115,7 +121,7 @@ async fn a_write_replaces_the_file_atomically() {
     let before = std::fs::metadata(&file).unwrap().ino();
     let core = core_with(&brain, &file).await;
 
-    let done = set_mine(&core).await.expect("saved");
+    let done = set_mine(&core).await.0.expect("saved");
     assert_eq!(
         done.text,
         "saved layout mine; apply it with: moa layout apply mine"
@@ -135,4 +141,26 @@ async fn a_write_replaces_the_file_atomically() {
     assert_eq!(names, ["layouts.json"]);
     within(core.barrier()).await;
     assert!(core.model().borrow().topics[&Topic::Layouts].contains_key("mine"));
+}
+
+/// A `layouts.json` that links elsewhere (a dotfiles folder, say) stays a link.
+#[tokio::test]
+async fn a_linked_file_is_written_through_its_link() {
+    let brain = TypicalBrain::new();
+    let dir = config_dir(&brain);
+    std::fs::create_dir_all(&dir).unwrap();
+    let elsewhere = brain.dir.path().join("dotfiles");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let target = elsewhere.join("layouts.json");
+    std::fs::write(&target, r#"{"layouts": {}}"#).unwrap();
+    let file = dir.join("layouts.json");
+    std::os::unix::fs::symlink(&target, &file).unwrap();
+    let core = core_with(&brain, &file).await;
+
+    set_mine(&core).await.0.expect("saved");
+    let link = std::fs::symlink_metadata(&file).unwrap();
+    assert!(link.file_type().is_symlink());
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(saved, json!({"layouts": {"mine": {"panel": "tree"}}}));
 }

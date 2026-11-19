@@ -76,11 +76,13 @@ pub struct PanelRow {
     pub view: View,
 }
 
-/// A `layouts` row (key: its name): the layout's leaves in order, whether it is the brain's
-/// current one, and why it can't be used, when it can't (no leaves then).
+/// A `layouts` row (key: its name): its place in the layouts' order (the rows are by name),
+/// the layout's leaves in order, whether it is the brain's current one, and why it can't be
+/// used, when it can't (no leaves then).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LayoutRow {
     pub name: String,
+    pub index: usize,
     pub leaves: Vec<String>,
     pub current: bool,
     pub error: Option<String>,
@@ -234,13 +236,15 @@ impl State {
         let current = current_layout(self);
         self.layouts
             .names()
-            .map(|name| {
+            .enumerate()
+            .map(|(index, name)| {
                 let (leaves, error) = match self.layouts.node(name) {
                     Ok(node) => (leaves(&node).iter().map(|l| l.to_string()).collect(), None),
                     Err(e) => (Vec::new(), Some(e.to_string())),
                 };
                 LayoutRow {
                     name: name.to_string(),
+                    index,
                     leaves,
                     current: name == current,
                     error,

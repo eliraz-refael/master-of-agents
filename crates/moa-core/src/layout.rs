@@ -342,19 +342,24 @@ enum Part<'a> {
     Entries(IndexMap<&'a str, &'a Value>),
 }
 
-/// The file's text merged with the presets (the spike's merge), or why it doesn't parse.
+/// The file's text merged with the presets (the spike's merge), or why it doesn't parse. An
+/// empty file, and `"layouts": null`, hold no entries.
 fn merged(text: &str) -> Result<Layouts, String> {
     /// The entries, in the file's order (a `Map` sorts them).
     #[derive(Deserialize)]
     struct InOrder {
         #[serde(default)]
-        layouts: IndexMap<String, Value>,
+        layouts: Option<IndexMap<String, Value>>,
+    }
+    if text.trim().is_empty() {
+        return Ok(presets());
     }
     let file = match serde_json::from_str(text).map_err(|e| e.to_string())? {
         Value::Object(file) => file,
         _ => return Err("it must be one JSON object".into()),
     };
-    let InOrder { layouts: own } = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let InOrder { layouts } = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let own = layouts.unwrap_or_default();
     let mut entries: IndexMap<String, Value> = presets()
         .entries
         .into_iter()
