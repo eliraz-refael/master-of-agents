@@ -673,8 +673,9 @@ Slice 5 is three plans: 5a (the panels and their views), 5b (layouts, the cockpi
 spot) and 5c (the picker, help and new sessions). The split table is in
 `2026-11-18-moa-v1-slice-5a-panels-and-views.md`, under "Slice 5 is three plans".
 
-**Detailed plans:** `2026-11-18-moa-v1-slice-5a-panels-and-views.md` (5a). 5b's and 5c's are
-written just before each starts.
+**Detailed plans:** `2026-11-18-moa-v1-slice-5a-panels-and-views.md` (5a),
+`2026-11-19-moa-v1-slice-5b-layouts-and-the-agent-spot.md` (5b). 5c's is written just before it
+starts.
 
 1. **`moa-view`**:
    - View-models for tree, plan, status, today, projects, activity and picture (the 7-line

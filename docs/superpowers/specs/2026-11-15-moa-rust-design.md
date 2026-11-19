@@ -821,6 +821,18 @@ something animated is visible. Measured 7.8 ms exec-to-frame (R4 §6.3).
   title. Splitting the cockpit is refused ("the cockpit is a layout").
 - **Lazy cockpit [C28]**: the daemon builds the cockpit when a user first attaches, not at
   login.
+- **Layouts are shared, the current one is per brain.** `layouts.json` is one file for every
+  brain; `layout set` writes it, and hand edits apply at the next layout command. Each brain keeps
+  its current layout itself (`meta` `layout.current`, default `cockpit`), so one brain's switch
+  never changes another's.
+- **moa owns a panel's view.** moa tags each panel it places (`@moa_panel <view>`, a pane option
+  that survives a daemon restart). A panel that (re)connects gets the tagged view, whatever it
+  asks for, and follows its row in the `panels` topic when moa reassigns it (`ui.select_view`).
+- **A panel that stops stays visible** as a pane reading "panel stopped · Ctrl-a r brings it
+  back" (`remain-on-exit`); it's logged and never restarted by itself, so a panel that crashes
+  at start can't loop. Repair restarts it in place.
+- **Ctrl-c in a panel moa placed** cancels an open prompt or y/N and never closes the panel; a
+  panel you started yourself with `moa panel` quits on Ctrl-c.
 - `goto PANEL` selects a panel, re-applying the layout if it's missing; `focus Q` resumes if
   needed and swaps the session into the agent spot (the previous occupant returns to its
   window; an empty slot is parked), else selects its window.
