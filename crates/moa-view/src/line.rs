@@ -57,22 +57,27 @@ pub struct Span {
     pub text: String,
     pub tone: Tone,
     pub bold: bool,
+    /// Drawn with its colours swapped: the strip's flash.
+    pub reversed: bool,
 }
 
 impl Span {
     pub fn new(text: impl Into<String>, tone: Tone) -> Span {
-        Span {
-            text: text.into(),
-            tone,
-            bold: false,
-        }
+        Span::styled(text, tone, false)
     }
 
     /// The span in bold.
     pub fn bold(text: impl Into<String>, tone: Tone) -> Span {
+        Span::styled(text, tone, true)
+    }
+
+    /// The span, in bold when `bold`.
+    pub fn styled(text: impl Into<String>, tone: Tone, bold: bool) -> Span {
         Span {
-            bold: true,
-            ..Span::new(text, tone)
+            text: text.into(),
+            tone,
+            bold,
+            reversed: false,
         }
     }
 }
@@ -168,12 +173,13 @@ impl Line {
 
 fn push_span(out: &mut String, span: &Span) {
     let bold = if span.bold { "*" } else { "" };
-    let _ = write!(out, "[{}{bold}]{}", span.tone.word(), span.text);
+    let reversed = if span.reversed { "!" } else { "" };
+    let _ = write!(out, "[{}{bold}{reversed}]{}", span.tone.word(), span.text);
 }
 
 /// The model snapshot form (V19): one line per `Line`, each span as `[tone]text` (`*` after
-/// the tone for bold), the chip in `⟨⟩`, then the item's kind in `‹›` (`‹more›` for a
-/// wrapped line).
+/// the tone for bold, then `!` for reversed), the chip in `⟨⟩`, then the item's kind in `‹›`
+/// (`‹more›` for a wrapped line).
 pub fn debug_lines(lines: &[Line]) -> String {
     let mut out = String::new();
     for line in lines {

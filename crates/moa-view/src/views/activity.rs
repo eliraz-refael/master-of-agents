@@ -21,13 +21,20 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
         .rev()
         .take(LIMIT)
         .map(|row| {
-            let tone = match row.who {
-                ActivityWho::Brain => Tone::Brain,
-                ActivityWho::You => Tone::You,
-                ActivityWho::Session => Tone::Dim,
-            };
             let at = local_format(row.at, &ctx.tz, "%H:%M");
-            Line::plain(cut(&format!("{at} {}", clean(&row.text)), width), tone)
+            Line::plain(
+                cut(&format!("{at} {}", clean(&row.text)), width),
+                tone(row.who),
+            )
         })
         .collect()
+}
+
+/// A row's tone, by who did it: moa, you, or a session.
+pub fn tone(who: ActivityWho) -> Tone {
+    match who {
+        ActivityWho::Brain => Tone::Brain,
+        ActivityWho::You => Tone::You,
+        ActivityWho::Session => Tone::Dim,
+    }
 }

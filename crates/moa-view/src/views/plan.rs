@@ -346,11 +346,7 @@ impl Cx<'_> {
         };
         let chip_w = chip.as_ref().map_or(0, |c| text::width(&c.text) + 1);
         let wrap_w = self.width.saturating_sub(5 + chip_w).max(10);
-        let span = |s: String| Span {
-            text: cut(&s, self.width),
-            tone: look.tone,
-            bold: look.bold,
-        };
+        let span = |s: String| Span::styled(cut(&s, self.width), look.tone, look.bold);
         let mut wrapped = text::wrap(&text, wrap_w).into_iter();
         let first = wrapped.next().unwrap_or_default();
         let mut line = Line::new(vec![span(format!("  {} {first}", look.mark))]).with_item(item);

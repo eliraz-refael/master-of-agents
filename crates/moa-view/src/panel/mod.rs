@@ -17,7 +17,7 @@ use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
 use crate::text::clean;
-use crate::views::{self, ViewUi, tree};
+use crate::views::{self, ViewUi, picture, tree};
 
 mod ask;
 mod tree_keys;
@@ -70,6 +70,8 @@ pub struct Screen {
     pub brand: Option<Span>,
     /// The visible lines, each with its mark.
     pub body: Vec<(Line, Mark)>,
+    /// The rule above the picture's activity strip, when the strip shows.
+    pub rule: Option<Line>,
     /// The picture's activity strip.
     pub strip: Vec<Line>,
     /// The footer, as one span. Only the editor is fitted to the footer here (its end is
@@ -81,16 +83,32 @@ pub struct Screen {
     pub wake_at: Option<UtcMs>,
 }
 
-/// The screen as text, for snapshots: the body's lines as [`debug_lines`] prints them, each
-/// after `> ` when selected, `~ ` when hovered and two spaces otherwise; then the footer.
+/// The screen as text, for snapshots: the picture's tabs and brand; the body's lines as
+/// [`debug_lines`] prints them, each after `> ` when selected, `~ ` when hovered and two
+/// spaces otherwise; the picture's rule and strip; then the footer.
 pub fn debug_screen(screen: &Screen) -> String {
     let mut out = String::new();
+    if let Some((_, shown)) = &screen.tabs {
+        let _ = writeln!(out, "tabs: {}", picture::tabs_text(*shown));
+    }
+    if let Some(brand) = &screen.brand {
+        out.push_str("brand: ");
+        out.push_str(&debug_lines(&[Line::new(vec![brand.clone()])]));
+    }
     for (line, mark) in &screen.body {
         out.push_str(match mark {
             Mark::Plain => "  ",
             Mark::Hovered => "~ ",
             Mark::Selected => "> ",
         });
+        out.push_str(&debug_lines(std::slice::from_ref(line)));
+    }
+    if let Some(line) = &screen.rule {
+        out.push_str("rule: ");
+        out.push_str(&debug_lines(std::slice::from_ref(line)));
+    }
+    for line in &screen.strip {
+        out.push_str("strip: ");
         out.push_str(&debug_lines(std::slice::from_ref(line)));
     }
     let bold = if screen.footer.bold { "*" } else { "" };
@@ -167,6 +185,16 @@ impl Panel {
         }
     }
 
+    /// The view the picture's shown tab draws; `None` for every other view.
+    fn tab(&self) -> Option<View> {
+        (self.view == View::Picture).then(|| picture::tab_view(&self.ui))
+    }
+
+    /// The view whose lines the body shows: the picture's tab, else the panel's own.
+    fn shown(&self) -> View {
+        self.tab().unwrap_or(self.view)
+    }
+
     /// The selected line's item.
     pub fn selected(&self) -> Option<&Item> {
         self.list.selected(&self.lines)
@@ -232,13 +260,20 @@ impl Panel {
             };
         }
         let body = usize::from(g.body.h);
-        // The picture's tab decides its rows' keys; it comes with the picture's own view.
-        for action in keys::actions(self.view, None, k) {
-            if let Some(out) = self.act(*action, data, ctx, body) {
-                return out;
+        let tab = self.ui.tab;
+        let mut out = Vec::new();
+        // The picture's rows follow its tab's keys (V21).
+        for action in keys::actions(self.view, self.tab(), k) {
+            if let Some(done) = self.act(*action, data, ctx, body) {
+                out = done;
+                break;
             }
         }
-        Vec::new()
+        if self.ui.tab != tab {
+            // The new tab's lines, so its first item is selected now.
+            self.refresh(data, ctx, size);
+        }
+        out
     }
 
     /// A mouse event (V11): a move marks the row under the pointer, a click selects it and
@@ -340,14 +375,31 @@ impl Panel {
             .skip(self.list.top)
             .take(usize::from(g.body.h));
         let body: Vec<(Line, Mark)> = shown.map(|(i, l)| (l.clone(), self.mark(i))).collect();
-        let animate = body.iter().any(|(l, _)| l.animated);
-        let wake_at = body.iter().filter_map(|(l, _)| l.changes_at).min();
+        let mut tabs = None;
+        let mut brand = None;
+        let mut rule = None;
+        let mut strip = Vec::new();
+        if self.view == View::Picture {
+            let tab = self.ui.tab % picture::TABS.len();
+            tabs = Some((picture::tab_names(), tab));
+            let line = picture::brand(data, ctx);
+            brand = picture::brand_fits(tab, &line, g.tabs.map_or(0, |r| r.w)).then_some(line);
+            if let Some(r) = g.strip {
+                rule = Some(picture::rule(r.w));
+                strip = picture::strip(data, ctx, r.w, r.h);
+            }
+        }
+        // Only what is on screen moves or changes (V10).
+        let visible = || body.iter().map(|(l, _)| l).chain(&strip).chain(&brand);
+        let animate = visible().any(|l| l.animated);
+        let wake_at = visible().filter_map(|l| l.changes_at).min();
         Screen {
             title: g.framed.then(|| self.view.label().to_string()),
-            tabs: None,
-            brand: None,
+            tabs,
+            brand: brand.and_then(|l| l.spans.into_iter().next()),
             body,
-            strip: Vec::new(),
+            rule,
+            strip,
             footer: self.footer(data, g.footer.w),
             animate,
             wake_at,
@@ -394,7 +446,12 @@ impl Panel {
             );
         }
         let adopted = self.selected_session(data).is_some_and(|row| row.adopted);
-        Span::new(keys::hint(self.view, adopted), Tone::Dim)
+        // The picture's sessions and status tabs show their own hints, as the spike's did.
+        let hints = match self.tab() {
+            Some(tab @ (View::Tree | View::Status)) => tab,
+            _ => self.view,
+        };
+        Span::new(keys::hint(hints, adopted), Tone::Dim)
     }
 
     /// The folder the selected row is in: a session's, a project's, a task's session's.
@@ -489,7 +546,7 @@ impl Panel {
                     Item::Suggestion(_) => None,
                 };
             }
-            Action::NewSession if self.view == View::Tree => {
+            Action::NewSession if self.shown() == View::Tree => {
                 return self.tree_key(action, data, ctx);
             }
             Action::NewSession | Action::ChooseAccount => {
@@ -546,8 +603,22 @@ impl Panel {
                     answer,
                 })]);
             }
-            // The picture's tabs come with its own view.
-            Action::NextTab | Action::PrevTab | Action::Tab(_) => return None,
+            Action::NextTab | Action::PrevTab | Action::Tab(_) => {
+                if self.view != View::Picture {
+                    return None;
+                }
+                let n = picture::TABS.len();
+                let tab = self.ui.tab % n;
+                self.ui.tab = match action {
+                    Action::NextTab => (tab + 1) % n,
+                    Action::PrevTab => (tab + n - 1) % n,
+                    Action::Tab(d) => usize::from(d).clamp(1, n) - 1,
+                    _ => tab,
+                };
+                // The new tab opens at its top, its first item selected.
+                self.list = ListState::default();
+                self.hover = None;
+            }
         }
         // A move through the list: nothing to send.
         Some(Vec::new())

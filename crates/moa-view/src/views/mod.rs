@@ -13,6 +13,7 @@ use crate::line::{Item, Line, Tone};
 use crate::text::{self, SPIN, clean, cut, short_account};
 
 pub mod activity;
+pub mod picture;
 pub mod plan;
 pub mod projects;
 pub mod status;
@@ -20,7 +21,7 @@ pub mod today;
 pub mod tree;
 
 /// What a view keeps in the panel rather than in the brain: the projects opened in the
-/// projects view, and the tab the picture shows.
+/// projects view, and the tab the picture shows (an index into [`picture::TABS`]).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ViewUi {
     pub expanded: BTreeSet<ProjectId>,
@@ -36,8 +37,30 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Today => today::build(data, ctx, ui, width),
         View::Projects => projects::build(data, ctx, ui, width),
         View::Activity => activity::build(data, ctx, ui, width),
-        // The other views come with their builders.
-        _ => Vec::new(),
+        View::Picture => picture::build(data, ctx, ui, width),
+        View::Console | View::Picker | View::EmptySlot | View::Help | View::Setup => {
+            let words = not_yet(view).unwrap_or_default();
+            vec![Line::plain(cut(words, usize::from(width)), Tone::Dim)]
+        }
+    }
+}
+
+/// What a view this build doesn't draw says instead (V15), in the wording of the key that
+/// opens it.
+pub fn not_yet(view: View) -> Option<&'static str> {
+    match view {
+        View::Console => Some("the console isn't in this build yet"),
+        View::Picker => Some("finding a session isn't in this build yet"),
+        View::EmptySlot => Some("the agent spot isn't in this build yet"),
+        View::Help => Some("help isn't in this build yet"),
+        View::Setup => Some("setup isn't in this build yet"),
+        View::Tree
+        | View::Plan
+        | View::Status
+        | View::Today
+        | View::Activity
+        | View::Projects
+        | View::Picture => None,
     }
 }
 
