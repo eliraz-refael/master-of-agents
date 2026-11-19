@@ -161,7 +161,10 @@ pub fn build(data: &Data, ctx: &Ctx, _ui: &ViewUi, width: u16) -> Vec<Line> {
     }
     lines.push(Line::new(Vec::new()));
     lines.push(Line::plain(
-        cut("↵ or click: jump to its session · d done · x drop", width),
+        cut(
+            "↵ or click: jump to its session · d done · x drop · a archive · n/N new",
+            width,
+        ),
         Tone::Dim,
     ));
     lines

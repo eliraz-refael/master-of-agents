@@ -326,13 +326,12 @@ pub fn screen_of(tb: &TempBrain, pane: &str) -> String {
 /// The terminal cell, 1-based as a mouse report gives it, three columns into the row of
 /// `pane` that shows `line_text` (the first cell of a framed view's body). Placed from tmux's
 /// own `#{pane_left}`/`#{pane_top}` and the row's place in `capture-pane`.
+///
+/// Only the framed view's list rows are searched: below the frame's top line and the view's
+/// header line, and above the blank line, the footer and the frame's bottom line. A footer
+/// message or prompt that names `line_text` is never the row clicked.
 #[track_caller]
 pub fn cell_of(tb: &TempBrain, pane: &str, line_text: &str) -> (u32, u32) {
-    let screen = screen_of(tb, pane);
-    let row = screen
-        .lines()
-        .position(|l| l.contains(line_text))
-        .unwrap_or_else(|| panic!("{pane} doesn't show {line_text:?}:\n{screen}"));
     let at = tmux(
         tb,
         &[
@@ -340,11 +339,23 @@ pub fn cell_of(tb: &TempBrain, pane: &str, line_text: &str) -> (u32, u32) {
             "-p",
             "-t",
             pane,
-            "#{pane_left} #{pane_top}",
+            "#{pane_left} #{pane_top} #{pane_height}",
         ],
     );
-    let (left, top) = at.split_once(' ').unwrap();
-    let (left, top): (u32, u32) = (left.parse().unwrap(), top.parse().unwrap());
+    let at: Vec<u32> = at.split(' ').map(|n| n.parse().unwrap()).collect();
+    let [left, top, height] = at[..] else {
+        panic!("{pane}'s place: {at:?}");
+    };
+    // The frame's top line (0) and the header (1); the body ends where the blank line
+    // before the footer begins (`height - 3`).
+    let rows = 2..usize::try_from(height.saturating_sub(3)).unwrap();
+    let screen = screen_of(tb, pane);
+    let row = screen
+        .lines()
+        .enumerate()
+        .find(|(i, l)| rows.contains(i) && l.contains(line_text))
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| panic!("{pane}'s rows don't show {line_text:?}:\n{screen}"));
     (left + 3, top + u32::try_from(row).unwrap() + 1)
 }
 

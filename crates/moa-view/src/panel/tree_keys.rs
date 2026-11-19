@@ -14,8 +14,13 @@ use crate::views::tree;
 
 /// What `r` and `D` say on a node made from a project's name, or on `Loose`: only a real
 /// group can be renamed or deleted, so nothing is asked or sent.
-fn not_a_group(name: &str) -> String {
-    format!("{name} isn't a group")
+fn not_a_group(path: &str) -> String {
+    format!("{} isn't a group", leaf(path))
+}
+
+/// The last part of a tree path: what a group's rename prompt is prefilled with.
+fn leaf(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or_default()
 }
 
 impl Panel {
@@ -52,19 +57,22 @@ impl Panel {
                 let Item::Group(old) = selected? else {
                     return None;
                 };
-                let leaf = old.rsplit('/').next().unwrap_or_default().to_string();
                 if !tree::is_group(data, &old) {
-                    return Some(self.say(&not_a_group(&leaf)));
+                    return Some(self.say(&not_a_group(&old)));
                 }
-                Some(self.ask("rename group:".to_string(), leaf, Ask::RenameGroup { old }))
+                let prefill = leaf(&old).to_string();
+                Some(self.ask(
+                    "rename group:".to_string(),
+                    prefill,
+                    Ask::RenameGroup { old },
+                ))
             }
             Action::DeleteGroup => {
                 let Item::Group(path) = selected? else {
                     return None;
                 };
                 if !tree::is_group(data, &path) {
-                    let leaf = path.rsplit('/').next().unwrap_or_default();
-                    return Some(self.say(&not_a_group(leaf)));
+                    return Some(self.say(&not_a_group(&path)));
                 }
                 Some(vec![Out::Send(Op::GroupRm { path })])
             }

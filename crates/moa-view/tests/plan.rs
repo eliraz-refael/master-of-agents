@@ -283,7 +283,7 @@ fn an_empty_plan_says_so() {
             "Fri 13 Nov",
             "  nothing tracked yet: moa fills this in as sessions report",
             "",
-            "↵ or click: jump to its session · d done · x drop",
+            "↵ or click: jump to its session · d done · x drop · a archive · n/N new",
         ]
     );
     assert_eq!(lines[1].spans[0].tone, Tone::Dim);
