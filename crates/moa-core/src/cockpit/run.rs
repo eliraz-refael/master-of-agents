@@ -45,7 +45,7 @@ const REPLACED: &str = "replaced by a later layout request";
 pub(crate) enum CockpitOp {
     /// Builds layout `name` (the current one when `None`): `layout.apply`, a layout key, or
     /// `goto` (`Select::Leaf`), which first looks for its panel in the cockpit. Only a build
-    /// replaces a waiting build.
+    /// of its kind (a switch, or a `goto`) replaces a waiting one.
     Build {
         name: Option<String>,
         tell: Option<Tell>,
@@ -247,8 +247,11 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     let kind = build_kind(&op);
     let waiting = &mut state.cockpit.waiting;
     match waiting.iter().position(|w| build_kind(w) == kind) {
+        // The replaced one gives up its place: the newer waits at the end, so keys of the two
+        // kinds still run in the order they were pressed.
         Some(i) if kind.is_some() => {
-            let old = std::mem::replace(&mut waiting[i], op);
+            let old = waiting.remove(i).expect("the position is in the queue");
+            waiting.push_back(op);
             fx.extend(told(state, tell_of(&old), Err(OpError(REPLACED.into()))));
         }
         _ => waiting.push_back(op),

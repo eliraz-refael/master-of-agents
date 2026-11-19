@@ -280,15 +280,20 @@ fn a_key_while_down_types_quits_or_tries_again() {
 }
 
 /// After a first connect that failed, the footer says why and that a key tries again; once
-/// reconnecting gave up, it says that.
+/// reconnecting gave up, it says that. A panel moa placed can't start moa with a key, so it
+/// says to run moa first.
 #[test]
 fn the_down_line_is_honest() {
     assert_eq!(
-        down_line(Some("moa couldn't start: no such file")),
+        down_line(Some("moa couldn't start: no such file"), false),
         "moa couldn't start: no such file; press any key to try again"
     );
     assert_eq!(
-        down_line(None),
+        down_line(None, false),
         "moa isn't running: press any key to try again"
+    );
+    assert_eq!(
+        down_line(None, true),
+        "moa isn't running: run moa, then press any key"
     );
 }

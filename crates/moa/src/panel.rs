@@ -29,6 +29,11 @@ fn parse_view(word: &str) -> Result<View, String> {
         .map_err(|_| format!("moa panel: no view called {word}; views: {VIEWS}"))
 }
 
+/// Whether moa placed this panel itself: `MOA_NO_AUTOSTART` is exactly `1`, as moa sets it.
+fn placed_by_moa(mark: Option<&std::ffi::OsStr>) -> bool {
+    mark.is_some_and(|v| v == "1")
+}
+
 /// Runs the panel until it quits. Everything that can refuse does so before the terminal is
 /// taken, as one line.
 pub fn panel(args: &PanelArgs) -> Result<(), String> {
@@ -55,7 +60,7 @@ pub fn panel(args: &PanelArgs) -> Result<(), String> {
     client.client = "panel";
     // A panel moa placed itself never starts moa (it may have been stopped on purpose): its
     // first connect waits for moa as a reconnect does. One started by hand starts it.
-    let placed = std::env::var_os(moa_core::cockpit::NO_AUTOSTART).is_some_and(|v| !v.is_empty());
+    let placed = placed_by_moa(std::env::var_os(moa_core::cockpit::NO_AUTOSTART).as_deref());
     client.autostart = (!placed).then_some(exe);
     client.on_mismatch = OnMismatch::Accept;
     let opts = PanelOptions {
@@ -66,4 +71,27 @@ pub fn panel(args: &PanelArgs) -> Result<(), String> {
         tz: TimeZone::system(),
     };
     runtime()?.block_on(run(opts))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::placed_by_moa;
+
+    /// `MOA_NO_AUTOSTART` marks a panel moa placed only when it is exactly `1`.
+    #[test]
+    fn only_exactly_1_marks_a_placed_panel() {
+        assert!(placed_by_moa(Some(OsStr::new("1"))));
+        for v in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("yes"),
+            Some("1 "),
+            Some("11"),
+        ] {
+            assert!(!placed_by_moa(v.map(OsStr::new)), "{v:?}");
+        }
+    }
 }

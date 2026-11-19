@@ -68,6 +68,8 @@ const MISMATCH: &str = "this panel is from another build of moa; close it and ru
 const TRYING: &str = "moa isn't running; trying again…";
 /// The footer once reconnecting has given up.
 const GAVE_UP: &str = "moa isn't running: press any key to try again";
+/// A panel moa placed gave up: a key can't start moa for it (L15), so it says to run moa.
+const PLACED_GAVE_UP: &str = "moa isn't running: run moa, then press any key";
 /// The footer for an op sent while the first connect is under way.
 const CONNECTING: &str = "not connected to moa yet; try again in a moment";
 
@@ -125,11 +127,13 @@ pub fn down_key(panel: &Panel, key: Key) -> DownKey {
 }
 
 /// The footer while the panel waits for a key to try again: why the first connect failed,
-/// else that reconnecting gave up.
-pub fn down_line(why: Option<&str>) -> String {
-    match why {
-        Some(why) => format!("{why}; press any key to try again"),
-        None => GAVE_UP.to_string(),
+/// else that reconnecting gave up. A panel moa `placed` can't start moa, so it says to run
+/// moa first.
+pub fn down_line(why: Option<&str>, placed: bool) -> String {
+    match (why, placed) {
+        (Some(why), _) => format!("{why}; press any key to try again"),
+        (None, false) => GAVE_UP.to_string(),
+        (None, true) => PLACED_GAVE_UP.to_string(),
     }
 }
 
@@ -492,7 +496,7 @@ impl Loop {
         match &self.link {
             Link::Up { .. } | Link::Connecting { .. } => None,
             Link::Waiting { .. } => Some(TRYING.to_string()),
-            Link::Down(why) => Some(down_line(why.as_deref())),
+            Link::Down(why) => Some(down_line(why.as_deref(), self.placed())),
             Link::Mismatch => Some(MISMATCH.to_string()),
         }
     }
@@ -642,6 +646,11 @@ impl Loop {
         true
     }
 
+    /// Whether moa placed this panel itself: it has no way to start moa (L15).
+    fn placed(&self) -> bool {
+        self.opts.client.autostart.is_none()
+    }
+
     /// Sleeps the `waited`th delay before trying again, or gives up when there are no more.
     fn wait(&mut self, waited: usize) {
         match self.delays.get(waited) {
@@ -654,7 +663,7 @@ impl Loop {
             }
             None => {
                 self.link = Link::Down(None);
-                self.panel.note(GAVE_UP);
+                self.panel.note(&down_line(None, self.placed()));
             }
         }
     }
@@ -709,7 +718,7 @@ impl Loop {
                 // The first connect, which could start the daemon, says why it couldn't and
                 // that a key tries again. One that couldn't (a panel moa placed) waits for the
                 // daemon as a reconnect does.
-                self.panel.note(&down_line(Some(&line)));
+                self.panel.note(&down_line(Some(&line), self.placed()));
                 self.link = Link::Down(Some(line));
             }
             Err(Failed::Down(_)) => self.wait(waited),

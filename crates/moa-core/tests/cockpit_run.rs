@@ -919,3 +919,32 @@ fn the_goto_keys_say_where_they_went() {
         assert_eq!(notices(&fx), [format!("moa: {k}")], "{k}");
     }
 }
+
+/// A replaced build gives up its place: the newer one waits at the end, so keys of the two
+/// kinds still run in the order they were pressed.
+#[test]
+fn keys_keep_their_order() {
+    let mut st = up();
+    let first = the_listing(&key(&mut st, "layout-1"));
+    for k in ["tree", "layout-2"] {
+        assert!(queries(&key(&mut st, k)).is_empty(), "{k}");
+    }
+    let fx = key(&mut st, "console");
+    assert_eq!(notices(&fx), ["moa: replaced by a later layout request"]);
+    // `focus` first, as it was pressed after the goto `console` replaced.
+    let (n, _) = the_chain(&feed(
+        &mut st,
+        answer(first, lists(&shell_and_parked(), true)),
+    ));
+    let next = the_listing(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    let (n, _) = the_chain(&feed(
+        &mut st,
+        answer(next, lists(&shell_and_parked(), true)),
+    ));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(notices(&fx), ["moa: layout focus applied"]);
+    let next = the_listing(&fx);
+    let (n, _) = the_chain(&feed(&mut st, answer(next, lists(&focus_built(), true))));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(notices(&fx), ["moa: console"]);
+}
