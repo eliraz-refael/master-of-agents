@@ -197,7 +197,8 @@ pub(crate) fn gone(state: &mut State, conn: ConnId) -> Option<Effect> {
     publish_panels(state)
 }
 
-fn publish_panels(state: &mut State) -> Option<Effect> {
+/// `panels`, when its rows changed.
+pub(crate) fn publish_panels(state: &mut State) -> Option<Effect> {
     state
         .publish_changed(Topic::Panels)
         .map(|m| Effect::Publish(Publish::Model(m)))

@@ -332,7 +332,9 @@ fn layout_apply_lists_then_builds_then_remembers() {
             _ => None,
         })
         .collect();
-    assert!(models.len() >= 2, "layouts, then panels: {fx:?}");
+    // `layouts`; `panels` only when a panel's view changed (none here, see
+    // `panels_publish_only_when_a_view_changed`).
+    assert_eq!(models.len(), 1, "{fx:?}");
     assert_eq!(
         models[0].topics[&Topic::Layouts]["focus"]["current"],
         serde_json::json!(true)
@@ -811,14 +813,13 @@ fn a_goto_and_a_layout_key_never_replace_each_other() {
             "{k}: {fx:?}"
         );
     }
-    // Each kind replaces its own.
-    for k in ["layout-3", "console"] {
+    // Each kind replaces its own; a goto is told a later key took its place.
+    for (k, said) in [
+        ("layout-3", "moa: replaced by a later layout request"),
+        ("console", "moa: replaced by a later key"),
+    ] {
         let fx = key(&mut st, k);
-        assert_eq!(
-            notices(&fx),
-            ["moa: replaced by a later layout request"],
-            "{k}"
-        );
+        assert_eq!(notices(&fx), [said], "{k}");
     }
     // In order: `classic`, then the goto to the console.
     let (n, _) = the_chain(&feed(
@@ -930,7 +931,7 @@ fn keys_keep_their_order() {
         assert!(queries(&key(&mut st, k)).is_empty(), "{k}");
     }
     let fx = key(&mut st, "console");
-    assert_eq!(notices(&fx), ["moa: replaced by a later layout request"]);
+    assert_eq!(notices(&fx), ["moa: replaced by a later key"]);
     // `focus` first, as it was pressed after the goto `console` replaced.
     let (n, _) = the_chain(&feed(
         &mut st,
@@ -947,4 +948,116 @@ fn keys_keep_their_order() {
     let (n, _) = the_chain(&feed(&mut st, answer(next, lists(&focus_built(), true))));
     let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
     assert_eq!(notices(&fx), ["moa: console"]);
+}
+
+/// A build whose brain commit fails still built the layout: the reply says so, and the log
+/// says moa couldn't remember it.
+#[test]
+fn a_layout_built_but_not_saved_is_applied_all_the_same() {
+    let mut st = up();
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::default(),
+            refuse_writes: Some(moa_core::effect::RefuseWrites {
+                until: UtcMs(i64::MAX),
+                reason: "the disk is full".into(),
+            }),
+        },
+        now(),
+    );
+    let n = the_listing(&apply(&mut st, 1, "focus"));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&shell_and_parked(), true))));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(reply_text(&fx), Ok("layout focus applied".into()));
+    assert_eq!(st.meta(CURRENT_KEY), None);
+    assert_eq!(
+        logs(&fx),
+        [(
+            LogLevel::Warn,
+            "moa couldn't remember focus as the current layout: moa can't save right now \
+             (the disk is full); nothing was changed"
+                .to_string()
+        )]
+    );
+}
+
+/// An operation whose own listing tmux refused says so plainly, and logs it: the link is
+/// still up, so it isn't "lost".
+#[test]
+fn a_listing_tmux_refused_is_said_plainly() {
+    let mut st = up();
+    let n = the_listing(&apply(&mut st, 1, "focus"));
+    let fx = feed(
+        &mut st,
+        answer(
+            n,
+            vec![
+                Ok(vec!["S $0 moa".into()]),
+                Err("server exited unexpectedly".into()),
+                Ok(Vec::new()),
+            ],
+        ),
+    );
+    let said = "moa couldn't read the terminal's state: server exited unexpectedly; try again";
+    assert_eq!(reply_text(&fx), Err(said.into()));
+    assert_eq!(logs(&fx), [(LogLevel::Warn, said.to_string())]);
+    assert!(queries(&fx).is_empty());
+}
+
+/// L12: every listing that shows a stopped panel running again forgets it, so its next
+/// death is logged too.
+#[test]
+fn each_death_of_a_panel_is_logged() {
+    let mut st = up();
+    let mut dead = cockpit_built();
+    dead[3] = pane(7, 1, 0, true, "plan", true);
+    let mut alive = cockpit_built();
+    alive[3] = shown(7, "plan");
+    let mut said = Vec::new();
+    for panes in [&dead, &alive, &dead] {
+        feed(&mut st, TmuxIn::Notification(Notification::SessionsChanged));
+        feed(&mut st, refresh(lists(panes, false)));
+        if panes[3].ends_with(" 1 plan") {
+            said.extend(logs(&message(&mut st, "moa:hook pane-died %7")));
+        }
+    }
+    let line = (LogLevel::Info, "panel plan in %7 stopped".to_string());
+    assert_eq!(said, [line.clone(), line]);
+}
+
+/// `panels` is published when a build gives a registered panel another view, and only then.
+#[test]
+fn panels_publish_only_when_a_view_changed() {
+    let models = |fx: &[Effect]| {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::Publish(Publish::Model(_))))
+            .count()
+    };
+    let mut st = up();
+    send(
+        &mut st,
+        9,
+        Op::UiPanel {
+            pane: Some("%2".into()),
+            view: Some(View::Tree),
+        },
+    );
+    // `focus` keeps the tree a tree: only the commit's model.
+    let n = the_listing(&apply(&mut st, 1, "focus"));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&cockpit_built(), true))));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(models(&fx), 1, "{fx:?}");
+    // `triage` makes it the status panel: its row changes, and `panels` says so.
+    let n = the_listing(&apply(&mut st, 2, "triage"));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&cockpit_built(), true))));
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(models(&fx), 2, "{fx:?}");
+    let Some(Effect::Publish(Publish::Model(m))) = fx
+        .iter()
+        .rfind(|e| matches!(e, Effect::Publish(Publish::Model(_))))
+    else {
+        panic!("{fx:?}")
+    };
+    assert_eq!(m.topics[&Topic::Panels]["c1"]["view"], "status");
 }

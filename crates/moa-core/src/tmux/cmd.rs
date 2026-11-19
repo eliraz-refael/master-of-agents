@@ -226,7 +226,7 @@ impl Cmd {
             },
             // `resize-window` leaves the window's size fixed; unsetting it hands the window
             // back to the user's terminals. moa never sets it otherwise.
-            "set-option" if self.args.iter().any(|a| a == "window-size") => {
+            "set-option" if option_name(&self.args) == Some("window-size") => {
                 match self.args.as_slice() {
                     [w, u, t, pane, name]
                         if w == "-w"
@@ -256,6 +256,22 @@ impl Cmd {
             _ => Ok(()),
         }
     }
+}
+
+/// The option a `set-option` names: its first word that is no flag and no `-t`'s target. A
+/// value after it (an agent's title) is never taken for it.
+fn option_name(args: &[String]) -> Option<&str> {
+    let mut words = args.iter();
+    while let Some(w) = words.next() {
+        match w.as_str() {
+            "-t" => {
+                words.next();
+            }
+            w if w.starts_with('-') => {}
+            w => return Some(w),
+        }
+    }
+    None
 }
 
 /// Both are pane ids.

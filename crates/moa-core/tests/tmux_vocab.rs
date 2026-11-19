@@ -585,6 +585,24 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
         cmd("set-option", &["-w", "-u", "-t", "%3", "window-size"]).check(),
         Ok(())
     );
+    // Only the option named `window-size` is held to that shape: a value that reads
+    // `window-size` (an agent titled so) is any other option's.
+    assert_eq!(
+        cmd(
+            "set-option",
+            &["-p", "-t", "%5", "@moa_label", "window-size"]
+        )
+        .check(),
+        Ok(())
+    );
+    assert_eq!(
+        cmd(
+            "set-option",
+            &["-p", "-t", "%5", "@moa_label", "● window-size"]
+        )
+        .check(),
+        Ok(())
+    );
     let window_size = "window-size is only unset, on a tab id's window";
     for args in [
         &["-w", "-t", "%3", "window-size", "manual"][..],

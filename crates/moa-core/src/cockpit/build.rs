@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use super::Vacated;
 use super::assign::view_of;
 use super::scene::{AGENT, HIDDEN, MOA, PaneAt, Place, Role, Scene};
 use crate::layout::{Axis, Leaf, Node, Size};
@@ -275,8 +276,12 @@ pub(crate) fn chain(
                 .expect("a window holds a pane");
             cmds.push(swap(keeper, c.pane));
             // 3. C now sits where the keeper was. In the wrong session, it goes home at
-            // once, so a chain that stops later never leaves a stranger in `_moa`.
-            if !assigned.contains(&c.pane) && session_of(at(keeper).place) != Some(home_of(c)) {
+            // once, so a chain that stops later never leaves a stranger in `_moa`. An agent
+            // or a tagged stranger goes home wherever it landed: it loses its cockpit tags,
+            // as the queue records (L17), and takes a tab of its own.
+            let untags = c.agent().is_some() || (c.role == Role::Other && c.tagged);
+            let elsewhere = session_of(at(keeper).place) != Some(home_of(c));
+            if !assigned.contains(&c.pane) && (elsewhere || untags) {
                 cmds.extend(go_home(c, title));
             }
             swapped = Some(c.pane);
@@ -342,12 +347,15 @@ pub(crate) fn swap_in(
 /// L11's vacate of the spot's agent in `spot`: a spare empty slot swapped in and the agent
 /// killed; else the spot respawned in place as the empty slot (`respawn` is the rest of
 /// `respawn-pane -k -t <spot>`), untagged as a session and tagged as the slot.
-pub(crate) fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Cmd {
+pub(crate) fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Vacated {
     let spare = scene.panes.iter().find(|at| {
         at.role == Role::Panel(View::EmptySlot) && at.place == Place::Hidden && !at.dead
     });
     if let Some(slot) = spare {
-        return Cmd::chain(vec![swap(slot.pane, spot), kill_pane(spot)]);
+        return Vacated {
+            chain: Cmd::chain(vec![swap(slot.pane, spot), kill_pane(spot)]),
+            respawned: false,
+        };
     }
     let mut cmds = vec![
         Cmd::new("respawn-pane")
@@ -360,5 +368,66 @@ pub(crate) fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Cmd {
     cmds.push(unset_pane_option(spot, "@moa_term"));
     cmds.extend(panel_tags(spot, View::EmptySlot));
     cmds.extend(keep_on_exit(spot));
-    Cmd::chain(cmds)
+    Vacated {
+        chain: Cmd::chain(cmds),
+        respawned: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tmux::ids::WindowId;
+
+    fn at(pane: u32, window: u32, place: Place, role: Role, tagged: bool) -> PaneAt {
+        PaneAt {
+            pane: PaneId(pane),
+            window: WindowId(window),
+            place,
+            dead: false,
+            role,
+            tagged,
+        }
+    }
+
+    fn lines(cmd: &Cmd) -> Vec<String> {
+        cmd.parts()
+            .iter()
+            .map(|c| format!("{} {}", c.name(), c.argv().join(" ")))
+            .collect()
+    }
+
+    /// Step 3: the cockpit pane the keeper swaps out loses its cockpit tags and gets its tab,
+    /// even when the keeper came from session `moa` (its home already). The chain then does
+    /// what the queue records: the agent's `@moa_view` unset (L17). `plan` places keepers
+    /// only in the cockpit or `_moa` today; this keeps the chain right if that changes.
+    #[test]
+    fn an_agent_swapped_out_of_the_cockpit_always_leaves_its_tags() {
+        let id = SessionId(uuid::Uuid::from_u128(1));
+        let scene = Scene {
+            panes: vec![
+                at(1, 1, Place::Cockpit, Role::Spot(Some(id)), true),
+                at(2, 2, Place::Moa, Role::Panel(View::Tree), true),
+            ],
+            moa_session: true,
+            cockpit: Some(WindowId(1)),
+            users: true,
+        };
+        let layout = Node::Leaf {
+            leaf: Leaf::Panel(View::Tree),
+            size: None,
+        };
+        let title = |_| "Lantern".to_string();
+        let leaves = [(Leaf::Panel(View::Tree), PaneId(2))];
+        let lines = lines(&chain(&scene, &layout, &leaves, &title));
+        assert_eq!(
+            lines[..4],
+            [
+                "swap-pane -d -s %2 -t %1",
+                "break-pane -d -s %1 -t =moa: -n Lantern",
+                "set-option -p -u -t %1 @moa_view",
+                "set-option -p -u -t %1 @moa_label",
+            ]
+        );
+    }
 }

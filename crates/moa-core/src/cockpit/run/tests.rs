@@ -291,9 +291,12 @@ fn a_vacate_leaves_the_spot_whole() {
     );
     assert!(lines.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
     assert_eq!(st.panel_starts, 0);
+    assert_eq!(st.tmux.topology.moa_session(PaneId(9)), Some(sid(1)));
     feed(&mut st, answer(n, vec![Ok(Vec::new())]));
     assert_eq!(st.panel_starts, 1);
     assert_eq!(st.tmux.topology.view_of(PaneId(9)), Some("empty-slot"));
+    // No longer a session's tab, at once: the chain took its session tag off.
+    assert_eq!(st.tmux.topology.moa_session(PaneId(9)), None);
 
     let mut st = up();
     let n = the_listing(&vacate_of(&mut st, 9));

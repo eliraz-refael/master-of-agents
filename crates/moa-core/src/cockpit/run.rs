@@ -39,6 +39,8 @@ use crate::tmux::topology::refresh_cmds;
 pub(crate) const LOST: &str = "moa lost its terminal; try again";
 /// A waiting build a newer one took the place of.
 const REPLACED: &str = "replaced by a later layout request";
+/// A waiting `goto` a newer one took the place of.
+const REPLACED_GOTO: &str = "replaced by a later key";
 
 /// One operation on the cockpit.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -117,6 +119,8 @@ enum Step {
 struct Then {
     /// The `@moa_view`s it sets (`None`: unsets), recorded at once (L17).
     tags: Vec<(PaneId, Option<&'static str>)>,
+    /// The panes it takes `@moa_session` off, recorded at once too.
+    untagged: Vec<PaneId>,
     /// A build's live panels given another view: their rows change.
     views: Option<Vec<(PaneId, View)>>,
     /// The panels it starts in place.
@@ -252,7 +256,11 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
         Some(i) if kind.is_some() => {
             let old = waiting.remove(i).expect("the position is in the queue");
             waiting.push_back(op);
-            fx.extend(told(state, tell_of(&old), Err(OpError(REPLACED.into()))));
+            let why = match kind {
+                Some(true) => REPLACED_GOTO,
+                _ => REPLACED,
+            };
+            fx.extend(told(state, tell_of(&old), Err(OpError(why.into()))));
         }
         _ => waiting.push_back(op),
     }
@@ -385,16 +393,33 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         return Vec::new();
     }
     if !state.tmux.scene_listed(&answers) {
-        return lost_now(state);
+        let why = answers
+            .iter()
+            .find_map(|a| a.as_ref().err())
+            .map_or("tmux's answer didn't parse", |e| first_line(e));
+        let text = format!("moa couldn't read the terminal's state: {why}; try again");
+        let mut fx = vec![log(LogLevel::Warn, text.clone())];
+        let said = match &state.cockpit.in_flight {
+            // An operation nobody asked for has the log line only.
+            Some((_, op)) if tell_of(op).is_some() => refused(op, text),
+            _ => Said::Nothing,
+        };
+        fx.extend(finish(state, said));
+        return fx;
     }
-    let topology = &state.tmux.topology;
-    state.cockpit.stopped.retain(|p| topology.is_dead(*p));
+    forget_running(state);
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     let Some((_, op)) = state.cockpit.in_flight.clone() else {
         return Vec::new();
     };
     let next = decide(state, &op, &scene);
     act(state, seq, next)
+}
+
+/// L9: what the lazy build looks for, a user's terminal and a cockpit (in session `moa`)
+/// with no panel in it.
+fn wants_lazy(scene: &Scene) -> bool {
+    scene.moa_session && scene.users && !scene.in_cockpit().any(|at| at.tagged)
 }
 
 /// What `op` does next in `scene`.
@@ -421,6 +446,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                             focus_cmds(pane).to_vec(),
                             Then {
                                 tags: Vec::new(),
+                                untagged: Vec::new(),
                                 views: None,
                                 starts: 0,
                                 layout,
@@ -457,8 +483,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             build(state, op, scene, layout, &node, None)
         }
         CockpitOp::Lazy => {
-            let built = scene.in_cockpit().any(|at| at.tagged);
-            if !planned && (!scene.moa_session || !scene.users || built) {
+            if !planned && !wants_lazy(scene) {
                 return Next::Done(Said::Nothing);
             }
             let (layout, node) = current(state);
@@ -475,29 +500,30 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let Some(at) = scene.pane(*pane) else {
                 return Next::Done(Said::Nothing);
             };
-            let then = |tags, starts| Then {
+            let then = |tags, untagged, starts| Then {
                 tags,
+                untagged,
                 views: None,
                 starts,
                 layout: String::new(),
                 ok: Said::Nothing,
             };
             if matches!(at.role, Role::Spot(Some(_))) {
-                let chain = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
-                // In place, the spot becomes the empty slot; a spare one swapped in already is.
-                let respawned = chain.parts()[0].name() == "respawn-pane";
-                let tags = match respawned {
-                    true => vec![(*pane, Some(View::EmptySlot.word()))],
-                    false => Vec::new(),
+                let v = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
+                // In place, the spot becomes the empty slot, no longer a session's tab; a spare
+                // one swapped in already is the slot, and the agent's pane is gone.
+                let then = match v.respawned {
+                    true => then(vec![(*pane, Some(View::EmptySlot.word()))], vec![*pane], 1),
+                    false => then(Vec::new(), Vec::new(), 0),
                 };
-                Next::Chain(chain.parts().to_vec(), then(tags, u32::from(respawned)))
+                Next::Chain(v.chain.parts().to_vec(), then)
             } else if at.agent().is_none() {
                 // Not an agent's any more: its chain already ran (a vacate queued again after
                 // a lost link or a reload finds the empty slot it left), or the pane is
                 // someone else's. Nothing is killed.
                 Next::Done(Said::Nothing)
             } else {
-                Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), 0))
+                Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), Vec::new(), 0))
             }
         }
     }
@@ -583,6 +609,7 @@ fn build(
         cmds,
         Then {
             tags,
+            untagged: Vec::new(),
             views: Some(b.views),
             starts: 0,
             layout,
@@ -681,6 +708,9 @@ pub(crate) fn chain_answered(
             let said = match answers.into_iter().next() {
                 Some(Ok(_)) => {
                     state.tmux.views_set(&then.tags);
+                    for pane in &then.untagged {
+                        state.tmux.untag_sent(*pane);
+                    }
                     state.panel_starts += then.starts;
                     let said = match then.ok {
                         Said::Applied(layout) => {
@@ -715,23 +745,26 @@ fn views_given(state: &mut State, views: &[(PaneId, View)]) -> Option<Effect> {
             }
         }
     }
-    state
-        .publish(&BTreeSet::from([Topic::Panels]))
-        .map(|m| Effect::Publish(Publish::Model(m)))
+    crate::panel::publish_panels(state)
 }
 
 /// `layout.apply`'s layout was built: it becomes the brain's current one, with a `ui`
-/// event, then the reply. A broken `layouts.json` is said too (L2).
+/// event, then the reply. A commit the store refuses is logged; the reply still says the
+/// layout was applied, since it was. A broken `layouts.json` is said too (L2).
 fn applied(state: &mut State, now: &Now, layout: String) -> (Vec<Effect>, Said) {
     let mut tx = Tx::new(now);
     let change = Change::Meta {
         key: CURRENT_KEY.to_string(),
         value: Some(layout.clone()),
     };
-    if let Err(e) = tx.ui(state, vec![change], format!("layout → {layout}")) {
-        return (Vec::new(), Said::Reply(Err(e)));
-    }
-    let fx = post_commit(state, tx);
+    // tmux built it whatever the brain says: a refused commit is logged, not said.
+    let fx = match tx.ui(state, vec![change], format!("layout → {layout}")) {
+        Ok(()) => post_commit(state, tx),
+        Err(OpError(e)) => vec![log(
+            LogLevel::Warn,
+            format!("moa couldn't remember {layout} as the current layout: {e}"),
+        )],
+    };
     let mut text = format!("layout {layout} applied");
     if let Some(why) = &state.layouts.file_error {
         text.push_str(&format!("\nlayouts.json has an error: {why}"));
@@ -802,15 +835,24 @@ pub(crate) fn linked(state: &mut State, another_server: bool) -> Vec<Effect> {
     pump(state)
 }
 
-/// The link's own listing came back. The first after a link-up queues the lazy build when
+/// The panels logged as stopped that a listing shows running again: their next death is
+/// logged too (L12).
+fn forget_running(state: &mut State) {
+    let topology = &state.tmux.topology;
+    state.cockpit.stopped.retain(|p| topology.is_dead(*p));
+}
+
+/// The link's own listing came back: the stopped panels it shows running are forgotten.
+/// The first after a link-up queues the lazy build when
 /// it shows what the build looks for, a user's terminal and a cockpit with no panel in it;
 /// the build then takes a listing of its own, as every operation does (L17).
 pub(crate) fn link_listed(state: &mut State) -> Vec<Effect> {
+    forget_running(state);
     if !std::mem::take(&mut state.cockpit.lazy_armed) {
         return Vec::new();
     }
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
-    if !scene.moa_session || !scene.users || scene.in_cockpit().any(|at| at.tagged) {
+    if !wants_lazy(&scene) {
         return Vec::new();
     }
     queue(state, CockpitOp::Lazy)
