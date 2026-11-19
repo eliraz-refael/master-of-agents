@@ -155,3 +155,24 @@ pub fn hint(view: View, adopted_selected: bool) -> &'static str {
         View::Console | View::Picker | View::EmptySlot | View::Help | View::Setup => "",
     }
 }
+
+/// The picture's key hints for the tab it shows: the sessions and status tabs keep their
+/// views' own hints, as the spike's did; the others name the tab keys, the keys that work on
+/// that tab's rows, and `q`.
+pub fn picture_hint(tab: View, adopted_selected: bool) -> &'static str {
+    match tab {
+        View::Tree | View::Status => hint(tab, adopted_selected),
+        View::Plan => "1-6/tab · j/k · ⏎ jump · d done · x drop · a archive · n/N new · q",
+        View::Today => {
+            "1-6/tab · j/k · ⏎ jump · y/n suggestion · a archive · x close · n/N new · q"
+        }
+        View::Projects => "1-6/tab · j/k · ⏎ expand/jump · a archive · x close · n/N new · q",
+        View::Activity => "1-6/tab · j/k scroll · q",
+        View::Picture
+        | View::Console
+        | View::Picker
+        | View::EmptySlot
+        | View::Help
+        | View::Setup => hint(View::Picture, adopted_selected),
+    }
+}

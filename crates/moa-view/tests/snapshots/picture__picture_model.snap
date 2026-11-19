@@ -1,0 +1,29 @@
+---
+source: crates/moa-view/tests/picture.rs
+expression: debug_screen(&t.screen())
+---
+tabs: [Plan]   Today    Projects    Sessions    Activity    Status 
+brand: [brain*]moa ⠸
+  [head*]Fri 13 Nov · ✓ 1 done today
+  
+  [group*]Lantern ───────────────────────────────── 2 on you · 1 with agents · 1 waiting
+> [warn*]  ! Fix login: the session needs you  ‹session›
+  [p0*]  ★ P0 Fix the login loop ⟨[late*] 1d overdue ⟩  ‹task›
+  [ok]  ⠸ Write the README  (agent working) ⟨[today*] today ⟩  ‹task›
+  [dim]  ◷ Wait for review  (design team) ⟨[soon]tomorrow⟩  ‹task›
+  
+  [group*]Kite ──────────────────────────────────────────────────── 2 on you · 1 waiting
+  [text]  ▸ P1 Pick a cover ⟨[soon]Tue⟩  ‹task›
+  [text]  ▸ Write the back-cover text for both the paperback and the e-book editions  ‹task›
+  [dim]  ◷ Order copies  (someone else) ⟨[dim]3 Dec⟩  ‹task›
+  
+  [head*]- ────────────────────────────────────────────────────────────────── 1 waiting
+rule: [frame]─[dim] activity [frame]─────────────────────────────────────────────────────────────────────
+strip: [you]09:09  added to today: "Fix the login loop"
+strip: [dim]09:16  linked session 5e550002 → Lantern
+strip: [you]09:27  task "Proofread chapter 1": active → done
+strip: [brain]09:40  suggests #1: Archive 3 ended sessions?
+strip: [dim]09:48  Release notes asks: Ship it today?
+strip: [you]09:56  project Beacon: active → idea
+strip: [dim*!]09:59 ✦Fix login needs you
+footer: [dim]1-6/tab · j/k · ⏎ jump · d done · x drop · a archive · n/N new · q

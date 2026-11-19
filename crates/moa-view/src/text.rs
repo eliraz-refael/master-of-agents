@@ -220,19 +220,24 @@ pub fn ago(from: Option<UtcMs>, now: UtcMs) -> String {
     }
 }
 
-/// The first moment at or after `now` when [`ago`] of `from` reads differently.
+/// The first moment after `now` when [`ago`] of `from` reads differently. Worked out exactly
+/// (in `i128`), so it is always after `now`; a change past the end of time is `i64::MAX`.
 pub fn next_ago_change(from: UtcMs, now: UtcMs) -> UtcMs {
-    let ms = now.0.saturating_sub(from.0);
-    let step = if ms < MINUTE {
-        return UtcMs(from.0.saturating_add(MINUTE));
-    } else if ms < HOUR {
-        MINUTE
-    } else if ms < DAY {
-        HOUR
+    let (from, now) = (i128::from(from.0), i128::from(now.0));
+    let ms = now - from;
+    let next = if ms < i128::from(MINUTE) {
+        from + i128::from(MINUTE)
     } else {
-        DAY
+        let step = i128::from(if ms < i128::from(HOUR) {
+            MINUTE
+        } else if ms < i128::from(DAY) {
+            HOUR
+        } else {
+            DAY
+        });
+        from + (ms / step + 1) * step
     };
-    UtcMs(from.0.saturating_add((ms / step + 1).saturating_mul(step)))
+    UtcMs(i64::try_from(next).unwrap_or(i64::MAX))
 }
 
 /// Days from `today` to `due`: negative when it is overdue.

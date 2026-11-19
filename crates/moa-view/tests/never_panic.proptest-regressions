@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8e1f802afa40e9e8fa886ae58528c6203e30b0e3ce92ecf2f4312e7b44ea09f1 # shrinks to data = Data { sessions: {SessionId(5e550000-0000-4000-8000-000000000000): SessionRow { session: Session { id: SessionId(5e550000-0000-4000-8000-000000000000), agent_kind: Claude, account: None, cwd: None, start_cwd: None, project_id: None, title: None, title_locked: false, group_path: None, lifecycle: Live, activity: Working, activity_at: None, activity_why: None, last_prompt: None, last_turn_end_at: None, seen_at: None, asleep_at: None, archived_at: None, location: Here, resume_failed: false, created_at: UtcMs(1760522400000), last_seen_at: Some(UtcMs(-9223372036854775808)) }, handle: "", project: None, display_state: Waiting, why: "", adopted: false }}, groups: {}, projects: {}, tasks: {}, suggestions: {}, activity: {}, brain: None, panels: {}, unreadable: {} }, ctx = Ctx { now: UtcMs(1760522400000), today: 2025-10-15, tz: TimeZone(Posix(EST5EDT,M3.2.0,M11.1.0)), tick: 0, home: "/h", is_dir: 0x1024a92d4 }, size = Size { w: 4, h: 7 }, inputs = [Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter), Key(Enter)]

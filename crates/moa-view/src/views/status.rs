@@ -78,7 +78,7 @@ fn heading(state: DisplayState, count: usize, width: usize) -> Line {
     } else {
         look(state)
     };
-    Line::new(vec![Span { text, tone, bold }])
+    Line::new(vec![Span::styled(text, tone, bold)])
 }
 
 /// One session (the spike's `status_line`): its glyph, its title, its group's last part in 14
@@ -110,11 +110,7 @@ fn session_line(row: &SessionRow, ctx: &Ctx, width: usize) -> Line {
         text.push_str(&why);
     }
     let (tone, bold) = look(row.display_state);
-    let span = Span {
-        text: cut(&text, width),
-        tone,
-        bold,
-    };
+    let span = Span::styled(cut(&text, width), tone, bold);
     let mut line = Line::new(vec![span]).with_item(Item::Session(s.id));
     line.animated = animates(row.display_state);
     line.changes_at = s.activity_at.map(|at| text::next_ago_change(at, ctx.now));

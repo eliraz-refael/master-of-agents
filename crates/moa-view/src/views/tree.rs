@@ -245,7 +245,7 @@ fn walk(node: &Node, prefix: &str, path: &str, depth: usize, cx: &Cx, out: &mut 
         let text = format!("{prefix}{branch}{}", session_text(row, left, cx.ctx));
         let text = cut(&text, cx.width);
         let (tone, bold) = session_tone(row.display_state);
-        let span = Span { text, tone, bold };
+        let span = Span::styled(text, tone, bold);
         let mut line = Line::new(vec![span]).with_item(Item::Session(row.session.id));
         line.animated = animates(row.display_state);
         line.changes_at = row
