@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ◷ big picture ──────────────────────────────────────────╮
+│ Fri 13 Nov · ✓ 1 done today                              │
+│                                                          │
+│ Lantern ────────── 2 on you · 1 with agents · 1 waiting  │
+│   ! Fix login: the session needs you                     │
+│   ★ P0 Fix the login loop                     1d overdue │
+│   ⠸ Write the README  (agent working)              today │
+│   ◷ Wait for review  (design team)               tomorrow│
+│                                                          │
+│ Kite ───────────────────────────── 2 on you · 1 waiting  │
+│   ▸ P1 Pick a cover                                   Tue│
+│   ▸ Write the back-cover text for both the paperback and │
+│     the e-book editions                                  │
+│                                                          │
+│ ⏎/click jump · d done · x drop                           │
+╰──────────────────────────────────────────────────────────╯

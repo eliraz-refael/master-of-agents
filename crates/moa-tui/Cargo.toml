@@ -1,0 +1,23 @@
+[package]
+name = "moa-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+moa-view = { path = "../moa-view" }
+moa-core = { path = "../moa-core" }
+jiff.workspace = true
+unicode-segmentation.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+# The tests draw the Lantern fixture.
+moa-view = { path = "../moa-view", features = ["fixture"] }
+
+[lints]
+workspace = true

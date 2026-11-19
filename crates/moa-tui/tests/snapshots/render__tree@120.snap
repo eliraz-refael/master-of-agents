@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ▤ sessions ─────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ 10 sessions · 8 live · 1 asleep · ⠸ 1 working · 1 waiting on you                                                     │
+│ ▾ Private  8 · 7 live ⠸                                                                                              │
+│ ├─ ▾ Lantern  3 · 3 live ⠸                                                                                           │
+│ │  ├─ ! Fix login                                                                   acct- ~/private/lantern        1m│
+│ │  ├─ ⠸ Rust scaffold                                                               acct- ~/private/lantern        1h│
+│ │  └─ ◌ Import the whole archive of old notes into the new format                   acct- ~/private                6h│
+│ ├─ ▾ Kite  3 · 2 live                                                                                                │
+│ │  ├─ ? Release notes                                                               acct- ~/private/kite           2h│
+│ │  ├─ ✓ 設計レビュー                                                                acct- ~/private/kite           3h│
+│ │  └─ ○ Closed thing 👨                                                             acct- ~/private                9h│
+│ ├─ ▾ Harbor  2 · 2 live                                                                                              │
+│ │  ├─ ● Dev server 👍                                                               acct- ~/private/harbor         4h│
+│                                                                                                                      │
+│ ⏎/click open · n new · + group · m move · r rename · D del group · a archive · x close                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

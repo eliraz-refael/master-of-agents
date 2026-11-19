@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ☀ today ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ TODAY · Fri 13 Nov                                                                                                   │
+│ ▸ Lantern: Fix the login loop  [todo]                                                                                │
+│                                                                                                                      │
+│ WAITING ON YOU                                                                                                       │
+│ ! Fix login [acct-a]  1m                                                                                             │
+│ ? Release notes [acct-a]  2h                                                                                         │
+│ ✓ 設計レビュー [acct-a]  3h                                                                                          │
+│ ● Dev server 👍 [acct-a]  4h                                                                                         │
+│ ✗ Migrate DB [acct-b]  5h                                                                                            │
+│ ● Hand started [acct-a]  7h                                                                                          │
+│                                                                                                                      │
+│ WORKING                                                                                                              │
+│                                                                                                                      │
+│ j/k · ⏎ open · y/n suggestion                                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

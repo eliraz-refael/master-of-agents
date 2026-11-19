@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ▤ sessions ─────────────────────────╮
+│ 10 sessions · 8 live · 1 asleep · ⠸ 1│
+│ ▾ Private  8 · 7 live ⠸              │
+│ ├─ ▾ Lantern  3 · 3 live ⠸           │
+│ │  ├─ ! Fix login                  1m│
+│ │  ├─ ⠸ Rust scaffold              1h│
+│ │  └─ ◌ Import the whole archive   6h│
+│ ├─ ▾ Kite  3 · 2 live                │
+│ │  ├─ ? Release notes              2h│
+│ │  ├─ ✓ 設計レビュー               3h│
+│ │  └─ ○ Closed thing 👨            9h│
+│ ├─ ▾ Harbor  2 · 2 live              │
+│ │  ├─ ● Dev server 👍              4h│
+│                                      │
+│ ⏎/click open · n new · + group · m mo│
+╰──────────────────────────────────────╯

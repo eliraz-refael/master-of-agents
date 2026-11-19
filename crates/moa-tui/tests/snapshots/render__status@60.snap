@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ◉ status ───────────────────────────────────────────────╮
+│ needs you ──────────────────────────────────────────── 1 │
+│ ! Fix login                           Lantern         1m │
+│ asks you ───────────────────────────────────────────── 1 │
+│ ? Release notes                       Kite            2h │
+│ failed ─────────────────────────────────────────────── 1 │
+│ ✗ Migrate DB                          Harbor          5h │
+│ done ───────────────────────────────────────────────── 1 │
+│ ✓ 設計レビュー                        Kite            3h │
+│ working ────────────────────────────────────────────── 1 │
+│ ⠸ Rust scaffold                       Lantern         2m │
+│ quiet ──────────────────────────────────────────────── 1 │
+│ ◌ Import the whole archive of old not Lantern         6h │
+│                                                          │
+│ ⏎/click jump · j/k · Ctrl-a / find                       │
+╰──────────────────────────────────────────────────────────╯
