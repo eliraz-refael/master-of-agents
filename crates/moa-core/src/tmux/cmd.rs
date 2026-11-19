@@ -240,8 +240,19 @@ fn panes(a: &str, b: &str) -> bool {
 
 /// A size `resize-pane` takes: cells (`12`) or a share of the window (`30%`).
 fn is_size(s: &str) -> bool {
-    let digits = s.strip_suffix('%').unwrap_or(s);
-    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+    let (digits, percent) = match s.strip_suffix('%') {
+        Some(digits) => (digits, true),
+        None => (s, false),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    // L1's sizes: cells from 1, a share of the window from 1 to 99 %.
+    match digits.parse::<u16>() {
+        Ok(n) if percent => (1..=99).contains(&n),
+        Ok(n) => n >= 1,
+        Err(_) => false,
+    }
 }
 
 /// `respawn-pane -k -t %A [-c DIR] [-e K=V]… CMD…`: it kills what the pane runs (`-k`), so

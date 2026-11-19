@@ -88,7 +88,8 @@ pub struct LayoutRow {
     pub error: Option<String>,
 }
 
-/// The `layouts` row with key `file`, there while `layouts.json` doesn't parse.
+/// The `layouts` row with key `""` (no layout can be named that), there while
+/// `layouts.json` doesn't parse.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LayoutFileRow {
     pub error: String,
@@ -255,12 +256,17 @@ impl State {
 
     fn layouts_rows(&self) -> BTreeMap<String, Value> {
         let rows = self.layout_rows();
-        let mut by_name = by_key(rows.iter().map(|r| (r.name.clone(), r)));
+        // A hand-written entry named `""` is listed (as broken), but `""` is the file's row.
+        let mut by_name = by_key(
+            rows.iter()
+                .filter(|r| !r.name.is_empty())
+                .map(|r| (r.name.clone(), r)),
+        );
         if let Some(error) = &self.layouts.file_error {
             let row = LayoutFileRow {
                 error: error.clone(),
             };
-            by_name.insert("file".into(), keyed("file", &row));
+            by_name.insert(String::new(), keyed("", &row));
         }
         by_name
     }

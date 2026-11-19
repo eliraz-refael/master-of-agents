@@ -305,8 +305,8 @@ fn a_broken_file_keeps_the_presets_and_is_never_overwritten() {
         "{shown}"
     );
     assert_eq!(
-        st.model().topics[&Topic::Layouts]["file"],
-        json!({"key": "file", "error": error})
+        st.model().topics[&Topic::Layouts][""],
+        json!({"key": "", "error": error})
     );
 
     let fx = send(&b, &mut st, 2, set("mine", json!({"panel": "tree"})));
@@ -529,4 +529,59 @@ fn an_empty_file_or_null_layouts_is_no_entries() {
             "{text:?}"
         );
     }
+}
+
+#[test]
+fn a_layout_name_is_one_word() {
+    let (b, mut st) = started(None, &[]);
+    for (req, name) in ["", "my layout", "a\nb", "tab\t", "bell\u{7}"]
+        .into_iter()
+        .enumerate()
+    {
+        let fx = send(&b, &mut st, req as u64, set(name, json!({"panel": "tree"})));
+        assert_eq!(
+            refusal(&fx),
+            "a layout's name is one word, like mine",
+            "{name:?}"
+        );
+        assert!(writes(&fx).is_empty(), "{name:?}");
+    }
+    let fx = send(&b, &mut st, 9, set("file", json!({"panel": "tree"})));
+    assert_eq!(writes(&fx).len(), 1);
+}
+
+/// The broken-file row's key is `""`, which no layout can have: a layout named `file` is a
+/// row like any other, and a hand-written entry with no name is listed as broken but never
+/// takes the file row's key.
+#[test]
+fn the_file_row_has_a_key_no_layout_can_have() {
+    let (b, mut st) = started(Some(r#"{"layouts": {"file": {"panel": "tree"}}}"#), &[]);
+    send(&b, &mut st, 1, list());
+    let rows = &st.model().topics[&Topic::Layouts];
+    assert_eq!(rows["file"]["leaves"], json!(["tree"]));
+    assert!(!rows.contains_key(""));
+
+    let (b, mut st) = started(
+        Some(r#"{"layouts": {"": {"panel": "tree"}, "x": {"panel": "plan"}}}"#),
+        &[("layout.current", "")],
+    );
+    assert_eq!(
+        Layouts::load(Some(r#"{"layouts": {"": {"panel": "tree"}}}"#))
+            .node("")
+            .unwrap_err()
+            .to_string(),
+        "a layout needs a name"
+    );
+    let fx = send(&b, &mut st, 1, list());
+    let shown = text_of(&fx);
+    assert!(
+        shown
+            .lines()
+            .any(|l| l == "  : has an error: a layout needs a name"),
+        "{shown}"
+    );
+    assert!(shown.starts_with("▸ cockpit: "), "{shown}");
+    let rows = &st.model().topics[&Topic::Layouts];
+    assert!(!rows.contains_key(""));
+    assert!(rows.contains_key("x"));
 }

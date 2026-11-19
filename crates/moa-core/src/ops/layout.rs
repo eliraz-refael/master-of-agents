@@ -5,7 +5,7 @@
 use serde_json::{Value, json};
 
 use crate::effect::{Effect, Publish};
-use crate::layout::{Layouts, current_layout, parse, presets};
+use crate::layout::{Layouts, check_name, current_layout, parse, presets};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops::term::with_tilde;
 use crate::publish::Topic;
@@ -102,6 +102,7 @@ fn set(
     fx: &mut Vec<Effect>,
 ) -> Result<Done, OpError> {
     let refused = |e: crate::layout::LayoutError| OpError(e.to_string());
+    check_name(name).map_err(refused)?;
     parse(layout).map_err(refused)?;
     let text = state
         .layouts

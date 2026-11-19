@@ -115,6 +115,21 @@ pub enum LayoutError {
     /// The file doesn't parse: nothing is written over it.
     #[error("fix layouts.json first ({0}); nothing was saved")]
     FileBroken(String),
+    /// A hand-written entry named `""`.
+    #[error("a layout needs a name")]
+    NoName,
+    /// A name `layout.set` won't save.
+    #[error("a layout's name is one word, like mine")]
+    BadName,
+}
+
+/// A name `layout.set` saves: one word, with no space or control character in it. So no
+/// layout it saves is named `""`, the `layouts` topic's key for the file's error.
+pub fn check_name(name: &str) -> Result<(), LayoutError> {
+    if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(LayoutError::BadName);
+    }
+    Ok(())
 }
 
 /// A layout from its JSON, checked as the spike's `validate` did.
@@ -289,7 +304,11 @@ impl Layouts {
 
     /// The layout named `name`, parsed.
     pub fn node(&self, name: &str) -> Result<Node, LayoutError> {
-        parse(self.entry(name)?)
+        let entry = self.entry(name)?;
+        if name.is_empty() {
+            return Err(LayoutError::NoName);
+        }
+        parse(entry)
     }
 
     /// The JSON of the layout named `name`.

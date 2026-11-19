@@ -427,6 +427,9 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
         ),
         cmd("resize-pane", &["-t", "%1", "-x", "30%"]),
         cmd("resize-pane", &["-t", "%1", "-y", "12"]),
+        cmd("resize-pane", &["-t", "%1", "-y", "1"]),
+        cmd("resize-pane", &["-t", "%1", "-x", "1%"]),
+        cmd("resize-pane", &["-t", "%1", "-x", "99%"]),
         cmd(
             "respawn-pane",
             &["-k", "-t", "%1", "/opt/moa", "panel", "empty-slot"],
@@ -488,6 +491,10 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
     refused(cmd("resize-pane", &["-t", "%1", "-x", "30%%"]), resize);
     refused(cmd("resize-pane", &["-t", "%1", "-x", "%"]), resize);
     refused(cmd("resize-pane", &["-t", "%1", "-x", "+3"]), resize);
+    // L1's sizes: cells from 1, percentages from 1 to 99.
+    for size in ["0", "00", "0%", "100%", "150%", "70000"] {
+        refused(cmd("resize-pane", &["-t", "%1", "-y", size]), resize);
+    }
     let respawn = "respawn-pane needs -k, a tab id and a command";
     refused(cmd("respawn-pane", &["-t", "%1", "/opt/moa"]), respawn);
     refused(
