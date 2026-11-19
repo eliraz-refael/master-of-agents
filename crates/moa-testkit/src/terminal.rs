@@ -140,6 +140,28 @@ impl Terminal {
     pub fn tty(&self) -> String {
         self.tty.clone()
     }
+
+    /// Resizes the terminal, as a user dragging its window would. The pty isn't the
+    /// program's controlling terminal, so the kernel signals nobody: the program is sent
+    /// SIGWINCH here.
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        tcsetwinsize(
+            &self.master,
+            Winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+        )?;
+        let sent = Command::new("kill")
+            .args(["-WINCH", &self.child.id().to_string()])
+            .status()?;
+        if !sent.success() {
+            return Err(io::Error::other("SIGWINCH wasn't delivered"));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Terminal {

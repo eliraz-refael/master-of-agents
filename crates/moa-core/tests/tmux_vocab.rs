@@ -75,6 +75,7 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             "resize-pane",
             "respawn-pane",
             "rename-window",
+            "resize-window",
         ];
         if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");
@@ -551,6 +552,32 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
         ] {
             refused(cmd(name, args), select);
         }
+    }
+    // A rebuilt cockpit's window takes its terminal's size, then follows it again (L6).
+    assert_eq!(cmd("resize-window", &["-A", "-t", "%3"]).check(), Ok(()));
+    let resize_window = "resize-window needs -A and a tab id";
+    for args in [
+        &["-t", "%3"][..],
+        &["-A", "-t", "moa"],
+        &["-A", "-t", "@1"],
+        &["-a", "-t", "%3"],
+        &["-x", "80", "-t", "%3"],
+        &["-A", "-t", "%3", "-x", "80"],
+    ] {
+        refused(cmd("resize-window", args), resize_window);
+    }
+    assert_eq!(
+        cmd("set-option", &["-w", "-u", "-t", "%3", "window-size"]).check(),
+        Ok(())
+    );
+    let window_size = "window-size is only unset, on a tab id's window";
+    for args in [
+        &["-w", "-t", "%3", "window-size", "manual"][..],
+        &["-w", "-u", "-t", "@1", "window-size"],
+        &["-g", "window-size", "smallest"],
+        &["-u", "-t", "%3", "window-size"],
+    ] {
+        refused(cmd("set-option", args), window_size);
     }
     refused(
         cmd("move-window", &["-s", "%1", "-t", "=moa:"]),

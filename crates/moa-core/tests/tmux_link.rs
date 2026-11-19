@@ -406,7 +406,19 @@ fn refreshes_coalesce() {
         assert!(tmux_effects(&fx).is_empty(), "one refresh in flight");
     }
     let fx = reply_lists(&mut s, 1, WITH_MOA);
-    assert_eq!(tmux_effects(&fx), vec![&refresh_effect(1)]);
+    // The first listing shows a user's terminal and no cockpit panel: the lazy build asks a
+    // listing of its own too (L9).
+    let [refresh, lazy] = tmux_effects(&fx)[..] else {
+        panic!("{fx:?}")
+    };
+    assert_eq!(refresh, &refresh_effect(1));
+    assert!(matches!(
+        lazy,
+        Effect::Tmux {
+            token: Some(TmuxToken::Query(_)),
+            ..
+        }
+    ));
     let fx = reply_lists(&mut s, 1, WITH_MOA);
     assert!(tmux_effects(&fx).is_empty());
 }

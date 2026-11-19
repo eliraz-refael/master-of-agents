@@ -60,6 +60,16 @@ fn break_to(pane: PaneId, to: &str, name: Option<&str>) -> Cmd {
     }
 }
 
+/// The window of `pane` sized to its session's largest terminal, then given back to
+/// tmux's own sizing (`resize-window` fixes the size until the option is unset).
+fn fit_to_terminal(pane: PaneId) -> [Cmd; 2] {
+    let p = pane.to_string();
+    [
+        Cmd::new("resize-window").args(["-A", "-t", &p]),
+        Cmd::new("set-option").args(["-w", "-u", "-t", &p, "window-size"]),
+    ]
+}
+
 fn resize(axis: Axis, pane: PaneId, size: Size) -> Cmd {
     let flag = match axis {
         Axis::H => "-x",
@@ -240,8 +250,14 @@ pub(crate) fn chain(
     // 1. The keeper: the first leaf's pane, in the cockpit window.
     let mut swapped = None;
     match scene.cockpit {
-        // The window it is in becomes the cockpit.
-        None => cmds.push(break_to(keeper, MOA, Some(MOA))),
+        // The window it is in becomes the cockpit, at the size of session `moa`'s terminal:
+        // a parked window keeps whatever size it had (`_moa`'s 10x3 if no terminal was
+        // attached when it started), and tmux resizes a window only once someone looks at
+        // it, so the joins and sizes below would be laid out in the old size.
+        None => {
+            cmds.push(break_to(keeper, MOA, Some(MOA)));
+            cmds.extend(fit_to_terminal(keeper));
+        }
         Some(_) if at(keeper).place == Place::Cockpit => {}
         Some(_) => {
             // A cockpit pane the layout doesn't use first, a stranger first of those. Among

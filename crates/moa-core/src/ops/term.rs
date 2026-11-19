@@ -29,7 +29,11 @@ pub(crate) enum Tell {
 
 /// What tells `tell` how a terminal turned out: the reply, or a notice on the key's client
 /// while the link is up (a key came over it; with the link gone, nobody can be shown one).
-fn told(state: &State, tell: Option<Tell>, result: Result<Done, OpError>) -> Option<Effect> {
+pub(crate) fn told(
+    state: &State,
+    tell: Option<Tell>,
+    result: Result<Done, OpError>,
+) -> Option<Effect> {
     match tell? {
         Tell::Reply(conn, req) => Some(Effect::Reply { conn, req, result }),
         Tell::Notice(client) => {

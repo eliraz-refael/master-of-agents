@@ -12,6 +12,7 @@ use moa_core::state::State;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::mailbox::KeyAction;
 use moa_core::tmux::notify::Notification;
+use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
 
 fn now() -> Now {
@@ -44,7 +45,8 @@ fn started() -> State {
     s
 }
 
-/// A connected link whose first refresh has been answered, so nothing is left to write.
+/// A connected link whose first refresh has been answered, so nothing is left to write. The
+/// cockpit is built (its console panel `%3`), so the link builds nothing.
 fn up() -> State {
     let mut s = started();
     feed(
@@ -67,7 +69,7 @@ fn up() -> State {
             token: TmuxToken::Refresh,
             results: vec![
                 Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
-                Ok(vec!["P %3 @1 $0 1 1 0 0 ".into()]),
+                Ok(vec!["P %3 @1 $0 1 1 0 1  0 console".into()]),
                 Ok(vec!["C 0 $0 /dev/ttys1".into()]),
             ],
         },
@@ -115,17 +117,43 @@ fn expected(client: &str, a: KeyAction) -> Vec<String> {
         .collect()
 }
 
-/// Every key but `$`, which opens a terminal (panels.rs).
+/// The keys whose slice hasn't landed (5c) still say so.
 #[test]
 fn every_key_gets_its_notice() {
     let mut s = up();
-    for a in KeyAction::ALL {
-        if a == KeyAction::Terminal {
-            continue;
-        }
+    for a in [
+        KeyAction::Find,
+        KeyAction::FindOther,
+        KeyAction::New,
+        KeyAction::Help,
+    ] {
         let fx = message(&mut s, &format!("moa:key {} %3 $0 /dev/ttys1", a.word()));
         assert_eq!(the_notice(&fx), expected("/dev/ttys1", a), "{a:?}");
         assert!(logs(&fx).is_empty(), "{a:?}");
+    }
+}
+
+/// The cockpit's keys (L13): `c t p g` go to a panel, `1`–`4` apply a preset and `r`
+/// repairs. Each starts a cockpit operation, which lists the panes first (L17); none says
+/// "not yet".
+#[test]
+fn the_cockpit_keys_act() {
+    for k in ["c", "t", "p", "g", "1", "2", "3", "4", "r"] {
+        let a = KeyAction::ALL.into_iter().find(|a| a.key() == k).unwrap();
+        let mut s = up();
+        let fx = message(&mut s, &format!("moa:key {} %3 $0 /dev/ttys1", a.word()));
+        let [
+            Effect::Tmux {
+                conn: 1,
+                cmds,
+                token: Some(TmuxToken::Query(_)),
+            },
+        ] = tmux_effects(&fx)[..]
+        else {
+            panic!("{k}: {fx:?}")
+        };
+        assert_eq!(*cmds, refresh_cmds(), "{k}");
+        assert!(logs(&fx).is_empty(), "{k}");
     }
 }
 
@@ -153,8 +181,8 @@ fn the_terminal_key_is_no_longer_a_notice() {
 #[test]
 fn a_menu_item_without_a_pane_still_answers() {
     let mut s = up();
-    let fx = message(&mut s, "moa:key tree - $0 /dev/ttys1");
-    assert_eq!(the_notice(&fx), expected("/dev/ttys1", KeyAction::Tree));
+    let fx = message(&mut s, "moa:key help - $0 /dev/ttys1");
+    assert_eq!(the_notice(&fx), expected("/dev/ttys1", KeyAction::Help));
 }
 
 #[test]

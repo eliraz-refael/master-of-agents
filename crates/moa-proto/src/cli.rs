@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
+use moa_core::layout::{LEAVES, Leaf};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
 use moa_core::op::{ADOPT_USAGE, Answer, NoParams, Op, SLEEP_USAGE, TaskAdd, TaskSet};
 use moa_core::tmux::ids::PaneId;
@@ -554,14 +555,25 @@ impl Verb {
                     layout: serde_json::from_str(&json.join(" "))
                         .map_err(|e| VerbError::Usage(format!("layout: {e}")))?,
                 },
+                (LayoutOp::Apply, []) => Op::LayoutApply { name: None },
+                (LayoutOp::Apply, [name]) => Op::LayoutApply {
+                    name: Some(name.clone()),
+                },
                 (LayoutOp::List, _) => return usage("usage: moa layout list"),
                 (LayoutOp::Show, _) => return usage("usage: moa layout show NAME"),
                 (LayoutOp::Set, _) => return usage("usage: moa layout set NAME JSON"),
-                (LayoutOp::Apply, _) => return Err(VerbError::NotYet(self.name())),
+                (LayoutOp::Apply, _) => return usage("usage: moa layout apply [NAME]"),
+            },
+            Verb::Goto { panel } => Op::Goto {
+                panel: panel.parse::<Leaf>().map_err(|_| {
+                    VerbError::Usage(format!(
+                        "usage: moa goto PANEL (panels: {})",
+                        LEAVES.join(", ")
+                    ))
+                })?,
             },
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Goto { .. }
-            | Verb::Peers
+            Verb::Peers
             | Verb::Ask { .. }
             | Verb::Reply { .. }
             | Verb::Asks

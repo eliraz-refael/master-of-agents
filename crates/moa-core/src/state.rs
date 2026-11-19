@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::UtcMs;
 use crate::change::Change;
+use crate::cockpit::run::CockpitRun;
 use crate::config::{AccountName, BrainName, Config, caller_store};
 use crate::effect::RefuseWrites;
 use crate::layout::{self, Layouts};
@@ -322,6 +323,9 @@ pub struct State {
     /// How many panels moa started, new or respawned, while this daemon ran (L7): a layout
     /// switch that starts nothing leaves it as it was. Kept in memory.
     pub(crate) panel_starts: u32,
+    /// The cockpit's operations, one at a time (L17). Kept in memory: a reload starts the
+    /// queue over.
+    pub(crate) cockpit: CockpitRun,
 }
 
 impl State {
@@ -361,6 +365,7 @@ impl State {
             pane_views: BTreeMap::new(),
             layouts: layout::presets(),
             panel_starts: 0,
+            cockpit: CockpitRun::default(),
         }
     }
 

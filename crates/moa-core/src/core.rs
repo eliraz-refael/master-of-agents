@@ -5,8 +5,9 @@ use std::collections::BTreeSet;
 
 use crate::change::Change;
 use crate::cockpit;
-use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn};
+use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn, TmuxToken};
 use crate::hooks;
+use crate::keys;
 use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
@@ -21,7 +22,7 @@ use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
 use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
-use crate::tmux::mailbox::{KeyAction, Mailbox};
+use crate::tmux::mailbox::{HookMsg, Mailbox};
 use crate::tmux::notify::Notification;
 use crate::tmux::panes::parse_panes;
 use crate::tmux::status;
@@ -101,24 +102,28 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
+            fx.extend(cockpit::run::reload(state));
             fx.extend(ops::launch::lost_opens(state));
             // The reload may have dropped a reconcile's changes: the panes are looked at again.
             fx.extend(reconcile::ask_if_due(state, now));
             fx
         }
         Input::Tmux(t) => {
-            // `Ctrl-a $` opens a terminal where it was pressed (V6); the link answers the
-            // other keys with a notice. It is the only key the core takes before the link:
-            // as more keys land, they belong in one dispatch here, not a check apiece.
-            if let TmuxIn::Notification(Notification::Message(m)) = &t
-                && let Ok(Mailbox::Key {
-                    action: KeyAction::Terminal,
-                    pane,
-                    client,
-                    ..
-                }) = Mailbox::parse(m)
+            // Every key the core has goes through one dispatch (L13); the link answers the
+            // rest with a notice.
+            let mailbox = match &t {
+                TmuxIn::Notification(Notification::Message(m)) => Mailbox::parse(m).ok(),
+                _ => None,
+            };
+            if let Some(Mailbox::Key {
+                action,
+                pane,
+                client,
+                ..
+            }) = &mailbox
+                && let Some(fx) = keys::run(state, *action, *pane, client.clone())
             {
-                return ops::term::term_key(state, pane, client);
+                return fx;
             }
             // A pane that exited puts its session to sleep, before the link looks at the tree.
             let mut fx = match link::exited_pane(&t) {
@@ -151,16 +156,27 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 matches!(t, TmuxIn::Connected { .. }),
                 matches!(t, TmuxIn::Down(Down::NoServer)),
             );
+            // A new connection, or none: nothing asked on the old one is answered (L17).
+            let link_conn = state.tmux.conn();
+            let fresh = matches!(t, TmuxIn::Connected { conn, .. } if link_conn != Some(conn));
+            let lost = matches!(t, TmuxIn::Down(_)) || (fresh && link_conn.is_some());
+            let link_listed = matches!(t, TmuxIn::Replies { conn, token: TmuxToken::Refresh, .. }
+                if link_conn == Some(conn));
             // Another server's pane ids name other tabs: the views the old tabs had go.
-            if state.tmux.another_server(&t) {
+            let another_server = state.tmux.another_server(&t);
+            if another_server {
                 state.pane_views.clear();
             }
             fx.extend(state.tmux.input(t));
+            if lost {
+                fx.extend(cockpit::run::lost(state));
+            }
             // Reconcile reads its listing, a resume, an adopt or an `ls` its own and a
             // terminal its new tab or a key its folder, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
             let (mut adopts, mut lists, mut looks) = (Vec::new(), Vec::new(), Vec::new());
             let (mut heres, mut spawns) = (Vec::new(), Vec::new());
+            let (mut scenes, mut chains) = (Vec::new(), Vec::new());
             for (asked, answers) in answers {
                 // A panel spawn reads each command's answer (L18); the rest read them as one.
                 match asked {
@@ -179,7 +195,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     Asked::Look { id, events } => {
                         looks.push((id, events, link::all_lines(answers)))
                     }
-                    Asked::Spawn { views, .. } => spawns.push((views, answers)),
+                    Asked::Spawn { views, seq } => spawns.push((views, seq, answers)),
+                    Asked::Scene { seq } => scenes.push((seq, answers)),
+                    Asked::Chain { seq } => chains.push((seq, answers)),
                 }
             }
             let panes_of = |answer: link::Answer| {
@@ -223,17 +241,47 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             for (id, events, answer) in looks {
                 more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
             }
-            // The panes that started are tagged; the queue (L17) will read the views that
-            // didn't. A spawn the link lost may have started panels moa knows nothing of:
-            // the log says so.
-            for (views, answers) in spawns {
+            // The cockpit's operation in flight reads its answers (L17). The panes a spawn
+            // started are tagged whatever became of it. A spawn the link lost may have started
+            // panels moa knows nothing of: the log says so. Otherwise what the link lost,
+            // nothing reads: `lost` ended its operation.
+            for (views, seq, answers) in spawns {
                 match answers {
-                    Some(answers) => more.extend(cockpit::spawn::spawned(state, &views, answers).0),
+                    Some(answers) => {
+                        more.extend(cockpit::run::spawn_answered(state, &views, seq, answers))
+                    }
                     None => more.push(cockpit::spawn::spawn_lost(&views)),
+                }
+            }
+            for (seq, answers) in scenes {
+                if let Some(answers) = answers {
+                    more.extend(cockpit::run::scene_answered(state, seq, answers));
+                }
+            }
+            for (seq, answers) in chains {
+                if let Some(answers) = answers {
+                    more.extend(cockpit::run::chain_answered(state, now, seq, answers));
                 }
             }
             if connected {
                 more.extend(reconcile::ask_if_due(state, now));
+            }
+            // A user's first attach, and a new link, build the cockpit if it isn't (L9); a
+            // panel that stopped is logged (L12).
+            if fresh {
+                more.extend(cockpit::run::linked(state, another_server));
+            }
+            if link_listed {
+                more.extend(cockpit::run::link_listed(state));
+            }
+            match mailbox {
+                Some(Mailbox::Hook(HookMsg::ClientAttached(_))) => {
+                    more.extend(cockpit::run::queue(state, cockpit::run::CockpitOp::Lazy));
+                }
+                Some(Mailbox::Hook(HookMsg::PaneDied(pane))) => {
+                    more.extend(cockpit::run::died(state, pane));
+                }
+                _ => {}
             }
             if no_server {
                 more.extend(reconcile::no_server(state, now));
@@ -278,6 +326,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         // gets its tags (R26). A panel on it goes, and `panels` says so.
         Input::ClientGone(conn) => {
             state.tmux.client_gone(conn);
+            cockpit::run::client_gone(state, conn);
             panel::gone(state, conn).into_iter().collect()
         }
         // Reconcile waits for it (R2): the connection's panes are looked at now, or, when
@@ -332,6 +381,20 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: op @ (Op::LayoutList(_) | Op::LayoutShow { .. } | Op::LayoutSet { .. }),
             ..
         } => ops::layout::run(state, conn, req, op),
+        // Each runs in the cockpit's queue, from a listing of its own (L17), and is answered
+        // once its chain is.
+        Input::Client {
+            conn,
+            req,
+            op: Op::LayoutApply { name },
+            ..
+        } => cockpit::run::apply(state, conn, req, name),
+        Input::Client {
+            conn,
+            req,
+            op: Op::Goto { panel },
+            ..
+        } => cockpit::run::goto(state, conn, req, panel),
         // Answered once tmux says how the new tab turned out. Every tab opens detached
         // (`-d`); unless `bg`, it is brought to the screen once it is bound.
         Input::Client {

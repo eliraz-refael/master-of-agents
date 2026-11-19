@@ -7,7 +7,8 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
-    Down, Effect, Input, TimerKey, TmuxIn, TmuxToken, check_order, handle_checked,
+    Down, Effect, Input, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken, check_order,
+    handle_checked,
 };
 use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
 use moa_core::op::{ConnId, Op, ReqId};
@@ -542,7 +543,17 @@ fn the_clock_stops_when_the_link_goes_down() {
     let mut s = started(vec![], vec![]);
     up_at(&mut s, &[], USER, now());
     let fx = feed(&mut s, TmuxIn::Down(Down::Lost));
-    assert_eq!(fx, vec![Effect::CancelTimer(TimerKey::Clock)]);
+    // The user's first attach had the cockpit built (L9): that goes with the link too.
+    assert_eq!(
+        fx,
+        vec![
+            Effect::CancelTimer(TimerKey::Clock),
+            Effect::Log(LogLine {
+                level: LogLevel::Info,
+                message: "a cockpit change was dropped: moa lost its terminal".into(),
+            }),
+        ]
+    );
     // A timer already on its way finds nobody to tell.
     let fx = handle_checked(
         &mut s,

@@ -58,6 +58,20 @@ expression: all
         ],
         "type": "object"
       },
+      "Leaf": {
+        "enum": [
+          "console",
+          "tree",
+          "today",
+          "activity",
+          "projects",
+          "plan",
+          "status",
+          "picture",
+          "agent"
+        ],
+        "type": "string"
+      },
       "NoParams": {
         "additionalProperties": false,
         "properties": {},
@@ -981,6 +995,57 @@ expression: all
                 "required": [
                   "name",
                   "layout"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Builds layout `name` in the cockpit (the current one when `None`), and makes it the\nbrain's current layout.",
+            "properties": {
+              "method": {
+                "const": "layout.apply",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "name": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Selects a panel in the cockpit, putting the current layout back first when the panel\nis missing from it. `agent` is the agent spot.",
+            "properties": {
+              "method": {
+                "const": "goto",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "panel": {
+                    "$ref": "#/$defs/Leaf"
+                  }
+                },
+                "required": [
+                  "panel"
                 ],
                 "type": "object"
               }

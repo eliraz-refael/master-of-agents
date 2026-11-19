@@ -353,7 +353,9 @@ impl World {
             }
             // No geometry: a resize or a select only needs its pane.
             ("select-window" | "select-pane", ["-t", x])
-            | ("resize-pane", ["-t", x, "-x" | "-y", _]) => {
+            | ("resize-pane", ["-t", x, "-x" | "-y", _])
+            | ("resize-window", ["-A", "-t", x])
+            | ("set-option", ["-w", "-u", "-t", x, "window-size"]) => {
                 self.pane_arg(x)?;
             }
             (name, args) => panic!("the simulator doesn't know {name} {args:?}"),

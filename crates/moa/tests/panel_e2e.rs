@@ -9,11 +9,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use moa_client::{Client, ClientOptions, OnMismatch};
-use moa_core::config::BrainName;
-use moa_core::publish::Topic;
-use moa_core::state::CallerInfo;
-use moa_platform::{build_id_of, canonical, pid_alive};
+use moa_platform::{canonical, pid_alive};
 use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
 use serde_json::{Map, Value};
 
@@ -299,36 +295,6 @@ impl Rig {
     }
 }
 
-/// The rows of the `panels` topic, as a client subscribed to it sees them now.
-fn panels(tb: &TempBrain) -> Vec<Value> {
-    let opts = ClientOptions {
-        paths: tb.paths(),
-        brain: BrainName::default_brain(),
-        client: "panel-e2e",
-        caller: CallerInfo::default(),
-        autostart: None,
-        on_mismatch: OnMismatch::Accept,
-        build: build_id_of(Path::new(MOA)).unwrap(),
-    };
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async move {
-        let Ok(mut client) = Client::connect(opts).await else {
-            return Vec::new();
-        };
-        let Ok(snapshot) = client.subscribe(&[Topic::Panels]).await else {
-            return Vec::new();
-        };
-        snapshot
-            .topics
-            .get(&Topic::Panels)
-            .cloned()
-            .unwrap_or_default()
-    })
-}
-
 #[test]
 fn a_tree_panel_shows_the_brain_and_follows_it() {
     let r = rig();
@@ -547,6 +513,8 @@ fn a_panel_comes_back_after_moa_restarts() {
     let pane = r.tree(&["Kite", "Harbor"]);
     r.select(&pane, "Harbor");
 
+    // The cockpit's panels have connected: none of them starts moa again (L15).
+    cockpit_panels_connected(&r.tb);
     shutdown(&r.tb);
     r.shows(
         &pane,
@@ -557,10 +525,14 @@ fn a_panel_comes_back_after_moa_restarts() {
     r.shows(&pane, &[TREE_HINT]);
     r.ok(&["set", &kite.id, "--title", "Kite2"]);
     r.shows(&pane, &["Kite2"]);
+    // The cockpit's own panels (built when the terminal attached) register too.
     let registered = wait_for(SHOWS, || {
         let rows = panels(&r.tb);
-        let one = rows.len() == 1 && rows[0]["pane"] == pane.as_str() && rows[0]["view"] == "tree";
-        one.then_some(())
+        let mine: Vec<_> = rows
+            .iter()
+            .filter(|row| row["pane"] == pane.as_str())
+            .collect();
+        (mine.len() == 1 && mine[0]["view"] == "tree").then_some(())
     });
     assert!(registered.is_some(), "panels: {:?}", panels(&r.tb));
 

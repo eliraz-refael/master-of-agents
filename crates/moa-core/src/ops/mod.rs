@@ -77,7 +77,9 @@ pub(crate) fn run(
         | Op::UiHere { .. }
         | Op::LayoutList(_)
         | Op::LayoutShow { .. }
-        | Op::LayoutSet { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::LayoutSet { .. }
+        | Op::LayoutApply { .. }
+        | Op::Goto { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

@@ -477,8 +477,16 @@ fn a_missing_cockpit_is_made_from_the_first_leaf() {
     assert!(scene.moa_session);
     let b = built(plan(&scene, &node("cockpit"), title));
     let l = lines(&b.chain);
-    assert_eq!(l[0], "break-pane -d -s %2 -t =moa: -n moa");
-    assert_eq!(l[1], "join-pane -d -h -s %3 -t %2");
+    // At the size of session `moa`'s terminal, then sized by tmux again (L6).
+    assert_eq!(
+        l[..4],
+        [
+            "break-pane -d -s %2 -t =moa: -n moa",
+            "resize-window -A -t %2",
+            "set-option -w -u -t %2 window-size",
+            "join-pane -d -h -s %3 -t %2",
+        ]
+    );
     w.run(&b.chain).unwrap();
     assert_eq!(w.cockpit_leaves(), vec![p(2), p(3), p(4)]);
     assert_eq!(w.where_is(shell).map(|(wi, _)| w.windows[wi].id), Some(tab));
