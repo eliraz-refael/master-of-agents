@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+[Plan]   Today    Projects    Sessions
+Fri 13 Nov · ✓ 1 done today
+
+Lantern ── 2 on you · 1 with agents · 1
+  ! Fix login: the session needs you
+  ★ P0 Fix the login loop    1d overdue
+  ⠸ Write the README  (agent      today
+─ activity ─────────────────────────────
+09:09  added to today: "Fix the login lo
+09:16  linked session 5e550002 → Lantern
+09:27  task "Proofread chapter 1": activ
+09:40  suggests #1: Archive 3 ended sess
+09:48  Release notes asks: Ship it today
+09:56  project Beacon: active → idea
+09:59 ✦Fix login needs you
+1-6/tab · j/k · ⏎ jump · d done · x drop

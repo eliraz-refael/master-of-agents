@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ▦ projects ─────────────────────────────────────────────────────────────────╮
+│ ▸ Kite  active 0d  2 live · 3 tasks                                          │
+│ ▸ Lantern  active 0d  2 live · 3 tasks                                       │
+│ ▸ Harbor  active 3d  2 live                                                  │
+│ ▸ Beacon  idea                                                               │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ ⏎ expand · n new session · N choose account                                  │
+╰──────────────────────────────────────────────────────────────────────────────╯

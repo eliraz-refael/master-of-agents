@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ≡ activity ─────────────────────────────────────────────╮
+│ 09:59 Fix login needs you                                │
+│ 09:56 project Beacon: active → idea                      │
+│ 09:48 Release notes asks: Ship it today?                 │
+│ 09:40 suggests #1: Archive 3 ended sessions?             │
+│ 09:27 task "Proofread chapter 1": active → done          │
+│ 09:16 linked session 5e550002 → Lantern                  │
+│ 09:09 added to today: "Fix the login loop"               │
+│ 09:02 new task "Write the README" in Lantern             │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│ j/k scroll                                               │
+╰──────────────────────────────────────────────────────────╯

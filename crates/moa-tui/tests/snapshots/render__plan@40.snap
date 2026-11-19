@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ◷ big picture ──────────────────────╮
+│ Fri 13 Nov · ✓ 1 done today          │
+│                                      │
+│ Lantern ── 2 on you · 1 with agents ·│
+│   ! Fix login: the session needs you │
+│   ★ P0 Fix the login      1d overdue │
+│     loop                             │
+│   ⠸ Write the README  (agent   today │
+│     working)                         │
+│   ◷ Wait for review          tomorrow│
+│     (design team)                    │
+│                                      │
+│ Kite ───────── 2 on you · 1 waiting  │
+│                                      │
+│ ⏎/click jump · d done · x drop       │
+╰──────────────────────────────────────╯
