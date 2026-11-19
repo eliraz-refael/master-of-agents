@@ -490,6 +490,12 @@ fn op_methods_match_the_variants() {
             name: "mine".into(),
             layout: serde_json::json!({"panel": "tree"}),
         },
+        Op::LayoutApply {
+            name: Some("focus".into()),
+        },
+        Op::Goto {
+            panel: moa_core::layout::Leaf::Agent,
+        },
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
     // be serialized or parsed.
@@ -533,6 +539,7 @@ const WRITES: &[&str] = &[
     "suggest",
     "suggestion.answer",
     "layout.set",
+    "layout.apply",
 ];
 
 #[test]

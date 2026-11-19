@@ -102,19 +102,21 @@ impl KeyAction {
     }
 
     /// The notice shown until the action's slice lands.
-    pub fn not_yet(self) -> &'static str {
+    /// `None` for a key the core acts on (`keys::run`).
+    pub fn not_yet(self) -> Option<&'static str> {
         match self {
-            KeyAction::Console => "the console isn't in this build yet",
-            KeyAction::Tree => "the sessions tree isn't in this build yet",
-            KeyAction::Plan => "the big picture isn't in this build yet",
-            KeyAction::Agent => "the agent spot isn't in this build yet",
-            KeyAction::Find | KeyAction::FindOther => "finding a session isn't in this build yet",
-            KeyAction::New => "new sessions aren't in this build yet",
-            // Never shown since slice 5a: the core opens the terminal (`term_key`).
-            KeyAction::Terminal => "terminals aren't in this build yet",
-            KeyAction::Layout(_) => "layouts aren't in this build yet",
-            KeyAction::Repair => "repair isn't in this build yet",
-            KeyAction::Help => "help isn't in this build yet",
+            KeyAction::Find | KeyAction::FindOther => {
+                Some("finding a session isn't in this build yet")
+            }
+            KeyAction::New => Some("new sessions aren't in this build yet"),
+            KeyAction::Help => Some("help isn't in this build yet"),
+            KeyAction::Console
+            | KeyAction::Tree
+            | KeyAction::Plan
+            | KeyAction::Agent
+            | KeyAction::Terminal
+            | KeyAction::Layout(_)
+            | KeyAction::Repair => None,
         }
     }
 }

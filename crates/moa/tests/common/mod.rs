@@ -367,3 +367,37 @@ pub fn click(tb: &TempBrain, term: &Terminal, pane: &str, line_text: &str) {
     let (x, y) = cell_of(tb, pane, line_text);
     term.press(format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m").as_bytes());
 }
+
+/// The rows of the `panels` topic, as a client subscribed to it sees them now.
+pub fn panels(tb: &TempBrain) -> Vec<Value> {
+    use moa_client::{Client, ClientOptions, OnMismatch};
+    use moa_core::config::BrainName;
+    use moa_core::publish::Topic;
+    use moa_core::state::CallerInfo;
+    let opts = ClientOptions {
+        paths: tb.paths(),
+        brain: BrainName::default_brain(),
+        client: "e2e",
+        caller: CallerInfo::default(),
+        autostart: None,
+        on_mismatch: OnMismatch::Accept,
+        build: moa_platform::build_id_of(Path::new(MOA)).unwrap(),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        let Ok(mut client) = Client::connect(opts).await else {
+            return Vec::new();
+        };
+        let Ok(snapshot) = client.subscribe(&[Topic::Panels]).await else {
+            return Vec::new();
+        };
+        snapshot
+            .topics
+            .get(&Topic::Panels)
+            .cloned()
+            .unwrap_or_default()
+    })
+}

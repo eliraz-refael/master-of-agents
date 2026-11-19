@@ -192,6 +192,15 @@ pub(crate) enum Asked {
         views: Vec<View>,
         seq: u64,
     },
+    /// The fresh listing a cockpit operation starts from (L17): it rebuilds the topology
+    /// as a refresh does.
+    Scene {
+        seq: u64,
+    },
+    /// A cockpit operation's commands: its chain, or Repair's respawns, one answer each.
+    Chain {
+        seq: u64,
+    },
 }
 
 /// A pane query's answer: each command's lines, or `Err` when any command failed or the
@@ -593,7 +602,9 @@ impl TmuxState {
             | Asked::Term { .. }
             | Asked::Here { .. }
             | Asked::Look { .. }
-            | Asked::Spawn { .. } => true,
+            | Asked::Spawn { .. }
+            | Asked::Scene { .. }
+            | Asked::Chain { .. } => true,
         });
         for asked in self.queries.values_mut() {
             if let Asked::Term { tell, .. } = asked
@@ -826,6 +837,32 @@ impl TmuxState {
         self.topology.set_view(pane, view);
     }
 
+    /// A cockpit chain that tmux ran set these `@moa_view`s (`None`: unset), as L17 records
+    /// them: the topology knows them at once, and a view a listing hasn't shown yet (a
+    /// panel just started) is kept as the chain left it, not as it was started.
+    pub(crate) fn views_set(&mut self, views: &[(PaneId, Option<&'static str>)]) {
+        for (pane, view) in views {
+            match view {
+                Some(view) => {
+                    if let Some(sent) = self.sent_views.get_mut(pane) {
+                        *sent = view;
+                    }
+                    self.topology.set_view(*pane, view);
+                }
+                None => {
+                    self.sent_views.remove(pane);
+                    self.topology.unset_view(*pane);
+                }
+            }
+        }
+    }
+
+    /// A cockpit operation's own listing came back (L17): the topology is rebuilt from it
+    /// as from a refresh's. `false` when it couldn't be read; what was known stays.
+    pub(crate) fn scene_listed(&mut self, results: &[Result<Vec<String>, String>]) -> bool {
+        self.rebuild(results)
+    }
+
     /// Moa took the session tag off `pane`, after a saved commit: neither the topology nor
     /// the tags waiting for a listing keep it.
     pub(crate) fn untag_sent(&mut self, pane: PaneId) {
@@ -954,11 +991,16 @@ impl TmuxState {
             // The log lines never carry the message text.
             Notification::Message(m) => match Mailbox::parse(m) {
                 Ok(Mailbox::Hook(_)) => self.refresh(),
-                Ok(Mailbox::Key { action, client, .. }) => vec![Effect::Tmux {
-                    conn,
-                    cmds: vec![notice(&client, action.not_yet())],
-                    token: None,
-                }],
+                // The keys the core acts on never get here (`keys::run`).
+                Ok(Mailbox::Key { action, client, .. }) => action
+                    .not_yet()
+                    .map(|text| Effect::Tmux {
+                        conn,
+                        cmds: vec![notice(&client, text)],
+                        token: None,
+                    })
+                    .into_iter()
+                    .collect(),
                 Ok(Mailbox::Prompt { .. }) => vec![log(
                     LogLevel::Info,
                     "a prompt answer arrived that nothing waits for".into(),
@@ -985,6 +1027,21 @@ impl TmuxState {
         let again = self.refresh == Refresh::Again;
         self.refresh = Refresh::Idle;
         let mut fx = Vec::new();
+        if !self.rebuild(results) {
+            fx.push(log(
+                LogLevel::Warn,
+                "listing the terminal server failed".into(),
+            ));
+        }
+        if again {
+            fx.extend(self.refresh());
+        }
+        fx
+    }
+
+    /// The topology from the three lists, keeping the tags sent that they don't show yet.
+    /// `false`, with what was known kept, when they aren't three lists.
+    fn rebuild(&mut self, results: &[Result<Vec<String>, String>]) -> bool {
         match results {
             [Ok(sessions), Ok(panes), Ok(clients)] => {
                 self.topology = Topology::from_lists(sessions, panes, clients);
@@ -1002,17 +1059,11 @@ impl TmuxState {
                     |t, p| t.view_of(p).is_some(),
                     |t, p, view| t.set_view(p, view),
                 );
+                true
             }
             // No information: what was known stays.
-            _ => fx.push(log(
-                LogLevel::Warn,
-                "listing the terminal server failed".into(),
-            )),
+            _ => false,
         }
-        if again {
-            fx.extend(self.refresh());
-        }
-        fx
     }
 
     /// Answers every waiter with `result`.

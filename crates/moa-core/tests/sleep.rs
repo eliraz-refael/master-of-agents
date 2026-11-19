@@ -98,11 +98,11 @@ fn s_by_hand(pid: i64, _: &[String]) -> Inspected {
     )
 }
 
-/// The cockpit `@1` (pane `%0`), which the user is looking at, and S's tab `%1` in `@2`
-/// behind it.
+/// The cockpit `@1`, built (its console panel `%0`), which the user is looking at, and S's
+/// tab `%1` in `@2` behind it.
 fn base_panes() -> Vec<String> {
     vec![
-        "P %0 @1 $0 1 1 0 1 ".into(),
+        "P %0 @1 $0 1 1 0 1  0 console".into(),
         format!("P %1 @2 $0 1 0 0 0 {S}"),
     ]
 }

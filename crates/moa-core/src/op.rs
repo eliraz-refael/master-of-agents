@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::Leaf;
 use crate::panel::View;
 
 /// A client connection, as the daemon numbers them.
@@ -196,6 +197,17 @@ pub enum Op {
         name: String,
         layout: serde_json::Value,
     },
+    /// Builds layout `name` in the cockpit (the current one when `None`), and makes it the
+    /// brain's current layout.
+    #[serde(rename = "layout.apply")]
+    LayoutApply {
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Selects a panel in the cockpit, putting the current layout back first when the panel
+    /// is missing from it. `agent` is the agent spot.
+    #[serde(rename = "goto")]
+    Goto { panel: Leaf },
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -341,6 +353,8 @@ impl Op {
         "layout.list",
         "layout.show",
         "layout.set",
+        "layout.apply",
+        "goto",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -366,7 +380,8 @@ impl Op {
             | Op::ProjectAdd { .. }
             | Op::Suggest { .. }
             | Op::SuggestionAnswer { .. }
-            | Op::LayoutSet { .. } => true,
+            | Op::LayoutSet { .. }
+            | Op::LayoutApply { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -380,6 +395,7 @@ impl Op {
             | Op::UiHere { .. }
             | Op::LayoutList(_)
             | Op::LayoutShow { .. }
+            | Op::Goto { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -420,6 +436,8 @@ impl Op {
             Op::LayoutList(_) => "layout.list",
             Op::LayoutShow { .. } => "layout.show",
             Op::LayoutSet { .. } => "layout.set",
+            Op::LayoutApply { .. } => "layout.apply",
+            Op::Goto { .. } => "goto",
             Op::DebugPanic => "debug.panic",
         }
     }

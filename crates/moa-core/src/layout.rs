@@ -90,6 +90,36 @@ impl fmt::Display for Leaf {
     }
 }
 
+/// On the wire, a leaf is its word (`goto`'s `panel`).
+impl Serialize for Leaf {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.word())
+    }
+}
+
+impl<'de> Deserialize<'de> for Leaf {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(d)?;
+        word.parse().map_err(|_| {
+            serde::de::Error::custom(format!(
+                "unknown panel '{word}' (panels: {})",
+                LEAVES.join(", ")
+            ))
+        })
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Leaf {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Leaf".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string", "enum": LEAVES })
+    }
+}
+
 /// One layout, parsed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Node {

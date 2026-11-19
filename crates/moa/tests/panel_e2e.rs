@@ -9,11 +9,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use moa_client::{Client, ClientOptions, OnMismatch};
-use moa_core::config::BrainName;
-use moa_core::publish::Topic;
-use moa_core::state::CallerInfo;
-use moa_platform::{build_id_of, canonical, pid_alive};
+use moa_platform::{canonical, pid_alive};
 use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
 use serde_json::{Map, Value};
 
@@ -299,36 +295,6 @@ impl Rig {
     }
 }
 
-/// The rows of the `panels` topic, as a client subscribed to it sees them now.
-fn panels(tb: &TempBrain) -> Vec<Value> {
-    let opts = ClientOptions {
-        paths: tb.paths(),
-        brain: BrainName::default_brain(),
-        client: "panel-e2e",
-        caller: CallerInfo::default(),
-        autostart: None,
-        on_mismatch: OnMismatch::Accept,
-        build: build_id_of(Path::new(MOA)).unwrap(),
-    };
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(async move {
-        let Ok(mut client) = Client::connect(opts).await else {
-            return Vec::new();
-        };
-        let Ok(snapshot) = client.subscribe(&[Topic::Panels]).await else {
-            return Vec::new();
-        };
-        snapshot
-            .topics
-            .get(&Topic::Panels)
-            .cloned()
-            .unwrap_or_default()
-    })
-}
-
 #[test]
 fn a_tree_panel_shows_the_brain_and_follows_it() {
     let r = rig();
@@ -557,10 +523,14 @@ fn a_panel_comes_back_after_moa_restarts() {
     r.shows(&pane, &[TREE_HINT]);
     r.ok(&["set", &kite.id, "--title", "Kite2"]);
     r.shows(&pane, &["Kite2"]);
+    // The cockpit's own panels (built when the terminal attached) register too.
     let registered = wait_for(SHOWS, || {
         let rows = panels(&r.tb);
-        let one = rows.len() == 1 && rows[0]["pane"] == pane.as_str() && rows[0]["view"] == "tree";
-        one.then_some(())
+        let mine: Vec<_> = rows
+            .iter()
+            .filter(|row| row["pane"] == pane.as_str())
+            .collect();
+        (mine.len() == 1 && mine[0]["view"] == "tree").then_some(())
     });
     assert!(registered.is_some(), "panels: {:?}", panels(&r.tb));
 
@@ -596,4 +566,44 @@ fn a_panel_started_at_the_end_leaves_nothing_behind() {
     let gone = wait_for(SHOWS, || (!pid_alive(server)).then_some(()));
     assert!(gone.is_some(), "the terminal server outlived its root");
     assert!(!root.exists());
+}
+
+/// A panel moa placed itself (`MOA_NO_AUTOSTART`, as every cockpit panel has) never starts
+/// moa: with moa stopped, its first connect waits as a reconnect does, and it links once
+/// moa runs again. One started by hand still starts moa.
+#[test]
+fn a_panel_moa_placed_never_starts_moa() {
+    let r = rig();
+    shutdown(&r.tb);
+    let free = || {
+        fs::File::open(r.tb.paths().lock(B))
+            .is_ok_and(|f| f.try_lock().is_ok())
+            .then_some(())
+    };
+    assert!(wait_for(SHOWS, free).is_some(), "moa didn't stop");
+
+    let cmd = format!("'{MOA}' panel tree");
+    let placed = tmux(
+        &r.tb,
+        &[
+            "new-window",
+            "-d",
+            "-t",
+            "=moa:",
+            "-e",
+            "MOA_NO_AUTOSTART=1",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &cmd,
+        ],
+    );
+    r.shows(&placed, &["moa isn't running; trying again…"]);
+    assert!(free().is_some(), "the placed panel started moa");
+
+    // One started by hand starts it, and the placed one links then.
+    panel_tab(&r.tb, "tree");
+    let held = wait_for(SHOWS, || free().is_none().then_some(()));
+    assert!(held.is_some(), "a panel started by hand didn't start moa");
+    r.shows(&placed, &[TREE_HINT]);
 }

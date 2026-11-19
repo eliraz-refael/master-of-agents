@@ -262,13 +262,46 @@ fn layout_verbs_parse() {
     assert_eq!(err(&["layout", "show"]), "usage: moa layout show NAME");
 }
 
+/// `layout apply` builds the current layout, or the one named (L3).
+#[test]
+fn layout_apply_parses() {
+    assert_eq!(op(&["layout", "apply"]), Op::LayoutApply { name: None });
+    assert_eq!(
+        op(&["layout", "apply", "focus"]),
+        Op::LayoutApply {
+            name: Some("focus".into())
+        }
+    );
+    assert_eq!(
+        err(&["layout", "apply", "focus", "x"]),
+        "usage: moa layout apply [NAME]"
+    );
+}
+
+/// `goto` takes one of the nine leaves, and names them when it gets another word.
+#[test]
+fn goto_parses() {
+    use moa_core::layout::Leaf;
+    use moa_core::panel::View;
+    assert_eq!(
+        op(&["goto", "tree"]),
+        Op::Goto {
+            panel: Leaf::Panel(View::Tree)
+        }
+    );
+    assert_eq!(op(&["goto", "agent"]), Op::Goto { panel: Leaf::Agent });
+    assert_eq!(
+        err(&["goto", "nope"]),
+        "usage: moa goto PANEL (panels: console, tree, today, activity, projects, plan, \
+         status, picture, agent)"
+    );
+    // A view that is no leaf of a layout is no panel to go to.
+    assert!(err(&["goto", "empty-slot"]).starts_with("usage: moa goto PANEL"));
+}
+
 #[test]
 fn later_verbs_say_not_yet() {
     assert_eq!(err(&["peers"]), "moactl peers isn't in this build yet");
-    assert_eq!(
-        err(&["layout", "apply", "focus"]),
-        "moactl layout isn't in this build yet"
-    );
     assert_eq!(err(&["setup"]), "moactl setup isn't in this build yet");
 }
 

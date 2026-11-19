@@ -26,28 +26,65 @@ pub(crate) fn panel_argv(state: &State, view: View) -> Vec<String> {
     ]
 }
 
+/// Set on every panel moa places itself: its first connect never starts moa, which may have
+/// just been stopped on purpose; it waits for moa as a reconnecting panel does.
+pub const NO_AUTOSTART: &str = "MOA_NO_AUTOSTART";
+
+/// A panel's environment, as `-e` flags: `MOA_BRAIN`, `MOA_NO_AUTOSTART`, then the daemon's
+/// (`MOA_ROOT` when sandboxed, `MOA_REAL_HOME` when it may use the real home).
+fn panel_env(state: &State) -> Vec<String> {
+    [("MOA_BRAIN", state.brain().as_str()), (NO_AUTOSTART, "1")]
+        .into_iter()
+        .chain(
+            state
+                .deps()
+                .panel
+                .env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .flat_map(|(k, v)| ["-e".to_string(), format!("{k}={v}")])
+        .collect()
+}
+
+/// Home, as `-c` takes it: tmux expands it as a format.
+fn home_dir(state: &State) -> String {
+    literal_format(&state.deps().home.display().to_string())
+}
+
 /// L7: one `new-window` per view, parked in `_moa`, each printing its pane. It opens at
 /// home, since `moa panel` refuses a folder that's gone and `_moa`'s is wherever moa first
-/// ran. The environment goes explicitly: `MOA_BRAIN`, then the daemon's (`MOA_ROOT` when
-/// sandboxed). Public only so the daemon's real-tmux test can run these very commands.
+/// ran. The environment goes explicitly (`panel_env`). Public only so the daemon's
+/// real-tmux test can run these very commands.
 pub fn spawn_cmds(state: &State, views: &[View]) -> Vec<Cmd> {
-    let deps = state.deps();
-    let home = deps.home.display().to_string();
     views
         .iter()
         .map(|view| {
-            let env = std::iter::once(("MOA_BRAIN", state.brain().as_str()))
-                .chain(deps.panel.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-                .flat_map(|(k, v)| ["-e".to_string(), format!("{k}={v}")]);
-            // tmux expands `-c` and `-n` as formats; a view's word has no `#`.
+            // A view's word has no `#` for `-n` to expand.
             Cmd::new("new-window")
                 .args(["-d", "-P", "-F", SPAWNED_FORMAT, "-c"])
-                .arg(literal_format(&home))
+                .arg(home_dir(state))
                 .args(["-t", &format!("={HIDDEN}:"), "-n", view.word()])
-                .args(env)
+                .args(panel_env(state))
                 .args(panel_argv(state, *view))
         })
         .collect()
+}
+
+/// What follows `respawn-pane -k -t %N` to run the `view` panel in place (L11, L12): at
+/// home, with the panel's environment, as a new one starts.
+pub(crate) fn respawn_tail(state: &State, view: View) -> Vec<String> {
+    let mut tail = vec!["-c".to_string(), home_dir(state)];
+    tail.extend(panel_env(state));
+    tail.extend(panel_argv(state, view));
+    tail
+}
+
+/// `respawn-pane` of `pane` as the `view` panel.
+pub(crate) fn respawn(state: &State, pane: PaneId, view: View) -> Cmd {
+    Cmd::new("respawn-pane")
+        .args(["-k", "-t", &pane.to_string()])
+        .args(respawn_tail(state, view))
 }
 
 /// L7's tags for a panel just started in `pane`: its view, its label, and a pane that stays
@@ -61,7 +98,6 @@ pub fn spawn_tags(pane: PaneId, view: View) -> Vec<Cmd> {
 
 /// Starts `views` for the cockpit operation `seq`: the tokened commands, whose answer comes
 /// back as `Asked::Spawn` for [`spawned`]. `None` while the link isn't up.
-#[allow(dead_code)] // Unused until the cockpit queue (L17) sends spawns.
 pub(crate) fn spawn(state: &mut State, views: Vec<View>, seq: u64) -> Option<Effect> {
     let cmds = spawn_cmds(state, &views);
     state.tmux.ask(Asked::Spawn { views, seq }, cmds)

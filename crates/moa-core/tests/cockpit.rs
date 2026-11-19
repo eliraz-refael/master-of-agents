@@ -477,8 +477,16 @@ fn a_missing_cockpit_is_made_from_the_first_leaf() {
     assert!(scene.moa_session);
     let b = built(plan(&scene, &node("cockpit"), title));
     let l = lines(&b.chain);
-    assert_eq!(l[0], "break-pane -d -s %2 -t =moa: -n moa");
-    assert_eq!(l[1], "join-pane -d -h -s %3 -t %2");
+    // At the size of session `moa`'s terminal, then sized by tmux again (L6).
+    assert_eq!(
+        l[..4],
+        [
+            "break-pane -d -s %2 -t =moa: -n moa",
+            "resize-window -A -t %2",
+            "set-option -w -u -t %2 window-size",
+            "join-pane -d -h -s %3 -t %2",
+        ]
+    );
     w.run(&b.chain).unwrap();
     assert_eq!(w.cockpit_leaves(), vec![p(2), p(3), p(4)]);
     assert_eq!(w.where_is(shell).map(|(wi, _)| w.windows[wi].id), Some(tab));
@@ -579,7 +587,9 @@ fn vacate_swaps_a_spare_or_respawns_in_place() {
     spare.put(c, p(9), spot_agent(1));
     let slot = spare.park(View::EmptySlot);
     let mut none = spare.clone();
-    let cmd = vacate(&spare.scene(), p(9), &respawn_tail());
+    let v = vacate(&spare.scene(), p(9), &respawn_tail());
+    assert!(!v.respawned);
+    let cmd = v.chain;
     assert_eq!(
         cmd.line(),
         format!("swap-pane -d -s {slot} -t %9 ; kill-pane -t %9")
@@ -590,7 +600,9 @@ fn vacate_swaps_a_spare_or_respawns_in_place() {
 
     // A stopped slot is no spare: the spot is respawned, and the stopped one left alone.
     none.panes.get_mut(&slot).unwrap().dead = true;
-    let cmd = vacate(&none.scene(), p(9), &respawn_tail());
+    let v = vacate(&none.scene(), p(9), &respawn_tail());
+    assert!(v.respawned);
+    let cmd = v.chain;
     let mut want = vec![
         "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default /x/moa panel empty-slot --brain default"
             .to_string(),
@@ -932,7 +944,7 @@ proptest! {
                     let Some(spot) = scene.spot() else { continue };
                     let Role::Spot(Some(_)) = spot.role else { continue };
                     may_kill = Some(spot.pane);
-                    let cmd = vacate(&scene, spot.pane, &respawn_tail());
+                    let cmd = vacate(&scene, spot.pane, &respawn_tail()).chain;
                     w.run(&cmd).map_err(TestCaseError::fail)?;
                     let now = w.scene();
                     prop_assert_eq!(now.spot().map(|s| s.role), Some(Role::Spot(None)));

@@ -24,6 +24,7 @@ pub const ALLOWED: &[&str] = &[
     "resize-pane",
     "respawn-pane",
     "rename-window",
+    "resize-window",
 ];
 
 /// A command that must not be sent, with the reason.
@@ -47,6 +48,8 @@ const RESPAWN: &str = "respawn-pane needs -k, a tab id and a command";
 const RESPAWN_ENV: &str = "a tab's environment can't hold a newline";
 const RENAME: &str = "rename-window needs a tab id, then -- and a name";
 const RENAME_FORMAT: &str = "rename-window's name must keep # literal (##)";
+const RESIZE_WINDOW: &str = "resize-window needs -A and a tab id";
+const WINDOW_SIZE: &str = "window-size is only unset, on a tab id's window";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
 /// What a chain is called where a name is asked for (a log line). It is no tmux command.
@@ -216,6 +219,27 @@ impl Cmd {
                 _ => Err(Refused(RESIZE)),
             },
             "respawn-pane" => check_respawn(&self.args),
+            // A rebuilt cockpit takes its session's size (L6): `-A`, the largest client's.
+            "resize-window" => match self.args.as_slice() {
+                [a, t, pane] if a == "-A" && t == "-t" && is_pane_id(pane) => Ok(()),
+                _ => Err(Refused(RESIZE_WINDOW)),
+            },
+            // `resize-window` leaves the window's size fixed; unsetting it hands the window
+            // back to the user's terminals. moa never sets it otherwise.
+            "set-option" if option_name(&self.args) == Some("window-size") => {
+                match self.args.as_slice() {
+                    [w, u, t, pane, name]
+                        if w == "-w"
+                            && u == "-u"
+                            && t == "-t"
+                            && is_pane_id(pane)
+                            && name == "window-size" =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(Refused(WINDOW_SIZE)),
+                }
+            }
             // A name is free text (an agent's title): after `--`, one that starts with `-` is
             // still a name, never flags. tmux expands it as a format, so it must have been
             // through [`literal_format`]: a lone `#` (`#(…)` runs a shell) is refused.
@@ -232,6 +256,22 @@ impl Cmd {
             _ => Ok(()),
         }
     }
+}
+
+/// The option a `set-option` names: its first word that is no flag and no `-t`'s target. A
+/// value after it (an agent's title) is never taken for it.
+fn option_name(args: &[String]) -> Option<&str> {
+    let mut words = args.iter();
+    while let Some(w) = words.next() {
+        match w.as_str() {
+            "-t" => {
+                words.next();
+            }
+            w if w.starts_with('-') => {}
+            w => return Some(w),
+        }
+    }
+    None
 }
 
 /// Both are pane ids.

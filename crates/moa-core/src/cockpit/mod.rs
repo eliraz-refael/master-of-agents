@@ -6,13 +6,14 @@
 
 mod assign;
 pub(crate) mod build;
+pub(crate) mod run;
 mod scene;
 pub(crate) mod spawn;
 
 use std::collections::BTreeSet;
 
 pub use scene::{PaneAt, Place, Role, Scene};
-pub use spawn::{spawn_cmds, spawn_tags};
+pub use spawn::{NO_AUTOSTART, spawn_cmds, spawn_tags};
 
 use crate::layout::{Leaf, Node, leaves};
 use crate::model::SessionId;
@@ -96,9 +97,18 @@ pub fn swap_in(scene: &Scene, pane: PaneId, title: impl Fn(SessionId) -> String)
     build::swap_in(scene, pane, &title)
 }
 
+/// A vacate's chain, and which way it empties the spot.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Vacated {
+    pub chain: Cmd,
+    /// The spot is respawned in place as the empty slot (a panel start, and no longer a
+    /// session's tab); else a spare slot is swapped in and the agent killed.
+    pub respawned: bool,
+}
+
 /// L11: the spot's agent in `spot` taken out, leaving the empty slot: a spare one parked is
 /// swapped in and the agent killed, else the spot is respawned in place. `respawn` is the
 /// rest of `respawn-pane -k -t <spot>`: `-c <home> -e K=V … <exe> panel empty-slot --brain <b>`.
-pub fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Cmd {
+pub fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Vacated {
     build::vacate(scene, spot, respawn)
 }

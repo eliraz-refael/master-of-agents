@@ -46,7 +46,7 @@ fn moa_key(tb: &TempBrain, term: &Terminal, key: &str, says: &str) {
 
 /// The notice a daemon key shows in this build.
 fn notice(a: KeyAction) -> String {
-    format!("moa: {}", a.not_yet())
+    format!("moa: {}", a.not_yet().unwrap())
 }
 
 fn launches(tb: &TempBrain) -> u64 {
@@ -94,11 +94,14 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
     came_up(&tb, &term);
     let before = launches(&tb);
 
-    // `$` opens a tab now: slice 5a's Task 14 tests it end to end.
-    for a in KeyAction::ALL {
-        if a == KeyAction::Terminal {
-            continue;
-        }
+    // `$` opens a tab now (slice 5a's Task 14 tests it end to end), and the cockpit's keys
+    // act (cockpit_run.rs in moa-core): the rest still say they're coming.
+    for a in [
+        KeyAction::Find,
+        KeyAction::FindOther,
+        KeyAction::New,
+        KeyAction::Help,
+    ] {
         moa_key(&tb, &term, a.key(), &notice(a));
     }
 
@@ -110,10 +113,10 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
         "the menu never showed"
     );
     term.mark();
-    term.press(KeyAction::Tree.key().as_bytes());
+    term.press(KeyAction::Help.key().as_bytes());
     assert!(
-        term.wait_for_text(&notice(KeyAction::Tree), QUICK),
-        "the menu's tree item never answered"
+        term.wait_for_text(&notice(KeyAction::Help), QUICK),
+        "the menu's help item never answered"
     );
 
     // Pure keys: the next and previous tab, and no split in the cockpit.
@@ -210,7 +213,7 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
     // Back again, from a second terminal; the first one's keys work.
     let again = open(&tb, &[], &[]);
     came_up(&tb, &again);
-    moa_key(&tb, &term, "c", &notice(KeyAction::Console));
+    moa_key(&tb, &term, "?", &notice(KeyAction::Help));
 
     // A crash.
     let pid = status_json(&tb)["pid"].to_string();
@@ -369,7 +372,7 @@ fn a_user_tmux_conf_with_run_shell_and_hooks() {
     .unwrap();
     let term = open(&tb, &[], &[]);
     came_up(&tb, &term);
-    moa_key(&tb, &term, "c", &notice(KeyAction::Console));
+    moa_key(&tb, &term, "?", &notice(KeyAction::Help));
 
     assert_eq!(option(&tb, "@user_opt"), "1");
     let set = hooks(&tb);

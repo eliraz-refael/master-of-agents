@@ -75,6 +75,7 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             "resize-pane",
             "respawn-pane",
             "rename-window",
+            "resize-window",
         ];
         if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");
@@ -232,7 +233,8 @@ fn every_action_has_a_word_key_label_and_notice() {
         assert!(keys.insert(a.key()), "{a:?}");
         assert!(!a.label().is_empty());
         for word in ["tmux", "pane", "window"] {
-            assert!(!a.not_yet().contains(word), "{a:?}: {}", a.not_yet());
+            let text = a.not_yet().unwrap_or_default();
+            assert!(!text.contains(word), "{a:?}: {text}");
         }
         // Whole words: "Repair panels" is fine.
         let label = a.label().to_lowercase();
@@ -250,6 +252,20 @@ fn every_action_has_a_word_key_label_and_notice() {
     assert_eq!(KeyAction::from_word("layout-0"), None);
     assert_eq!(KeyAction::Layout(2).label(), "Layout: focus (agent)");
     assert_eq!(KeyAction::FindOther.not_yet(), KeyAction::Find.not_yet());
+    // The keys the core acts on say nothing is coming (L13).
+    let coming: Vec<KeyAction> = KeyAction::ALL
+        .into_iter()
+        .filter(|a| a.not_yet().is_some())
+        .collect();
+    assert_eq!(
+        coming,
+        [
+            KeyAction::Find,
+            KeyAction::FindOther,
+            KeyAction::New,
+            KeyAction::Help
+        ]
+    );
 }
 
 const MOA_SESSION: &str = "0b9e6c6e-2a43-4a7e-9d51-6e3f0d3c8a11";
@@ -551,6 +567,50 @@ fn the_pane_moving_commands_take_only_their_safe_shapes() {
         ] {
             refused(cmd(name, args), select);
         }
+    }
+    // A rebuilt cockpit's window takes its terminal's size, then follows it again (L6).
+    assert_eq!(cmd("resize-window", &["-A", "-t", "%3"]).check(), Ok(()));
+    let resize_window = "resize-window needs -A and a tab id";
+    for args in [
+        &["-t", "%3"][..],
+        &["-A", "-t", "moa"],
+        &["-A", "-t", "@1"],
+        &["-a", "-t", "%3"],
+        &["-x", "80", "-t", "%3"],
+        &["-A", "-t", "%3", "-x", "80"],
+    ] {
+        refused(cmd("resize-window", args), resize_window);
+    }
+    assert_eq!(
+        cmd("set-option", &["-w", "-u", "-t", "%3", "window-size"]).check(),
+        Ok(())
+    );
+    // Only the option named `window-size` is held to that shape: a value that reads
+    // `window-size` (an agent titled so) is any other option's.
+    assert_eq!(
+        cmd(
+            "set-option",
+            &["-p", "-t", "%5", "@moa_label", "window-size"]
+        )
+        .check(),
+        Ok(())
+    );
+    assert_eq!(
+        cmd(
+            "set-option",
+            &["-p", "-t", "%5", "@moa_label", "● window-size"]
+        )
+        .check(),
+        Ok(())
+    );
+    let window_size = "window-size is only unset, on a tab id's window";
+    for args in [
+        &["-w", "-t", "%3", "window-size", "manual"][..],
+        &["-w", "-u", "-t", "@1", "window-size"],
+        &["-g", "window-size", "smallest"],
+        &["-u", "-t", "%3", "window-size"],
+    ] {
+        refused(cmd("set-option", args), window_size);
     }
     refused(
         cmd("move-window", &["-s", "%1", "-t", "=moa:"]),

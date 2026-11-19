@@ -500,7 +500,7 @@ async fn a_spawned_panel_runs_in_the_hidden_session() {
         &exe,
         format!(
             "#!/bin/sh\n\
-             {{ pwd -P; echo \"$MOA_BRAIN\"; echo \"$MOA_ROOT\"; echo \"$*\"; }} > '{said}.tmp'\n\
+             {{ pwd -P; echo \"$MOA_BRAIN\"; echo \"$MOA_ROOT\"; echo \"$MOA_NO_AUTOSTART\"; echo \"$*\"; }} > '{said}.tmp'\n\
              mv '{said}.tmp' '{said}'\n\
              exec sleep 30\n",
             said = said.display()
@@ -571,6 +571,7 @@ async fn a_spawned_panel_runs_in_the_hidden_session() {
             folder.to_str().unwrap(),
             "default",
             "/r",
+            "1",
             "panel tree --brain default"
         ]
     );
@@ -591,5 +592,204 @@ async fn a_spawned_panel_runs_in_the_hidden_session() {
         screen.contains("panel stopped · Ctrl-a r brings it back"),
         "{screen}"
     );
+    ctl.close().await;
+}
+
+/// One pane of a window as tmux lays it out: its `@moa_view`, left, top, width and height.
+type Cell = (String, u32, u32, u32, u32);
+
+/// L6 on a real server, with the cockpit window gone (session `moa` is there, but no window in
+/// it is named `moa`). The keeper's parked window was made in `_moa` at 10x3, before a user's
+/// terminal attached, and tmux resizes a window only once someone looks at it: the chain
+/// sizes it to the terminal first, so its joins and sizes are laid out at 120x29. Then tmux
+/// sizes it again: a terminal resize reaches the cockpit. With no terminal on session `moa`
+/// (a `moa layout apply` from a script), the build still goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missing_cockpit_is_made_again_at_its_terminals_size() {
+    use moa_core::cockpit::{Scene, plan};
+    use moa_core::layout::{PRESET_KEYS, leaves, presets};
+    use moa_testkit::Terminal;
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    let root = tb.root().display().to_string();
+    tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "_moa",
+        "-x",
+        "10",
+        "-y",
+        "3",
+        "/bin/sh",
+        ";",
+        "new-session",
+        "-d",
+        "-s",
+        "moa",
+        "-n",
+        "shell",
+        "-c",
+        &root,
+        "/bin/sh",
+    ]);
+    // Parked before anyone attached: each window is `_moa`'s 10x3.
+    for view in ["tree", "console", "plan", "status", "empty-slot"] {
+        let pane = tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "=_moa:",
+            "-n",
+            view,
+            "sleep",
+            "300",
+        ]);
+        tmux(&["set-option", "-p", "-t", pane.trim(), "@moa_view", view]);
+    }
+    let socket = tb.paths().tmux_socket(B).unwrap();
+    let program = moa_testkit::tmux_path().unwrap_or_else(|e| panic!("{e}"));
+    let mut attach: Vec<std::ffi::OsString> = vec!["-u".into()];
+    attach.extend(socket.args().iter().cloned());
+    attach.extend(["attach".into(), "-t".into(), "=moa".into()]);
+    let users = || {
+        tmux(&["list-clients", "-F", "#{client_control_mode}"])
+            .lines()
+            .filter(|l| *l == "0")
+            .count()
+    };
+    let term = Terminal::spawn(&program, &attach, &tb.env(), 120, 30).unwrap();
+    wait_for(Duration::from_secs(10), || (users() == 1).then_some(()))
+        .expect("the user's terminal is attached");
+    let (ctl, _events, _) = ControlClient::connect(&ConnectOptions {
+        tmux: program.clone(),
+        socket: socket.args().to_vec(),
+        env: tb.env(),
+        wait: CONNECT_WAIT,
+    })
+    .await
+    .expect("a control client");
+
+    let lines = |args: &[&str]| -> Vec<String> { tmux(args).lines().map(str::to_string).collect() };
+    let scene = || {
+        let t = Topology::from_lists(
+            &lines(&["list-sessions", "-F", topology::LIST_SESSIONS]),
+            &lines(&["list-panes", "-a", "-F", topology::LIST_PANES]),
+            &lines(&["list-clients", "-F", topology::LIST_CLIENTS]),
+        );
+        Scene::read(&t, |_| None)
+    };
+    let size = |pane: &str| {
+        tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{window_width}x#{window_height}",
+        ])
+    };
+    let cells = |pane: &str| -> Vec<Cell> {
+        lines(&[
+            "list-panes",
+            "-t",
+            pane,
+            "-F",
+            "#{@moa_view} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+        ])
+        .iter()
+        .map(|l| {
+            let f: Vec<&str> = l.split(' ').collect();
+            let n = |i: usize| f[i].parse::<u32>().unwrap();
+            (f[0].to_string(), n(1), n(2), n(3), n(4))
+        })
+        .collect()
+    };
+    // Builds `name` with the cockpit window gone, from parked panels: the keeper's pane.
+    let build = async |name: &str| -> (String, Result<Vec<String>, String>) {
+        let before = scene();
+        assert!(
+            before.moa_session && before.cockpit.is_none(),
+            "{name}: {before:?}"
+        );
+        let layout = presets().node(name).unwrap();
+        let build = plan(&before, &layout, |_| String::new())
+            .build
+            .unwrap_or_else(|| panic!("{name}: a build from parked panels"));
+        let keeper = build.leaves[0].1.to_string();
+        let answer = ctl.run(&build.chain).await.map_err(|e| e.to_string());
+        let after = scene();
+        let cockpit = after
+            .cockpit
+            .unwrap_or_else(|| panic!("{name}: no cockpit"));
+        let held = after.panes.iter().filter(|at| at.window == cockpit).count();
+        assert_eq!(held, leaves(&layout).len(), "{name}: {after:?}");
+        (keeper, answer)
+    };
+    // Every pane of the cockpit parked again, so the next build finds no cockpit.
+    let park = |keeper: &str| {
+        for (pane, _) in lines(&["list-panes", "-t", keeper, "-F", "#{pane_id} x"])
+            .iter()
+            .filter_map(|l| l.split_once(' '))
+        {
+            tmux(&["break-pane", "-d", "-s", pane, "-t", "=_moa:"]);
+        }
+    };
+    let near = |got: u32, want: u32| got.abs_diff(want) <= 1;
+
+    let mut keeper = String::new();
+    for name in PRESET_KEYS {
+        if !keeper.is_empty() {
+            park(&keeper);
+        }
+        let (k, answer) = build(name).await;
+        keeper = k;
+        assert_eq!(answer, Ok(Vec::new()), "{name}");
+        assert_eq!(size(&keeper), "120x29", "{name}");
+        let widths: Vec<(String, u32)> = cells(&keeper)
+            .into_iter()
+            .map(|(v, _, _, w, _)| (v, w))
+            .collect();
+        // 26% and 30% of 120 columns, the console the rest, borders between.
+        let want: &[(&str, u32)] = match name {
+            "cockpit" => &[("tree", 31), ("console", 51), ("plan", 36)],
+            "triage" => &[("status", 36), ("console", 49), ("plan", 33)],
+            _ => &[],
+        };
+        if !want.is_empty() {
+            assert_eq!(widths.len(), want.len(), "{name}: {widths:?}");
+            for ((view, got), (v, w)) in widths.iter().zip(want) {
+                assert!(view == v && near(*got, *w), "{name}: {widths:?}");
+            }
+        }
+    }
+
+    // The cockpit follows the terminal again: no size of its own is left set.
+    assert_eq!(
+        tmux(&["show-options", "-wqv", "-t", &keeper, "window-size"]),
+        ""
+    );
+    tmux(&["select-window", "-t", &keeper]);
+    term.resize(100, 30).unwrap();
+    wait_for(Duration::from_secs(10), || {
+        (size(&keeper) == "100x29").then_some(())
+    })
+    .unwrap_or_else(|| panic!("the cockpit didn't follow the terminal: {}", size(&keeper)));
+
+    // With no terminal on session `moa`, `resize-window -A` changes nothing and the build
+    // still goes through.
+    tmux(&["select-window", "-t", "=moa:shell"]);
+    park(&keeper);
+    drop(term);
+    wait_for(Duration::from_secs(10), || (users() == 0).then_some(()))
+        .expect("the user's terminal is gone");
+    let (keeper, answer) = build("cockpit").await;
+    assert_eq!(answer, Ok(Vec::new()));
+    assert_eq!(cells(&keeper).len(), 3);
     ctl.close().await;
 }
