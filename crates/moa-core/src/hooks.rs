@@ -20,7 +20,7 @@ use crate::peers::peers_note;
 use crate::state::{State, Table};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::{LaunchKind, Link};
+use crate::tmux::link::LaunchKind;
 use crate::{Now, UtcMs};
 
 /// What [`apply`] did with an event.
@@ -207,25 +207,26 @@ fn lifts_fence(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
 
 /// Whether `env` comes from the tab moa last killed for session `id` (sleep, close or
 /// restart: [`State::killed`]), while the session isn't bound to that tab, and unless the
-/// link is up on another server, where that id may name a new tab. Its agent dies with the
-/// tab, but a hook it sent between the commit and the kill arrives after the commit, and may
-/// be stamped later than it. A kill can be lost (its batch failed, or the link went), and
-/// then a reload, reconcile or `adopt` binds the session to the tab again: its agent runs,
-/// and its events count again.
+/// link last connected to another server (up or down since), where that id may name a new
+/// tab. Its agent dies with the tab, but a hook it sent between the commit and the kill
+/// arrives after the commit, and may be stamped later than it. A kill can be lost (its batch
+/// failed, or the link went), and then a reload, reconcile or `adopt` binds the session to
+/// the tab again: its agent runs, and its events count again.
 fn from_a_killed_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
-    let Some(pane) = env.pane.as_deref().and_then(|p| p.parse::<PaneId>().ok()) else {
+    let Some(pane) = unbound_tab_of(state, id, env) else {
         return false;
     };
     let Some((killed_on, killed)) = state.killed.get(&id) else {
         return false;
     };
-    let other_server = matches!(
-        &state.tmux().link,
-        Link::Up { generation, .. } if generation != killed_on
-    );
-    *killed == pane
-        && !other_server
-        && state.binding(id).and_then(|b| b.pane_id.parse().ok()) != Some(pane)
+    *killed == pane && state.tmux().generation().is_none_or(|g| g == *killed_on)
+}
+
+/// The tab `env` says it comes from, when session `id` isn't bound to it.
+fn unbound_tab_of(state: &State, id: SessionId, env: &HookEnvelope) -> Option<PaneId> {
+    let pane = env.pane.as_deref()?.parse::<PaneId>().ok()?;
+    let bound = state.binding(id).and_then(|b| b.pane_id.parse().ok());
+    (bound != Some(pane)).then_some(pane)
 }
 
 /// Whether end `env` comes from the tab session `id`'s restart killed (R24), which isn't
@@ -233,7 +234,7 @@ fn from_a_killed_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
 /// agent). Any other end, one that doesn't say its tab or one with no binding among them,
 /// goes by the other rules.
 fn from_an_old_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
-    let Some(pane) = env.pane.as_deref().and_then(|p| p.parse::<PaneId>().ok()) else {
+    let Some(pane) = unbound_tab_of(state, id, env) else {
         return false;
     };
     matches!(env.kind, HookKind::SessionEnded { .. })
@@ -241,7 +242,6 @@ fn from_an_old_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
             .restarted
             .get(&id)
             .is_some_and(|(_, killed)| *killed == pane)
-        && state.binding(id).and_then(|b| b.pane_id.parse().ok()) != Some(pane)
 }
 
 /// What an event does to its session past its history row.

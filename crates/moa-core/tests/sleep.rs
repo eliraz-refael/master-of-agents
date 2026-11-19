@@ -12,7 +12,7 @@ use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
-    Effect, Input, Publish, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked,
+    Down, Effect, Input, Publish, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked,
 };
 use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::{DisplayState, display_state, is_asleep};
@@ -970,9 +970,15 @@ fn the_slept_agents_late_start_is_history_only() {
 
 /// A tab id names a tab only on its own server. Once the link is up on a new terminal
 /// server, a start from a tab with the killed tab's id is a new agent there, and brings S
-/// back.
+/// back; and so it does once the link to that new server drops.
 #[test]
 fn a_killed_tabs_id_on_a_new_server_counts_again() {
+    for then_down in [false, true] {
+        a_killed_tabs_id_on_a_new_server(then_down);
+    }
+}
+
+fn a_killed_tabs_id_on_a_new_server(then_down: bool) {
     let mut r = World::new().up();
     let fx = r.sleep_op(1, &[S], None, false);
     assert_eq!(kills(&fx), [&kill("%1")], "{fx:?}");
@@ -991,6 +997,9 @@ fn a_killed_tabs_id_on_a_new_server_counts_again() {
             socket: "moa".into(),
         },
     );
+    if then_down {
+        feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    }
     assert!(is_asleep(r.s()));
 
     let late = UtcMs(slept_at.0 + 1000);
