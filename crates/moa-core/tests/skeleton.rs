@@ -478,6 +478,7 @@ fn op_methods_match_the_variants() {
         Op::UiPanel {
             pane: Some("%3".into()),
             view: Some(moa_core::panel::View::Tree),
+            placed: false,
         },
         Op::UiHere {
             folder: Some("/x".into()),
@@ -495,6 +496,10 @@ fn op_methods_match_the_variants() {
         },
         Op::Goto {
             panel: moa_core::layout::Leaf::Agent,
+        },
+        Op::UiSelectView {
+            pane: "%3".into(),
+            view: moa_core::panel::View::Plan,
         },
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't

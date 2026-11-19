@@ -326,8 +326,9 @@ pub(crate) fn swap_in(
     }
     let mut cmds = vec![swap(pane, spot.pane)];
     match spot.agent() {
+        _ if !occupant_stays(spot, at) => cmds.extend(go_home(spot, title)),
         // An agent from the spot keeps a tab of moa's: `pane`'s, named by its title.
-        Some(old) if at.place == Place::Moa => {
+        Some(old) => {
             cmds.push(Cmd::new("rename-window").args([
                 "-t",
                 &spot.pane.to_string(),
@@ -337,11 +338,20 @@ pub(crate) fn swap_in(
             cmds.extend(untag_agent(spot.pane));
         }
         // An empty slot already parked by the swap stays.
-        None if at.place == Place::Hidden => {}
-        _ => cmds.extend(go_home(spot, title)),
+        None => {}
     }
     cmds.extend(agent_tags(pane, &cut(&title(id))));
     Some(Cmd::chain(cmds))
+}
+
+/// Whether the spot's occupant `spot`, swapped with the agent `at`, stays in the window `at`
+/// leaves: an agent in a tab of moa's, an empty slot in `_moa`. Anywhere else it goes home
+/// (L11).
+pub(crate) fn occupant_stays(spot: &PaneAt, at: &PaneAt) -> bool {
+    match spot.agent() {
+        Some(_) => at.place == Place::Moa,
+        None => at.place == Place::Hidden,
+    }
 }
 
 /// L11's vacate of the spot's agent in `spot`: a spare empty slot swapped in and the agent

@@ -162,10 +162,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let lost = matches!(t, TmuxIn::Down(_)) || (fresh && link_conn.is_some());
             let link_listed = matches!(t, TmuxIn::Replies { conn, token: TmuxToken::Refresh, .. }
                 if link_conn == Some(conn));
-            // Another server's pane ids name other tabs: the views the old tabs had go.
+            // Another server's pane ids name other tabs: the views the old tabs had go, and
+            // no panel has its tab any more (L8).
             let another_server = state.tmux.another_server(&t);
+            let mut unpaned = None;
             if another_server {
                 state.pane_views.clear();
+                unpaned = panel::server_changed(state);
             }
             fx.extend(state.tmux.input(t));
             if lost {
@@ -207,6 +210,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 })
             };
             let mut more = reconcile::answered(state, now, reconciles, replied);
+            more.extend(unpaned);
             for (ask, answer) in resumes {
                 more.extend(ops::launch::resumed(state, now, ask, panes_of(answer)));
             }
@@ -272,6 +276,11 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 more.extend(cockpit::run::linked(state, another_server));
             }
             if link_listed {
+                // Each panel's view is read again from the tags (L8).
+                // Healing waits while a cockpit operation runs (L17): this listing may be
+                // older than the chain in flight, and the next listing heals.
+                let heal = cockpit::run::idle(state);
+                more.extend(panel::listed(state, heal));
                 more.extend(cockpit::run::link_listed(state));
             }
             match mailbox {
@@ -365,9 +374,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         Input::Client {
             conn,
             req,
-            op: Op::UiPanel { pane, view },
+            op: Op::UiPanel { pane, view, placed },
             ..
-        } => panel::register(state, conn, req, pane.as_deref(), view),
+        } => panel::register(state, conn, req, pane.as_deref(), view, placed),
         Input::Client {
             conn,
             req,
@@ -395,6 +404,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::Goto { panel },
             ..
         } => cockpit::run::goto(state, conn, req, panel),
+        Input::Client {
+            conn,
+            req,
+            op: Op::UiSelectView { pane, view },
+            ..
+        } => cockpit::run::select_view(state, conn, req, &pane, view),
         // Answered once tmux says how the new tab turned out. Every tab opens detached
         // (`-d`); unless `bg`, it is brought to the screen once it is bound.
         Input::Client {

@@ -167,6 +167,8 @@ pub struct Panel {
     hover: Option<Item>,
     /// Where the pointer was last seen.
     pointer: Option<(u16, u16)>,
+    /// moa gave this panel its view (its `panels` row says `managed`, L8).
+    managed: bool,
 }
 
 const CANCELLED: &str = "cancelled";
@@ -191,6 +193,7 @@ impl Panel {
             message: None,
             hover: None,
             pointer: None,
+            managed: false,
         }
     }
 
@@ -198,11 +201,32 @@ impl Panel {
         self.view
     }
 
-    /// Shows another view, from its top, with nothing asked or said.
+    /// Whether moa gave this panel its view, as its row last said (L8).
+    pub fn managed(&self) -> bool {
+        self.managed
+    }
+
+    /// Shows another view, from its top, with nothing asked or said. Whether moa manages
+    /// the panel stays as it is.
     pub fn set_view(&mut self, view: View) {
         if view != self.view {
+            let managed = self.managed;
             *self = Panel::new(view);
+            self.managed = managed;
         }
+    }
+
+    /// Follows the panel's own `panels` row (`key`, from `ui.panel`'s reply): the view moa
+    /// gives it, and whether moa manages it (L8). A row for another key, or none, changes
+    /// nothing. True when the view changed.
+    pub fn follow(&mut self, data: &Data, key: &str) -> bool {
+        let Some(row) = data.panels.get(key) else {
+            return false;
+        };
+        self.managed = row.managed;
+        let changed = row.view != self.view;
+        self.set_view(row.view);
+        changed
     }
 
     /// The view the picture's shown tab draws; `None` for every other view.

@@ -314,7 +314,6 @@ fn unknown_views_say_not_yet() {
     let cases = [
         (View::Console, "the console isn't in this build yet"),
         (View::Picker, "finding a session isn't in this build yet"),
-        (View::EmptySlot, "the agent spot isn't in this build yet"),
         (View::Help, "help isn't in this build yet"),
         (View::Setup, "setup isn't in this build yet"),
     ];
@@ -324,4 +323,20 @@ fn unknown_views_say_not_yet() {
         let narrow = views::build(view, &data, &ctx, &ViewUi::default(), 10);
         assert_eq!(narrow[0].text(), words[..10], "{view:?}");
     }
+    assert_eq!(views::not_yet(View::EmptySlot), None);
+}
+
+/// The agent spot with no agent in it says how to fill it (the spike's `EMPTY_SLOT`): dim,
+/// with nothing to select, cut to the width.
+#[test]
+fn empty_slot_model() {
+    let lines = views::empty_slot::build(80);
+    insta::assert_snapshot!("empty_slot_model", debug_lines(&lines));
+    let (data, ctx) = lantern();
+    let built = views::build(View::EmptySlot, &data, &ctx, &ViewUi::default(), 80);
+    assert_eq!(built, lines);
+    assert!(lines.iter().all(|l| !l.selectable()));
+    let narrow = views::empty_slot::build(10);
+    assert_eq!(narrow[2].text(), "press Ente");
+    assert!(narrow.iter().all(|l| l.text().chars().count() <= 10));
 }

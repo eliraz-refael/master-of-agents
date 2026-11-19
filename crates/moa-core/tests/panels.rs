@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use moa_core::UtcMs;
 use moa_core::change::Change;
+use moa_core::cockpit::spawn_tags;
 use moa_core::effect::{Down, Effect, Input, LogLevel, Publish, TmuxIn, TmuxToken, handle_checked};
 use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
 use moa_core::op::{ConnId, Done, Op, OpError};
@@ -49,6 +50,7 @@ fn panel(pane: Option<&str>, view: Option<View>) -> Op {
     Op::UiPanel {
         pane: pane.map(str::to_string),
         view,
+        placed: false,
     }
 }
 
@@ -89,7 +91,7 @@ fn a_panel_registers_and_is_published() {
     assert_eq!(ms.len(), 1, "{fx:?}");
     assert_eq!(
         topic(ms[0], Topic::Panels),
-        json!({"c7": {"key": "c7", "pane": "%3", "view": "tree"}})
+        json!({"c7": {"key": "c7", "pane": "%3", "view": "tree", "managed": false}})
     );
     let at_publish = fx
         .iter()
@@ -102,7 +104,7 @@ fn a_panel_registers_and_is_published() {
     assert!(at_publish < at_reply, "{fx:?}");
     assert_eq!(
         the_reply(&fx).unwrap().data,
-        json!({"key": "c7", "view": "tree"})
+        json!({"key": "c7", "view": "tree", "managed": false})
     );
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert!(!fx.iter().any(|e| matches!(e, Effect::Persist(_))));
@@ -116,12 +118,12 @@ fn a_panel_without_a_view_gets_its_panes_last_one_else_picture() {
     let fx = send_on(&b, &mut st, 8, 1, panel(Some("%3"), None));
     assert_eq!(
         the_reply(&fx).unwrap().data,
-        json!({"key": "c8", "view": "plan"})
+        json!({"key": "c8", "view": "plan", "managed": false})
     );
     let fx = send_on(&b, &mut st, 9, 1, panel(Some("%4"), None));
     assert_eq!(
         the_reply(&fx).unwrap().data,
-        json!({"key": "c9", "view": "picture"})
+        json!({"key": "c9", "view": "picture", "managed": false})
     );
 }
 
@@ -166,7 +168,7 @@ fn a_second_panel_on_a_pane_replaces_the_first() {
     send_on(&b, &mut st, 8, 1, panel(Some("%3"), Some(View::Status)));
     assert_eq!(
         published_panels(&st),
-        json!({"c8": {"key": "c8", "pane": "%3", "view": "status"}})
+        json!({"c8": {"key": "c8", "pane": "%3", "view": "status", "managed": false}})
     );
 }
 
@@ -180,7 +182,7 @@ fn a_closed_connection_drops_its_panel() {
     assert_eq!(ms.len(), 1, "{fx:?}");
     assert_eq!(
         topic(ms[0], Topic::Panels),
-        json!({"c8": {"key": "c8", "pane": "%4", "view": "today"}})
+        json!({"c8": {"key": "c8", "pane": "%4", "view": "today", "managed": false}})
     );
     // A connection with no panel publishes nothing when it goes.
     let fx = handle_checked(&mut st, Input::ClientGone(ConnId(9)), b.now());
@@ -521,11 +523,66 @@ fn the_terminal_key_opens_in_the_panels_here() {
     opens_in(&b, &mut st, &fx, "⌨ a", "/r/work/a");
 }
 
-/// Until 5b gives a panel the agent spot's folder (V6).
+/// A panel with no folder of its own opens a terminal in the folder of the agent in the
+/// spot, else at home (L11).
 #[test]
-fn a_panel_with_no_here_opens_at_home() {
+fn the_terminal_key_falls_back_to_the_spots_folder() {
     let b = TypicalBrain::new();
+    let mut snapshot = b.snapshot();
+    let mut s = session(A, Lifecycle::Live);
+    s.cwd = Some("/r/work/a".into());
+    snapshot.sessions.push(s);
+    snapshot.pane_bindings.push(binding(A, "%7", true));
+    // The tree `%3` in the cockpit, beside Lantern's agent `%7` in the spot.
+    let tree = "P %3 @1 $0 1 1 0 1  0 tree".to_string();
+    let spot = format!("P %7 @1 $0 1 1 0 1 {A} 0 agent");
+    let mut st = with_panel(&b, deps(&b), snapshot);
+    link_listed(&b, &mut st, &[tree.clone(), spot]);
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ a", "/r/work/a");
+
+    // The empty slot in the spot: home.
     let mut st = with_panel(&b, deps(&b), b.snapshot());
+    let slot = "P %8 @1 $0 1 1 0 1  0 empty-slot".to_string();
+    link_listed(&b, &mut st, &[tree, slot]);
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
+
+    // No cockpit: home.
+    let mut st = with_panel(&b, deps(&b), b.snapshot());
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
+}
+
+/// A stale `agent` tag on a pane outside the cockpit (left by a chain that stopped half
+/// way) never picks the folder: only the cockpit's spot does.
+#[test]
+fn a_stale_agent_tag_outside_the_cockpit_never_picks_the_folder() {
+    let b = TypicalBrain::new();
+    let mut snapshot = b.snapshot();
+    for (id, cwd) in [(A, "/r/work/a"), (B, "/r/work/b")] {
+        let mut s = session(id, Lifecycle::Live);
+        s.cwd = Some(cwd.into());
+        snapshot.sessions.push(s);
+    }
+    snapshot
+        .pane_bindings
+        .extend([binding(A, "%7", true), binding(B, "%6", true)]);
+    // B's tab `%6`, in window `@0` (listed first), still tagged `agent`.
+    let stale = format!("P %6 @0 $0 1 0 0 0 {B} 0 agent");
+    let tree = "P %3 @1 $0 1 1 0 1  0 tree".to_string();
+
+    // Lantern in the spot: its folder.
+    let spot = format!("P %7 @1 $0 1 1 0 1 {A} 0 agent");
+    let mut st = with_panel(&b, deps(&b), snapshot.clone());
+    link_listed(&b, &mut st, &[stale.clone(), tree.clone(), spot]);
+    let fx = terminal_key(&b, &mut st, "%3");
+    opens_in(&b, &mut st, &fx, "⌨ a", "/r/work/a");
+
+    // The empty slot in the spot: home.
+    let slot = "P %8 @1 $0 1 1 0 1  0 empty-slot".to_string();
+    let mut st = with_panel(&b, deps(&b), snapshot);
+    link_listed(&b, &mut st, &[stale, tree, slot]);
     let fx = terminal_key(&b, &mut st, "%3");
     opens_in(&b, &mut st, &fx, "⌨ ~", &home(&b));
 }
@@ -804,4 +861,439 @@ fn a_bad_folded_value_reads_as_empty() {
     assert!(folded(&st).is_empty());
     send(&b, &mut st, 1, fold("A", true));
     assert_eq!(folded(&st), ["A"]);
+}
+
+// --- Panels follow moa's view (L8) ---
+
+/// `ui.panel` from a panel moa placed itself (`MOA_NO_AUTOSTART`), or not.
+fn placed_panel(pane: &str, view: View, placed: bool) -> Op {
+    Op::UiPanel {
+        pane: Some(pane.to_string()),
+        view: Some(view),
+        placed,
+    }
+}
+
+fn select_view(pane: &str, view: View) -> Op {
+    Op::UiSelectView {
+        pane: pane.to_string(),
+        view,
+    }
+}
+
+/// One `list-panes` line: `%id` in window `@window` of session `$session` (`$0` is `moa`,
+/// `$1` is `_moa`), outside the cockpit, alive, tagged with `view` (empty: none).
+fn pane_line(id: u32, window: u32, session: u32, view: &str) -> String {
+    format!("P %{id} @{window} ${session} 1 1 0 0  0 {view}")
+}
+
+/// The three lists: sessions `moa` and `_moa`, `panes`, and moa's control client.
+fn lists(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
+    vec![
+        Ok(vec!["S $0 moa".to_string(), "S $1 _moa".to_string()]),
+        Ok(panes.to_vec()),
+        Ok(vec!["C 1 $1 client-9".to_string()]),
+    ]
+}
+
+/// The link's own listing comes back with `panes`.
+fn link_listed(b: &TypicalBrain, st: &mut State, panes: &[String]) -> Vec<Effect> {
+    feed(
+        b,
+        st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(panes),
+        },
+    )
+}
+
+/// tmux answers query `n` with the three lists, `panes` among them.
+fn answer_lists(b: &TypicalBrain, st: &mut State, n: u64, panes: Vec<String>) -> Vec<Effect> {
+    feed(
+        b,
+        st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: lists(&panes),
+        },
+    )
+}
+
+/// `%3` tagged `status` and `%9` tagged `tree`, parked; `%4`, an untagged shell in `moa`;
+/// `%6`, an untagged pane in `_moa`.
+fn the_panes() -> Vec<String> {
+    vec![
+        pane_line(3, 103, 1, "status"),
+        pane_line(9, 109, 1, "tree"),
+        pane_line(4, 4, 0, ""),
+        pane_line(6, 106, 1, ""),
+    ]
+}
+
+/// The link up, its first listing showing [`the_panes`].
+fn listed_up() -> (TypicalBrain, State) {
+    let (b, mut st) = loaded(TOML);
+    link_up(&b, &mut st);
+    link_listed(&b, &mut st, &the_panes());
+    (b, st)
+}
+
+/// The last `panels` published in `fx`.
+fn last_panels(fx: &[Effect]) -> Value {
+    let ms = models(fx);
+    let m = ms
+        .last()
+        .unwrap_or_else(|| panic!("nothing published: {fx:?}"));
+    topic(m, Topic::Panels)
+}
+
+/// The one tokened query in `fx`: its number and its commands, each as one line.
+fn the_ask(fx: &[Effect]) -> (u64, Vec<String>) {
+    let (n, cmds) = the_query(fx);
+    let lines = cmds
+        .iter()
+        .flat_map(|c| c.parts().to_vec())
+        .map(|c| format!("{} {}", c.name(), c.argv().join(" ")))
+        .collect();
+    (n, lines)
+}
+
+#[test]
+fn the_tag_wins_over_the_view_a_panel_asks_for() {
+    let (b, mut st) = listed_up();
+    let fx = send_on(&b, &mut st, 7, 1, panel(Some("%3"), Some(View::Tree)));
+    assert_eq!(
+        the_reply(&fx).unwrap().data,
+        json!({"key": "c7", "view": "status", "managed": true})
+    );
+    let fx = send_on(&b, &mut st, 8, 1, panel(Some("%4"), Some(View::Tree)));
+    assert_eq!(
+        the_reply(&fx).unwrap().data,
+        json!({"key": "c8", "view": "tree", "managed": false})
+    );
+    assert_eq!(
+        published_panels(&st),
+        json!({
+            "c7": {"key": "c7", "pane": "%3", "view": "status", "managed": true},
+            "c8": {"key": "c8", "pane": "%4", "view": "tree", "managed": false},
+        })
+    );
+}
+
+#[test]
+fn a_listing_corrects_a_panel_that_registered_too_early() {
+    let (b, mut st) = loaded(TOML);
+    let fx = send_on(&b, &mut st, 7, 1, panel(Some("%3"), Some(View::Tree)));
+    assert_eq!(
+        the_reply(&fx).unwrap().data,
+        json!({"key": "c7", "view": "tree", "managed": false})
+    );
+    link_up(&b, &mut st);
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert_eq!(
+        last_panels(&fx),
+        json!({"c7": {"key": "c7", "pane": "%3", "view": "status", "managed": true}})
+    );
+    // A listing that changes nothing publishes nothing.
+    feed(
+        &b,
+        &mut st,
+        TmuxIn::Notification(Notification::SessionsChanged),
+    );
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert!(models(&fx).is_empty(), "{fx:?}");
+    // One that shows the tag gone: the panel is its own again, with the view it has.
+    feed(
+        &b,
+        &mut st,
+        TmuxIn::Notification(Notification::SessionsChanged),
+    );
+    let fx = link_listed(&b, &mut st, &[pane_line(3, 103, 1, "")]);
+    assert_eq!(
+        last_panels(&fx),
+        json!({"c7": {"key": "c7", "pane": "%3", "view": "status", "managed": false}})
+    );
+}
+
+#[test]
+fn select_view_retags_and_publishes() {
+    let (b, mut st) = listed_up();
+    send_on(&b, &mut st, 7, 1, panel(Some("%3"), Some(View::Tree)));
+    let fx = send_on(&b, &mut st, 7, 2, select_view("%3", View::Plan));
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let (n, asked) = the_ask(&fx);
+    assert_eq!(asked.len(), 3, "a listing: {asked:?}");
+    assert!(asked[1].starts_with("list-panes"), "{asked:?}");
+
+    let fx = answer_lists(&b, &mut st, n, the_panes());
+    let (n, chain) = the_ask(&fx);
+    assert_eq!(
+        chain,
+        [
+            "set-option -p -t %3 @moa_view plan",
+            "set-option -p -t %3 @moa_label ◷ big picture",
+            "set-option -p -t %3 @moa_framed 1",
+            "set-option -p -t %3 window-style fg=#4c566a",
+            "set-option -p -t %3 window-active-style fg=#88c0d0",
+        ]
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+
+    let fx = answer(&b, &mut st, n, Ok(Vec::new()));
+    assert_eq!(
+        last_panels(&fx),
+        json!({"c7": {"key": "c7", "pane": "%3", "view": "plan", "managed": true}})
+    );
+    let at_publish = fx
+        .iter()
+        .rposition(|e| matches!(e, Effect::Publish(_)))
+        .unwrap();
+    let at_reply = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Reply { .. }))
+        .unwrap();
+    assert!(at_publish < at_reply, "{fx:?}");
+    assert_eq!(
+        the_reply(&fx).unwrap().data,
+        json!({"pane": "%3", "view": "plan"})
+    );
+    // The tab's view is moa's: a panel there again gets it.
+    handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+    let fx = send_on(&b, &mut st, 8, 1, panel(Some("%3"), None));
+    assert_eq!(the_reply(&fx).unwrap().data["view"], "plan");
+
+    // An untagged pane isn't a panel moa placed.
+    let fx = send_on(&b, &mut st, 8, 2, select_view("%4", View::Plan));
+    let (n, _) = the_ask(&fx);
+    let fx = answer_lists(&b, &mut st, n, the_panes());
+    assert_eq!(the_reply(&fx), Err(OpError("%4 isn't a moa panel".into())));
+    assert!(st.tmux().queries().next().is_none());
+    // Nor is a tab id that isn't one.
+    let fx = send_on(&b, &mut st, 8, 3, select_view("4", View::Plan));
+    assert_eq!(
+        the_reply(&fx),
+        Err(OpError("a panel's tab id looks like %5".into()))
+    );
+}
+
+/// L17: the topology knows a chain's tags as soon as its `Ok` comes, before any listing.
+#[test]
+fn chain_ok_records_its_tags_at_once() {
+    let (b, mut st) = listed_up();
+    let fx = send_on(&b, &mut st, 7, 1, select_view("%9", View::Plan));
+    let (n, _) = the_ask(&fx);
+    let (n, _) = the_ask(&answer_lists(&b, &mut st, n, the_panes()));
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("tree"));
+    answer(&b, &mut st, n, Ok(Vec::new()));
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("plan"));
+    assert!(st.tmux().queries().next().is_none());
+}
+
+/// `ui.select_view` on conn 7 for `pane`, through its listing (which shows `panes`): the
+/// reply it ends with, when it ends there.
+fn select_from_listing(
+    b: &TypicalBrain,
+    st: &mut State,
+    pane: &str,
+    panes: Vec<String>,
+) -> Vec<Effect> {
+    let fx = send_on(b, st, 7, 1, select_view(pane, View::Plan));
+    let (n, _) = the_ask(&fx);
+    answer_lists(b, st, n, panes)
+}
+
+/// The agent spot keeps its view, whoever is in it; no panel is given the empty slot's
+/// view or the picker's.
+#[test]
+fn select_view_leaves_the_spot_alone() {
+    let (b, mut st) = listed_up();
+    let mut panes = the_panes();
+    // In the cockpit: the empty slot `%8`, and Lantern's agent `%7` (should both be there).
+    panes.push("P %8 @1 $0 1 1 0 1  0 empty-slot".to_string());
+    panes.push(format!("P %7 @1 $0 1 1 0 1 {A} 0 agent"));
+    for pane in ["%8", "%7"] {
+        let fx = select_from_listing(&b, &mut st, pane, panes.clone());
+        let said = format!("{pane} is the agent spot; it can't show another view");
+        assert_eq!(the_reply(&fx), Err(OpError(said)));
+        assert!(st.tmux().queries().next().is_none(), "no chain");
+    }
+    // A spare empty slot parked in `_moa` stays one: a vacate swaps it into the spot.
+    panes.push(pane_line(5, 105, 1, "empty-slot"));
+    let fx = select_from_listing(&b, &mut st, "%5", panes);
+    let said = "%5 is a spare agent spot; it can't show another view".to_string();
+    assert_eq!(the_reply(&fx), Err(OpError(said)));
+    assert!(st.tmux().queries().next().is_none(), "no chain");
+    for view in [View::EmptySlot, View::Picker] {
+        let fx = send_on(&b, &mut st, 7, 2, select_view("%3", view));
+        let said = format!("{view} can't be chosen for a panel");
+        assert_eq!(the_reply(&fx), Err(OpError(said)));
+        assert!(st.tmux().queries().next().is_none(), "no listing");
+    }
+}
+
+/// tmux refusing the retag is said in plain words, and nothing changes.
+#[test]
+fn a_select_view_tmux_refuses_says_why() {
+    let (b, mut st) = listed_up();
+    send_on(&b, &mut st, 8, 1, panel(Some("%9"), None));
+    let (n, _) = the_ask(&select_from_listing(&b, &mut st, "%9", the_panes()));
+    let fx = answer(&b, &mut st, n, Err("can't find pane: %9".into()));
+    assert_eq!(
+        the_reply(&fx),
+        Err(OpError(
+            "the panel in %9 couldn't show plan: can't find pane: %9".into()
+        ))
+    );
+    assert!(models(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("tree"));
+    assert_eq!(published_panels(&st)["c8"]["view"], "tree");
+}
+
+#[test]
+fn select_view_with_no_terminal_says_so() {
+    let (b, mut st) = loaded(TOML);
+    let fx = send_on(&b, &mut st, 7, 1, select_view("%3", View::Plan));
+    assert_eq!(
+        the_reply(&fx),
+        Err(OpError(
+            "moa isn't open in a terminal yet; run moa first".into()
+        ))
+    );
+}
+
+/// The connection that asked closed: the retag still happens, with nobody to answer.
+#[test]
+fn a_select_view_whose_asker_left_still_retags() {
+    let (b, mut st) = listed_up();
+    let (n, _) = the_ask(&select_from_listing(&b, &mut st, "%9", the_panes()));
+    handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+    let fx = answer(&b, &mut st, n, Ok(Vec::new()));
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.tmux().topology.view_of(PaneId(9)), Some("plan"));
+}
+
+#[test]
+fn a_new_tmux_server_clears_the_panes_of_registered_panels() {
+    let (b, mut st) = listed_up();
+    send_on(&b, &mut st, 7, 1, panel(Some("%3"), Some(View::Tree)));
+    // The same server, linked again: the panel keeps its tab.
+    feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    let fx = feed(&b, &mut st, connected(2, generation()));
+    assert!(models(&fx).is_empty(), "{fx:?}");
+    assert_eq!(published_panels(&st)["c7"]["pane"], "%3");
+    // Another server's `%3` is another tab.
+    feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    let other = Generation {
+        pid: 11,
+        start: 2000,
+    };
+    let fx = feed(&b, &mut st, connected(3, other));
+    assert_eq!(
+        last_panels(&fx),
+        json!({"c7": {"key": "c7", "pane": null, "view": "status", "managed": false}})
+    );
+}
+
+/// The commands sent as a placed panel's tags (`TmuxToken::Tags`).
+fn tags_sent(fx: &[Effect]) -> Vec<Cmd> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux {
+                cmds,
+                token: Some(TmuxToken::Tags),
+                ..
+            } => Some(cmds.iter().cloned()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// L18: a panel moa placed that was never tagged (its spawn's answer lost) is tagged as it
+/// registers, as its spawn would have tagged it. One the user started, or one outside
+/// `_moa`, never is.
+#[test]
+fn an_untagged_panel_moa_placed_is_tagged_as_it_registers() {
+    let (b, mut st) = listed_up();
+    let fx = send_on(&b, &mut st, 7, 1, placed_panel("%6", View::Tree, true));
+    assert_eq!(tags_sent(&fx), spawn_tags(PaneId(6), View::Tree));
+    assert_eq!(
+        the_reply(&fx).unwrap().data,
+        json!({"key": "c7", "view": "tree", "managed": true})
+    );
+    assert_eq!(st.tmux().topology.view_of(PaneId(6)), Some("tree"));
+    // Kept through a listing that doesn't show it yet, and not sent again.
+    feed(
+        &b,
+        &mut st,
+        TmuxIn::Notification(Notification::SessionsChanged),
+    );
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert!(tags_sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(published_panels(&st)["c7"]["managed"], true);
+
+    // The user's own panel, and a placed one outside `_moa`.
+    let (b, mut st) = listed_up();
+    let fx = send_on(&b, &mut st, 7, 1, placed_panel("%6", View::Tree, false));
+    assert!(tags_sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(the_reply(&fx).unwrap().data["managed"], false);
+    let fx = send_on(&b, &mut st, 8, 1, placed_panel("%4", View::Tree, true));
+    assert!(tags_sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(the_reply(&fx).unwrap().data["managed"], false);
+}
+
+/// L17: healing waits while a cockpit operation runs, since a listing taken before its chain
+/// could retag a pane after the chain ran. The orphan stays untagged, and the first listing
+/// once the queue is idle heals it.
+#[test]
+fn healing_waits_for_the_cockpit_queue() {
+    let (b, mut st) = listed_up();
+    // A `ui.select_view` of `%3`, its chain in flight.
+    let (n, _) = the_ask(&send_on(&b, &mut st, 7, 1, select_view("%3", View::Plan)));
+    let (n, _) = the_ask(&answer_lists(&b, &mut st, n, the_panes()));
+
+    let fx = send_on(&b, &mut st, 8, 1, placed_panel("%6", View::Tree, true));
+    assert!(tags_sent(&fx).is_empty(), "{fx:?}");
+    let changed = TmuxIn::Notification(Notification::SessionsChanged);
+    feed(&b, &mut st, changed.clone());
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert!(tags_sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.tmux().topology.view_of(PaneId(6)), None);
+
+    // The chain answered, the queue idle: the next listing heals it.
+    answer(&b, &mut st, n, Ok(Vec::new()));
+    feed(&b, &mut st, changed);
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert_eq!(tags_sent(&fx), spawn_tags(PaneId(6), View::Tree));
+}
+
+/// A `ui.select_view` refused after its asker left has nobody to hear it: it is logged.
+#[test]
+fn a_select_view_refused_after_its_asker_left_is_logged() {
+    let (b, mut st) = listed_up();
+    let (n, _) = the_ask(&send_on(&b, &mut st, 7, 1, select_view("%4", View::Plan)));
+    handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+    let fx = answer_lists(&b, &mut st, n, the_panes());
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        log_lines(&fx),
+        [(LogLevel::Warn, "%4 isn't a moa panel".to_string())]
+    );
+}
+
+/// A placed panel that registered before moa listed its tab is tagged at that listing.
+#[test]
+fn an_untagged_placed_panel_is_tagged_at_the_first_listing() {
+    let (b, mut st) = loaded(TOML);
+    send_on(&b, &mut st, 7, 1, placed_panel("%6", View::Today, true));
+    link_up(&b, &mut st);
+    let fx = link_listed(&b, &mut st, &the_panes());
+    assert_eq!(tags_sent(&fx), spawn_tags(PaneId(6), View::Today));
+    assert_eq!(
+        last_panels(&fx),
+        json!({"c7": {"key": "c7", "pane": "%6", "view": "today", "managed": true}})
+    );
 }

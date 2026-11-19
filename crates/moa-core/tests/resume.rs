@@ -908,6 +908,147 @@ fn focus_resumes_a_sleeping_session() {
     assert_eq!(selects(&fx), select("%7").iter().collect::<Vec<_>>());
 }
 
+/// The three lists of a cockpit listing: sessions `moa` and `_moa`, `panes`, and moa's
+/// control client with a user's terminal.
+fn cockpit_lists(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
+    vec![
+        Ok(vec!["S $0 moa".to_string(), "S $1 _moa".to_string()]),
+        Ok(panes.to_vec()),
+        Ok(vec![
+            "C 1 $1 client-9".to_string(),
+            "C 0 $0 /dev/ttys1".to_string(),
+        ]),
+    ]
+}
+
+/// L11: with the `focus` layout up, a resumed session's tab is swapped into the agent spot
+/// once it is bound, in place of selecting the tab; the caller is answered as before.
+#[test]
+fn a_resumed_session_lands_in_the_spot() {
+    let mut r = World::new().reconciled();
+    // The link's own listing: `focus` built, its empty slot `%5` in the spot.
+    let mut panes: Vec<String> = [(2, "tree"), (4, "plan"), (5, "empty-slot"), (3, "console")]
+        .iter()
+        .map(|(p, v)| format!("P %{p} @1 $0 1 1 0 1  0 {v}"))
+        .collect();
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: cockpit_lists(&panes),
+        },
+    );
+    r.launched(1, false);
+    let fx = r.bound("%7");
+    assert!(selects(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            done(format!("resumed {TITLE} in {}", r.lantern()))
+        )]
+    );
+    // The spot's own listing, then its chain.
+    let asked: Vec<u64> = r.st.tmux().queries().collect();
+    let [n] = asked[..] else {
+        panic!("one listing, not {asked:?}");
+    };
+    panes.push(format!("P %7 @7 $0 1 0 0 0 {S} 0 "));
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: cockpit_lists(&panes),
+        },
+    );
+    let chain: Vec<String> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Tmux {
+                cmds,
+                token: Some(TmuxToken::Query(_)),
+                ..
+            } => Some(cmds.iter().flat_map(|c| c.parts().to_vec())),
+            _ => None,
+        })
+        .flatten()
+        .map(|c| format!("{} {}", c.name(), c.argv().join(" ")))
+        .collect();
+    assert_eq!(
+        chain[..2],
+        ["swap-pane -d -s %7 -t %5", "break-pane -d -s %5 -t =_moa:"]
+    );
+    assert_eq!(chain[2], "set-option -p -t %7 @moa_view agent");
+    assert_eq!(
+        chain[chain.len() - 2..],
+        ["select-window -t %7", "select-pane -t %7"]
+    );
+    let n = r.st.tmux().queries().next().unwrap();
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: vec![Ok(Vec::new())],
+        },
+    );
+    assert!(replies(&fx).is_empty(), "answered already: {fx:?}");
+    assert_eq!(
+        r.st.tmux().topology.view_of(moa_core::tmux::ids::PaneId(7)),
+        Some("agent")
+    );
+}
+
+/// A resumed session whose tab closed before its show's turn: nobody to answer (the caller
+/// heard already), so the show is logged, and nothing is sent.
+#[test]
+fn a_resumed_tab_that_closed_before_its_show_is_logged() {
+    let mut r = World::new().reconciled();
+    let panes = vec!["P %5 @1 $0 1 1 0 1  0 empty-slot".to_string()];
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: cockpit_lists(&panes),
+        },
+    );
+    r.launched(1, false);
+    r.bound("%7");
+    let n = r.st.tmux().queries().next().expect("the show's listing");
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: cockpit_lists(&panes),
+        },
+    );
+    let logged: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some((l.level, l.message.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [(
+            moa_core::effect::LogLevel::Warn,
+            "its tab closed before moa could show it"
+        )]
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert!(r.st.tmux().queries().next().is_none(), "nothing sent");
+}
+
 /// R10.
 #[test]
 fn resume_refuses_before_reconcile() {

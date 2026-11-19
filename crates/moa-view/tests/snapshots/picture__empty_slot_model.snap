@@ -1,0 +1,8 @@
+---
+source: crates/moa-view/tests/picture.rs
+expression: debug_lines(&lines)
+---
+[dim]no agent here yet
+
+[dim]press Enter on a session in the tree
+[dim]to bring it into this spot

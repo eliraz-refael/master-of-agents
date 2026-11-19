@@ -329,6 +329,48 @@ impl Topology {
         self.views.remove(&p);
     }
 
+    /// Records that moa swapped panes `a` and `b` (`swap-pane -d`): each takes the other's
+    /// place, and a window's active place stays where it was. Panes of one window, or one
+    /// the lists don't hold, change nothing.
+    pub fn swapped(&mut self, a: PaneId, b: PaneId) {
+        let (Some(wa), Some(wb)) = (self.window_of(a), self.window_of(b)) else {
+            return;
+        };
+        if wa == wb {
+            return;
+        }
+        for (w, out, into) in [(wa, a, b), (wb, b, a)] {
+            if let Some(w) = self.windows.get_mut(&w) {
+                w.panes.remove(&out);
+                w.panes.insert(into);
+                if w.active == Some(out) {
+                    w.active = Some(into);
+                }
+            }
+        }
+    }
+
+    /// Records that moa broke pane `p` out of its window into a new one (`break-pane -d`):
+    /// it leaves its window, and is in none until a listing shows its new one.
+    pub fn lifted(&mut self, p: PaneId) {
+        let Some(id) = self.window_of(p) else {
+            return;
+        };
+        let Some(w) = self.windows.get_mut(&id) else {
+            return;
+        };
+        w.panes.remove(&p);
+        if w.active == Some(p) {
+            w.active = None;
+        }
+        if w.panes.is_empty() {
+            self.windows.remove(&id);
+            self.window_sessions.remove(&id);
+            self.cockpits.remove(&id);
+            self.current.retain(|_, current| *current != id);
+        }
+    }
+
     /// The moa session a pane was tagged with (`@moa_session`), if any.
     pub fn moa_session(&self, p: PaneId) -> Option<SessionId> {
         self.moa_sessions.get(&p).copied()
@@ -369,5 +411,38 @@ mod tests {
             let t = Topology::from_lists(&sessions, &panes, &clients);
             let _ = t.visible();
         }
+    }
+
+    /// A swap trades the panes' places, the active place staying put; a pane broken out
+    /// leaves its window, and a window left empty goes with it.
+    #[test]
+    fn swaps_and_breaks_are_recorded() {
+        let s = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let mut t = Topology::from_lists(
+            &s(&["S $0 moa", "S $1 _moa"]),
+            &s(&[
+                "P %1 @1 $0 1 1 0 1  0 tree",
+                "P %5 @1 $0 0 1 0 1  0 empty-slot",
+                "P %9 @9 $0 1 0 0 0  0 ",
+            ]),
+            &s(&["C 0 $0 /dev/ttys1"]),
+        );
+        t.swapped(PaneId(9), PaneId(5));
+        assert_eq!(t.window_of(PaneId(9)), Some(WindowId(1)));
+        assert_eq!(t.window_of(PaneId(5)), Some(WindowId(9)));
+        assert_eq!(t.windows[&WindowId(9)].active, Some(PaneId(5)));
+        // Two panes of one window, or one not listed: nothing.
+        t.swapped(PaneId(1), PaneId(9));
+        t.swapped(PaneId(9), PaneId(7));
+        assert_eq!(t.window_of(PaneId(9)), Some(WindowId(1)));
+        assert_eq!(t.window_of(PaneId(1)), Some(WindowId(1)));
+
+        t.lifted(PaneId(5));
+        assert_eq!(t.window_of(PaneId(5)), None);
+        assert!(!t.has_window(WindowId(9)));
+        assert_eq!(t.view_of(PaneId(5)), Some("empty-slot"), "its tags stay");
+        t.lifted(PaneId(9));
+        assert_eq!(t.cockpit(), Some(WindowId(1)), "the cockpit keeps the tree");
+        assert_eq!(t.panes_in(WindowId(1)).collect::<Vec<_>>(), [PaneId(1)]);
     }
 }

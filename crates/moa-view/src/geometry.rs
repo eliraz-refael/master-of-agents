@@ -59,10 +59,25 @@ pub const STRIP: u16 = 7;
 /// The layout of `view` at `size`. A framed view keeps the spike's padding inside the frame:
 /// the body at x 2, y 1, `w - 3` wide; one blank line, then the footer on the last inner line.
 /// The picture has no frame: its tabs on line 0, the body, a rule, the 7-line strip, and the
-/// footer on the last line; a screen too short for the strip leaves it out. Parts too small
-/// to have cells are empty.
+/// footer on the last line; a screen too short for the strip leaves it out. The empty slot
+/// has no frame either: the spike's margins, the body at x 2, y 1, and the footer on the
+/// last line. Parts too small to have cells are empty.
 pub fn geometry(view: View, size: Size) -> Geometry {
     let Size { w, h } = size;
+    if view == View::EmptySlot {
+        let footer = if h >= 2 {
+            Rect::new(2, h - 1, w.saturating_sub(2), 1)
+        } else {
+            Rect::default()
+        };
+        return Geometry {
+            framed: false,
+            tabs: None,
+            body: Rect::new(2, 1, w.saturating_sub(2), h.saturating_sub(2)),
+            strip: None,
+            footer,
+        };
+    }
     if view == View::Picture {
         let tabs = Rect::new(0, 0, w, h.min(1));
         let footer = if h >= 2 {

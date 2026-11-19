@@ -157,6 +157,83 @@ fn focus_waits_for_a_launch_and_answers_when_bound() {
     );
 }
 
+/// The three lists of a listing: sessions `moa` and `_moa`, `panes`, moa's control client
+/// and a user's terminal.
+fn cockpit_lists(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
+    vec![
+        Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
+        Ok(panes.to_vec()),
+        Ok(vec!["C 1 $1 client-9".into(), "C 0 $0 /dev/ttys1".into()]),
+    ]
+}
+
+/// With a cockpit, a focus waiting for a launch hears what the show did once it ran (L11):
+/// that the session was brought into the spot, or that its tab closed first. Never `went
+/// to` before the show.
+#[test]
+fn with_a_cockpit_a_focus_waiting_for_a_launch_hears_where_it_landed() {
+    for closed in [false, true] {
+        let (b, mut st) = reconciled();
+        // The link's own listing: the cockpit, its empty slot `%5` in the spot.
+        let mut panes = vec![
+            "P %2 @1 $0 1 1 0 1  0 tree".to_string(),
+            "P %5 @1 $0 0 1 0 1  0 empty-slot".to_string(),
+        ];
+        let refresh = TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: cockpit_lists(&panes),
+        };
+        feed(&b, &mut st, refresh);
+        let id = open_bg(&b, &mut st, 1);
+        let fx = focus_from(&b, &mut st, 1, 2, &id.to_string());
+        assert!(replies(&fx).is_empty(), "{fx:?}");
+
+        let fx = bound(&b, &mut st, id, "%7");
+        assert_eq!(replies(&fx).len(), 1, "only the open's: {fx:?}");
+        assert_eq!(replies(&fx)[0].0, ReqId(1));
+        assert!(selects(&fx).is_empty(), "{fx:?}");
+
+        // The show's listing.
+        let asked: Vec<u64> = st.tmux().queries().collect();
+        let [n] = asked[..] else {
+            panic!("one listing, not {asked:?}");
+        };
+        if !closed {
+            panes.push(format!("P %7 @7 $0 1 0 0 0 {id} 0 "));
+        }
+        let answer = |n, results| TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results,
+        };
+        let fx = feed(&b, &mut st, answer(n, cockpit_lists(&panes)));
+        if closed {
+            assert_eq!(
+                replies(&fx),
+                [(
+                    ReqId(2),
+                    Err(OpError("its tab closed before moa could show it".into()))
+                )]
+            );
+            continue;
+        }
+        assert!(replies(&fx).is_empty(), "{fx:?}");
+        let n = st.tmux().queries().next().expect("the swap's chain");
+        let fx = feed(&b, &mut st, answer(n, vec![Ok(Vec::new())]));
+        assert_eq!(
+            replies(&fx),
+            [(
+                ReqId(2),
+                Ok(Done {
+                    text: "brought it into the cockpit".into(),
+                    data: json!({ "id": id, "title": "lantern" }),
+                })
+            )]
+        );
+    }
+}
+
 /// R10: the bindings can't be trusted until this connection's tabs are reconciled.
 #[test]
 fn focus_refuses_before_reconcile() {

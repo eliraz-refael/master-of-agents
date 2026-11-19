@@ -69,11 +69,15 @@ pub struct BrainRow {
     pub folded: Vec<String>,
 }
 
-/// A `panels` row (key `c<conn>`): one connected panel, its tab and its view.
+/// A `panels` row (key `c<conn>`): one connected panel, its tab and its view, and whether
+/// that view is moa's (the tab carries `@moa_view`, L8). The panel follows its own row.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PanelRow {
     pub pane: Option<String>,
     pub view: View,
+    /// Absent from an older daemon's rows.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 /// A `layouts` row (key: its name): its place in the layouts' order (the rows are by name),
@@ -225,6 +229,7 @@ impl State {
                 let row = PanelRow {
                     pane: reg.pane.map(|p| p.to_string()),
                     view: reg.view,
+                    managed: reg.managed,
                 };
                 let v = keyed(&key, &row);
                 (key, v)

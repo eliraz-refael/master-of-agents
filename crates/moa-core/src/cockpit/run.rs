@@ -13,9 +13,10 @@ use std::collections::{BTreeSet, VecDeque};
 use serde_json::json;
 
 use super::assign::view_of;
+use super::build::{occupant_stays, panel_tags};
 use super::scene::{AGENT, Role, Scene};
 use super::spawn::{respawn, respawn_tail, spawn, spawned};
-use super::{Plan, plan, vacate};
+use super::{Plan, plan, swap_in, vacate};
 use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
@@ -23,7 +24,7 @@ use crate::effect::{Effect, LogLevel, Publish};
 use crate::layout::{CURRENT_KEY, DEFAULT_LAYOUT, LayoutError, Leaf, Node, current_layout, leaves};
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
-use crate::ops::launch::{focus_cmds, title_of};
+use crate::ops::launch::{GONE, focus_cmds, shown, title_of};
 use crate::ops::term::{Tell, told};
 use crate::panel::View;
 use crate::publish::Topic;
@@ -65,6 +66,19 @@ pub(crate) enum CockpitOp {
     /// elsewhere, a plain kill; gone, nothing. It survives a lost link and a reload.
     #[allow(dead_code)] // Queued from Task 10 (`kill_tab` while a cockpit exists).
     Vacate { pane: PaneId },
+    /// `ui.select_view`: the panel in `pane` shows `view`, its tag and frame set (L8, L10).
+    /// Queued, so it never races a build's retagging of the same pane.
+    SelectView {
+        pane: PaneId,
+        view: View,
+        tell: Option<Tell>,
+    },
+    /// Brings the agent in `pane` to the screen (L11): swapped into the spot when the
+    /// cockpit has one, else its tab selected. `focus` and the tree's Enter, and an `open`
+    /// or `resume` once its tab is bound, whose `tells` are the focus requests that waited
+    /// for the tab (the launch's own caller was answered by it). Never replaced, and never
+    /// replaces a waiting operation: each runs in its turn.
+    Show { pane: PaneId, tells: Vec<Tell> },
 }
 
 /// Which pane a build selects once it is done (L6 step 7).
@@ -121,6 +135,8 @@ struct Then {
     tags: Vec<(PaneId, Option<&'static str>)>,
     /// The panes it takes `@moa_session` off, recorded at once too.
     untagged: Vec<PaneId>,
+    /// A swap into the spot: where it puts the panes, recorded at once too.
+    moved: Option<Moved>,
     /// A build's live panels given another view: their rows change.
     views: Option<Vec<(PaneId, View)>>,
     /// The panels it starts in place.
@@ -128,6 +144,15 @@ struct Then {
     /// The layout it builds, for its error.
     layout: String,
     ok: Said,
+}
+
+/// Where a swap into the spot (L11) puts the panes: `pane` takes the spot's place, and the
+/// spot's occupant takes `pane`'s old one when it `stays` there, else it goes to a new tab.
+#[derive(Clone, Copy, Debug)]
+struct Moved {
+    pane: PaneId,
+    spot: PaneId,
+    stays: bool,
 }
 
 /// How an operation ends.
@@ -148,19 +173,31 @@ enum Next {
     Chain(Vec<Cmd>, Then),
 }
 
-/// Whom `op` answers.
-fn tell_of(op: &CockpitOp) -> Option<Tell> {
+/// Whom `op` answers: none for an operation nobody asked for, or whose asker left.
+fn tells_of(op: &CockpitOp) -> Vec<Tell> {
     match op {
-        CockpitOp::Build { tell, .. } | CockpitOp::Repair { tell } => tell.clone(),
-        CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => None,
+        CockpitOp::Build { tell, .. }
+        | CockpitOp::Repair { tell }
+        | CockpitOp::SelectView { tell, .. } => tell.iter().cloned().collect(),
+        CockpitOp::Show { tells, .. } => tells.clone(),
+        CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => Vec::new(),
     }
 }
 
-/// `text` as `op`'s refusal: said to whoever asked, or logged for an operation nobody did.
+/// `result`, told to each of `tells`.
+fn told_all(state: &State, tells: Vec<Tell>, result: &Result<Done, OpError>) -> Vec<Effect> {
+    tells
+        .into_iter()
+        .filter_map(|tell| told(state, Some(tell), result.clone()))
+        .collect()
+}
+
+/// `text` as `op`'s refusal: said to whoever asked, or logged when nobody is left to hear it
+/// (an operation nobody asked for, or one whose asker left).
 fn refused(op: &CockpitOp, text: String) -> Said {
-    match op {
-        CockpitOp::Build { .. } | CockpitOp::Repair { .. } => Said::Reply(Err(OpError(text))),
-        CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => Said::Logged(text),
+    match tells_of(op).is_empty() {
+        true => Said::Logged(text),
+        false => Said::Reply(Err(OpError(text))),
     }
 }
 
@@ -175,15 +212,16 @@ fn first_line(e: &str) -> &str {
 /// A chain's error in plain words (L18).
 fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
     let why = first_line(e);
-    let text = if why.contains("no space for") || why.contains("pane too small") {
-        format!("the {layout} layout doesn't fit this window; make the terminal bigger")
-    } else {
-        match op {
-            CockpitOp::Vacate { pane } => {
-                format!("the agent in {pane} couldn't be taken down: {why}")
-            }
-            _ => format!("layout {layout} couldn't be applied: {why}; Ctrl-a r tries again"),
+    let text = match op {
+        CockpitOp::Vacate { pane } => format!("the agent in {pane} couldn't be taken down: {why}"),
+        CockpitOp::SelectView { pane, view, .. } => {
+            format!("the panel in {pane} couldn't show {view}: {why}")
         }
+        CockpitOp::Show { .. } => format!("moa couldn't bring it to the screen: {why}"),
+        _ if why.contains("no space for") || why.contains("pane too small") => {
+            format!("the {layout} layout doesn't fit this window; make the terminal bigger")
+        }
+        _ => format!("layout {layout} couldn't be applied: {why}; Ctrl-a r tries again"),
     };
     refused(op, text)
 }
@@ -245,7 +283,7 @@ fn build_kind(op: &CockpitOp) -> Option<bool> {
 pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     if state.tmux.conn().is_none() && !matches!(op, CockpitOp::Vacate { .. }) {
         let no = Err(OpError(NO_TERMINAL.into()));
-        return told(state, tell_of(&op), no).into_iter().collect();
+        return told_all(state, tells_of(&op), &no);
     }
     let mut fx = Vec::new();
     let kind = build_kind(&op);
@@ -260,12 +298,26 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
                 Some(true) => REPLACED_GOTO,
                 _ => REPLACED,
             };
-            fx.extend(told(state, tell_of(&old), Err(OpError(why.into()))));
+            fx.extend(told_all(state, tells_of(&old), &Err(OpError(why.into()))));
         }
         _ => waiting.push_back(op),
     }
     fx.extend(pump(state));
     fx
+}
+
+/// Whether bringing a session to the screen goes through the queue (L11): a cockpit is
+/// there, so it may have a spot, or an operation that may build one is queued, and the show
+/// keeps its place behind it. Otherwise there is no spot, and the session's tab is selected
+/// at once (4b).
+pub(crate) fn shows_queued(state: &State) -> bool {
+    state.tmux.topology.cockpit().is_some() || !idle(state)
+}
+
+/// Nothing runs in the queue and nothing waits: a command sent now can't land between an
+/// operation's listing and its chain.
+pub(crate) fn idle(state: &State) -> bool {
+    state.cockpit.in_flight.is_none() && state.cockpit.waiting.is_empty()
 }
 
 /// `layout.apply`: the layout built, then the reply.
@@ -297,6 +349,39 @@ pub(crate) fn goto(state: &mut State, conn: ConnId, req: ReqId, panel: Leaf) -> 
     )
 }
 
+/// `ui.select_view`: the panel in `pane` retagged to show `view`, then its row and the
+/// reply (L8).
+pub(crate) fn select_view(
+    state: &mut State,
+    conn: ConnId,
+    req: ReqId,
+    pane: &str,
+    view: View,
+) -> Vec<Effect> {
+    // The empty slot is the spot's, and the picker a prompt's: neither is a panel's to pick.
+    let pane = match crate::panel::pane_arg(pane) {
+        Ok(_) if matches!(view, View::EmptySlot | View::Picker) => {
+            Err(OpError(format!("{view} can't be chosen for a panel")))
+        }
+        p => p,
+    };
+    let pane = match pane {
+        Ok(pane) => pane,
+        Err(e) => {
+            let result = Err(e);
+            return vec![Effect::Reply { conn, req, result }];
+        }
+    };
+    queue(
+        state,
+        CockpitOp::SelectView {
+            pane,
+            view,
+            tell: Some(Tell::Reply(conn, req)),
+        },
+    )
+}
+
 /// Starts the operations waiting, while none is in flight.
 fn pump(state: &mut State) -> Vec<Effect> {
     let mut fx = Vec::new();
@@ -318,7 +403,10 @@ fn pump(state: &mut State) -> Vec<Effect> {
 /// for an operation that builds (L2).
 fn start(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     let mut fx = Vec::new();
-    if !matches!(op, CockpitOp::Vacate { .. }) {
+    if !matches!(
+        op,
+        CockpitOp::Vacate { .. } | CockpitOp::SelectView { .. } | CockpitOp::Show { .. }
+    ) {
         state.layouts = crate::ops::layout::read(state);
         fx.extend(
             state
@@ -373,7 +461,10 @@ fn finish(state: &mut State, said: Said) -> Vec<Effect> {
     run.reset_op();
     let mut fx = Vec::new();
     match said {
-        Said::Reply(result) => fx.extend(told(state, op.as_ref().and_then(tell_of), result)),
+        Said::Reply(result) => {
+            let tells = op.as_ref().map(tells_of).unwrap_or_default();
+            fx.extend(told_all(state, tells, &result));
+        }
         Said::Logged(text) => fx.push(log(LogLevel::Warn, text)),
         Said::Applied(_) | Said::Nothing => {}
     }
@@ -386,8 +477,8 @@ fn awaits(state: &State, seq: u64, step: fn(&Step) -> bool) -> bool {
     matches!(state.cockpit.in_flight, Some((s, _)) if s == seq) && step(&state.cockpit.step)
 }
 
-/// An operation's listing came back: the topology is rebuilt from it, then the operation
-/// plans in it and does its next step.
+/// An operation's listing came back: the topology is rebuilt from it, the panels' views are
+/// read again from it (L8), then the operation plans in it and does its next step.
 pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> Vec<Effect> {
     if !awaits(state, seq, |s| matches!(s, Step::Listing)) {
         return Vec::new();
@@ -401,19 +492,22 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         let mut fx = vec![log(LogLevel::Warn, text.clone())];
         let said = match &state.cockpit.in_flight {
             // An operation nobody asked for has the log line only.
-            Some((_, op)) if tell_of(op).is_some() => refused(op, text),
+            Some((_, op)) if !tells_of(op).is_empty() => refused(op, text),
             _ => Said::Nothing,
         };
         fx.extend(finish(state, said));
         return fx;
     }
     forget_running(state);
+    // The operation's own listing: a panel healed now is tagged before its chain goes out.
+    let mut fx = crate::panel::listed(state, true);
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     let Some((_, op)) = state.cockpit.in_flight.clone() else {
-        return Vec::new();
+        return fx;
     };
     let next = decide(state, &op, &scene);
-    act(state, seq, next)
+    fx.extend(act(state, seq, next));
+    fx
 }
 
 /// L9: what the lazy build looks for, a user's terminal and a cockpit (in session `moa`)
@@ -447,6 +541,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                             Then {
                                 tags: Vec::new(),
                                 untagged: Vec::new(),
+                                moved: None,
                                 views: None,
                                 starts: 0,
                                 layout,
@@ -503,6 +598,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let then = |tags, untagged, starts| Then {
                 tags,
                 untagged,
+                moved: None,
                 views: None,
                 starts,
                 layout: String::new(),
@@ -524,6 +620,74 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 Next::Done(Said::Nothing)
             } else {
                 Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), Vec::new(), 0))
+            }
+        }
+        CockpitOp::SelectView { pane, view, .. } => {
+            // Only a pane moa tagged as a panel; never the spot (its empty slot or its agent),
+            // a spare empty slot parked for it (a vacate's), an agent's or a stranger's.
+            let at = scene.pane(*pane);
+            if at.is_some_and(|at| matches!(at.role, Role::Spot(_))) {
+                let text = format!("{pane} is the agent spot; it can't show another view");
+                return Next::Done(refused(op, text));
+            }
+            match at.and_then(|at| at.panel_view()) {
+                None => return Next::Done(refused(op, format!("{pane} isn't a moa panel"))),
+                Some(View::EmptySlot) => {
+                    let text = format!("{pane} is a spare agent spot; it can't show another view");
+                    return Next::Done(refused(op, text));
+                }
+                Some(_) => {}
+            }
+            let done = Done {
+                text: String::new(),
+                data: json!({ "pane": pane.to_string(), "view": view }),
+            };
+            Next::Chain(
+                panel_tags(*pane, *view),
+                Then {
+                    tags: vec![(*pane, Some(view.word()))],
+                    untagged: Vec::new(),
+                    moved: None,
+                    views: Some(vec![(*pane, *view)]),
+                    starts: 0,
+                    layout: String::new(),
+                    ok: Said::Reply(Ok(done)),
+                },
+            )
+        }
+        CockpitOp::Show { pane, .. } => {
+            // Its tab closed while the show waited (or holds no agent now): nothing moves. A
+            // launch's show has nobody to tell (its caller heard already): it is logged.
+            let Some(id) = scene.pane(*pane).and_then(|at| at.agent()) else {
+                return Next::Done(refused(op, GONE.into()));
+            };
+            let then = |tags, moved: Option<Moved>| Then {
+                tags,
+                untagged: Vec::new(),
+                moved,
+                views: None,
+                starts: 0,
+                layout: String::new(),
+                ok: Said::Reply(Ok(shown(state, id, moved.is_some()))),
+            };
+            let swap = swap_in(scene, *pane, |id| title(state, id));
+            match (swap, scene.spot(), scene.pane(*pane)) {
+                (Some(chain), Some(old), Some(at)) => {
+                    let mut cmds = chain.parts().to_vec();
+                    cmds.extend(focus_cmds(*pane));
+                    // The spot's new agent, and its old occupant: an empty slot stays one,
+                    // parked; an agent goes back to a tab, without the spot's view.
+                    let view = old.agent().is_none().then(|| View::EmptySlot.word());
+                    let tags = vec![(*pane, Some(AGENT)), (old.pane, view)];
+                    let moved = Moved {
+                        pane: *pane,
+                        spot: old.pane,
+                        stays: occupant_stays(old, at),
+                    };
+                    Next::Chain(cmds, then(tags, Some(moved)))
+                }
+                // No spot, or it is the spot already: 4b's select.
+                _ => Next::Chain(focus_cmds(*pane).to_vec(), then(Vec::new(), None)),
             }
         }
     }
@@ -610,6 +774,7 @@ fn build(
         Then {
             tags,
             untagged: Vec::new(),
+            moved: None,
             views: Some(b.views),
             starts: 0,
             layout,
@@ -711,6 +876,14 @@ pub(crate) fn chain_answered(
                     for pane in &then.untagged {
                         state.tmux.untag_sent(*pane);
                     }
+                    // Straight into the topology: any listing answered after this `Ok` was
+                    // run after the chain, so it shows the panes where the chain put them.
+                    if let Some(m) = then.moved {
+                        state.tmux.topology.swapped(m.pane, m.spot);
+                        if !m.stays {
+                            state.tmux.topology.lifted(m.spot);
+                        }
+                    }
                     state.panel_starts += then.starts;
                     let said = match then.ok {
                         Said::Applied(layout) => {
@@ -735,13 +908,15 @@ pub(crate) fn chain_answered(
     fx
 }
 
-/// A build placed its panels: those given another view show it in `panels` (L5 step 3).
+/// A chain tagged these panels with another view (a build, L5 step 3; `ui.select_view`):
+/// their rows show it, as moa's (L8).
 fn views_given(state: &mut State, views: &[(PaneId, View)]) -> Option<Effect> {
     for (pane, view) in views {
         state.pane_views.insert(*pane, *view);
         for reg in state.panels.values_mut() {
             if reg.pane == Some(*pane) {
                 reg.view = *view;
+                reg.managed = true;
             }
         }
     }
@@ -794,7 +969,7 @@ fn drop_all(state: &mut State) -> (Vec<Effect>, bool) {
     for op in ops {
         match op {
             CockpitOp::Vacate { .. } => state.cockpit.waiting.push_back(op),
-            op => fx.extend(told(state, tell_of(&op), Err(OpError(LOST.into())))),
+            op => fx.extend(told_all(state, tells_of(&op), &Err(OpError(LOST.into())))),
         }
     }
     (fx, dropped)
@@ -867,10 +1042,17 @@ pub(crate) fn client_gone(state: &mut State, conn: ConnId) {
         .map(|(_, op)| op)
         .chain(run.waiting.iter_mut());
     for op in ops {
-        if let CockpitOp::Build { tell, .. } | CockpitOp::Repair { tell } = op
-            && matches!(tell, Some(Tell::Reply(c, _)) if *c == conn)
-        {
-            *tell = None;
+        let gone = |tell: &Tell| matches!(tell, Tell::Reply(c, _) if *c == conn);
+        match op {
+            CockpitOp::Build { tell, .. }
+            | CockpitOp::Repair { tell }
+            | CockpitOp::SelectView { tell, .. } => {
+                if tell.as_ref().is_some_and(gone) {
+                    *tell = None;
+                }
+            }
+            CockpitOp::Show { tells, .. } => tells.retain(|t| !gone(t)),
+            CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => {}
         }
     }
 }

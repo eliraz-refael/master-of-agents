@@ -7,9 +7,11 @@ use serde_json::json;
 
 use super::projects::project_for;
 use super::sessions::{NotKilled, agent_left, kill_checked, running_pane, unread_log};
+use super::term::{Tell, told};
 use crate::Now;
 use crate::change::Change;
 use crate::cockpit::build::tab_name;
+use crate::cockpit::run::{CockpitOp, queue, shows_queued};
 use crate::config::{AccountConfig, AccountName};
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, TmuxToken};
@@ -51,6 +53,10 @@ const NOT_LISTED: &str =
     "the account its conversation was recorded in isn't in moa.toml; add it there to resume";
 const NO_FOLDER: &str = "moa doesn't know which folder it ran in; start it fresh with moactl open";
 pub(crate) const UNSAFE_ID: &str = "that conversation's id isn't one moa can resume";
+/// A session's tab that closed before it could be brought to the screen.
+pub(crate) const GONE: &str = "its tab closed before moa could show it";
+/// `focus`'s answer once the session was swapped into the agent spot (L11).
+const BROUGHT: &str = "brought it into the cockpit";
 
 /// The conversation a launch runs: a new one under this id, or an old one resumed.
 pub(crate) enum Conv<'a> {
@@ -653,22 +659,13 @@ fn go_on(
             let Some(s) = state.session(id) else {
                 return vec![reply(Err(OpError(LOST.into())))];
             };
-            let went = went_to(state, s);
             if !focus {
+                let went = went_to(state, s);
                 let title = went.data["title"].as_str().unwrap_or_default();
                 let text = format!("{title} is already running");
                 return vec![reply(Ok(Done { text, ..went }))];
             }
-            let mut fx = Vec::new();
-            if let Link::Up { conn: link, .. } = state.tmux().link {
-                fx.push(Effect::Tmux {
-                    conn: link,
-                    cmds: focus_cmds(pane).to_vec(),
-                    token: None,
-                });
-            }
-            fx.push(reply(Ok(went)));
-            fx
+            show(state, pane, Some(Tell::Reply(conn, req)))
         }
         Ok(Resume::Check(checked)) => {
             let ask = ResumeAsk {
@@ -853,10 +850,22 @@ pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec
     let mut tx = Tx::new(now);
     let mut logs = Vec::new();
     let mut after = Vec::new();
-    for Settled { id, launching, end } in settled {
+    for Settled {
+        id,
+        mut launching,
+        end,
+    } in settled
+    {
         let (result, went) = match end {
             OpenEnd::Bound { pane, pid } => bind(
-                state, &mut tx, id, pane, pid, &launching, &mut logs, &mut after,
+                state,
+                &mut tx,
+                id,
+                pane,
+                pid,
+                &mut launching,
+                &mut logs,
+                &mut after,
             ),
             OpenEnd::Failed(why) => {
                 // tmux's first line and ids only: no record contents.
@@ -957,7 +966,8 @@ type Answers = (Result<Done, OpError>, Option<Done>);
 
 /// Binds the session to its new pane and tags the pane with it, then brings it to the
 /// screen when asked (after the commit, in `after`). The binding is stamped with the
-/// launch's own time.
+/// launch's own time. A show through the cockpit's queue takes the launch's focus waiters,
+/// which it answers itself.
 #[allow(clippy::too_many_arguments)]
 fn bind(
     state: &mut State,
@@ -965,7 +975,7 @@ fn bind(
     id: SessionId,
     pane: PaneId,
     pid: i64,
-    launching: &Launching,
+    launching: &mut Launching,
     logs: &mut Vec<Effect>,
     after: &mut Vec<Effect>,
 ) -> Answers {
@@ -1023,8 +1033,11 @@ fn bind(
         );
         return (Err(OpError(text)), None);
     }
+    // With a cockpit, the tab is shown through its queue once tagged (L11). The caller is
+    // answered here; the focus requests that waited for the tab hear what the show did.
+    let queued = launching.focus && shows_queued(state);
     let mut cmds = vec![set_pane_option(pane, "@moa_session", &id.to_string())];
-    if launching.focus {
+    if launching.focus && !queued {
         cmds.extend(focus_cmds(pane));
     }
     after.push(Effect::Tmux {
@@ -1033,6 +1046,13 @@ fn bind(
         token: None,
     });
     state.tmux.tag_sent(pane, id);
+    if queued {
+        let tells = std::mem::take(&mut launching.waiters)
+            .into_iter()
+            .map(|(conn, req)| Tell::Reply(conn, req))
+            .collect();
+        after.extend(queue(state, CockpitOp::Show { pane, tells }));
+    }
     let went = went_to(state, &s);
     (Ok(launched_reply(state, launching.kind, s)), Some(went))
 }
@@ -1068,11 +1088,53 @@ pub(crate) fn title_of(state: &State, s: &Session) -> String {
 
 /// `went to <title>`: the title, else the handle.
 fn went_to(state: &State, s: &Session) -> Done {
-    let title = title_of(state, s);
+    shown(state, s.id, false)
+}
+
+/// What a show of session `id` answers: 4b's `went to <title>`, or, when it was `swapped`
+/// into the agent spot, that it was brought into the cockpit; with its id and title.
+pub(crate) fn shown(state: &State, id: SessionId, swapped: bool) -> Done {
+    let title = match state.session(id) {
+        Some(s) => title_of(state, s),
+        None => state.handle_of(id),
+    };
+    let text = match swapped {
+        true => BROUGHT.to_string(),
+        false => format!("went to {title}"),
+    };
     Done {
-        text: format!("went to {title}"),
-        data: json!({ "id": s.id, "title": title }),
+        text,
+        data: json!({ "id": id, "title": title }),
     }
+}
+
+/// Brings the agent in `pane` to the screen, and tells `tell` (L11). With a cockpit, or a
+/// cockpit operation queued, it goes through the queue (`CockpitOp::Show`), which swaps it
+/// into the spot when the layout has one. Otherwise there is no spot: 4b's select, sent on
+/// its own since nothing is saved, then the answer.
+pub(crate) fn show(state: &mut State, pane: PaneId, tell: Option<Tell>) -> Vec<Effect> {
+    if shows_queued(state) {
+        let tells = tell.into_iter().collect();
+        return queue(state, CockpitOp::Show { pane, tells });
+    }
+    let Some(conn) = state.tmux().conn() else {
+        return told(state, tell, Err(OpError(NO_TERMINAL.into())))
+            .into_iter()
+            .collect();
+    };
+    // A pane no session is bound to any more isn't selected.
+    let Some(id) = bound_session(state, pane) else {
+        return told(state, tell, Err(OpError(GONE.into())))
+            .into_iter()
+            .collect();
+    };
+    let mut fx = vec![Effect::Tmux {
+        conn,
+        cmds: focus_cmds(pane).to_vec(),
+        token: None,
+    }];
+    fx.extend(told(state, tell, Ok(shown(state, id, false))));
+    fx
 }
 
 /// A launch that got no tab. An `open`'s session ends, marked so when tmux refused it; a
@@ -1102,12 +1164,12 @@ fn end_launch(
     }
 }
 
-/// `focus Q`: once the tabs are reconciled, a running session's tab comes to the screen; a
-/// session whose tab is opening is brought there once it is bound, and answered then. A
-/// tracked tab is brought there with nothing saved, so the commands go out on their own,
-/// before the reply. An untracked tab goes through resume, whose look at its agent can
-/// save (an agent that left puts its session to sleep). Any other session is resumed, and
-/// answered once its tab is there (R12).
+/// `focus Q`: once the tabs are reconciled, a running session comes to the screen ([`show`]:
+/// into the agent spot when the cockpit has one, L11); a session whose tab is opening is
+/// brought there once it is bound, and answered then. A tracked tab is shown with nothing
+/// saved. An untracked tab goes through resume, whose look at its agent can save (an agent
+/// that left puts its session to sleep). Any other session is resumed, and answered once
+/// its tab is there (R12).
 pub(crate) fn focus(
     state: &mut State,
     now: &Now,
@@ -1116,10 +1178,9 @@ pub(crate) fn focus(
     q: &str,
 ) -> Vec<Effect> {
     let reply = |result| Effect::Reply { conn, req, result };
-    let link = match ready(state) {
-        Ok(link) => link,
-        Err(e) => return vec![reply(Err(e))],
-    };
+    if let Err(e) = ready(state) {
+        return vec![reply(Err(e))];
+    }
     let id = match state.resolve(q) {
         Ok(id) => id,
         Err(e) => return vec![reply(Err(e))],
@@ -1133,14 +1194,7 @@ pub(crate) fn focus(
     // a resume does ([`check`]), which focuses it while it runs.
     let tracked = state.binding(id).is_some_and(|b| b.tracked);
     match (bound_pane(state, id).filter(|_| tracked), state.session(id)) {
-        (Some(pane), Some(s)) => vec![
-            Effect::Tmux {
-                conn: link,
-                cmds: focus_cmds(pane).to_vec(),
-                token: None,
-            },
-            reply(Ok(went_to(state, s))),
-        ],
+        (Some(pane), Some(_)) => show(state, pane, Some(Tell::Reply(conn, req))),
         _ => start_resume(state, now, conn, req, &id.to_string(), true, true),
     }
 }

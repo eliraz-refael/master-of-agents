@@ -137,15 +137,33 @@ pub fn down_line(why: Option<&str>, placed: bool) -> String {
     }
 }
 
-/// What every connect sends first (V13): which panel this is, then its selection's folder.
-pub fn first_ops(pane: Option<PaneId>, view: Option<View>, here: Option<String>) -> Vec<Op> {
+/// What every connect sends first (V13): which panel this is, whether moa `placed` it (L18),
+/// then its selection's folder.
+pub fn first_ops(
+    pane: Option<PaneId>,
+    view: Option<View>,
+    here: Option<String>,
+    placed: bool,
+) -> Vec<Op> {
     vec![
         Op::UiPanel {
             pane: pane.map(|p| p.to_string()),
             view,
+            placed,
         },
         Op::UiHere { folder: here },
     ]
+}
+
+/// What a reconnect sends first: the view `panel` shows now, the one moa last gave it
+/// rather than the one it started with (L8), and `here`, its selection's folder.
+pub fn reconnect_ops(
+    pane: Option<PaneId>,
+    panel: &Panel,
+    here: Option<String>,
+    placed: bool,
+) -> Vec<Op> {
+    first_ops(pane, Some(panel.view()), here, placed)
 }
 
 /// The waits between reconnects (V13): 250 ms doubling to 8 s, then 8 s, for at most a
@@ -474,12 +492,12 @@ impl Loop {
     /// the first connect may start the daemon.
     fn connect(&mut self, waited: usize) {
         let here = self.panel.here(&self.data);
-        let view = if self.linked_once {
-            Some(self.panel.view())
+        let (pane, placed) = (self.opts.pane, self.placed());
+        let first = if self.linked_once {
+            reconnect_ops(pane, &self.panel, here.clone(), placed)
         } else {
-            self.opts.view
+            first_ops(pane, self.opts.view, here.clone(), placed)
         };
-        let first = first_ops(self.opts.pane, view, here.clone());
         let mut client = self.opts.client.clone();
         if self.linked_once {
             client.autostart = None;
@@ -668,16 +686,13 @@ impl Loop {
         }
     }
 
-    /// The daemon reassigned this panel's view: its `panels` row says another (V3).
+    /// The panel follows its own `panels` row: the view moa gives it, and whether moa
+    /// manages it (L8).
     fn follow_row(&mut self) {
         let Link::Up { key: Some(key), .. } = &self.link else {
             return;
         };
-        if let Some(row) = self.data.panels.get(key)
-            && row.view != self.panel.view()
-        {
-            self.panel.set_view(row.view);
-        }
+        self.panel.follow(&self.data, key);
     }
 
     /// A connect ended.
