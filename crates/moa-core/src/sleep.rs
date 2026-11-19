@@ -4,6 +4,7 @@
 //! of them.
 
 use crate::change::Change;
+use crate::cockpit::run::through_queue;
 use crate::config::SleepAfter;
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, TimerKey};
@@ -59,9 +60,9 @@ pub fn why_not(state: &State, id: SessionId, now: UtcMs, after_ms: i64) -> Optio
         return Some("not reconciled");
     }
     let topology = &state.tmux().topology;
-    let Some(window) = topology.window_of(pane) else {
+    if !topology.has_pane(pane) {
         return Some("not listed");
-    };
+    }
     if topology.moa_session(pane) != Some(id) {
         return Some("not tagged");
     }
@@ -69,12 +70,9 @@ pub fn why_not(state: &State, id: SessionId, now: UtcMs, after_ms: i64) -> Optio
     if !s.last_seen_at.is_some_and(|t| t > b.bound_at) {
         return Some("never heard from");
     }
+    // The cockpit's spot sleeps too, off screen: the empty slot takes its place (L11).
     if topology.visible().contains(&pane) {
         return Some("on screen");
-    }
-    // Slice 5 parks the cockpit's spot first; until then only tabs of their own sleep.
-    if topology.is_cockpit(window) {
-        return Some("in the cockpit");
     }
     None
 }
@@ -206,13 +204,20 @@ pub(crate) fn kill_pane(pane: PaneId) -> Cmd {
 
 /// Kills session `id`'s tab `pane` once `tx` is saved (R15), and remembers it as the tab
 /// moa killed for the session, on the server the link is up on: its agent's late events
-/// are history only ([`State::killed`]). With no link up the kill doesn't go out.
+/// are history only ([`State::killed`]). While a cockpit exists (or its queue is busy), the
+/// kill is the queue's vacate, which plans from a listing of its own: in the agent spot, the
+/// empty slot takes the agent's place (L11, L17). Otherwise it is a plain kill, which
+/// doesn't go out with no link up.
 pub(crate) fn kill_tab(state: &mut State, tx: &mut Tx, id: SessionId, pane: PaneId) {
     if let Link::Up { generation, .. } = &state.tmux().link {
         let generation = *generation;
         state.killed.insert(id, (generation, pane));
     }
-    tx.tmux(kill_pane(pane));
+    if through_queue(state) {
+        tx.vacate(pane);
+    } else {
+        tx.tmux(kill_pane(pane));
+    }
 }
 
 /// This brain's wait before an idle session sleeps, or `None` for never.

@@ -11,7 +11,7 @@ use super::term::{Tell, told};
 use crate::Now;
 use crate::change::Change;
 use crate::cockpit::build::tab_name;
-use crate::cockpit::run::{CockpitOp, queue, shows_queued};
+use crate::cockpit::run::{CockpitOp, queue, through_queue};
 use crate::config::{AccountConfig, AccountName};
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, TmuxToken};
@@ -1035,7 +1035,7 @@ fn bind(
     }
     // With a cockpit, the tab is shown through its queue once tagged (L11). The caller is
     // answered here; the focus requests that waited for the tab hear what the show did.
-    let queued = launching.focus && shows_queued(state);
+    let queued = launching.focus && through_queue(state);
     let mut cmds = vec![set_pane_option(pane, "@moa_session", &id.to_string())];
     if launching.focus && !queued {
         cmds.extend(focus_cmds(pane));
@@ -1113,7 +1113,7 @@ pub(crate) fn shown(state: &State, id: SessionId, swapped: bool) -> Done {
 /// into the spot when the layout has one. Otherwise there is no spot: 4b's select, sent on
 /// its own since nothing is saved, then the answer.
 pub(crate) fn show(state: &mut State, pane: PaneId, tell: Option<Tell>) -> Vec<Effect> {
-    if shows_queued(state) {
+    if through_queue(state) {
         let tells = tell.into_iter().collect();
         return queue(state, CockpitOp::Show { pane, tells });
     }

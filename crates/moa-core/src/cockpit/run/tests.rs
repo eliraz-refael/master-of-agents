@@ -1,6 +1,7 @@
-//! The queue (L17) where only the crate reaches it: until `kill_tab` queues a vacate (Task
-//! 10), no op can, so a waiting `Vacate` is queued here directly (R4). Also the vacate
-//! itself, the refill, and a chain's tags kept against an older listing.
+//! The queue (L17) where only the crate reaches it: a `Vacate` or a `Refill` queued directly,
+//! where the tests through `handle` (`tests/cockpit_run.rs`) queue them by a sleep, a close
+//! or an agent's exit. Also the vacate itself, the refill, and a chain's tags kept against
+//! an older listing.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -304,15 +305,59 @@ fn a_vacate_leaves_the_spot_whole() {
     assert_eq!(lines, ["swap-pane -d -s %5 -t %9", "kill-pane -t %9"]);
     feed(&mut st, answer(n, vec![Ok(Vec::new())]));
     assert_eq!(st.panel_starts, 0);
+    // The killed agent's pane is no longer the spot's: an exit of it refills nothing.
+    assert_eq!(st.tmux.topology.view_of(PaneId(9)), None);
+}
 
+/// A refill is what any build waiting already does: queued behind one, it isn't queued
+/// again. Behind anything else it waits its turn, and it never takes another's place.
+#[test]
+fn a_refill_is_dropped_only_behind_a_build() {
+    for (builds, name) in [
+        (true, Some("triage")),
+        (true, None),
+        (false, Some("no-such-layout")),
+    ] {
+        let mut st = up();
+        the_listing(&apply(&mut st, 1, "focus"));
+        let op = CockpitOp::Build {
+            name: name.map(str::to_string),
+            tell: None,
+            select: Select::Default,
+        };
+        queue(&mut st, op.clone());
+        queue(&mut st, CockpitOp::Refill);
+        let want = match builds {
+            true => vec![op],
+            false => vec![op, CockpitOp::Refill],
+        };
+        assert_eq!(st.cockpit.waiting, want, "{name:?}");
+    }
     let mut st = up();
-    let n = the_listing(&vacate_of(&mut st, 9));
-    let fx = feed(
-        &mut st,
-        answer(n, lists(lantern_in_the_spot(false)[..2].to_vec())),
-    );
-    assert!(queries(&fx).is_empty(), "gone: nothing to do");
-    assert!(st.cockpit.in_flight.is_none());
+    the_listing(&apply(&mut st, 1, "focus"));
+    queue(&mut st, CockpitOp::Repair { tell: None });
+    queue(&mut st, CockpitOp::Refill);
+    queue(&mut st, CockpitOp::Refill);
+    assert_eq!(st.cockpit.waiting, [CockpitOp::Repair { tell: None }]);
+
+    // Behind a goto, a show or a vacate, which build nothing by themselves, it waits.
+    let mut st = up();
+    the_listing(&apply(&mut st, 1, "focus"));
+    let goto = CockpitOp::Build {
+        name: None,
+        tell: None,
+        select: Select::Leaf(Leaf::Agent),
+    };
+    let show = CockpitOp::Show {
+        pane: PaneId(8),
+        tells: Vec::new(),
+    };
+    let vacate = CockpitOp::Vacate { pane: PaneId(9) };
+    for op in [goto.clone(), show.clone(), vacate.clone()] {
+        queue(&mut st, op);
+    }
+    queue(&mut st, CockpitOp::Refill);
+    assert_eq!(st.cockpit.waiting, [goto, show, vacate, CockpitOp::Refill]);
 }
 
 /// A vacate tmux refuses is logged as the agent's, whatever tmux's words: a vacate builds no

@@ -59,12 +59,12 @@ pub(crate) enum CockpitOp {
     /// Builds the current layout when a user's terminal is attached and the cockpit holds
     /// no panel yet (L9).
     Lazy,
-    /// Builds the current layout again, whatever the cockpit holds: the spot's agent ended.
-    #[allow(dead_code)] // Queued from Task 10 (the spot's agent exiting).
+    /// Builds the current layout again, whatever the cockpit holds, selecting nothing: the
+    /// spot's agent ended (L11). A build waiting already does that: a refill behind one is
+    /// dropped. It never takes another's place, nor is replaced.
     Refill,
-    /// Takes the agent in `pane` down: from the spot, leaving the empty slot (L11);
-    /// elsewhere, a plain kill; gone, nothing. It survives a lost link and a reload.
-    #[allow(dead_code)] // Queued from Task 10 (`kill_tab` while a cockpit exists).
+    /// Takes the agent in `pane` down (`kill_tab`): from the spot, leaving the empty slot
+    /// (L11); elsewhere, a plain kill; gone, nothing. It survives a lost link and a reload.
     Vacate { pane: PaneId },
     /// `ui.select_view`: the panel in `pane` shows `view`, its tag and frame set (L8, L10).
     /// Queued, so it never races a build's retagging of the same pane.
@@ -277,13 +277,30 @@ fn build_kind(op: &CockpitOp) -> Option<bool> {
     }
 }
 
+/// Whether waiting `op` builds a layout whatever the cockpit holds, as a refill would: a
+/// layout switch (of a layout there is), Repair, or a refill.
+fn refills(state: &State, op: &CockpitOp) -> bool {
+    match op {
+        CockpitOp::Build {
+            name,
+            select: Select::Default,
+            ..
+        } => name.as_ref().is_none_or(|n| state.layouts.node(n).is_ok()),
+        CockpitOp::Repair { .. } | CockpitOp::Refill => true,
+        _ => false,
+    }
+}
+
 /// Runs `op` after those queued before it, now if none is. A build replaces a waiting
-/// build of its kind, which is told so. With no link, only a vacate waits; the rest are
-/// refused.
+/// build of its kind, which is told so; a refill behind a build is dropped. With no link,
+/// only a vacate waits; the rest are refused.
 pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     if state.tmux.conn().is_none() && !matches!(op, CockpitOp::Vacate { .. }) {
         let no = Err(OpError(NO_TERMINAL.into()));
         return told_all(state, tells_of(&op), &no);
+    }
+    if op == CockpitOp::Refill && state.cockpit.waiting.iter().any(|w| refills(state, w)) {
+        return Vec::new();
     }
     let mut fx = Vec::new();
     let kind = build_kind(&op);
@@ -306,11 +323,11 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     fx
 }
 
-/// Whether bringing a session to the screen goes through the queue (L11): a cockpit is
-/// there, so it may have a spot, or an operation that may build one is queued, and the show
-/// keeps its place behind it. Otherwise there is no spot, and the session's tab is selected
-/// at once (4b).
-pub(crate) fn shows_queued(state: &State) -> bool {
+/// Whether bringing a session to the screen, or taking its tab down, goes through the queue
+/// (L11, L17): a cockpit is there, so it may have a spot, or an operation that may build
+/// one is queued, and the show or the vacate keeps its place behind it. Otherwise there is
+/// no spot: the session's tab is selected, or killed, at once (4b).
+pub(crate) fn through_queue(state: &State) -> bool {
     state.tmux.topology.cockpit().is_some() || !idle(state)
 }
 
@@ -607,10 +624,11 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             if matches!(at.role, Role::Spot(Some(_))) {
                 let v = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
                 // In place, the spot becomes the empty slot, no longer a session's tab; a spare
-                // one swapped in already is the slot, and the agent's pane is gone.
+                // one swapped in already is the slot, and the agent's pane is gone: no longer
+                // the spot's, so nothing reads an exit of it as the spot's agent ending.
                 let then = match v.respawned {
                     true => then(vec![(*pane, Some(View::EmptySlot.word()))], vec![*pane], 1),
-                    false => then(Vec::new(), Vec::new(), 0),
+                    false => then(vec![(*pane, None)], Vec::new(), 0),
                 };
                 Next::Chain(v.chain.parts().to_vec(), then)
             } else if at.agent().is_none() {

@@ -26,6 +26,7 @@ use moa_core::state::{Deps, LoadNote, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::link::NOT_READY;
 use moa_core::tmux::notify::Notification;
+use moa_core::tmux::topology::refresh_cmds;
 use moa_testkit::brain::TypicalBrain;
 use serde_json::json;
 
@@ -511,6 +512,82 @@ fn restart_kills_then_resumes() {
     assert!(b.tracked && b.pane_id == "%7", "{b:?}");
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
     assert_ne!(why_not(&r.st, s_id(), r.b.now().wall, 0), Some("opening"));
+}
+
+/// The tokened queries in `fx`: their numbers and commands.
+fn queries(fx: &[Effect]) -> Vec<(u64, Vec<Cmd>)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux {
+                cmds,
+                token: Some(TmuxToken::Query(n)),
+                ..
+            } => Some((*n, cmds.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// S's old agent in the cockpit's spot (L11): restarted, the empty slot takes its place, by
+/// the cockpit's queue, from a listing of its own; the new tab opens as before.
+#[test]
+fn restarting_the_spots_agent_leaves_the_empty_slot() {
+    let mut r = World::new().reconciled();
+    // The cockpit, with a tree panel and S's tab %5 in the spot; no spare empty slot.
+    let scene = || {
+        let lines = |l: &[String]| Ok(l.to_vec());
+        vec![
+            lines(&["S $0 moa".into(), "S $1 _moa".into()]),
+            lines(&[
+                "P %2 @1 $0 0 0 0 1  0 tree".into(),
+                format!("P %5 @1 $0 1 0 0 1 {S} 0 agent"),
+            ]),
+            lines(&["C 1 $1 client-9".into()]),
+        ]
+    };
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: scene(),
+        },
+    );
+    assert!(queried(&r.restart(1)));
+    let fx = r.listed();
+    assert!(kills(&fx).is_empty(), "{fx:?}");
+    let [(n, cmds)] = &queries(&fx)[..] else {
+        panic!("one listing: {fx:?}");
+    };
+    assert_eq!(*cmds, refresh_cmds());
+    let persist = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
+    let listing = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Tmux { token: Some(TmuxToken::Query(q)), .. } if q == n));
+    assert!(persist.is_some() && persist < listing, "{fx:?}");
+    assert_eq!(the_open(&fx).0, s_id());
+
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(*n),
+            results: scene(),
+        },
+    );
+    let [(_, chain)] = &queries(&fx)[..] else {
+        panic!("one chain: {fx:?}");
+    };
+    let first = &chain[0].parts()[0];
+    assert_eq!(
+        (first.name(), &first.argv()[..3]),
+        (
+            "respawn-pane",
+            &["-k".to_string(), "-t".into(), "%5".into()][..]
+        )
+    );
 }
 
 /// The old tab's exit, before the new tab's answer or after it, isn't the session's end:
