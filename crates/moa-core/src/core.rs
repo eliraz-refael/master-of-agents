@@ -10,7 +10,7 @@ use crate::live::{QUIET_AFTER, quiet_candidate};
 use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
-use crate::ops::launch::Tell;
+use crate::ops::term::Tell;
 use crate::panel;
 use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
@@ -116,7 +116,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     ..
                 }) = Mailbox::parse(m)
             {
-                return ops::launch::term_key(state, pane, client);
+                return ops::term::term_key(state, pane, client);
             }
             // A pane that exited puts its session to sleep, before the link looks at the tree.
             let mut fx = match link::exited_pane(&t) {
@@ -201,12 +201,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 ));
             }
             for (tell, name, path, answer) in terms {
-                more.extend(ops::launch::term_opened(
+                more.extend(ops::term::term_opened(
                     state, tell, &name, &path, answer, replied,
                 ));
             }
             for (client, answer) in heres {
-                more.extend(ops::launch::here_answered(state, client, answer, replied));
+                more.extend(ops::term::here_answered(state, client, answer, replied));
             }
             for (id, events, answer) in looks {
                 more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
@@ -360,7 +360,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             req,
             op: Op::TermOpen { path, title },
             ..
-        } => ops::launch::term(state, Tell::Reply(conn, req), &path, title.as_deref()),
+        } => ops::term::term(state, Tell::Reply(conn, req), &path, title.as_deref()),
         // Answered at once, or after one pane query and the new tab (C11).
         Input::Client {
             conn,

@@ -18,7 +18,8 @@ use crate::hook::HookEnvelope;
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::ops::adopt::AdoptArgs;
-use crate::ops::launch::{ResumeAsk, Tell};
+use crate::ops::launch::ResumeAsk;
+use crate::ops::term::Tell;
 use crate::state::State;
 
 /// An op that needs a tab, while moa's terminal isn't linked.
