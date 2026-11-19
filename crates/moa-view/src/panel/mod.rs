@@ -382,7 +382,9 @@ impl Panel {
         if self.view == View::Picture {
             let tab = self.ui.tab % picture::TABS.len();
             tabs = Some((picture::tab_names(), tab));
-            let line = picture::brand(data, ctx);
+            // Only the strip's drawn rows make the brand spin: none when it is left out.
+            let strip_rows = g.strip.map_or(0, |r| r.h);
+            let line = picture::brand(data, ctx, strip_rows);
             // A tab row with no cells shows no brand, so nothing spins for it.
             let row = g.tabs.filter(|r| r.h > 0).map_or(0, |r| r.w);
             brand = picture::brand_fits(tab, &line, row).then_some(line);
@@ -452,12 +454,12 @@ impl Panel {
             );
         }
         let adopted = self.selected_session(data).is_some_and(|row| row.adopted);
-        // The picture's sessions and status tabs show their own hints, as the spike's did.
-        let hints = match self.tab() {
-            Some(tab @ (View::Tree | View::Status)) => tab,
-            _ => self.view,
+        // The picture's hints are its shown tab's (V21).
+        let hint = match self.tab() {
+            Some(tab) => keys::picture_hint(tab, adopted),
+            None => keys::hint(self.view, adopted),
         };
-        Span::new(keys::hint(hints, adopted), Tone::Dim)
+        Span::new(hint, Tone::Dim)
     }
 
     /// The folder the selected row is in: a session's, a project's, a task's session's.
@@ -615,15 +617,19 @@ impl Panel {
                 }
                 let n = picture::TABS.len();
                 let tab = self.ui.tab % n;
-                self.ui.tab = match action {
+                let next = match action {
                     Action::NextTab => (tab + 1) % n,
                     Action::PrevTab => (tab + n - 1) % n,
                     Action::Tab(d) => usize::from(d).clamp(1, n) - 1,
                     _ => tab,
                 };
-                // The new tab opens at its top, its first item selected.
-                self.list = ListState::default();
-                self.hover = None;
+                // The new tab opens at its top, its first item selected; the shown tab's
+                // digit leaves it as it is.
+                if next != tab {
+                    self.ui.tab = next;
+                    self.list = ListState::default();
+                    self.hover = None;
+                }
             }
         }
         // A move through the list: nothing to send.

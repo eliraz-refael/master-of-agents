@@ -122,7 +122,12 @@ fn tabs_switch_with_tab_numbers_and_arrows() {
     for _ in 0..12 {
         t.key(Key::Char('j'));
     }
-    assert_ne!(t.panel.selected().cloned(), first);
+    let moved = t.panel.selected().cloned();
+    assert_ne!(moved, first);
+    // The shown tab's own digit keeps its selection.
+    t.key(Key::Char('4'));
+    t.screen();
+    assert_eq!(t.panel.selected().cloned(), moved, "the same tab stays put");
     t.key(Key::Char('5'));
     t.key(Key::Char('4'));
     t.screen();
@@ -168,8 +173,29 @@ fn the_tabs_rows_keep_their_views_keys() {
     assert!(footer.starts_with("new session in "), "{footer}");
     assert_eq!(t.key(Key::Esc), []);
 
-    // Its footer hints are the tab's own on the sessions and status tabs, else the picture's.
+    // Its footer hints are the tab's own on the sessions and status tabs, else the picture's
+    // for that tab, naming only the keys that work there.
     let hint = |t: &mut T| t.screen().footer.text;
+    t.key(Key::Char('1'));
+    let plan = hint(&mut t);
+    assert!(plan.contains("x drop"), "{plan}");
+    assert!(plan.contains("d done"), "{plan}");
+    assert!(!plan.contains("x close"), "{plan}");
+    t.key(Key::Char('2'));
+    let today = hint(&mut t);
+    assert!(today.contains("y/n suggestion"), "{today}");
+    assert!(
+        !today.contains("x close") && !today.contains("a archive"),
+        "{today}"
+    );
+    t.key(Key::Char('3'));
+    let projects = hint(&mut t);
+    assert!(
+        !projects.contains("x close") && !projects.contains("a archive"),
+        "{projects}"
+    );
+    t.key(Key::Char('5'));
+    assert_eq!(hint(&mut t), "1-6/tab · j/k scroll · q");
     t.key(Key::Char('6'));
     assert_eq!(hint(&mut t), "⏎/click jump · j/k · Ctrl-a / find");
     t.key(Key::Char('4'));
@@ -243,6 +269,11 @@ fn the_strip_flashes_rows_under_4_seconds() {
     assert_eq!(old.changes_at, None);
     assert!(old.spans.iter().all(|s| !s.bold && !s.reversed));
     assert_eq!(old.spans[0].tone, Tone::You);
+
+    // The brand wakes for the flash only while the strip draws it.
+    let brand = views::picture::brand(&data, &ctx, 7);
+    assert_eq!(brand.changes_at, Some(UtcMs(at.0 + 4_000)));
+    assert_eq!(views::picture::brand(&data, &ctx, 0).changes_at, None);
 
     // Reversed on every other 250 ms: `(tick * 2 / 5) % 2 == 1`.
     for (tick, reversed) in [(0, false), (2, false), (3, true), (4, true), (5, false)] {

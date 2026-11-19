@@ -2,7 +2,6 @@
 //! the `moa` brand at the right of the tabs, and the activity strip under a rule.
 
 use moa_core::UtcMs;
-use moa_core::live::DisplayState;
 use moa_core::model::ActivityRow;
 use moa_core::panel::View;
 use moa_core::time::local_format;
@@ -150,17 +149,15 @@ pub fn rule(cells: u16) -> Line {
 }
 
 /// The brand (V21): `moa <spinner>` while any session is working or waiting or one of the
-/// strip's rows flashes, else `moa ●`; bold, in the brain's colour. It changes when a flash
-/// ends or starts.
-pub fn brand(data: &Data, ctx: &Ctx) -> Line {
-    let rows = newest(data, usize::from(crate::geometry::STRIP));
+/// strip's `strip_rows` rows flashes, else `moa ●`; bold, in the brain's colour. It changes
+/// when a flash ends or starts.
+pub fn brand(data: &Data, ctx: &Ctx, strip_rows: u16) -> Line {
+    let rows = newest(data, usize::from(strip_rows));
     let flashes: Vec<Flash> = rows.iter().map(|row| flash(row, ctx.now)).collect();
-    let busy = data.sessions.values().any(|r| {
-        matches!(
-            r.display_state,
-            DisplayState::Working | DisplayState::Waiting
-        )
-    });
+    let busy = data
+        .sessions
+        .values()
+        .any(|r| views::animates(r.display_state));
     let spins = busy || flashes.iter().any(Flash::on);
     let mark = if spins { spinner(ctx.tick) } else { "●" };
     let mut line = Line::new(vec![Span::bold(format!("moa {mark}"), Tone::Brain)]);
