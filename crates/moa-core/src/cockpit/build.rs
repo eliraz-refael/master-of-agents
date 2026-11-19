@@ -146,8 +146,10 @@ fn go_home(at: &PaneAt, title: &dyn Fn(SessionId) -> String) -> Vec<Cmd> {
         set_pane_option(p, "@moa_term", "1"),
         set_pane_option(p, "@moa_label", &literal_format(SHELL)),
     ];
+    // A pane moa once tagged loses the tag and any frame with it, so it draws as a terminal.
     if at.tagged {
         cmds.push(unset_pane_option(p, "@moa_view"));
+        cmds.extend(frame(p, false));
     }
     cmds
 }
@@ -282,7 +284,8 @@ pub(crate) fn chain(
 
 /// L11's swap of the agent in `pane` into the spot, then the old occupant's way home: an
 /// empty slot is parked; an agent stays in `pane`'s old tab, which takes its title. `None`
-/// with no spot, when `pane` already is the spot, or when it isn't an agent's.
+/// with no spot, when `pane` already is the spot, or when it isn't a live agent's (a dead
+/// one, kept by the user's `remain-on-exit`, never takes the spot from a live one).
 pub(crate) fn swap_in(
     scene: &Scene,
     pane: PaneId,
@@ -291,7 +294,7 @@ pub(crate) fn swap_in(
     let spot = scene.spot()?;
     let at = scene.pane(pane)?;
     let id = at.agent()?;
-    if spot.pane == pane {
+    if spot.pane == pane || at.dead {
         return None;
     }
     let mut cmds = vec![swap(pane, spot.pane)];

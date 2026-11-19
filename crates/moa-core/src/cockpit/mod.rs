@@ -89,7 +89,7 @@ pub fn plan(scene: &Scene, layout: &Node, title: impl Fn(SessionId) -> String) -
 
 /// L11: the agent in `pane` swapped into the spot, and the old occupant sent home, as one
 /// chain (with no select: the caller adds it). `None` when there's no spot, when `pane`
-/// already is the spot, or when `pane` isn't an agent's.
+/// already is the spot, or when `pane` isn't a live agent's.
 pub fn swap_in(scene: &Scene, pane: PaneId, title: impl Fn(SessionId) -> String) -> Option<Cmd> {
     build::swap_in(scene, pane, &title)
 }

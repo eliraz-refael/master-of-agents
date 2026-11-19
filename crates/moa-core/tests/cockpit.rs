@@ -509,6 +509,18 @@ fn swap_in_parks_the_empty_slot() {
     }
 }
 
+/// A dead agent's pane (kept by the user's own `remain-on-exit`) never takes the spot from
+/// the live one there: the caller only selects its tab.
+#[test]
+fn a_dead_agent_never_takes_the_spot() {
+    let mut w = focus_built(spot_agent(2));
+    let tab = w.window("moa", "Lantern");
+    w.put(tab, p(9), PaneSt::agent(sid(1)).dead());
+    assert_eq!(swap_in(&w.scene(), p(9), title), None);
+    w.panes.get_mut(&p(9)).unwrap().dead = false;
+    assert!(swap_in(&w.scene(), p(9), title).is_some());
+}
+
 #[test]
 fn swap_in_sends_the_old_occupant_home_by_title() {
     let mut w = focus_built(spot_agent(2));
@@ -628,11 +640,36 @@ fn an_unbound_agent_with_its_tag_goes_home_by_title() {
         "set-option -p -t %3 @moa_term 1",
         "set-option -p -t %3 @moa_label ⌨ shell",
         "set-option -p -u -t %3 @moa_view",
+        "set-option -p -u -t %3 @moa_framed",
+        "set-option -p -u -t %3 window-style",
+        "set-option -p -u -t %3 window-active-style",
     ];
     let at = l.iter().position(|x| x == home[0]).expect("the break");
-    assert_eq!(l[at..at + 4], home);
+    assert_eq!(l[at..at + home.len()], home);
     w.run(&b.chain).unwrap();
     assert_eq!(w.panes[&p(3)].tags.get("@moa_view"), None);
+}
+
+/// A stranger still wearing a panel's frame (a view tag moa doesn't know, and the frame's
+/// options) goes home as a plain terminal: no view, no frame.
+#[test]
+fn a_framed_stranger_loses_its_frame_on_the_way_home() {
+    let framed = PaneSt::stranger()
+        .tag("@moa_view", "old-view")
+        .tag("@moa_framed", "1")
+        .tag("window-style", "fg=#4c566a")
+        .tag("window-active-style", "fg=#88c0d0");
+    let mut w = focus_built(framed);
+    let scene = w.scene();
+    assert_eq!(
+        scene.pane(p(3)).map(|s| (s.role, s.tagged)),
+        Some((Role::Other, true))
+    );
+    let b = built(plan(&scene, &node("cockpit"), title));
+    w.run(&b.chain).unwrap();
+    let tags: Vec<&str> = w.panes[&p(3)].tags.keys().map(String::as_str).collect();
+    assert_eq!(tags, vec!["@moa_label", "@moa_term"]);
+    assert_eq!(w.session_of(p(3)), Some("moa"));
 }
 
 #[test]
