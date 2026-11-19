@@ -649,6 +649,11 @@ impl TmuxState {
         self.queries.values().any(|a| a == asked)
     }
 
+    /// The last server generation the link connected to, kept while it is down.
+    pub(crate) fn generation(&self) -> Option<Generation> {
+        self.generation
+    }
+
     /// Whether this connection's panes have been reconciled.
     pub fn reconciled(&self) -> bool {
         self.reconciled

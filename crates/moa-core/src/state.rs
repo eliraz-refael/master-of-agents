@@ -272,6 +272,17 @@ pub struct State {
     /// killed, or another one moa didn't start: history only, whenever it arrives; so is an
     /// end from the killed tab. Kept in memory: a daemon restart forgets it.
     pub(crate) restarted: BTreeMap<SessionId, (UtcMs, PaneId)>,
+    /// The tab moa last killed for each session (`sleep`, sleeping on its own, `close`,
+    /// `restart`), and the server it was on. Its agent dies with it, but a hook that agent
+    /// sent between the commit and the kill can still arrive after the commit, stamped later
+    /// than it: a start would bring the session back with no tab. So any event from that
+    /// tab but an end is history only ([`crate::hooks`]), while the session isn't bound to
+    /// it: a lost kill leaves the tab the session's. tmux never reuses a tab id on one
+    /// server. A hook names its tab but not its server, so an agent in another tmux, in a
+    /// tab with the same id, is taken for the killed one. Kept in memory: a daemon restart
+    /// forgets it, and a late start that reaches the new daemon after its first reconcile
+    /// brings the session back with no tab until the next one.
+    pub(crate) killed: BTreeMap<SessionId, (Generation, PaneId)>,
     /// The sessions a look at the tabs found no agent of ([`crate::wake`]), each with the
     /// server and the panes that look listed. Their events ask no look again until they
     /// start, or tmux shows a pane that look didn't. Kept in memory.
@@ -315,6 +326,7 @@ impl State {
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),
             restarted: BTreeMap::new(),
+            killed: BTreeMap::new(),
             not_found: BTreeMap::new(),
             panels: BTreeMap::new(),
             pane_views: BTreeMap::new(),

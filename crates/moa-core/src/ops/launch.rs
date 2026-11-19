@@ -21,7 +21,7 @@ use crate::model::{
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::reconcile::on_this_server;
 use crate::route::{Route, route};
-use crate::sleep::kill_pane;
+use crate::sleep::kill_tab;
 use crate::state::State;
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_pane, bound_session};
@@ -811,7 +811,7 @@ pub(crate) fn resumed(
     // its tab goes before the new one opens, on the same connection (R15).
     if let Some(pane) = checked.kill {
         state.restarted.insert(id, (tx.wall, pane));
-        tx.tmux(kill_pane(pane));
+        kill_tab(state, &mut tx, id, pane);
     }
     let (answer, waiters) = if via_focus {
         (None, vec![(conn, req)])

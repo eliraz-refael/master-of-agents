@@ -12,7 +12,7 @@ use moa_core::change::Change;
 use moa_core::effect::{
     Down, Effect, Input, Publish, RefuseWrites, TmuxIn, TmuxToken, handle_checked,
 };
-use moa_core::hook::{HookEnvelope, HookKind};
+use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::is_asleep;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, EventKind, Inspected, Lifecycle,
@@ -568,6 +568,48 @@ fn the_agents_end_after_close_is_history_only() {
         TmuxIn::Notification(Notification::Message("moa:hook pane-exited %1".into())),
     );
     assert!(changes(&fx).is_empty(), "{fx:?}");
+    let after = r.s();
+    assert_eq!(after.lifecycle, Lifecycle::Ended);
+    assert!(after.asleep_at.is_none());
+}
+
+/// The start of S's agent, sent between the close's commit and the kill of its tab, so
+/// stamped after the commit and arriving after it, is the dying agent's: history only, and
+/// S stays ended.
+#[test]
+fn the_closed_agents_late_start_is_history_only() {
+    let mut r = World::new().reconciled();
+    r.close(1);
+    let at = r.b.now().wall.0 + 1000;
+    let fx = handle_checked(
+        &mut r.st,
+        Input::Hook {
+            reply: None,
+            envelope: HookEnvelope {
+                agent: AgentKind::Claude,
+                slot: Some(S.into()),
+                pane: Some("%1".into()),
+                brain: Some("default".into()),
+                store_dir: Some(shown(&r.b.home.join(".claude-a"))),
+                conversation_id: C.into(),
+                kind: HookKind::SessionStarted {
+                    source: StartSource::Startup,
+                },
+                at: UtcMs(at),
+                at_ns: at * 1_000_000,
+                pid: 100,
+                seq: 1,
+                cwd: None,
+                transcript_path: None,
+            },
+        },
+        r.b.now(),
+    );
+    assert!(
+        matches!(changes(&fx).as_slice(), [Change::Event(e)]
+            if e.kind.0 == EventKind::SESSION_STARTED && e.session_id == Some(s_id())),
+        "{fx:?}"
+    );
     let after = r.s();
     assert_eq!(after.lifecycle, Lifecycle::Ended);
     assert!(after.asleep_at.is_none());

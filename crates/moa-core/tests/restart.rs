@@ -770,6 +770,35 @@ fn a_late_start_from_before_the_restart_keeps_the_fence() {
     assert!(!is_asleep(r.s()));
 }
 
+/// A start the old agent sent between the restart's commit and the kill of its tab, so
+/// stamped after the restart, is still that agent's: it comes from the killed tab. It
+/// doesn't lift the fence, and the old agent's end that follows is still history only.
+#[test]
+fn a_late_start_from_the_killed_tab_keeps_the_fence() {
+    let mut r = World::new().reconciled();
+    r.committed(1);
+    r.bound("%7");
+    let fx = hook(
+        &mut r,
+        false,
+        HookKind::SessionStarted {
+            source: StartSource::Clear,
+        },
+        1000,
+        905,
+    );
+    assert!(
+        matches!(changes(&fx).as_slice(), [Change::Event(e)]
+            if e.kind.0 == EventKind::SESSION_STARTED && e.session_id == Some(s_id())),
+        "{fx:?}"
+    );
+    let fx = old_agent_ended(&mut r, 2000);
+    history_only(&fx);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+    assert!(!is_asleep(r.s()));
+    assert!(r.st.binding(s_id()).is_some_and(|b| b.pane_id == "%7"));
+}
+
 /// After a restart, a start that doesn't name S (C9 resumed by hand in another app) is a
 /// new agent of S's: the killed one can't start again. It lifts the fence and brings S
 /// back, as it would have before the restart: live, with no tab here, and its own later
@@ -1212,6 +1241,42 @@ fn a_reload_that_lost_a_restarts_commit_answers_it() {
     // The old agent still runs: its end is S's.
     old_agent_ended(&mut r, 1000);
     assert!(is_asleep(r.s()), "{:?}", r.s());
+}
+
+/// The batch that held the restart's commit failed, so its kill never went out: the reload
+/// brings S back bound to its adopted tab, %5, the tab the restart had queued to kill. %5 is
+/// S's tab again, so its agent's events count again: a turn it starts is applied.
+#[test]
+fn a_tab_the_session_is_bound_to_again_isnt_a_killed_tab() {
+    let mut r = World::new().reconciled();
+    let s = r.s().clone();
+    let binding = r.st.binding(s_id()).cloned().unwrap();
+    let convs: Vec<Conversation> = r.st.conversations_of(s_id()).cloned().collect();
+    r.committed(1);
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(s);
+    snap.conversations.extend(convs);
+    snap.pane_bindings.push(binding.clone());
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    assert_eq!(r.st.binding(s_id()), Some(&binding));
+
+    hook(
+        &mut r,
+        false,
+        HookKind::TurnStarted {
+            prompt: "go on".into(),
+        },
+        1000,
+        900,
+    );
+    assert_eq!(r.s().activity, Activity::Working, "{:?}", r.s());
 }
 
 /// A reload that kept the restart's commit (another batch failed) leaves its launch
