@@ -14,6 +14,7 @@ use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
     Effect, Input, Publish, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked,
 };
+use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::{DisplayState, display_state, is_asleep};
 use moa_core::model::{
     Activity, ActivityWho, AgentKind, Ask, AskId, AskStatus, AskTarget, Conversation,
@@ -905,6 +906,66 @@ fn sleep_by_name() {
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert!(kills(&fx).is_empty(), "{fx:?}");
     assert!(replies(&fx)[0].1.is_err());
+}
+
+/// A `SessionStart` for S from tab `pane`, naming S in `MOA_SESSION`, stamped `at` and
+/// handled at `wall`.
+fn start_from(r: &mut Rig, pane: &str, at: UtcMs, wall: UtcMs, pid: u32) -> Vec<Effect> {
+    r.input(
+        wall,
+        Input::Hook {
+            reply: None,
+            envelope: HookEnvelope {
+                agent: AgentKind::Claude,
+                slot: Some(S.into()),
+                pane: Some(pane.into()),
+                brain: Some("default".into()),
+                store_dir: Some(shown(&r.b.home.join(".claude-a"))),
+                conversation_id: C.into(),
+                kind: HookKind::SessionStarted {
+                    source: StartSource::Startup,
+                },
+                at,
+                at_ns: at.0 * 1_000_000,
+                pid,
+                seq: 1,
+                cwd: None,
+                transcript_path: None,
+            },
+        },
+    )
+}
+
+/// The start of S's agent, sent between the sleep's commit and the kill of its tab, so
+/// stamped after the commit and arriving after it: that agent is dying with its tab, so the
+/// start is history only, and S stays asleep. A start from any other tab still brings S back.
+#[test]
+fn the_slept_agents_late_start_is_history_only() {
+    for by_name in [true, false] {
+        let mut r = World::new().up();
+        let slept_at = if by_name { r.b.now().wall } else { r.due };
+        let fx = if by_name {
+            r.sleep_op(1, &[S], None, false)
+        } else {
+            r.input(slept_at, Input::Timer(TimerKey::Sleep))
+        };
+        assert_eq!(kills(&fx), [&kill("%1")], "{fx:?}");
+        assert!(is_asleep(r.s()));
+
+        let late = UtcMs(slept_at.0 + 1000);
+        let fx = start_from(&mut r, "%1", late, UtcMs(late.0 + 1000), 101);
+        let saved = changes(&fx);
+        assert!(
+            matches!(saved.as_slice(), [Change::Event(e)] if e.session_id == Some(s_id())),
+            "{fx:?}"
+        );
+        assert!(is_asleep(r.s()), "{:?}", r.s());
+
+        let later = UtcMs(late.0 + 2000);
+        start_from(&mut r, "%8", later, UtcMs(later.0 + 1000), 808);
+        assert_eq!(r.s().lifecycle, Lifecycle::Live, "{:?}", r.s());
+        assert_eq!(r.s().asleep_at, None);
+    }
 }
 
 #[test]

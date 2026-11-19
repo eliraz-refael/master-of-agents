@@ -17,7 +17,7 @@ use crate::model::{
 use crate::names::{is_live_spike, newest_first, place, title_or_prompt};
 use crate::op::{ConnId, Done, OpError, ReqId, SLEEP_USAGE};
 use crate::reconcile::{Recheck, moa_session_of, tagged_for, untag_pane, untracked_agent_runs};
-use crate::sleep::{kill_pane, put_to_sleep, why_not};
+use crate::sleep::{kill_tab, put_to_sleep, why_not};
 use crate::state::State;
 use crate::time::{days_ago, local_text};
 use crate::tmux::focus::bound_pane;
@@ -423,7 +423,7 @@ pub(crate) fn close(
     }
     tx.ui(state, changes, text)?;
     if let Some(pane) = pane {
-        tx.tmux(kill_pane(pane));
+        kill_tab(state, tx, id, pane);
     }
     Ok(Done {
         text: "closed".into(),
@@ -520,7 +520,7 @@ pub(crate) fn sleep(
     for id in running {
         match kill_checked(state, id) {
             Ok(pane) => {
-                panes.extend(pane);
+                panes.extend(pane.map(|pane| (id, pane)));
                 if let Some(s) = state.session(id) {
                     names.push(title_of(state, s));
                 }
@@ -554,8 +554,8 @@ pub(crate) fn sleep(
     } else if !changes.is_empty() {
         tx.commit(state, changes)?;
     }
-    for pane in panes {
-        tx.tmux(kill_pane(pane));
+    for (id, pane) in panes {
+        kill_tab(state, tx, id, pane);
     }
     for pane in left_tabs {
         untag_pane(state, tx, pane);

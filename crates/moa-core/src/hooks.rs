@@ -20,7 +20,7 @@ use crate::peers::peers_note;
 use crate::state::{State, Table};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::LaunchKind;
+use crate::tmux::link::{LaunchKind, Link};
 use crate::{Now, UtcMs};
 
 /// What [`apply`] did with an event.
@@ -191,14 +191,34 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
 
 /// Whether `env` lifts session `id`'s restart fence (R24): a start that doesn't name it,
 /// sent after the restart was saved. That is a new agent started by hand (the killed one
-/// can't start again), as adopting one is; an older start is the killed agent's own.
+/// can't start again), as adopting one is; an older start, or one from the killed tab, is
+/// the killed agent's own.
 fn lifts_fence(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
     matches!(env.kind, HookKind::SessionStarted { .. })
         && slot_of(env) != Some(id)
+        && !from_a_killed_tab(state, id, env)
         && state
             .restarted
             .get(&id)
             .is_some_and(|(at, _)| env.at >= *at)
+}
+
+/// Whether `env` comes from the tab moa last killed for session `id` (sleep, close or
+/// restart: [`State::killed`]), unless the link is up on another server, where that id
+/// may name a new tab. Its agent dies with the tab, but a hook it sent between the commit
+/// and the kill arrives after the commit, and may be stamped later than it.
+fn from_a_killed_tab(state: &State, id: SessionId, env: &HookEnvelope) -> bool {
+    let Some(pane) = env.pane.as_deref().and_then(|p| p.parse::<PaneId>().ok()) else {
+        return false;
+    };
+    let Some((killed_on, killed)) = state.killed.get(&id) else {
+        return false;
+    };
+    let other_server = matches!(
+        &state.tmux().link,
+        Link::Up { generation, .. } if generation != killed_on
+    );
+    *killed == pane && !other_server
 }
 
 /// Whether end `env` comes from the tab session `id`'s restart killed (R24), which isn't
@@ -245,7 +265,10 @@ enum After {
 /// end from a tab that isn't the session's (the killed agent's, `MOA_SESSION` or not) is
 /// history only too. While the restart's tab opens, any end is history only, whatever it
 /// names: tmux names the new tab long before the new agent could end, so only the killed
-/// agent ends then.
+/// agent ends then. Any other event from a tab moa killed for the session (sleep, close,
+/// restart) is the killed agent's, sent before it died, however late it is stamped: history
+/// only, so its start can't bring back a session moa just put to sleep or closed. Its end
+/// goes by R14 like any other: moa's kill makes it `other`, and a clean quit still wins.
 fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) -> After {
     let older = before
         .activity_at
@@ -275,6 +298,7 @@ fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) 
                 ..asleep(before, env.at)
             }),
         },
+        _ if from_a_killed_tab(state, id, env) => None,
         _ if older => None,
         HookKind::SessionStarted { .. } => Some(transition(before, env)),
         _ if ended => return After::Unproven,

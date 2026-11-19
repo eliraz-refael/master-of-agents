@@ -15,7 +15,7 @@ use crate::state::State;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::bound_pane;
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::log;
+use crate::tmux::link::{Link, log};
 use crate::{Now, UtcMs};
 
 /// Why session `id` can't go to sleep at `now` after `after_ms` idle, or `None` when it can
@@ -151,7 +151,7 @@ fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effec
             continue;
         }
         changes.extend(one);
-        panes.extend(bound_pane(state, id));
+        panes.extend(bound_pane(state, id).map(|pane| (id, pane)));
         if let Some(s) = state.session(id) {
             names.push(title_of(state, s));
         }
@@ -175,8 +175,8 @@ fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effec
         ));
         return;
     }
-    for pane in panes {
-        tx.tmux(kill_pane(pane));
+    for (id, pane) in panes {
+        kill_tab(state, &mut tx, id, pane);
     }
     let mut more = vec![log(
         LogLevel::Info,
@@ -200,8 +200,19 @@ pub(crate) fn put_to_sleep(state: &State, tx: &Tx, id: SessionId) -> Vec<Change>
 }
 
 /// Kills tab `pane`, by its id (R14).
-pub(crate) fn kill_pane(pane: PaneId) -> Cmd {
+fn kill_pane(pane: PaneId) -> Cmd {
     Cmd::new("kill-pane").args(["-t".to_string(), pane.to_string()])
+}
+
+/// Kills session `id`'s tab `pane` once `tx` is saved (R15), and remembers it as the tab
+/// moa killed for the session, on the server the link is up on: its agent's late events
+/// are history only ([`State::killed`]). With no link up the kill doesn't go out.
+pub(crate) fn kill_tab(state: &mut State, tx: &mut Tx, id: SessionId, pane: PaneId) {
+    if let Link::Up { generation, .. } = &state.tmux().link {
+        let generation = *generation;
+        state.killed.insert(id, (generation, pane));
+    }
+    tx.tmux(kill_pane(pane));
 }
 
 /// This brain's wait before an idle session sleeps, or `None` for never.
