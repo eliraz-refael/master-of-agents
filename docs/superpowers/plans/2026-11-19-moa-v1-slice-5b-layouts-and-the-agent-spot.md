@@ -145,7 +145,7 @@ plan was reviewed before implementation; the review checked every tmux claim on 
 | # | Call | Why |
 |---|---|---|
 | L1 | **`moa_core::layout`, the spike's format and texts:**<br>• `Node` is `{"split":"h"\|"v","children":[≥2 nodes],"size"?}` or `{"panel":LEAF,"size"?}`;<br>• `size` is a positive integer (cells; not `30.0`, not a boolean) or `"N%"` with N from 1 to 99;<br>• leaves, in the spike's `PANELS` order, are `console tree today activity projects plan status picture agent`, at most one `console` and one `agent` per layout;<br>• the presets are the spike's `DEFAULTS` (cockpit, focus, classic, triage), copied exactly;<br>• the file's order is kept, and presets missing from the file come first (the spike's merge), so a deleted preset comes back;<br>• the file's entries stay raw JSON and are parsed when used: a broken entry is listed with its error and refused on `apply`, while the others still work.<br>Errors are the spike's texts with their paths (`layout.children[1]: unknown panel 'tre' (panels: console, tree, today, activity, projects, plan, status, picture, agent)`). | Spec §6.13 ("keep the spike's format and file", "validated: known names, ≤ 1 console, ≤ 1 agent", presets "merged in, deleted presets come back"). The spike accepted `"0%"`, which tmux refuses, so 1–99 says that up front. Parsing per entry keeps one bad hand edit from taking away every layout. |
-| L2 | **Where layouts live:**<br>• `layouts.json` lives in `Paths::config_dir()` (`~/.config/moa/`; the sandbox's own in the sandbox).<br>• The core reads it through `Deps.read_text` when it starts, and again at every `layout.*` op, `goto`, layout key, Repair and lazy build. That's a user action, never a poll.<br>• **A file that isn't valid JSON** gives the presets alone, plus a file error. `layout list` and `apply` say `layouts.json has an error: <serde's text with line and column>`, and the `layouts` topic carries it. Keys and the lazy cockpit keep working with the presets.<br>• `layout.set` refuses such a file: `fix layouts.json first (<error>); nothing was saved`.<br>• **Otherwise `layout.set`** writes the file through `Effect::WriteFile { path, text, req }`. The daemon runs it before the effects after it: a temporary file in the same folder, then a rename. On failure, the daemon skips that op's `Publish` and `Reply` and refuses the request (`code::FAILED`, `couldn't save layouts.json: <error>`). The write keeps every top-level key and entry it doesn't change (`current` included), pretty-printed with 2 spaces like the spike's `json.dump(indent=2)`. Only layout ops publish `layouts`, and each reads the file first, so after a failed write (whose publish the daemon skipped) the next one shows the file as it really is.<br>• The current layout per brain is the `meta` value `layout.current`, defaulting to `cockpit`. A name no longer in the file, or a broken entry, falls back to `cockpit`. | Spec: `layouts.json` is shared config (§6.5 "Shared config"). Hot reload is slice 9; reading on each layout action gets hand edits in with no watcher. Brains share the file, so a per-file `current` would let one brain switch another's layout. A hand-edited file must never be lost to a `layout set`. |
+| L2 | **Where layouts live:**<br>• `layouts.json` lives in `Paths::config_dir()` (`~/.config/moa/`; the sandbox's own in the sandbox).<br>• The core reads it through `Deps.read_text` when it starts, and again at every `layout.*` op, `goto`, layout key, Repair and lazy build. That's a user action, never a poll.<br>• **A file that isn't valid JSON** gives the presets alone, plus a file error. `layout list` and `apply` say `layouts.json has an error: <serde's text with line and column>`, and the `layouts` topic carries it. Keys and the lazy cockpit keep working with the presets.<br>• `layout.set` refuses such a file: `fix layouts.json first (<error>); nothing was saved`.<br>• **Otherwise `layout.set`** writes the file through `Effect::WriteFile { path, text, req }`. The daemon runs it before the effects after it: a temporary file in the same folder, then a rename. On failure, the daemon skips that op's `Publish` and `Reply` and refuses the request (`code::FAILED`, `couldn't save layouts.json: <error>`). The write keeps every top-level key and entry it doesn't change (`current` included), pretty-printed with 2 spaces like the spike's `json.dump(indent=2)`. Only layout ops publish `layouts`, and each reads the file first, so after a failed write (whose publish the daemon skipped) the next one shows the file as it really is. Accepted: a client that subscribes in between can see the unsaved entry until then.<br>• The current layout per brain is the `meta` value `layout.current`, defaulting to `cockpit`. A name no longer in the file, or a broken entry, falls back to `cockpit`. | Spec: `layouts.json` is shared config (§6.5 "Shared config"). Hot reload is slice 9; reading on each layout action gets hand edits in with no watcher. Brains share the file, so a per-file `current` would let one brain switch another's layout. A hand-edited file must never be lost to a `layout set`. |
 | L3 | **Ops and verbs** (spec §6.4):<br>• `layout.list` → lines `▸ cockpit: tree · console · plan` (`▸` for the current one, a space otherwise, then a space), then `(config: <path, ~ for home>)`;<br>• `layout.show {name}` → the entry's JSON, pretty;<br>• `layout.set {name, layout}` → `saved layout <name>; apply it with: moa layout apply <name>`;<br>• `layout.apply {name?}` → `layout <name> applied`; with no name, the current one;<br>• `goto {panel}` → the leaf word;<br>• `ui.select_view {pane, view}` → `{pane, view}`.<br>`moactl layout list\|show NAME\|set NAME JSON…\|apply [NAME]` and `moactl goto PANEL` stop saying "not yet". `set` joins the remaining words with spaces, as the spike did. Writes: `layout.set` and `layout.apply` (the meta value). New topic `layouts`: rows `{key: name, name, leaves: [words], current: bool, error: string?}`, plus a row `{key: "file", error}` while the file doesn't parse. | Parity (R1 §2.2). The hint says "moa" where the spike said "moactl", since `moa` is the command users type. The topic lets the console (slice 6) and help (5c) show layouts without asking. |
 | L4 | **tmux commands that move panes** join `Cmd`'s allow-list, each with a checked shape:<br>• `swap-pane -d -s %A -t %B`;<br>• `join-pane -d -h\|-v -s %A -t %B`;<br>• `break-pane -d -s %A -t =moa:\|=_moa: [-n NAME]`;<br>• `resize-pane -t %A -x\|-y N\|N%`;<br>• `respawn-pane -k -t %A [-c DIR] [-e K=V]… CMD…`;<br>• `rename-window -t %A NAME`.<br>Targets are pane ids only, never names, so a prefix can't match a stranger (research 2, item 9). `break-pane` also moves a pane that is alone in its window (verified on 3.4 and 3.8), so `move-window` isn't needed.<br>**`Cmd::chain(Vec<Cmd>) -> Cmd`** sends `a ; b ; …` as one line, checked part by part, with the existing sentinel after it. tmux runs the commands in order and skips the rest of the line after a failure. Control mode sends one block per command that ran (verified). The chain's result is the first error's text, or `Ok`. | Spec §6.6: "`a ; b` plus a sentinel for transactions"; "mutations batched into one write". Slice 3's T14 left this to its first consumer. A failed `join-pane` must not be followed by moves that assume it worked. |
 | L5 | **Which pane plays each leaf** (`cockpit::assign`). A *panel* is a pane tagged `@moa_view=<view>`. Unassigned means no leaf has taken it yet. In order:<br>1. **`agent`:** the cockpit's spot occupant (an agent tagged `agent`, or an `empty-slot` panel, even a dead one); else an unassigned live `empty-slot` panel.<br>2. **Each panel leaf, in layout order:** an unassigned panel showing exactly that view: a live one first (in the cockpit, then parked), then a dead one. A **dead** panel counts here, and only here: it keeps its own leaf, moves like any pane, and is never reassigned.<br>3. **Every leaf still empty** (`agent` included) takes any unassigned live panel, cockpit first, reassigned to the leaf's view (`empty-slot` for `agent`).<br>4. **The rest** are new panels, started parked before the build. | Spec §6.13: "views it needs that aren't on screen come from parked panel panes … only the very first use of a view (or Repair after a crash) spawns a panel". Reassigning is a published row change, not a launch. Preferring an exact match keeps each panel's scroll and selection. A stopped panel staying in its place means only Repair starts a process for it (Call 5). |
@@ -161,7 +161,7 @@ plan was reviewed before implementation; the review checked every tmux claim on 
 | L15 | **No stray servers:** `moa_client`'s autostart, and with it the panel's first connect and every `moactl`, refuses when `Paths`'s root folder doesn't exist: `moa's folder <root> is gone`. Task 2 hunts the other sources of the stray `/tmp/moaXXXX` servers. Each source it finds gets a fix, plus a test that would have caught it. | 5a's Task 14 carry: a test failing between `panel_tab` and the panel's first connect let that connect start a daemon under a deleted root. A user's real root always exists. |
 | L16 | **The topology learns the tags:** `LIST_PANES` gains `#{pane_dead}` and `#{@moa_view}`, and `LIST_CLIENTS` already has `client_control_mode`. Renames are applied straight from the notification (`%unlinked-window-renamed @w name` for windows outside `_moa`, `%window-renamed` inside it, `%session-renamed`), without a full listing. That removes 4b's "listing per tab rename" cost. `Sandbox::tmux` looks tmux up once. (`Topology::session_named` stays public: the integration tests use it.) | The scene needs tags and liveness. 4b and slice 3 carried the rename cost and the cleanup to this slice. |
 | L17 | **One cockpit operation at a time, each from its own listing:**<br>• **One queue, `State.cockpit`.** These all go through it:<br>&nbsp;&nbsp;– builds: apply, goto's re-apply, Repair, the lazy build, the refill;<br>&nbsp;&nbsp;– swaps (`show`) and `goto`'s select;<br>&nbsp;&nbsp;– `ui.select_view`;<br>&nbsp;&nbsp;– vacates (`kill_tab` of an agent, below).<br>• **A newer `Build` replaces a waiting `Build`**, and only that. The replaced request is answered `replaced by a later layout request`. Repair, Lazy and Refill are never replaced.<br>• **Each operation starts with a fresh listing:** it asks `refresh_cmds()` (sessions, panes and clients) as `Asked::Scene { op }`. That answer rebuilds the topology exactly as `listed()` does (keeping the tags sent but not yet listed), then runs `resolve_panels` (L8). The operation plans in that answer, sends its chain as `Asked::Chain { op }`, and only when the chain's answer arrives does the next operation start.<br>• **A chain's `Ok` records its tag changes in the topology at once**, as `tag_sent` does, so the topology knows which pane is the spot before the next refresh.<br>• **An answer for an operation that isn't the one in flight is ignored.**<br>• **`Input::Reload`** (after a panic) resets the queue. Waiting `Vacate`s are queued again, since their commits are already saved. Every other waiting request is answered `moa lost its terminal; try again`.<br>• **tmux runs one client's commands in order**, so a listing sent after a chain sees that chain's result. It costs one round trip, about 1 ms.<br>• **If the link goes down**, every waiting operation except `Vacate`s is dropped: its request is answered `moa lost its terminal; try again`, and a key's with nothing. `Vacate`s run when the link comes back to the same server. On another server their panes are gone anyway.<br>• **`kill_tab` of a bound agent** goes through the queue as `Vacate { pane }` whenever a cockpit exists. A vacate whose fresh scene shows the pane in the spot uses L11's chain; one elsewhere, a plain `kill-pane`; one whose pane is gone, nothing. With no cockpit, `kill_tab` stays as it is today. | The topology catches up only through refreshes, which arrive after the chain that caused them, and `%layout-change` never comes for the cockpit (it's outside `_moa`). A plan from a stale scene can move a whole window that it believes holds one pane, dragging an agent into `_moa`. Two keys pressed quickly, or a Repair whose respawned panes still read as dead, hit exactly that. |
-| L18 | **Answers keep tmux's words, per command:** the new `Asked` variants (`Scene`, `Spawn`, `Chain`) get `Vec<Result<Vec<String>, String>>`, one entry per command, with tmux's error text. A failed spawn never hides the panels the other commands started: each started pane is tagged. A chain's error reaches the user in plain words:<br>• `layout <name> couldn't be applied: <tmux's words>; Ctrl-a r tries again`;<br>• tmux's `no space for a new pane` and `pane too small` become `the <name> layout doesn't fit this window; make the terminal bigger`. | `Answer` (`link.rs:186`) drops the error text today. An untagged `moa panel` would run in `_moa` for ever, never reused. |
+| L18 | **Answers keep tmux's words, per command:** the new `Asked` variants (`Scene`, `Spawn`, `Chain`) get `Vec<Result<Vec<String>, String>>`, one entry per `Cmd` sent (a chain is one `Cmd`, so one entry), with tmux's error text. A failed spawn never hides the panels the other commands started: each started pane is tagged. A chain's error reaches the user in plain words:<br>• `layout <name> couldn't be applied: <tmux's words>; Ctrl-a r tries again`;<br>• tmux's `no space for a new pane` and `pane too small` become `the <name> layout doesn't fit this window; make the terminal bigger`. | `Answer` (`link.rs:186`) drops the error text today. An untagged `moa panel` would run in `_moa` for ever, never reused. |
 
 ## Parity rows this part delivers (spec §7)
 
@@ -452,15 +452,18 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
 **Files:**
 - Create: `crates/moa-core/src/cockpit/{mod.rs, scene.rs, assign.rs, build.rs}`
 - Test: `crates/moa-core/tests/cockpit.rs` (new) and `crates/moa-core/tests/cockpit/sim.rs` (the
-  simulator; it reads only `Cmd`'s public `name()` and `argv()`).
+  simulator; it reads only `Cmd`'s public `parts()`, `name()` and `argv()`).
 
 **Interfaces:**
 - Produces:
   - `pub enum Role { Panel(View), Spot(Option<SessionId>), Agent(SessionId), Other }`:
-    - `Spot` is the cockpit's spot occupant: `Spot(Some)` an agent tagged `agent`, `Spot(None)`
-      an `empty-slot` panel there;
+    - an *agent* is a pane with a binding or a `@moa_session` tag (L6 step 2); its session id
+      comes from whichever it has;
+    - `Spot` is the cockpit's spot occupant: `Spot(Some)` an agent tagged `@moa_view agent`,
+      `Spot(None)` an `empty-slot` panel there;
     - an `empty-slot` panel outside the cockpit is `Panel(EmptySlot)`;
-    - an agent tagged `agent` outside the cockpit is `Agent`.
+    - an agent anywhere else, tagged `agent` or not, is `Agent`;
+    - a pane tagged `@moa_view agent` that isn't an agent is `Other`.
   - `pub struct PaneAt { pub pane: PaneId, pub window: WindowId, pub place: Place, pub dead: bool, pub role: Role }`,
     with `pub enum Place { Cockpit, Moa, Hidden, Elsewhere }`.
   - `pub struct Scene { pub panes: Vec<PaneAt>, pub moa_session: bool, pub cockpit: Option<WindowId>, pub users: bool }`,
@@ -580,8 +583,8 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
     `Err("create window failed")` → the first and third panes are tagged, `panel_starts == 2`,
     and the operation re-plans once. If it still needs the second, the reply is
     `couldn't start the console panel; see panel.log`.
-  - `a_spawn_whose_answer_never_comes_starts_nothing_else`: the link goes down, so the queue is
-    dropped (L17), with one log line.
+  - `a_spawn_whose_answer_never_comes_starts_nothing_else`: the link goes down, so the operation
+    is dropped (L17), with one log line.
   - `status_reports_panel_starts`.
   - In `crates/moa-daemon/tests/tmux.rs`, `a_spawned_panel_runs_in_the_hidden_session` (real
     tmux, with a stand-in `exe` script that sleeps): the pane is in `_moa`, its window is named
@@ -614,12 +617,20 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
     is `goto`'s: it replies with the leaf word, not `layout <name> applied`;
   - `pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect>`, which starts the
     operation when nothing is in flight;
-  - `Asked::Scene { op: CockpitOp }` and `Asked::Chain { op: CockpitOp, name: Option<String> }`;
+  - `Asked::Scene { seq: u64 }` and `Asked::Chain { seq: u64 }`. Each operation gets the next
+    `seq` when it starts, and an answer whose `seq` isn't the one in flight is ignored (L17);
   - `keys::run(state, key: KeyAction, pane, client) -> Option<Vec<Effect>>`; `None` falls
     through to the link's not-yet notice;
-  - `State.cockpit: CockpitRun { in_flight: Option<CockpitOp>, waiting: VecDeque<CockpitOp> }`.
+  - `State.cockpit: CockpitRun { seq: u64, in_flight: Option<(u64, CockpitOp)>, waiting: VecDeque<CockpitOp> }`.
     The spot is read from each scene, never stored. `in_flight` is cleared on every outcome:
-    an answer, an error, or the link going down.
+    an answer, an error, the link going down, or a reload. An in-flight `Vacate` cleared by a
+    lost link or a reload goes back to the head of `waiting`.
+  - **"A cockpit exists"** (L17, Task 10) means the topology has a window named `moa` in session
+    `moa` (`Topology::cockpit()` is `Some`).
+  - `SelectView` runs like every queued operation: a listing, then its chain (the `set-option`s
+    for the tag, the label and the frame), then on `Ok` the registry, `pane_views`, the
+    `panels` publish and the reply `{pane, view}`. A pane that isn't a panel in the listing →
+    `%3 isn't a moa panel`.
   - The meta write `layout.current` happens in the commit after a build's chain succeeds.
   - The `ui` event `layout → <name>` (the spike's `log_ui`).
 
@@ -634,7 +645,7 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
     - One operation is in flight.
     - The second's listing is asked only after the first chain's answer.
     - The second chain is planned from that listing.
-    - A third key while two wait replaces the waiting build, whose request is answered
+    - A third key, while one runs and one waits, replaces the waiting build, whose request is answered
       `replaced by a later layout request`. A waiting Repair is never replaced.
   - `a_reload_unwedges_the_cockpit_queue`: a `Build` in flight, a waiting `Vacate` and a
     waiting `Build`, then `Input::Reload`:
@@ -680,7 +691,8 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
   - `a_missing_cockpit_window_is_made_again`: the listing shows session `moa` with no window
     named `moa` → the chain starts `break-pane -d -s <first> -t =moa: -n moa`. With no session
     `moa`, `layout apply` replies `moa isn't open in a terminal yet; run moa first`.
-  - `link_up_with_a_user_attached_builds_it`; `a_lost_link_drops_the_queue` (L17's replies).
+  - `link_up_with_a_user_attached_builds_it`; `a_lost_link_drops_all_but_the_vacates` (L17's replies; an in-flight `Vacate` is
+    queued again).
   - In `tmux_keys.rs`, `every_key_gets_its_notice` now covers only `Find`, `FindOther`, `New`
     and `Help`. `the_cockpit_keys_act` covers `c t p g 1 2 3 4 r`.
   - In `cli.rs`: `goto_parses` (`goto tree`; `goto nope` → a usage error naming the nine words)
@@ -705,8 +717,8 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
 **Interfaces:**
 - Produces:
   - `Op::UiSelectView { pane: String, view: View }` (`ui.select_view`, not a write). It queues
-    `CockpitOp::SelectView` (L17), so it can't race a build's retagging of the same pane, and
-    sends its own `Effect::Tmux`;
+    `CockpitOp::SelectView` (L17, Task 7), so it can't race a build's retagging of the same
+    pane;
   - the `ui.panel` reply `{key, view, managed}`; `PanelRow` gains `managed: bool`;
   - `pub(crate) fn resolve_panels(state: &mut State) -> Option<Effect>`, run after every listing;
   - `Panel::follow(&mut self, data: &Data, key: &str) -> bool` (true when the view changed);
@@ -719,9 +731,12 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
   - `a_listing_corrects_a_panel_that_registered_too_early`: `ui.panel {%3, tree}` before
     `link_up` → `managed: false`. The first listing shows `%3` tagged `status` → `panels`
     publishes `c7` as `{view: status, managed: true}`.
-  - `select_view_retags_and_publishes`: `UiSelectView { pane: "%3", view: Plan }` → its own
-    `Tmux` with `set-option -p -t %3 @moa_view plan`, the label and the frame options; then
-    `panels` publishing `c7` as `plan`; then the reply.
+  - `select_view_retags_and_publishes`: `UiSelectView { pane: "%3", view: Plan }` → a listing.
+    Its answer → the chain with `set-option -p -t %3 @moa_view plan`, the label and the frame
+    options. The chain's `Ok` → `panels` publishing `c7` as `plan`, then the reply. On an
+    untagged `%4` → `%4 isn't a moa panel`.
+  - `chain_ok_records_its_tags_at_once`: right after a `Show` chain's `Ok`, before any refresh,
+    `Topology::view_of(%9) == Some("agent")`, so a sleep then queues a vacate of the spot.
   - `a_new_tmux_server_clears_the_panes_of_registered_panels`.
   - In moa-view's `panel.rs`, `a_panel_follows_its_row`: a `panels` row for its key with `plan`
     and `managed: true` → `follow` returns true, `view() == Plan` and `managed()`. A row for
@@ -804,12 +819,18 @@ The roadmap's, every earlier slice plan's, and 5a's Global Constraints apply. Al
     `asleep_at`, then a listing, then
     `swap-pane -d -s <slot> -t %9 ; kill-pane -t %9`. `panel_starts` is unchanged.
   - `sleeping_the_spots_agent_with_no_spare_respawns_the_spot`: the same with no spare →
-    `respawn-pane -k -t %9 -c /h -e … /x/moa panel empty-slot --brain default ; set-option -p -u -t %9 @moa_session ; …tags`.
+    `respawn-pane -k -t %9 -c /h -e … /x/moa panel empty-slot --brain default ; set-option -p -u -t %9 @moa_session ; …tags ; set-option -p -t %9 remain-on-exit on ; …its format`.
     `panel_starts` goes up by one, and the session is asleep.
   - `closing_the_spots_agent_leaves_the_empty_slot` (`x`, `session.close`).
   - `restarting_the_spots_agent_leaves_the_empty_slot`.
   - `a_spot_whose_agent_ends_refills`: `moa:hook pane-exited %9`, the spot's bound agent →
     `Refill` → a listing, then the build.
+  - `closing_an_agent_outside_the_spot_kills_it_after_a_listing`: with a cockpit, closing Kite
+    in its own tab → the commit, a listing, then `kill-pane -t <Kite>`. With no cockpit, it's
+    4b's synchronous `kill-pane`, so 4b's sleep and close tests (which have no cockpit) keep
+    passing unchanged.
+  - `sleep_right_after_a_show_vacates_the_spot`: a `Show` chain's `Ok`, then at once a sleep of
+    that session → the vacate's spot chain, never a bare `kill-pane`.
   - `a_vacate_whose_pane_left_the_spot_just_kills_it`: a `Vacate` queued behind a build that
     sent the pane home → a plain `kill-pane -t %9`. With the pane gone → nothing.
   - `a_dead_empty_slot_in_the_spot_is_left_for_repair`: `pane-died` of the `empty-slot` in the
