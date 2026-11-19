@@ -1,5 +1,7 @@
 //! A throwaway `MOA_ROOT` on a short `/tmp` path, for tests that run a real daemon. Dropping
-//! it stops the daemons it started, then the terminal servers under it.
+//! it stops the daemons it started, then the terminal servers under it, and removes the root.
+//! It holds each brain's start lock from before the daemons stop until the root is removed,
+//! so no client starts a daemon there meanwhile.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;

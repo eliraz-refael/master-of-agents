@@ -575,6 +575,10 @@ fn a_panel_comes_back_after_moa_restarts() {
 /// connect may still be under way. That connect finds moa stopped and starts a daemon of its
 /// own, which nobody stops, under a root about to be removed. Once the TempBrain is gone, no
 /// daemon holds the brain's lock and the terminal server has exited.
+///
+/// It is timing-bound: it catches the leak only when the panel's first connect lands while
+/// the teardown is under way, as it did in 6 runs of 6 before the fix. A run where the
+/// connect lands earlier or later passes either way.
 #[test]
 fn a_panel_started_at_the_end_leaves_nothing_behind() {
     let r = rig();
@@ -589,6 +593,7 @@ fn a_panel_started_at_the_end_leaves_nothing_behind() {
         "a daemon outlived {}",
         root.display()
     );
-    assert!(!pid_alive(server), "the terminal server outlived its root");
+    let gone = wait_for(SHOWS, || (!pid_alive(server)).then_some(()));
+    assert!(gone.is_some(), "the terminal server outlived its root");
     assert!(!root.exists());
 }
