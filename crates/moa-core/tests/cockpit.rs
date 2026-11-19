@@ -583,6 +583,8 @@ fn vacate_swaps_a_spare_or_respawns_in_place() {
         "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default /x/moa panel empty-slot --brain default"
             .to_string(),
         "set-option -p -u -t %9 @moa_session".into(),
+        "set-option -p -u -t %9 @moa_adopted".into(),
+        "set-option -p -u -t %9 @moa_term".into(),
     ];
     want.extend(panel_tags(p(9), View::EmptySlot));
     want.extend([

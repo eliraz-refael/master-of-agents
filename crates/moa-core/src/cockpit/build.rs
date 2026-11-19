@@ -8,6 +8,8 @@ use super::scene::{AGENT, HIDDEN, MOA, PaneAt, Place, Role, Scene};
 use crate::layout::{Axis, Leaf, Node, Size};
 use crate::model::SessionId;
 use crate::panel::View;
+use crate::reconcile::untag_cmds;
+use crate::sleep::kill_pane;
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{set_pane_option, unset_pane_option};
@@ -23,13 +25,13 @@ const FRAME_ACTIVE: &str = "fg=#88c0d0";
 const STOPPED: &str = "panel stopped · Ctrl-a r brings it back";
 
 /// A session's title, as a tab or a frame shows it: cut to 24 characters.
-fn cut(title: String) -> String {
-    title.chars().take(TITLE_CHARS).collect()
+fn cut(title: &str) -> String {
+    crate::ops::cut(title, TITLE_CHARS)
 }
 
 /// An agent's tab name: its title, cut. Never `moa`, which in session `moa` would read as
 /// the cockpit (after a rebuild made the cockpit a newer window than the agent's tab).
-fn tab_name(title: String) -> String {
+pub(crate) fn tab_name(title: &str) -> String {
     match cut(title) {
         name if name == MOA => format!("{MOA} (agent)"),
         name => name,
@@ -64,10 +66,6 @@ fn resize(axis: Axis, pane: PaneId, size: Size) -> Cmd {
         Axis::V => "-y",
     };
     Cmd::new("resize-pane").args(["-t", &pane.to_string(), flag, &size.arg()])
-}
-
-fn kill(pane: PaneId) -> Cmd {
-    Cmd::new("kill-pane").args(["-t", &pane.to_string()])
 }
 
 /// The frame's three options, set for a framed panel and unset for anything else.
@@ -139,7 +137,7 @@ fn go_home(at: &PaneAt, title: &dyn Fn(SessionId) -> String) -> Vec<Cmd> {
         return vec![break_to(p, HIDDEN, None)];
     }
     if let Some(id) = at.agent() {
-        let mut cmds = vec![break_to(p, MOA, Some(&tab_name(title(id))))];
+        let mut cmds = vec![break_to(p, MOA, Some(&tab_name(&title(id))))];
         cmds.extend(untag_agent(p));
         return cmds;
     }
@@ -275,7 +273,7 @@ pub(crate) fn chain(
     // 6. Tag.
     for (leaf, pane) in leaves {
         match (leaf, at(*pane).agent()) {
-            (Leaf::Agent, Some(id)) => cmds.extend(agent_tags(*pane, &cut(title(id)))),
+            (Leaf::Agent, Some(id)) => cmds.extend(agent_tags(*pane, &cut(&title(id)))),
             _ => cmds.extend(panel_tags(*pane, view_of(*leaf))),
         }
     }
@@ -304,7 +302,7 @@ pub(crate) fn swap_in(
                 "-t",
                 &spot.pane.to_string(),
                 "--",
-                &literal_format(&tab_name(title(old))),
+                &literal_format(&tab_name(&title(old))),
             ]));
             cmds.extend(untag_agent(spot.pane));
         }
@@ -312,7 +310,7 @@ pub(crate) fn swap_in(
         None if at.place == Place::Hidden => {}
         _ => cmds.extend(go_home(spot, title)),
     }
-    cmds.extend(agent_tags(pane, &cut(title(id))));
+    cmds.extend(agent_tags(pane, &cut(&title(id))));
     Some(Cmd::chain(cmds))
 }
 
@@ -324,14 +322,17 @@ pub(crate) fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Cmd {
         at.role == Role::Panel(View::EmptySlot) && at.place == Place::Hidden && !at.dead
     });
     if let Some(slot) = spare {
-        return Cmd::chain(vec![swap(slot.pane, spot), kill(spot)]);
+        return Cmd::chain(vec![swap(slot.pane, spot), kill_pane(spot)]);
     }
     let mut cmds = vec![
         Cmd::new("respawn-pane")
             .args(["-k", "-t", &spot.to_string()])
             .args(respawn.iter().cloned()),
-        unset_pane_option(spot, "@moa_session"),
     ];
+    // No longer a session's tab: the session tag and the adopted mark go (as reconcile takes
+    // them off), and a terminal's mark, so the slot never lists as an untracked tab.
+    cmds.extend(untag_cmds(spot));
+    cmds.push(unset_pane_option(spot, "@moa_term"));
     cmds.extend(panel_tags(spot, View::EmptySlot));
     cmds.extend(keep_on_exit(spot));
     Cmd::chain(cmds)

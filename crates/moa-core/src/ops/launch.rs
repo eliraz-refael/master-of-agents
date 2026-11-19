@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::cut;
 use super::projects::project_for;
 use super::sessions::{NotKilled, agent_left, kill_checked, running_pane, unread_log};
 use crate::Now;
 use crate::change::Change;
+use crate::cockpit::build::tab_name;
 use crate::config::{AccountConfig, AccountName};
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, TmuxToken};
@@ -120,10 +120,11 @@ pub(crate) fn new_window(state: &State, conn: u64, spec: &LaunchSpec) -> Effect 
         Conv::Resume(c) => ("--resume", c),
     };
     // tmux expands `-n` and `-c` as formats: cut first, so a doubled `#` isn't split and
-    // the name shows at most 24 characters. `-e` values and the argv stay as they are.
+    // the name shows at most 24 characters, and is never the cockpit's `moa`. `-e` values
+    // and the argv stay as they are.
     let mut cmd = Cmd::new("new-window")
         .args(["-d", "-P", "-F", OPENED_FORMAT, "-n"])
-        .arg(literal_format(&cut(spec.title, WINDOW_NAME_CUT)))
+        .arg(literal_format(&tab_name(spec.title)))
         .arg("-c")
         .arg(literal_format(spec.folder))
         .args(["-t", "=moa:"])

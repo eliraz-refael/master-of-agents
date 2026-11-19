@@ -200,7 +200,7 @@ pub(crate) fn put_to_sleep(state: &State, tx: &Tx, id: SessionId) -> Vec<Change>
 }
 
 /// Kills tab `pane`, by its id (R14).
-fn kill_pane(pane: PaneId) -> Cmd {
+pub(crate) fn kill_pane(pane: PaneId) -> Cmd {
     Cmd::new("kill-pane").args(["-t".to_string(), pane.to_string()])
 }
 
