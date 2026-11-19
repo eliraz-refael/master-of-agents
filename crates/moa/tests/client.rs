@@ -4,9 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use moa_client::{Client, ClientError, ClientOptions, OnMismatch};
+use moa_client::{Client, ClientError, ClientOptions, LiveMsg, OnMismatch};
 use moa_core::config::BrainName;
-use moa_core::op::Op;
+use moa_core::op::{Op, TaskAdd};
 use moa_core::publish::Topic;
 use moa_core::state::CallerInfo;
 use moa_platform::{build_id_of, pid_alive, spawn};
@@ -232,4 +232,42 @@ async fn a_mismatch_without_autostart_does_not_stop_the_daemon() {
     }
     assert!(pid_alive(pid));
     drop(old);
+}
+
+/// `Live` on a real daemon: a sent op comes back as its tagged reply, and the change it made
+/// arrives as a patch.
+#[tokio::test]
+async fn live_follows_a_real_daemon() {
+    let tb = TempBrain::new(None);
+    tb.adopt_typical("default");
+    let client = Client::connect(opts(&tb, true)).await.expect("autostart");
+    let (mut live, replies, _) = client.live(&[Topic::Tasks], vec![]).await.unwrap();
+    assert!(replies.is_empty());
+    let tag = live.send(Op::TaskAdd(TaskAdd {
+        project: "Lantern".into(),
+        title: "Probe".into(),
+        ..TaskAdd::default()
+    }));
+    let probe = |patch: &moa_proto::Patch| {
+        patch
+            .upsert
+            .get(&Topic::Tasks)
+            .is_some_and(|rows| rows.iter().any(|r| r["title"] == "Probe"))
+    };
+    let (mut replied, mut patched) = (false, false);
+    let seen = tokio::time::timeout(Duration::from_secs(10), async {
+        while !(replied && patched) {
+            match live.recv().await {
+                LiveMsg::Reply { tag: t, result } if t == tag => {
+                    assert!(result.is_ok(), "{result:?}");
+                    replied = true;
+                }
+                LiveMsg::Patch(p) if probe(&p) => patched = true,
+                LiveMsg::Closed => panic!("the connection closed"),
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(seen.is_ok(), "replied {replied}, patched {patched}");
 }

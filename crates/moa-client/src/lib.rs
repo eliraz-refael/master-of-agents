@@ -32,6 +32,9 @@ use tokio::net::UnixStream;
 use tokio::time::{Instant, sleep, timeout};
 use tokio_util::codec::{Framed, LinesCodec, LinesCodecError};
 
+mod live;
+pub use live::*;
+
 /// How long a started daemon has to say `ready`.
 const READY_WAIT: Duration = Duration::from_secs(10);
 /// How long a daemon told to `upgrade` has to exit.
@@ -200,6 +203,14 @@ impl Wire {
         }
     }
 
+    /// Writes an op as a request and returns its id.
+    async fn send_op(&mut self, op: &Op) -> Result<Id, ClientError> {
+        let mut wire = serde_json::to_value(op).map_err(io::Error::other)?;
+        let method = wire["method"].as_str().unwrap_or_default().to_string();
+        let params = wire["params"].take();
+        self.send(&method, params).await
+    }
+
     /// The next line, or `None` when the connection has ended.
     async fn read(&mut self) -> Result<Option<ServerLine>, ClientError> {
         match self.framed.next().await {
@@ -348,12 +359,9 @@ impl Client {
     }
 
     pub async fn call(&mut self, op: Op) -> Result<Done, ClientError> {
-        let mut wire = serde_json::to_value(&op).map_err(io::Error::other)?;
-        let method = wire["method"].as_str().unwrap_or_default().to_string();
-        let params = wire["params"].take();
         // A send that failed never reached the daemon; only a missing reply leaves a write
         // in doubt.
-        let id = self.wire.send(&method, params).await?;
+        let id = self.wire.send_op(&op).await?;
         let reply = match self.wire.reply(id).await {
             Err(ClientError::Stopped { .. }) => {
                 return Err(ClientError::Stopped { wrote: op.writes() });
