@@ -568,16 +568,46 @@ pub fn select_row(tb: &TempBrain, pane: &str, text: &str) {
         let key = if want > bar { "j" } else { "k" };
         tmux(tb, &["send-keys", "-t", pane, key]);
         // The key has landed once the bar is on another row.
+        // For a failure: each screen the panel showed meanwhile, as `<ms> <bar row>: <rows>`.
+        let started = std::time::Instant::now();
+        let mut seen: Vec<(String, String)> = Vec::new();
         let moved = wait_for(SHOWS, || {
             let rows = colours(tb, pane);
             let now = rows.iter().position(|l| l.contains(SEL_BG));
+            let shown = format!(
+                "{now:?}: {:?}",
+                rows.iter().map(|l| plain(l)).collect::<Vec<_>>()
+            );
+            if seen.last().is_none_or(|(_, s)| *s != shown) {
+                seen.push((format!("{}ms", started.elapsed().as_millis()), shown));
+            }
             now.filter(|now| *now != bar)
         });
-        assert!(
-            moved.is_some(),
-            "{key} left the bar on row {bar}, not {text:?}'s {want}\n{}",
-            tab_shows(tb, pane)
-        );
+        if moved.is_none() {
+            let pid = tmux(tb, &["display-message", "-p", "-t", pane, "#{pane_pid}"]);
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=,%cpu=,time=", "-p", &pid])
+                .output()
+                .map_or_else(|e| e.to_string(), |o| out(&o));
+            let mode = tmux(
+                tb,
+                &[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    pane,
+                    "in_mode=#{pane_in_mode}",
+                ],
+            );
+            let screens: Vec<String> = seen.iter().map(|(t, s)| format!("{t} {s}")).collect();
+            panic!(
+                "{key} left the bar on row {bar}, not {text:?}'s {want}\nits screens:\n{}\n\
+                 the panel ({pid}): {} {mode}\n{}",
+                screens.join("\n"),
+                ps.trim(),
+                tab_shows(tb, pane)
+            );
+        }
     }
     panic!("the bar never reached {text:?}");
 }

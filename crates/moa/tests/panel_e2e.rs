@@ -453,9 +453,13 @@ fn a_panel_started_at_the_end_leaves_nothing_behind() {
 fn a_panel_moa_placed_never_starts_moa() {
     let r = rig();
     shutdown(&r.tb);
+    // Whether moa answers on its socket. Never by trying the brain's lock: a daemon starting
+    // in that instant finds it held, takes it for another moa, and the panel that started it
+    // gives up.
+    let socket = r.tb.paths().socket(B).unwrap();
     let free = || {
-        fs::File::open(r.tb.paths().lock(B))
-            .is_ok_and(|f| f.try_lock().is_ok())
+        std::os::unix::net::UnixStream::connect(&socket)
+            .is_err()
             .then_some(())
     };
     assert!(wait_for(SHOWS, free).is_some(), "moa didn't stop");
