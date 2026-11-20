@@ -467,12 +467,21 @@ fn log_lines(fx: &[Effect]) -> Vec<(LogLevel, String)> {
 }
 
 /// `fx` opens a terminal tab `name` in `path`; once tmux answers with its pane, the tab is
-/// tagged and brought to the screen, and the key's client gets the notice.
+/// tagged and brought to the screen, and the key's client gets the notice. The `terms`
+/// topic has it at once (published unless it already had it so).
 fn opens_in(b: &TypicalBrain, st: &mut State, fx: &[Effect], name: &str, path: &str) {
     only_tmux(fx);
     let (n, cmds) = the_query(fx);
     assert_eq!(cmds, [new_window(name, path)]);
     let fx = answer(b, st, n, line("P %9 777"));
+    let (published, fx): (Vec<_>, Vec<_>) = fx
+        .into_iter()
+        .partition(|e| matches!(e, Effect::Publish(_)));
+    assert!(published.len() <= 1, "{published:?}");
+    assert_eq!(
+        st.model().topics[&Topic::Terms]["%9"]["name"],
+        name.trim_start_matches("⌨ ")
+    );
     only_tmux(&fx);
     let shown = if path == b.home.display().to_string() {
         "~"
@@ -1025,7 +1034,7 @@ fn select_view_retags_and_publishes() {
     let fx = send_on(&b, &mut st, 7, 2, select_view("%3", View::Plan));
     assert!(replies(&fx).is_empty(), "{fx:?}");
     let (n, asked) = the_ask(&fx);
-    assert_eq!(asked.len(), 3, "a listing: {asked:?}");
+    assert_eq!(asked.len(), 4, "a listing: {asked:?}");
     assert!(asked[1].starts_with("list-panes"), "{asked:?}");
 
     let fx = answer_lists(&b, &mut st, n, the_panes());

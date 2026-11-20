@@ -73,6 +73,7 @@ pub(crate) fn run(
         | Op::SessionAdopt { .. }
         | Op::SessionRestart { .. }
         | Op::TermOpen { .. }
+        | Op::TermShow { .. }
         | Op::UiPanel { .. }
         | Op::UiHere { .. }
         | Op::UiSelectView { .. }

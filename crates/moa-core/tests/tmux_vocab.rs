@@ -577,7 +577,7 @@ fn topology_apply() {
 }
 
 #[test]
-fn a_detached_user_hides_everything_and_refresh_lists_three_queries() {
+fn a_detached_user_hides_everything_and_refresh_lists_four_queries() {
     let mut t = lists(false);
     t.apply(&Notification::ClientDetached {
         client: ClientName("/dev/ttys1".into()),
@@ -587,7 +587,10 @@ fn a_detached_user_hides_everything_and_refresh_lists_three_queries() {
         .iter()
         .map(|c| c.name().to_string())
         .collect();
-    assert_eq!(names, ["list-sessions", "list-panes", "list-clients"]);
+    assert_eq!(
+        names,
+        ["list-sessions", "list-panes", "list-clients", "list-panes"]
+    );
     assert!(refresh_cmds().iter().all(|c| c.check().is_ok()));
 }
 

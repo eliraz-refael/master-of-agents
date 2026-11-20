@@ -113,6 +113,9 @@ pub enum Op {
         #[serde(default)]
         title: Option<String>,
     },
+    /// Brings terminal `pane` (`%N`), a tab `term.open` or `Ctrl-a $` opened, to the screen.
+    #[serde(rename = "term.show")]
+    TermShow { pane: String },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -344,6 +347,7 @@ impl Op {
         "session.adopt",
         "session.restart",
         "term.open",
+        "term.show",
         "task.ls",
         "task.add",
         "task.set",
@@ -400,6 +404,7 @@ impl Op {
             | Op::SuggestionLs(_)
             | Op::TmuxEnsure { .. }
             | Op::TermOpen { .. }
+            | Op::TermShow { .. }
             | Op::UiPanel { .. }
             | Op::UiHere { .. }
             | Op::UiSelectView { .. }
@@ -429,6 +434,7 @@ impl Op {
             Op::SessionAdopt { .. } => "session.adopt",
             Op::SessionRestart { .. } => "session.restart",
             Op::TermOpen { .. } => "term.open",
+            Op::TermShow { .. } => "term.show",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",

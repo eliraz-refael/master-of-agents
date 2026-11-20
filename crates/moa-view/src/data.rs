@@ -8,7 +8,7 @@ use moa_core::model::{
     ActivityId, ActivityRow, Group, Project, ProjectId, Session, SessionId, Suggestion,
     SuggestionId, Task, TaskId,
 };
-use moa_core::publish::{BrainRow, PanelRow, Topic};
+use moa_core::publish::{BrainRow, PanelRow, TermRow, Topic};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +23,7 @@ pub const TOPICS: &[Topic] = &[
     Topic::Activity,
     Topic::Brain,
     Topic::Panels,
+    Topic::Terms,
 ];
 
 /// A `sessions` row: the session and what the core adds to it.
@@ -54,6 +55,8 @@ pub struct Data {
     pub activity: BTreeMap<ActivityId, ActivityRow>,
     pub brain: Option<BrainRow>,
     pub panels: BTreeMap<String, PanelRow>,
+    /// The terminals moa opened, by tab id (`%N`).
+    pub terms: BTreeMap<String, TermRow>,
     /// The keys of rows that didn't decode, by topic.
     unreadable: BTreeSet<(Topic, String)>,
 }
@@ -109,6 +112,7 @@ impl Data {
             Topic::Activity => self.activity.clear(),
             Topic::Brain => self.brain = None,
             Topic::Panels => self.panels.clear(),
+            Topic::Terms => self.terms.clear(),
             Topic::Asks | Topic::Status | Topic::Layouts => {}
         }
         self.unreadable.retain(|(t, _)| *t != topic);
@@ -143,6 +147,7 @@ impl Data {
                 self.brain.is_some()
             }
             Topic::Panels => put(&mut self.panels, Some(key.to_string()), row),
+            Topic::Terms => put(&mut self.terms, Some(key.to_string()), row),
             Topic::Asks | Topic::Status | Topic::Layouts => true,
         }
     }
@@ -165,6 +170,7 @@ impl Data {
                 // The topic's one row.
                 Topic::Brain => self.brain = None,
                 Topic::Panels => drop_key(&mut self.panels, Some(key.clone())),
+                Topic::Terms => drop_key(&mut self.terms, Some(key.clone())),
                 Topic::Asks | Topic::Status | Topic::Layouts => {}
             }
             self.unreadable.remove(&(topic, key.clone()));

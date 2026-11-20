@@ -27,6 +27,7 @@ pub enum Topic {
     Brain,
     Panels,
     Layouts,
+    Terms,
 }
 
 impl Topic {
@@ -42,6 +43,7 @@ impl Topic {
         Topic::Brain,
         Topic::Panels,
         Topic::Layouts,
+        Topic::Terms,
     ];
 }
 
@@ -90,6 +92,13 @@ pub struct LayoutRow {
     pub leaves: Vec<String>,
     pub current: bool,
     pub error: Option<String>,
+}
+
+/// A `terms` row (key: its tab id, `%N`): a terminal moa opened (`@moa_term`), named by its
+/// label without the `⌨ `. Read from the topology: nothing about it is saved.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TermRow {
+    pub name: String,
 }
 
 /// The `layouts` row with key `""` (no layout can be named that), there while
@@ -276,11 +285,27 @@ impl State {
         by_name
     }
 
+    fn terms_rows(&self) -> BTreeMap<String, Value> {
+        self.tmux
+            .topology
+            .terms()
+            .map(|(pane, name)| {
+                let key = pane.to_string();
+                let row = TermRow {
+                    name: name.to_string(),
+                };
+                let v = keyed(&key, &row);
+                (key, v)
+            })
+            .collect()
+    }
+
     fn build(&self, topic: Topic) -> BTreeMap<String, Value> {
         match topic {
             Topic::Brain => self.brain_rows(),
             Topic::Panels => self.panels_rows(),
             Topic::Layouts => self.layouts_rows(),
+            Topic::Terms => self.terms_rows(),
             Topic::Sessions => self.sessions_rows(),
             Topic::Status => self.status_rows(),
             Topic::Groups => by_key(self.groups().map(|g| (g.path.clone(), g))),

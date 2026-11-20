@@ -13,13 +13,20 @@ pub const LIST_SESSIONS: &str = "S #{session_id} #{session_name}";
 /// the pane is dead, and its `@moa_view` tag last, since it is free text.
 pub const LIST_PANES: &str = "P #{pane_id} #{window_id} #{session_id} #{pane_active} #{window_active} #{window_zoomed_flag} #{&&:#{==:#{session_name},moa},#{==:#{window_name},moa}} #{@moa_session} #{pane_dead} #{@moa_view}";
 pub const LIST_CLIENTS: &str = "C #{client_control_mode} #{session_id} #{client_name}";
+/// The terminals moa opened (`@moa_term`), each with its `@moa_label`: a list of their own,
+/// since `LIST_PANES` already ends in free text.
+pub const LIST_TERMS: &str = "T #{pane_id} #{@moa_label}";
 
-/// The three queries that rebuild a `Topology`, in the order `from_lists` takes them.
+/// The four queries that rebuild a `Topology`: the three `from_lists` takes, in its order,
+/// then the terminals' for `terms_listed`.
 pub fn refresh_cmds() -> Vec<Cmd> {
     vec![
         Cmd::new("list-sessions").arg("-F").arg(LIST_SESSIONS),
         Cmd::new("list-panes").arg("-a").arg("-F").arg(LIST_PANES),
         Cmd::new("list-clients").arg("-F").arg(LIST_CLIENTS),
+        Cmd::new("list-panes")
+            .args(["-a", "-f", "#{@moa_term}", "-F"])
+            .arg(LIST_TERMS),
     ]
 }
 
@@ -53,10 +60,19 @@ pub struct Topology {
     views: BTreeMap<PaneId, String>,
     /// The panes whose program has exited and that tmux keeps (`remain-on-exit`).
     dead: BTreeSet<PaneId>,
+    /// The terminals moa opened (`@moa_term`), each with its `@moa_label` as moa meant it
+    /// (tmux keeps it with every `#` doubled).
+    terms: BTreeMap<PaneId, String>,
 }
 
 /// The name of the session that holds the cockpit, and of the cockpit window in it.
 const COCKPIT: &str = "moa";
+
+/// A terminal's name: its label without the `⌨ ` moa puts first. A label set by hand is
+/// the name as it is.
+fn term_name(label: &str) -> &str {
+    label.strip_prefix("⌨ ").unwrap_or(label)
+}
 
 /// Replace a value, saying whether it differed.
 fn put<K: Ord, V: PartialEq>(map: &mut BTreeMap<K, V>, k: K, v: V) -> Applied {
@@ -92,6 +108,22 @@ impl Topology {
             }
         }
         t
+    }
+
+    /// The terminals' list (`LIST_TERMS`) replaces the terminals known. Lines that don't
+    /// parse are skipped; an unset label prints as an empty one.
+    pub fn terms_listed(&mut self, lines: &[String]) {
+        self.terms.clear();
+        for line in lines {
+            let mut f = line.splitn(3, ' ');
+            if let (Some("T"), Some(pane)) = (f.next(), f.next())
+                && let Ok(pane) = pane.parse()
+            {
+                // Set through `literal_format`, which doubles every `#`.
+                let label = f.next().unwrap_or_default().replace("##", "#");
+                self.terms.insert(pane, label);
+            }
+        }
     }
 
     fn add_pane(&mut self, line: &str) {
@@ -309,6 +341,26 @@ impl Topology {
         self.dead.contains(&p)
     }
 
+    /// Terminal `p`'s label (`@moa_label`); none for a pane that isn't a terminal.
+    pub fn term_label(&self, p: PaneId) -> Option<&str> {
+        self.terms.get(&p).map(String::as_str)
+    }
+
+    /// Terminal `p`'s name: its label without the `⌨ ` moa puts first.
+    pub fn term_name(&self, p: PaneId) -> Option<&str> {
+        self.term_label(p).map(term_name)
+    }
+
+    /// Every terminal, by pane, with its name.
+    pub fn terms(&self) -> impl Iterator<Item = (PaneId, &str)> + '_ {
+        self.terms.iter().map(|(p, label)| (*p, term_name(label)))
+    }
+
+    /// Records that `p` is a terminal labelled `label`, as moa just tagged it.
+    pub fn set_term(&mut self, p: PaneId, label: &str) {
+        self.terms.insert(p, label.to_string());
+    }
+
     /// Records that `p` is tagged with session `id`, as moa just set it.
     pub fn tag(&mut self, p: PaneId, id: SessionId) {
         self.moa_sessions.insert(p, id);
@@ -407,8 +459,10 @@ mod tests {
             sessions in prop::collection::vec(line(), 0..8),
             panes in prop::collection::vec(line(), 0..8),
             clients in prop::collection::vec(line(), 0..8),
+            terms in prop::collection::vec(line(), 0..8),
         ) {
-            let t = Topology::from_lists(&sessions, &panes, &clients);
+            let mut t = Topology::from_lists(&sessions, &panes, &clients);
+            t.terms_listed(&terms);
             let _ = t.visible();
         }
     }

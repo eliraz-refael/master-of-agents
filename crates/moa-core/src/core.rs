@@ -324,6 +324,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fold_in(&mut fx, more);
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
+            // The terminals are the topology's (a listing's, or a terminal's own tag): the
+            // views hear of them when they changed.
+            fx.extend(
+                state
+                    .publish_changed(Topic::Terms)
+                    .map(|m| Effect::Publish(Publish::Model(m))),
+            );
             fx
         }
         Input::Hook { reply, envelope } => {
@@ -483,6 +490,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::TermOpen { path, title },
             ..
         } => ops::term::term(state, Tell::Reply(conn, req), &path, title.as_deref()),
+        // Answered at once, from the topology: nothing is saved.
+        Input::Client {
+            conn,
+            req,
+            op: Op::TermShow { pane },
+            ..
+        } => ops::term::show(state, conn, req, &pane),
         // Answered at once, or after one pane query and the new tab (C11).
         Input::Client {
             conn,
