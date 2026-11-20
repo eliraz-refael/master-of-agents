@@ -35,6 +35,7 @@ predicates.workspace = true
 moa-testkit = { path = "../moa-testkit" }
 sha2.workspace = true
 tempfile.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

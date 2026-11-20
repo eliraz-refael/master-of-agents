@@ -1066,6 +1066,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "unicode-width",
 ]
 
 [[package]]

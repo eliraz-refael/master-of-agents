@@ -12,6 +12,8 @@ use assert_cmd::Command;
 use moa_testkit::{TempBrain, Terminal, fake_claude, wait_for};
 use serde_json::Value;
 
+pub mod screen;
+
 pub const MOA: &str = env!("CARGO_BIN_EXE_moa");
 pub const B: &str = "default";
 /// What the status line shows once moa's config is in.
@@ -400,4 +402,162 @@ pub fn panels(tb: &TempBrain) -> Vec<Value> {
             .cloned()
             .unwrap_or_default()
     })
+}
+
+/// A pane as [`panes_of`] lists it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PaneRow {
+    pub id: String,
+    /// 0 once the pane's process is gone.
+    pub pid: u32,
+    /// `@moa_view`: the panel's view, or `agent` for the agent in the spot.
+    pub tag: String,
+    pub left: u32,
+    pub top: u32,
+    pub width: u32,
+    pub height: u32,
+    pub window: String,
+    pub dead: bool,
+    pub active: bool,
+}
+
+/// Every pane of the session `target` names (`=moa`, `=_moa`), in tmux's order: by tab,
+/// then top to bottom and left to right within it.
+pub fn panes_of(tb: &TempBrain, target: &str) -> Vec<PaneRow> {
+    let list = tmux(
+        tb,
+        &[
+            "list-panes",
+            "-s",
+            "-t",
+            target,
+            "-F",
+            "#{pane_id}\t#{pane_pid}\t#{@moa_view}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t\
+             #{pane_height}\t#{pane_dead}\t#{pane_active}\t#{window_name}",
+        ],
+    );
+    list.lines()
+        .map(|l| {
+            let f: Vec<&str> = l.splitn(10, '\t').collect();
+            let n = |i: usize| f[i].parse::<u32>().unwrap_or_else(|_| panic!("{l}"));
+            PaneRow {
+                id: f[0].to_string(),
+                pid: f[1].parse().unwrap_or(0),
+                tag: f[2].to_string(),
+                left: n(3),
+                top: n(4),
+                width: n(5),
+                height: n(6),
+                dead: f[7] == "1",
+                active: f[8] == "1",
+                window: f[9].to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The cockpit's panes: the tab named `moa` in session `moa`.
+pub fn cockpit_panes(tb: &TempBrain) -> Vec<PaneRow> {
+    panes_of(tb, "=moa")
+        .into_iter()
+        .filter(|p| p.window == "moa")
+        .collect()
+}
+
+/// `moa` on a terminal (120x30), once the daemon has built the cockpit on the first attach:
+/// its tab holds the tree, console and plan panels. The user's own `~/.tmux.conf` gets a
+/// line saying the terminal draws true colour first, as a user's would for theirs, so tmux
+/// sends moa's colours as they are, not cut to 256, on every tmux version.
+#[track_caller]
+pub fn cockpit_up(tb: &TempBrain) -> Terminal {
+    let mut conf = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(tb.root().join(".tmux.conf"))
+        .unwrap();
+    std::io::Write::write_all(
+        &mut conf,
+        b"set -as terminal-features 'xterm-256color:RGB'\n",
+    )
+    .unwrap();
+    let term = open(tb, &[], &[]);
+    came_up(tb, &term);
+    let built = wait_for(SHOWS, || {
+        let tags: Vec<String> = cockpit_panes(tb).into_iter().map(|p| p.tag).collect();
+        (tags == ["tree", "console", "plan"]).then_some(())
+    });
+    assert!(
+        built.is_some(),
+        "no cockpit: {:#?}\n{}",
+        cockpit_panes(tb),
+        what_happened(tb, &term)
+    );
+    term
+}
+
+/// The selection bar's background, `sel` (`#5e81ac`), as `capture-pane -e` writes it.
+pub const SEL_BG: &str = "48;2;94;129;172";
+
+/// `text` without its escape sequences.
+pub fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // `ESC [ params final`: up to the final byte.
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `pane`'s rows with their colours, as `capture-pane -e` writes them.
+pub fn colours(tb: &TempBrain, pane: &str) -> Vec<String> {
+    let shown = tmux(tb, &["capture-pane", "-p", "-e", "-t", pane]);
+    shown.lines().map(str::to_string).collect()
+}
+
+/// Presses `j` or `k` in `pane` until the selection bar is on the row showing `text`.
+#[track_caller]
+pub fn select_row(tb: &TempBrain, pane: &str, text: &str) {
+    for _ in 0..20 {
+        // Where the bar is, and the row showing `text`.
+        let found = wait_for(SHOWS, || {
+            let rows = colours(tb, pane);
+            let bar = rows.iter().position(|l| l.contains(SEL_BG))?;
+            let want = rows.iter().position(|l| plain(l).contains(text))?;
+            Some((bar, want))
+        });
+        let Some((bar, want)) = found else {
+            panic!(
+                "{pane} draws no bar, or no {text:?}\n{}",
+                tab_shows(tb, pane)
+            );
+        };
+        if bar == want {
+            return;
+        }
+        let key = if want > bar { "j" } else { "k" };
+        tmux(tb, &["send-keys", "-t", pane, key]);
+        // The key has landed once the bar is on another row.
+        let moved = wait_for(SHOWS, || {
+            let rows = colours(tb, pane);
+            let now = rows.iter().position(|l| l.contains(SEL_BG));
+            now.filter(|now| *now != bar)
+        });
+        assert!(
+            moved.is_some(),
+            "{key} left the bar on row {bar}, not {text:?}'s {want}\n{}",
+            tab_shows(tb, pane)
+        );
+    }
+    panic!("the bar never reached {text:?}");
 }

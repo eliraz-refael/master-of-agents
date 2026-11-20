@@ -136,6 +136,12 @@ impl Terminal {
         format!("{:?}", String::from_utf8_lossy(seen))
     }
 
+    /// Everything the program wrote since it started, mark or not: what a terminal emulator
+    /// replays to know what the screen shows.
+    pub fn output(&self) -> Vec<u8> {
+        lock(&self.out).clone()
+    }
+
     /// The pty's path: what tmux calls this client.
     pub fn tty(&self) -> String {
         self.tty.clone()

@@ -15,8 +15,6 @@ use serde_json::{Map, Value};
 
 use common::*;
 
-/// The selection bar's background, `sel` (`#5e81ac`), as `capture-pane -e` writes it.
-const SEL_BG: &str = "48;2;94;129;172";
 /// The hover mark's background, `surface` (`#3b4252`), as `capture-pane -e` writes it.
 const HOVER_BG: &str = "48;2;59;66;82";
 /// What the tree's footer says while nothing else is said: its key hints begin so.
@@ -41,27 +39,6 @@ fn rig() -> Rig {
 struct Opened {
     id: String,
     dir: PathBuf,
-}
-
-/// `text` without its escape sequences.
-fn plain(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // `ESC [ params final`: up to the final byte.
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&c) {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 impl Rig {
@@ -132,15 +109,9 @@ impl Rig {
         );
     }
 
-    /// `pane`'s rows with their colours, as `capture-pane -e` writes them.
-    fn colours(&self, pane: &str) -> Vec<String> {
-        let shown = tmux(&self.tb, &["capture-pane", "-p", "-e", "-t", pane]);
-        shown.lines().map(str::to_string).collect()
-    }
-
     /// The text of `pane`'s row drawn on background `bg`, if one is.
     fn row_on(&self, pane: &str, bg: &str) -> Option<String> {
-        self.colours(pane)
+        colours(&self.tb, pane)
             .into_iter()
             .find(|l| l.contains(bg))
             .map(|l| plain(&l))
@@ -164,43 +135,6 @@ impl Rig {
             self.row_on(pane, bg),
             tab_shows(&self.tb, pane)
         );
-    }
-
-    /// Presses `j` or `k` in `pane` until the selection bar is on the row showing `text`.
-    #[track_caller]
-    fn select(&self, pane: &str, text: &str) {
-        for _ in 0..20 {
-            // Where the bar is, and the row showing `text`.
-            let found = wait_for(SHOWS, || {
-                let rows = self.colours(pane);
-                let bar = rows.iter().position(|l| l.contains(SEL_BG))?;
-                let want = rows.iter().position(|l| plain(l).contains(text))?;
-                Some((bar, want))
-            });
-            let Some((bar, want)) = found else {
-                panic!(
-                    "{pane} draws no bar, or no {text:?}\n{}",
-                    tab_shows(&self.tb, pane)
-                );
-            };
-            if bar == want {
-                return;
-            }
-            let key = if want > bar { "j" } else { "k" };
-            tmux(&self.tb, &["send-keys", "-t", pane, key]);
-            // The key has landed once the bar is on another row.
-            let moved = wait_for(SHOWS, || {
-                let rows = self.colours(pane);
-                let now = rows.iter().position(|l| l.contains(SEL_BG));
-                now.filter(|now| *now != bar)
-            });
-            assert!(
-                moved.is_some(),
-                "{key} left the bar on row {bar}, not {text:?}'s {want}\n{}",
-                tab_shows(&self.tb, pane)
-            );
-        }
-        panic!("the bar never reached {text:?}");
     }
 
     /// The pane of the tab running session `id`.
@@ -315,7 +249,7 @@ fn keys_and_a_click_act() {
     let harbor = r.session("b", "Harbor", None);
     let pane = r.tree(&["Kite", "Harbor"]);
 
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
     tmux(&r.tb, &["send-keys", "-t", &pane, "Enter"]);
     r.client_shows(&r.session_pane(&harbor.id));
 
@@ -330,7 +264,7 @@ fn the_terminal_key_opens_where_the_panel_points() {
     let harbor = r.session("b", "Harbor", None);
     let pane = r.tree(&["Kite", "Harbor"]);
 
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
     r.terminal_key_opens(&pane, "⌨ b", &harbor.dir);
 }
 
@@ -340,7 +274,7 @@ fn a_fold_is_kept_across_panels() {
     r.session("a", "Kite", Some("Private"));
     let first = r.tree(&["▾ Private", "Kite"]);
 
-    r.select(&first, "Private");
+    select_row(&r.tb, &first, "Private");
     tmux(&r.tb, &["send-keys", "-t", &first, "Enter"]);
     r.shows(&first, &["▸ Private"]);
 
@@ -496,7 +430,7 @@ fn panels_launch_nothing_in_the_daemon() {
     tmux(&r.tb, &["send-keys", "-t", &pane, "Escape"]);
     r.shows(&pane, &["cancelled"]);
 
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
     r.terminal_key_opens(&pane, "⌨ b", &harbor.dir);
 
     assert_eq!(r.launches(), before, "a panel launched something");
@@ -511,7 +445,7 @@ fn a_panel_comes_back_after_moa_restarts() {
     let kite = r.session("a", "Kite", None);
     let harbor = r.session("b", "Harbor", None);
     let pane = r.tree(&["Kite", "Harbor"]);
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
 
     shutdown(&r.tb);
     r.shows(
