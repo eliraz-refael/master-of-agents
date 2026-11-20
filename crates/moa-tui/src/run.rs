@@ -9,7 +9,6 @@ use std::collections::BTreeSet;
 use std::future::{Future, pending};
 use std::io::{self, Write};
 use std::mem::ManuallyDrop;
-use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -957,7 +956,8 @@ async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), Stri
         w: area.width,
         h: area.height,
     };
-    let mut input = Input::start().map_err(|e| format!("can't use this terminal: {e}"))?;
+    let mut input =
+        Input::start(log.clone()).map_err(|e| format!("can't use this terminal: {e}"))?;
     let mut lp = Loop::new(opts, theme, size);
     lp.log = log;
     lp.connect(0);
@@ -988,7 +988,7 @@ async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), Stri
                     lp.log(&format!("stopped by {name}"));
                     return Ok(());
                 }
-                None if moa_platform::terminal_gone(io::stdin().as_fd()) => {
+                None if input.gone() => {
                     lp.log("stopped: the terminal closed");
                     return Ok(());
                 }

@@ -453,13 +453,12 @@ fn a_panel_started_at_the_end_leaves_nothing_behind() {
 fn a_panel_moa_placed_never_starts_moa() {
     let r = rig();
     shutdown(&r.tb);
-    // Whether moa answers on its socket. Never by trying the brain's lock: a daemon starting
-    // in that instant finds it held, takes it for another moa, and the panel that started it
-    // gives up.
-    let socket = r.tb.paths().socket(B).unwrap();
+    // No moa holds the brain's lock: it catches one still starting, which its socket
+    // wouldn't yet. Only where no moa should be starting: one starting in the instant the
+    // lock is tried finds it held, takes it for another moa, and gives up.
     let free = || {
-        std::os::unix::net::UnixStream::connect(&socket)
-            .is_err()
+        fs::File::open(r.tb.paths().lock(B))
+            .is_ok_and(|f| f.try_lock().is_ok())
             .then_some(())
     };
     assert!(wait_for(SHOWS, free).is_some(), "moa didn't stop");
@@ -483,9 +482,16 @@ fn a_panel_moa_placed_never_starts_moa() {
     r.shows(&placed, &["moa isn't running; trying again…"]);
     assert!(free().is_some(), "the placed panel started moa");
 
-    // One started by hand starts it, and the placed one links then.
+    // One started by hand starts it, and the placed one links then. That moa is starting
+    // now, so it is asked on its socket, never by its lock.
     panel_tab(&r.tb, "tree");
-    let held = wait_for(SHOWS, || free().is_none().then_some(()));
+    let socket = r.tb.paths().socket(B).unwrap();
+    let answers = || {
+        std::os::unix::net::UnixStream::connect(&socket)
+            .is_ok()
+            .then_some(())
+    };
+    let held = wait_for(SHOWS, answers);
     assert!(held.is_some(), "a panel started by hand didn't start moa");
     r.shows(&placed, &[TREE_HINT]);
 }

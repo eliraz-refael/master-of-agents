@@ -595,21 +595,17 @@ pub fn select_row(tb: &TempBrain, pane: &str, text: &str) {
             now.filter(|now| *now != (bar, on.clone()))
         });
         if moved.is_none() {
-            let pid = tmux(tb, &["display-message", "-p", "-t", pane, "#{pane_pid}"]);
+            // The report itself never panics: each thing it can't read, it says why.
+            let ask = |format: &str| {
+                tb.tmux(B, &["display-message", "-p", "-t", pane, format])
+                    .unwrap_or_else(|e| format!("({e})"))
+            };
+            let pid = ask("#{pane_pid}");
             let ps = std::process::Command::new("ps")
                 .args(["-o", "stat=,%cpu=,time=", "-p", &pid])
                 .output()
                 .map_or_else(|e| e.to_string(), |o| out(&o));
-            let mode = tmux(
-                tb,
-                &[
-                    "display-message",
-                    "-p",
-                    "-t",
-                    pane,
-                    "in_mode=#{pane_in_mode}",
-                ],
-            );
+            let mode = ask("in_mode=#{pane_in_mode}");
             let screens: Vec<String> = seen.iter().map(|(t, s)| format!("{t} {s}")).collect();
             panic!(
                 "{key} left the bar on row {bar}, not {text:?}'s {want}\nits screens:\n{}\n\
