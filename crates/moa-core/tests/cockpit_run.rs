@@ -998,9 +998,18 @@ fn a_listing_tmux_refused_is_said_plainly() {
             ],
         ),
     );
-    let said = "moa couldn't read the terminal's state: server exited unexpectedly; try again";
+    let said = "moa couldn't read the terminal's state; try again";
     assert_eq!(reply_text(&fx), Err(said.into()));
-    assert_eq!(logs(&fx), [(LogLevel::Warn, said.to_string())]);
+    assert_eq!(
+        logs(&fx),
+        [
+            (
+                LogLevel::Warn,
+                "tmux couldn't list the terminal: server exited unexpectedly".to_string()
+            ),
+            (LogLevel::Warn, said.to_string())
+        ]
+    );
     assert!(queries(&fx).is_empty());
 }
 

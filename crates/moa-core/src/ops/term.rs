@@ -8,6 +8,7 @@ use super::cut;
 use super::launch::{WENT_AWAY, WINDOW_NAME_CUT, focus_cmds, warn};
 use crate::cockpit::Scene;
 use crate::effect::{Effect, LogLevel};
+use crate::folders::tilde;
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::state::State;
 use crate::tmux::cmd::{Cmd, literal_format};
@@ -236,13 +237,25 @@ pub(crate) fn term_opened(
 
 /// `path` with `home` (as given, or `canonical`) written `~`.
 pub(crate) fn with_tilde(path: &str, home: &Path, canonical: fn(&Path) -> PathBuf) -> String {
-    let path = Path::new(path);
-    for home in [home.to_path_buf(), canonical(home)] {
-        match path.strip_prefix(&home) {
-            Ok(rest) if rest.as_os_str().is_empty() => return "~".into(),
-            Ok(rest) => return format!("~/{}", rest.display()),
-            Err(_) => {}
-        }
+    let first = tilde(path, home);
+    if first != path {
+        return first;
     }
-    path.display().to_string()
+    tilde(path, &canonical(home))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// macOS homes are `/var/...` and show up as `/private/var/...`: the canonical form is
+    /// tried when the given one doesn't match.
+    #[test]
+    fn term_tries_the_canonical_home() {
+        let canonical = |_: &Path| PathBuf::from("/private/h");
+        let h = Path::new("/h");
+        assert_eq!(with_tilde("/private/h/x", h, canonical), "~/x");
+        assert_eq!(with_tilde("/h/x", h, canonical), "~/x");
+        assert_eq!(with_tilde("/other", h, canonical), "/other");
+    }
 }

@@ -597,7 +597,8 @@ fn a_vacate_with_an_unreadable_listing_still_kills_its_agent() {
     assert_eq!(
         logged,
         [
-            "moa couldn't read the terminal's state: server exited; the agent in %9 is closed without it"
+            "tmux couldn't list the terminal: server exited",
+            "moa couldn't read the terminal's state; the agent in %9 is closed without it"
         ]
     );
     let (n, lines) = the_chain(&fx);

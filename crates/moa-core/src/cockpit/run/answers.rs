@@ -140,12 +140,18 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         if let Some((_, CockpitOp::Vacate { pane, .. })) = &state.cockpit.in_flight {
             let pane = *pane;
             if !known_panel(state, pane) {
-                let mut fx = vec![log(
-                    LogLevel::Warn,
-                    format!(
-                        "moa couldn't read the terminal's state: {why}; the agent in {pane} is closed without it"
+                let mut fx = vec![
+                    log(
+                        LogLevel::Warn,
+                        format!("tmux couldn't list the terminal: {why}"),
                     ),
-                )];
+                    log(
+                        LogLevel::Warn,
+                        format!(
+                            "moa couldn't read the terminal's state; the agent in {pane} is closed without it"
+                        ),
+                    ),
+                ];
                 let then = Then {
                     tags: vec![(pane, None)],
                     untagged: Vec::new(),
@@ -163,14 +169,19 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
                 return fx;
             }
         }
-        let text = format!("moa couldn't read the terminal's state: {why}; try again");
-        // Logged either way; an operation nobody asked for has the log line only (and a
-        // vacate's ends as not done).
-        let (mut fx, said) = match &state.cockpit.in_flight {
+        let text = "moa couldn't read the terminal's state; try again".to_string();
+        // tmux's words go to the log only. Logged either way; an operation nobody asked for
+        // has the log line only (and a vacate's ends as not done).
+        let mut fx = vec![log(
+            LogLevel::Warn,
+            format!("tmux couldn't list the terminal: {why}"),
+        )];
+        let said = match &state.cockpit.in_flight {
             Some((_, op)) if !tells_of(op).is_empty() => {
-                (vec![log(LogLevel::Warn, text.clone())], refused(op, text))
+                fx.push(log(LogLevel::Warn, text.clone()));
+                refused(op, text)
             }
-            _ => (Vec::new(), Said::Logged(text)),
+            _ => Said::Logged(text),
         };
         fx.extend(finish(state, said));
         return fx;
