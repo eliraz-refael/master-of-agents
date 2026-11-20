@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ picker ─────────────────────────────────────────────────────────────────────╮
+│ ›                                                              12/12 · 8 live│
+│ ─────────────────────────────────────────────────────────────────────────────│
+│  ! Fix login          Private/Lan needs you   1m  Bash: cargo test ⚠         │
+│  ? Release notes      Private/Kit asks you    2h  Ship it today?             │
+│  ✗ Migrate DB         Work/Harbor failed      5h  API error                  │
+│  ✓ 設計レビュー       Private/Kit done        3h                             │
+│  ⠸ Rust scaffold      Private/Lan working     2m                             │
+│  ◌ Import the whole a Private/Lan quiet       6h  quiet 361m                 │
+│  ● Dev server 👍      Private/Har idle        4h                             │
+│  ● Hand started       Private/Har idle        7h                             │
+│  ⌨ kite                           terminal                                   │
+│  ⌨ harbor                         terminal                                   │
+│                                                                              │
+│ ↵ jump · ↑↓ move · esc close                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯

@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ picker ─────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ › kite                                                                                                  6/12 · 8 live│
+│ ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+│  ? Release notes                Private/Kite       asks you    2h  Ship it today?                                    │
+│  ✓ 設計レビュー                 Private/Kite       done        3h                                                    │
+│  ⌨ kite                                            terminal                                                          │
+│  ○ Closed thing 👨              Private/Kite       ended       9h                                                    │
+│  ⠸ Rust scaffold                Private/Lantern    working     2m                                                    │
+│  💤Old spike                                       asleep      8h                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ ↵ jump · ↑↓ move · esc close                                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

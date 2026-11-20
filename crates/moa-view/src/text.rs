@@ -170,6 +170,21 @@ pub fn cut(s: &str, w: usize) -> String {
     s[..end].to_string()
 }
 
+/// The longest suffix of `s` that fits in `w` cells, starting at a grapheme boundary: where
+/// the typing is, for text typed into a line too short for it.
+pub fn tail(s: &str, w: usize) -> String {
+    let mut used = 0;
+    let mut start = s.len();
+    for (i, g) in s.grapheme_indices(true).rev() {
+        used += UnicodeWidthStr::width(g);
+        if used > w {
+            break;
+        }
+        start = i;
+    }
+    s[start..].to_string()
+}
+
 /// `s` as it fits `w` cells: one that is wider is cut at a grapheme boundary, loses the
 /// spaces the cut left at its end, and ends in `…`. `w` of 0 leaves nothing.
 pub fn ellipsize(s: &str, w: usize) -> String {

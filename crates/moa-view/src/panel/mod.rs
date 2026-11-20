@@ -17,9 +17,10 @@ use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
 use crate::text::{self, clean};
-use crate::views::{self, ViewUi, picture, tree};
+use crate::views::{self, ViewUi, picker, picture, tree};
 
 mod ask;
+mod pick_keys;
 mod tree_keys;
 
 use ask::Ask;
@@ -32,6 +33,8 @@ pub enum Out {
     /// Send this op to the daemon; its reply comes back through [`Panel::replied`].
     Send(Op),
     Quit,
+    /// The picker is done: it picked, or Esc, Ctrl-c or Ctrl-g closed it (S7).
+    Close,
 }
 
 /// A mouse event, in screen cells.
@@ -68,6 +71,11 @@ pub struct Screen {
     pub tabs: Option<(Vec<&'static str>, usize)>,
     /// The picture's `moa` mark at the right of its tabs.
     pub brand: Option<Span>,
+    /// The picker's head lines: its query and a rule.
+    pub head: Vec<Line>,
+    /// The cell the terminal's cursor stands in, when the view types into its head (the
+    /// picker's query).
+    pub cursor: Option<(u16, u16)>,
     /// The visible lines, each with its mark.
     pub body: Vec<(Line, Mark)>,
     /// The rule above the picture's activity strip, when the strip shows.
@@ -83,9 +91,9 @@ pub struct Screen {
     pub wake_at: Option<UtcMs>,
 }
 
-/// The screen as text, for snapshots: the picture's tabs and brand; the body's lines as
-/// [`debug_lines`] prints them, each after `> ` when selected, `~ ` when hovered and two
-/// spaces otherwise; the picture's rule and strip; then the footer.
+/// The screen as text, for snapshots: the picture's tabs and brand; the picker's head; the
+/// body's lines as [`debug_lines`] prints them, each after `> ` when selected, `~ ` when
+/// hovered and two spaces otherwise; the picture's rule and strip; then the footer.
 pub fn debug_screen(screen: &Screen) -> String {
     let mut out = String::new();
     if let Some((_, shown)) = &screen.tabs {
@@ -94,6 +102,10 @@ pub fn debug_screen(screen: &Screen) -> String {
     if let Some(brand) = &screen.brand {
         out.push_str("brand: ");
         out.push_str(&debug_lines(&[Line::new(vec![brand.clone()])]));
+    }
+    for line in &screen.head {
+        out.push_str("head: ");
+        out.push_str(&debug_lines(std::slice::from_ref(line)));
     }
     for (line, mark) in &screen.body {
         out.push_str(match mark {
@@ -169,6 +181,8 @@ pub struct Panel {
     pointer: Option<(u16, u16)>,
     /// moa gave this panel its view (its `panels` row says `managed`, L8).
     managed: bool,
+    /// The picker sent a pick and waits for its reply: an `Ok` closes it.
+    picking: bool,
 }
 
 const CANCELLED: &str = "cancelled";
@@ -200,6 +214,7 @@ impl Panel {
             hover: None,
             pointer: None,
             managed: false,
+            picking: false,
         }
     }
 
@@ -242,14 +257,27 @@ impl Panel {
     }
 
     /// Ctrl-c (L14): it cancels an open prompt or y/N; with nothing open it quits as `q`
-    /// does in the picture (see [`quit`](Panel::quit)).
+    /// does in the picture (see [`quit`](Panel::quit)). The picker closes, as Esc closes it,
+    /// and never says the managed line (S7).
     pub fn interrupt(&mut self) -> Option<Out> {
         self.hover = None;
         if self.prompt.take().is_some() || self.confirm.take().is_some() {
             self.say(CANCELLED);
             return None;
         }
+        if self.view == View::Picker {
+            return Some(Out::Close);
+        }
         self.quit()
+    }
+
+    /// The picker opens again (S9): its query empty, its first row selected, nothing said.
+    pub fn reset_pick(&mut self) {
+        self.ui.query.clear();
+        self.list = ListState::default();
+        self.hover = None;
+        self.message = None;
+        self.picking = false;
     }
 
     /// Quits a panel you started, and leaves one moa manages where it is, saying why
@@ -339,6 +367,9 @@ impl Panel {
             };
         }
         let body = usize::from(g.body.h);
+        if self.view == View::Picker {
+            return self.pick_key(k, data, body);
+        }
         let tab = self.ui.tab;
         let mut out = Vec::new();
         // The picture's rows follow its tab's keys (V21).
@@ -429,21 +460,33 @@ impl Panel {
         self.prompt.is_some() || self.confirm.is_some()
     }
 
-    /// Whether `k` quits this panel when nothing is being typed: Ctrl-c, and `q` in the
-    /// picture, in a panel moa doesn't manage (L14).
+    /// Whether `k` quits this panel when nothing is being typed: Ctrl-c, `q` in the picture,
+    /// and the picker's closing keys (Esc, Ctrl-c, Ctrl-g), in a panel moa doesn't manage
+    /// (L14).
     pub fn quits(&self, k: Key) -> bool {
-        !self.managed && keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
-    }
-
-    /// Pasted text goes to the prompt being answered, if any.
-    pub fn paste(&mut self, text: &str) {
-        if let Some(prompt) = &mut self.prompt {
-            prompt.editor.paste(text);
+        if self.managed {
+            false
+        } else if self.view == View::Picker {
+            matches!(k, Key::Esc | Key::Ctrl('c' | 'g'))
+        } else {
+            keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
         }
     }
 
-    /// An op's reply: the footer shows its text's last non-empty line, or nothing.
-    pub fn replied(&mut self, result: Result<Done, String>) {
+    /// Pasted text goes to the prompt being answered, else into the picker's query.
+    pub fn paste(&mut self, text: &str) {
+        if let Some(prompt) = &mut self.prompt {
+            prompt.editor.paste(text);
+        } else if self.view == View::Picker {
+            self.edit_query(|e| e.paste(text));
+        }
+    }
+
+    /// An op's reply: the footer shows its text's last non-empty line, or nothing. The
+    /// picker's pick that went through closes it ([`Out::Close`]); one refused stays in its
+    /// footer, the picker still open (S7).
+    pub fn replied(&mut self, result: Result<Done, String>) -> Option<Out> {
+        let ok = result.is_ok();
         let text = match result {
             Ok(done) => done.text,
             Err(e) => e,
@@ -454,6 +497,7 @@ impl Panel {
             .map(str::trim)
             .find(|l| !l.is_empty())
             .map(Message::sticky);
+        (std::mem::take(&mut self.picking) && ok).then_some(Out::Close)
     }
 
     /// A line for the footer from the panel's loop (the connection, say, or an error event),
@@ -493,6 +537,14 @@ impl Panel {
         let body: Vec<(Line, Mark)> = shown.map(|(i, l)| (l.clone(), self.mark(i))).collect();
         let mut tabs = None;
         let mut brand = None;
+        let mut head = Vec::new();
+        let mut cursor = None;
+        if let Some(r) = g.head.filter(|r| r.h > 0 && r.w > 0) {
+            let built = picker::head(data, &self.ui, build_width(&g));
+            head = built.lines.into_iter().take(usize::from(r.h)).collect();
+            let x = u16::try_from(built.cursor).unwrap_or(u16::MAX).min(r.w - 1);
+            cursor = Some((r.x + x, r.y));
+        }
         let mut rule = None;
         let mut strip = Vec::new();
         if self.view == View::Picture {
@@ -528,6 +580,8 @@ impl Panel {
             title: g.framed.then(|| self.view.label().to_string()),
             tabs,
             brand: brand.and_then(|l| l.spans.into_iter().next()),
+            head,
+            cursor,
             body,
             rule,
             strip,
@@ -610,7 +664,7 @@ impl Panel {
                 let session = data.tasks.get(id)?.session_id?;
                 data.sessions.get(&session)?.session.cwd.clone()
             }
-            Item::Group(_) | Item::Suggestion(_) => None,
+            Item::Group(_) | Item::Suggestion(_) | Item::Term { .. } => None,
         }
     }
 
@@ -628,7 +682,7 @@ impl Panel {
             Item::Session(id) => data.sessions.get(id)?.session.project_id,
             Item::Task(id) => data.tasks.get(id)?.project_id,
             Item::Project(id) => Some(*id),
-            Item::Group(_) | Item::Suggestion(_) => return None,
+            Item::Group(_) | Item::Suggestion(_) | Item::Term { .. } => return None,
         };
         Some(id.and_then(|id| data.projects.get(&id)))
     }
@@ -664,6 +718,7 @@ impl Panel {
                     .page(&self.lines, body, action == Action::PageDown);
             }
             Action::Quit => return Some(self.quit().into_iter().collect()),
+            Action::Activate if self.view == View::Picker => return Some(self.pick(data)),
             Action::Activate => {
                 return match selected? {
                     Item::Session(id) => {
@@ -690,7 +745,7 @@ impl Panel {
                         }
                         Some(Vec::new())
                     }
-                    Item::Suggestion(_) => None,
+                    Item::Suggestion(_) | Item::Term { .. } => None,
                 };
             }
             Action::NewSession if self.shown() == View::Tree => {

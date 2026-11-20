@@ -152,6 +152,7 @@ impl Theme {
             Tone::Brain => fg(Token::Magenta),
             Tone::Late => pill(Token::Red),
             Tone::Today => pill(Token::Yellow),
+            Tone::Hit => fg(Token::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         };
         if bold {
             style.add_modifier(Modifier::BOLD)

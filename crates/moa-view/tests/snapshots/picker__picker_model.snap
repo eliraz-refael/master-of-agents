@@ -1,0 +1,19 @@
+---
+source: crates/moa-view/tests/picker.rs
+expression: "debug_screen(&panel.screen(&data, &ctx, size))"
+---
+head: [head*]› [text*] ⟨[dim]12/12 · 8 live⟩
+head: [dim]─────────────────────────────────────────────────────────────────────────────
+> [warn*] ! [warn*]Fix login          Private/Lan [warn*]needs you   1m  Bash: cargo test ⚠  ‹session›
+  [ask*] ? [ask*]Release notes      Private/Kit [ask*]asks you    2h  Ship it today?  ‹session›
+  [fail*] ✗ [fail*]Migrate DB         Work/Harbor [fail*]failed      5h  API error  ‹session›
+  [ok*] ✓ [ok*]設計レビュー       Private/Kit [ok*]done        3h  ‹session›
+  [work] ⠸ [work]Rust scaffold      Private/Lan [work]working     2m  ‹session›
+  [quiet] ◌ [quiet]Import the whole a Private/Lan [quiet]quiet       6h  quiet 361m  ‹session›
+  [dim] ● [dim]Dev server 👍      Private/Har [dim]idle        4h  ‹session›
+  [dim] ● [dim]Hand started       Private/Har [dim]idle        7h  ‹session›
+  [text] ⌨ [text]kite                           [text]terminal        ‹term›
+  [text] ⌨ [text]harbor                         [text]terminal        ‹term›
+  [dim] 💤[dim]Old spike                      [dim]asleep      8h  ‹session›
+  [dim] ○ [dim]Closed thing 👨    Private/Kit [dim]ended       9h  ‹session›
+footer: [dim]↵ jump · ↑↓ move · esc close

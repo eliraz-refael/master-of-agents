@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ picker ─────────────────────────────╮
+│ ›                      12/12 · 8 live│
+│ ─────────────────────────────────────│
+│  ! Fix login needs you   1m  Bash: ca│
+│  ? Release n asks you    2h  Ship it │
+│  ✗ Migrate D failed      5h  API erro│
+│  ✓ 設計レビ  done        3h          │
+│  ⠸ Rust scaf working     2m          │
+│  ◌ Import th quiet       6h  quiet 36│
+│  ● Dev serve idle        4h          │
+│  ● Hand star idle        7h          │
+│  ⌨ kite      terminal                │
+│  ⌨ harbor    terminal                │
+│                                      │
+│ ↵ jump · ↑↓ move · esc close         │
+╰──────────────────────────────────────╯

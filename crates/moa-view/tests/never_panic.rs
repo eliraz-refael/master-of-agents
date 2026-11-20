@@ -510,6 +510,17 @@ fn check(screen: &Screen, now: UtcMs) -> Result<(), TestCaseError> {
         check_span(brand, "the brand")?;
     }
     let body = usize::from(g.body.w.max(10));
+    let head = g.head.unwrap_or_default();
+    prop_assert!(screen.head.len() <= usize::from(head.h));
+    for line in &screen.head {
+        check_line(line, body, "a head line")?;
+    }
+    if let Some((x, y)) = screen.cursor {
+        prop_assert!(
+            head.contains(x, y),
+            "the cursor ({x}, {y}) is outside {head:?}"
+        );
+    }
     prop_assert!(screen.body.len() <= usize::from(g.body.h));
     for (line, _) in &screen.body {
         check_line(line, body, "a body line")?;
@@ -547,7 +558,9 @@ proptest! {
                         panel.blur();
                     }
                     Input::Paste(text) => panel.paste(text),
-                    Input::Reply(text) => panel.replied(Err(text.clone())),
+                    Input::Reply(text) => {
+                        panel.replied(Err(text.clone()));
+                    }
                 }
                 check(&panel.screen(&data, &ctx, size), ctx.now)?;
             }
