@@ -595,11 +595,20 @@ fn sigterm_and_sighup_give_the_terminal_back() {
         assert!(killed.success(), "kill -{signal} {pid}");
         let dead = wait_for(SHOWS, || (field("#{pane_dead}") == "1").then_some(()));
         assert!(dead.is_some(), "{}", tab_shows(&r.tb, &pane));
+        // tmux 3.4 and 3.5 built with utempter can lose the panel's exit (moa-tmux's
+        // `every_hook_reaches_the_mailbox` says how): the pane is dead with no exit status
+        // until tmux reaps a child. moa nudges only the panes it tagged; this one is the
+        // test's, so the test nudges.
+        tmux(&r.tb, &["run-shell", "true"]);
 
-        assert_eq!(
+        let ended = wait_for(SHOWS, || {
+            let f = field("#{alternate_on} #{mouse_any_flag} #{pane_dead_status}");
+            (f == "0 0 0").then_some(())
+        });
+        assert!(
+            ended.is_some(),
+            "SIG{signal}: {:?}\n{}",
             field("#{alternate_on} #{mouse_any_flag} #{pane_dead_status}"),
-            "0 0 0",
-            "SIG{signal}\n{}",
             tab_shows(&r.tb, &pane)
         );
         let written = fs::read_to_string(&log).unwrap_or_default();

@@ -583,9 +583,18 @@ async fn a_spawned_panel_runs_in_the_hidden_session() {
         .status()
         .unwrap();
     assert!(killed.success());
+    wait_for(Duration::from_secs(10), || {
+        (show("#{pane_dead}") == "1").then_some(())
+    })
+    .expect("the panel's pane died");
+    // tmux 3.4 and 3.5 built with utempter can lose the panel's exit (moa-tmux's
+    // `every_hook_reaches_the_mailbox` says how): its pane is dead, but the stopped line
+    // waits until tmux reaps a child. moa nudges it so (`run-shell true`, L12); with no moa
+    // here, the test does.
+    tmux(&["run-shell", "true"]);
     let screen = wait_for(Duration::from_secs(10), || {
         let screen = tmux(&["capture-pane", "-p", "-t", &target]);
-        (show("#{pane_dead}") == "1" && screen.contains("panel stopped")).then_some(screen)
+        screen.contains("panel stopped").then_some(screen)
     })
     .expect("the stopped panel's pane stays");
     assert!(
