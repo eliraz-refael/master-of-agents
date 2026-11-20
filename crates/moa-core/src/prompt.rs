@@ -21,6 +21,8 @@ pub(crate) const WAITING: usize = 16;
 
 const FOLDER: &str = "new session · folder:";
 const TITLE: &str = "title:";
+/// What an empty folder answer says, as the tree's prompts do.
+const CANCELLED: &str = "cancelled";
 
 /// What a prompt's answer is for.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -104,9 +106,18 @@ pub(crate) fn answered(state: &mut State, now: &Now, token: u64, text: &str) -> 
     };
     let text = text.trim();
     match asking {
-        // V7's checks, as the tree's `n` makes them. Nothing is made: a typo never leaves a
-        // folder behind.
+        // V7's checks, as the tree's `n` makes them: an empty answer cancels. Nothing is made:
+        // a typo never leaves a folder behind.
         Asking::Folder { client } => {
+            if text.is_empty() {
+                return told(
+                    state,
+                    Some(Tell::Notice(client)),
+                    Err(OpError(CANCELLED.into())),
+                )
+                .into_iter()
+                .collect();
+            }
             let deps = state.deps();
             match typed_folder(text, &deps.home, deps.is_dir) {
                 Ok(folder) => {

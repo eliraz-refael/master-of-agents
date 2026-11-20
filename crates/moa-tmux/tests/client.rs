@@ -280,11 +280,12 @@ async fn prompt_answers_round_trip() {
             panic!("{message:?}")
         };
         assert_eq!(got, token, "{typed:?}");
-        // The quirk itself: 3.4 sends a typed `$HOME` as `\$HOME`, later ones as typed.
+        // The quirk itself: 3.4 sends a typed `$HOME` as `\$HOME`, later ones as typed. The
+        // versions that do are the ones `prompt::typed` unescapes.
         if typed.contains("$HOME") {
             assert_eq!(
                 text.contains(r"\$HOME"),
-                info.version.starts_with("3.4"),
+                typed_text(&info.version, r"\$") == "$",
                 "{} sent {message:?}",
                 info.version
             );

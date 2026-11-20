@@ -404,36 +404,35 @@ fn check_new_window(args: &[String]) -> Result<(), Refused> {
 /// client as `moa:prompt`. A `-b` that is another flag's value doesn't count: a prompt
 /// without one would freeze the control client until it is answered.
 fn check_prompt(args: &[String]) -> Result<(), Refused> {
-    let (mut detached, mut once) = (false, true);
     let mut flags: Vec<&str> = Vec::new();
     let mut rest = args;
     loop {
         match rest {
             [b, tail @ ..] if b == "-b" => {
-                once &= !detached;
-                detached = true;
+                flags.push("-b");
                 rest = tail;
             }
             [f, _, tail @ ..] if matches!(f.as_str(), "-t" | "-p" | "-I") => {
-                once &= !flags.contains(&f.as_str());
                 flags.push(f.as_str());
                 rest = tail;
             }
             _ => break,
         }
     }
-    if !detached {
+    if !flags.contains(&"-b") {
         return Err(Refused(NEEDS_B));
     }
+    // Each flag once: a repeat leaves the sorted list longer than this.
     flags.sort_unstable();
     match rest {
-        [template] if once && flags == ["-I", "-p", "-t"] && is_answer_template(template) => Ok(()),
+        [template] if flags == ["-I", "-b", "-p", "-t"] && is_answer_template(template) => Ok(()),
         _ => Err(Refused(PROMPT)),
     }
 }
 
 /// `display-message -c NAME -l "moa:prompt DIGITS %%%"`, with a client name tmux's parser
-/// reads as one bare word.
+/// reads as one bare word. The name holds no `%`: tmux puts the answer, unescaped, in place
+/// of every `%1` and the first `%%` of a template, so a `%` there could run what is typed.
 fn is_answer_template(t: &str) -> bool {
     let Some((name, rest)) = t
         .strip_prefix("display-message -c ")
@@ -445,7 +444,7 @@ fn is_answer_template(t: &str) -> bool {
         return false;
     };
     !name.is_empty()
-        && name.chars().all(is_bare)
+        && name.chars().all(|c| c != '%' && is_bare(c))
         && !token.is_empty()
         && token.bytes().all(|b| b.is_ascii_digit())
 }

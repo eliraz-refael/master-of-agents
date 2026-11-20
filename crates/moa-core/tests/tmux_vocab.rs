@@ -257,6 +257,18 @@ fn only_moas_prompt_shape_is_allowed() {
     ] {
         assert_eq!(check(bad), shape, "{bad:?}");
     }
+    // tmux puts the answer, unescaped, in place of `%1` and the first `%%`: a client name
+    // holding `%` could run what is typed.
+    for name in ["x%%", "x%1", "%"] {
+        let template = format!(r#"display-message -c {name} -l "moa:prompt 12 %%%""#);
+        assert_eq!(
+            check(&["-b", "-t", "c", "-p", "x", "-I", "", &template]),
+            shape,
+            "{name}"
+        );
+        let built = Cmd::prompt(&client, "x", "", &ClientName(name.into()), 12);
+        assert_eq!(built.check(), shape, "{name}");
+    }
 }
 
 #[test]

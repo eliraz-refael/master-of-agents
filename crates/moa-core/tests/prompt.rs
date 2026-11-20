@@ -258,6 +258,28 @@ fn the_title_comes_second_and_opens() {
     );
     assert!(replies(&fx).is_empty(), "{fx:?}");
     assert!(st.binding(id).is_some());
+    // As `moactl open` without `--bg`: the tab comes to the screen. This brain has no
+    // cockpit, so the select goes straight out.
+    let select = Cmd::new("select-window").args(["-t", "%7"]);
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Tmux { cmds, .. } if cmds.contains(&select))),
+        "{fx:?}"
+    );
+}
+
+#[test]
+fn an_empty_folder_answer_is_cancelled() {
+    // With tmux's trailing space, and without it.
+    for line in ["moa:prompt {t} ", "moa:prompt {t}", "moa:prompt {t}   "] {
+        let (b, mut st) = linked(TOML, "3.8");
+        let token = the_prompt(&key(&b, &mut st), "new session · folder:", "~/private/");
+        let fx = message(&b, &mut st, &line.replace("{t}", &token.to_string()));
+        assert_eq!(notices(&fx), ["moa: cancelled"], "{line:?}");
+        assert!(prompts(&fx).is_empty(), "{fx:?}");
+        assert_eq!(opens(&fx), 0, "{fx:?}");
+        assert!(changes(&fx).is_empty(), "{fx:?}");
+    }
 }
 
 #[test]
@@ -346,6 +368,19 @@ fn a_key_started_open_that_tmux_refuses_is_told_by_notice() {
         ["moa: couldn't open a tab for it; see moa's log"]
     );
     assert!(replies(&fx).is_empty(), "{fx:?}");
+    // Told once: nothing waits for the tab any more, so a second answer tells nobody.
+    let again = feed(
+        &b,
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Open(id),
+            results: vec![Ok(vec!["P %8 4243".into()])],
+        },
+    );
+    assert!(notices(&again).is_empty(), "{again:?}");
+    assert!(replies(&again).is_empty(), "{again:?}");
+    assert!(st.binding(id).is_none());
 }
 
 /// tmux 3.4 alone stores a typed `$` as `\$`: only there does moa take it back.
