@@ -99,9 +99,9 @@ impl Cmd {
     /// The one `command-prompt` moa sends (S5): `label` in `client`'s status line, prefilled
     /// with `prefill`, whose answer comes back to the control client `ctl` as
     /// `moa:prompt TOKEN TEXT`. `-b` keeps the control client from waiting for the answer.
-    /// tmux expands `label` and `prefill` as formats, and splits `-I` on `,`: the caller
-    /// passes neither `#` nor `,` in them. The template is in double quotes, because `%%%`
-    /// escapes the answer for those (a `'` in it would be lost in single ones).
+    /// tmux expands `label` and `prefill` as formats and with strftime, and splits `-I` on
+    /// `,`: the caller passes no `#`, `%` or `,` in them. The template is in double quotes,
+    /// because `%%%` escapes the answer for those (a `'` in it would be lost in single ones).
     pub fn prompt(
         client: &ClientName,
         label: &str,

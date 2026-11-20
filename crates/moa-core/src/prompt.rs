@@ -45,8 +45,8 @@ pub fn typed(version: &str, text: &str) -> String {
 }
 
 /// `Ctrl-a n` (S6): asks `client` for the new session's folder, prefilled with the brain's
-/// first folder (`~/x/`, ready for typing), else `~/`. A folder holding `,` or `#` isn't
-/// offered: tmux splits `-I` on `,` and expands `#{…}` in it.
+/// first folder (`~/x/`, ready for typing), else `~/`. A folder holding `,`, `#` or `%` isn't
+/// offered: tmux splits `-I` on `,`, and expands `#{…}` and strftime's `%` in it.
 pub(crate) fn new_session(state: &mut State, client: ClientName) -> Vec<Effect> {
     let deps = state.deps();
     let first = state
@@ -56,7 +56,7 @@ pub(crate) fn new_session(state: &mut State, client: ClientName) -> Vec<Effect> 
     let prefill = first
         .map(|f| with_tilde(&f.display().to_string(), &deps.home, deps.canonical))
         .map(|f| format!("{}/", f.trim_end_matches('/')))
-        .filter(|f| !f.contains([',', '#']))
+        .filter(|f| !f.contains([',', '#', '%']))
         .unwrap_or_else(|| "~/".to_string());
     let asking = Asking::Folder {
         client: client.clone(),

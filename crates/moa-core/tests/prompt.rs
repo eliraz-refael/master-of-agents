@@ -400,10 +400,12 @@ fn dollar_unescapes_only_on_3_4() {
     }
 }
 
-/// `-I` splits on `,` and expands `#{…}`: such a folder isn't offered.
+/// `-I` splits on `,`, expands `#{…}`, and runs strftime over the text: on tmux 3.4 and 3.8 a
+/// prefill `~/100%Ydone/` comes back as `~/1002026done/`, and `%%` as `%`. Such a folder
+/// isn't offered.
 #[test]
 fn a_prefill_with_a_comma_falls_back() {
-    for folder in ["~/a,b", "~/a#b"] {
+    for folder in ["~/a,b", "~/a#b", "~/a%Yb"] {
         let toml = TOML.replace("~/private", folder);
         let (b, mut st) = linked(&toml, "3.8");
         the_prompt(&key(&b, &mut st), "new session · folder:", "~/");
