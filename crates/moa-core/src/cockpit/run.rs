@@ -8,13 +8,13 @@
 //! listing again), and its chain (`Asked::Chain`). Every answer carries the operation's
 //! `seq`; one for an operation no longer in flight is ignored.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::json;
 
 use super::assign::view_of;
 use super::build::{occupant_stays, panel_tags};
-use super::scene::{AGENT, Role, Scene};
+use super::scene::{AGENT, Place, Role, Scene};
 use super::spawn::{respawn, respawn_tail, spawn, spawned};
 use super::{Plan, plan, swap_in, vacate};
 use crate::Now;
@@ -63,9 +63,10 @@ pub(crate) enum CockpitOp {
     /// spot's agent ended (L11). A build waiting already does that: a refill behind one is
     /// dropped. It never takes another's place, nor is replaced.
     Refill,
-    /// Takes the agent in `pane` down (`kill_tab`): from the spot, leaving the empty slot
-    /// (L11); elsewhere, a plain kill; gone, nothing. It survives a lost link and a reload.
-    Vacate { pane: PaneId },
+    /// Takes session `id`'s agent in `pane` down (`kill_tab`): from the spot, leaving the
+    /// empty slot (L11); elsewhere, a plain kill; gone, or no longer its, nothing. It
+    /// survives a lost link and a reload.
+    Vacate { pane: PaneId, id: SessionId },
     /// `ui.select_view`: the panel in `pane` shows `view`, its tag and frame set (L8, L10).
     /// Queued, so it never races a build's retagging of the same pane.
     SelectView {
@@ -107,6 +108,18 @@ pub(crate) struct CockpitRun {
     stopped: BTreeSet<PaneId>,
     /// The link just came up: its first listing may queue the lazy build (L9).
     lazy_armed: bool,
+    /// Restarts whose new tab waits for the old agent to go (R24), by the vacated pane.
+    pub(crate) held: BTreeMap<PaneId, Held>,
+    /// The held vacates that ended since, and whether they took the agent down: the end of
+    /// the input releases or refuses their restarts (`ops::launch::released`).
+    pub(crate) vacated: Vec<(PaneId, bool)>,
+}
+
+/// A restart's resume window, held until its vacate ends.
+#[derive(Debug)]
+pub(crate) struct Held {
+    pub(crate) id: SessionId,
+    pub(crate) window: Effect,
 }
 
 impl CockpitRun {
@@ -213,7 +226,9 @@ fn first_line(e: &str) -> &str {
 fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
     let why = first_line(e);
     let text = match op {
-        CockpitOp::Vacate { pane } => format!("the agent in {pane} couldn't be taken down: {why}"),
+        CockpitOp::Vacate { pane, .. } => {
+            format!("the agent in {pane} couldn't be taken down: {why}")
+        }
         CockpitOp::SelectView { pane, view, .. } => {
             format!("the panel in {pane} couldn't show {view}: {why}")
         }
@@ -476,6 +491,13 @@ fn finish(state: &mut State, said: Said) -> Vec<Effect> {
     let run = &mut state.cockpit;
     let op = run.in_flight.take().map(|(_, op)| op);
     run.reset_op();
+    // A vacate a restart waits for: done when it ended with nothing to say (its chain's
+    // `Ok`, or nothing left to take down), else not (L17, R24).
+    if let Some(CockpitOp::Vacate { pane, .. }) = &op
+        && run.held.contains_key(pane)
+    {
+        run.vacated.push((*pane, matches!(said, Said::Nothing)));
+    }
     let mut fx = Vec::new();
     match said {
         Said::Reply(result) => {
@@ -506,11 +528,13 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
             .find_map(|a| a.as_ref().err())
             .map_or("tmux's answer didn't parse", |e| first_line(e));
         let text = format!("moa couldn't read the terminal's state: {why}; try again");
-        let mut fx = vec![log(LogLevel::Warn, text.clone())];
-        let said = match &state.cockpit.in_flight {
-            // An operation nobody asked for has the log line only.
-            Some((_, op)) if !tells_of(op).is_empty() => refused(op, text),
-            _ => Said::Nothing,
+        // Logged either way; an operation nobody asked for has the log line only (and a
+        // vacate's ends as not done).
+        let (mut fx, said) = match &state.cockpit.in_flight {
+            Some((_, op)) if !tells_of(op).is_empty() => {
+                (vec![log(LogLevel::Warn, text.clone())], refused(op, text))
+            }
+            _ => (Vec::new(), Said::Logged(text)),
         };
         fx.extend(finish(state, said));
         return fx;
@@ -608,10 +632,26 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let (layout, node) = current(state);
             build(state, op, scene, layout, &node, None)
         }
-        CockpitOp::Vacate { pane } => {
+        CockpitOp::Vacate { pane, id } => {
             let Some(at) = scene.pane(*pane) else {
                 return Next::Done(Said::Nothing);
             };
+            // Still the agent's: its session's, or no one's. `kill_tab`'s commit deleted the
+            // binding, and the session tag may never have landed; a pane id names one pane
+            // on its server, and a vacate never runs on another. Not a panel's: its chain
+            // already ran (a vacate queued again after a lost link or a reload finds the
+            // empty slot it left).
+            let ours = match at.role {
+                Role::Spot(Some(s)) | Role::Agent(s) => s == *id,
+                Role::Other => true,
+                Role::Panel(_) | Role::Spot(None) => false,
+            };
+            if !ours {
+                return Next::Done(Said::Nothing);
+            }
+            // The spot's occupant, tagged `agent` there, with or without its session tag.
+            let in_spot =
+                at.place == Place::Cockpit && (matches!(at.role, Role::Spot(Some(_))) || at.tagged);
             let then = |tags, untagged, starts| Then {
                 tags,
                 untagged,
@@ -621,7 +661,7 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 layout: String::new(),
                 ok: Said::Nothing,
             };
-            if matches!(at.role, Role::Spot(Some(_))) {
+            if in_spot {
                 let v = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
                 // In place, the spot becomes the empty slot, no longer a session's tab; a spare
                 // one swapped in already is the slot, and the agent's pane is gone: no longer
@@ -631,11 +671,6 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                     false => then(vec![(*pane, None)], Vec::new(), 0),
                 };
                 Next::Chain(v.chain.parts().to_vec(), then)
-            } else if at.agent().is_none() {
-                // Not an agent's any more: its chain already ran (a vacate queued again after
-                // a lost link or a reload finds the empty slot it left), or the pane is
-                // someone else's. Nothing is killed.
-                Next::Done(Said::Nothing)
             } else {
                 Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), Vec::new(), 0))
             }
@@ -996,6 +1031,10 @@ fn drop_all(state: &mut State) -> (Vec<Effect>, bool) {
 /// The link went down, or another connection replaced it: nothing asked on it will be
 /// answered (L17).
 pub(crate) fn lost(state: &mut State) -> Vec<Effect> {
+    // The restarts held for their vacates heard the link go with their launch (R24): their
+    // windows are never sent, while the vacates still run once the link is back.
+    state.cockpit.held.clear();
+    state.cockpit.vacated.clear();
     let (mut fx, dropped) = drop_all(state);
     if dropped {
         fx.push(log(

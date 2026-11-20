@@ -103,6 +103,20 @@ pub fn replies(fx: &[Effect]) -> Vec<(ReqId, Result<Done, OpError>)> {
         .collect()
 }
 
+/// The pane queries asked in `fx` (listings, chains, …): their numbers and commands.
+pub fn queries(fx: &[Effect]) -> Vec<(u64, Vec<Cmd>)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux {
+                cmds,
+                token: Some(TmuxToken::Query(n)),
+                ..
+            } => Some((*n, cmds.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The commands of the one tokened `Open`, and its session.
 pub fn the_open(fx: &[Effect]) -> (SessionId, &[Cmd]) {
     let opens: Vec<_> = fx

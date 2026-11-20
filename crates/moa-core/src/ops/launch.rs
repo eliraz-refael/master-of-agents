@@ -11,7 +11,7 @@ use super::term::{Tell, told};
 use crate::Now;
 use crate::change::Change;
 use crate::cockpit::build::tab_name;
-use crate::cockpit::run::{CockpitOp, queue, through_queue};
+use crate::cockpit::run::{CockpitOp, Held, queue, through_queue};
 use crate::config::{AccountConfig, AccountName};
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, TmuxToken};
@@ -44,6 +44,9 @@ const NO_TAB: &str = "couldn't open a tab for it; see moa's log";
 pub(super) const WENT_AWAY: &str = "moa's terminal went away before it opened";
 const NOT_SAVED: &str = "moa couldn't save that session; nothing was opened, try again";
 const LOST: &str = "moa lost that session; a tab may have opened for it, see moa's log";
+/// A restart whose old agent couldn't be taken down: nothing was opened (R24).
+const OLD_TAB_STAYED: &str =
+    "its old tab couldn't be closed, so it wasn't restarted; see moa's log";
 const ELSEWHERE: &str = "it's running in another app right now; close it there first";
 const OTHER_TERMINAL: &str =
     "it's running in another moa terminal; use it there, or close it there first";
@@ -688,7 +691,8 @@ fn go_on(
 /// ran, so the checks are run again first (a restart's own, with its agent read again).
 /// Then step 6: a tab no binding holds whose agent runs the conversation refuses it; a
 /// listing that failed goes on, since steps 1–5 still guard it. Then one commit, R13a's or
-/// a restart's (R24), and the window; a restart kills its old tab between the two.
+/// a restart's (R24), and the window; a restart kills its old tab between the two (with a
+/// cockpit, the window waits for the kill's vacate to end: [`released`]).
 pub(crate) fn resumed(
     state: &mut State,
     now: &Now,
@@ -804,10 +808,14 @@ pub(crate) fn resumed(
         return fx;
     }
     // Saved: the old agent's hooks are history only from now on, however late they come, and
-    // its tab goes before the new one opens, on the same connection (R15).
+    // its tab goes before the new one opens (R15, R24). With no cockpit, the kill goes first
+    // on the same connection. With one, the kill is the cockpit queue's vacate, and the new
+    // tab waits for it to end ([`released`]).
+    let mut held = None;
     if let Some(pane) = checked.kill {
         state.restarted.insert(id, (tx.wall, pane));
         kill_tab(state, &mut tx, id, pane);
+        held = tx.vacates.iter().any(|(p, _)| *p == pane).then_some(pane);
     }
     let (answer, waiters) = if via_focus {
         (None, vec![(conn, req)])
@@ -834,8 +842,59 @@ pub(crate) fn resumed(
         prompt: None,
     };
     let window = new_window(state, link, &spec);
+    // Held before the vacate is queued: it may end at once (no link to ask on).
+    if let Some(pane) = held {
+        state.cockpit.held.insert(pane, Held { id, window });
+        fx.extend(post_commit(state, tx));
+        return fx;
+    }
     fx.extend(post_commit(state, tx));
     fx.push(window);
+    fx
+}
+
+/// The restarts held for their old agent's vacate (R24), once it ended: taken down (or
+/// already gone), the new tab opens; not, the restart is refused and its launch ends as a
+/// tab that couldn't open would, its session asleep and its old agent's events counting
+/// again. A launch the link already answered is left as it was told.
+pub(crate) fn released(state: &mut State, now: &Now) -> Vec<Effect> {
+    let ended = std::mem::take(&mut state.cockpit.vacated);
+    let mut fx = Vec::new();
+    for (pane, done) in ended {
+        let Some(Held { id, window }) = state.cockpit.held.remove(&pane) else {
+            continue;
+        };
+        if state.tmux.launching(id).is_none() {
+            continue;
+        }
+        if done {
+            fx.push(window);
+            continue;
+        }
+        let Some(launching) = state.tmux.forget_open(id) else {
+            continue;
+        };
+        state.restarted.remove(&id);
+        let mut tx = Tx::new(now);
+        let mut logs = vec![warn(format!(
+            "session {id} wasn't restarted: its old agent in {pane} couldn't be taken down"
+        ))];
+        end_launch(state, &mut tx, id, launching.kind, false, &mut logs);
+        fx.extend(logs);
+        fx.extend(post_commit(state, tx));
+        let no = Err(OpError(OLD_TAB_STAYED.into()));
+        fx.extend(
+            launching
+                .reply
+                .into_iter()
+                .chain(launching.waiters)
+                .map(|(conn, req)| Effect::Reply {
+                    conn,
+                    req,
+                    result: no.clone(),
+                }),
+        );
+    }
     fx
 }
 

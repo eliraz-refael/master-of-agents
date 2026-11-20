@@ -214,7 +214,7 @@ pub(crate) fn kill_tab(state: &mut State, tx: &mut Tx, id: SessionId, pane: Pane
         state.killed.insert(id, (generation, pane));
     }
     if through_queue(state) {
-        tx.vacate(pane);
+        tx.vacate(pane, id);
     } else {
         tx.tmux(kill_pane(pane));
     }

@@ -195,15 +195,23 @@ fn lost(req: u64) -> (ReqId, Result<Done, OpError>) {
     (ReqId(req), Err(OpError(LOST.into())))
 }
 
-fn vacate_of(st: &mut State, pane: u32) -> Vec<Effect> {
-    queue(st, CockpitOp::Vacate { pane: PaneId(pane) })
+/// A vacate of session `n`'s agent in `%pane`.
+fn vacate(pane: u32, n: u128) -> CockpitOp {
+    CockpitOp::Vacate {
+        pane: PaneId(pane),
+        id: sid(n),
+    }
+}
+
+fn vacate_of(st: &mut State, pane: u32, n: u128) -> Vec<Effect> {
+    queue(st, vacate(pane, n))
 }
 
 #[test]
 fn a_reload_unwedges_the_cockpit_queue() {
     let mut st = up();
     let old = the_listing(&apply(&mut st, 1, "focus"));
-    assert!(queries(&vacate_of(&mut st, 9)).is_empty());
+    assert!(queries(&vacate_of(&mut st, 9, 2)).is_empty());
     assert!(queries(&apply(&mut st, 2, "triage")).is_empty());
 
     let fx = handle(
@@ -244,7 +252,7 @@ fn vacates_survive_a_link_drop() {
     for (pid, runs) in [(10, true), (11, false)] {
         let mut st = up();
         the_listing(&apply(&mut st, 1, "focus"));
-        vacate_of(&mut st, 9);
+        vacate_of(&mut st, 9, 2);
         let fx = feed(&mut st, TmuxIn::Down(Down::Lost));
         assert_eq!(replies(&fx), [lost(1)]);
         assert!(queries(&fx).is_empty());
@@ -265,7 +273,7 @@ fn vacates_survive_a_link_drop() {
 #[test]
 fn a_lost_link_queues_an_in_flight_vacate_again() {
     let mut st = up();
-    the_listing(&vacate_of(&mut st, 9));
+    the_listing(&vacate_of(&mut st, 9, 2));
     assert!(queries(&apply(&mut st, 1, "focus")).is_empty());
     let fx = feed(&mut st, TmuxIn::Down(Down::Lost));
     assert_eq!(replies(&fx), [lost(1)]);
@@ -273,7 +281,7 @@ fn a_lost_link_queues_an_in_flight_vacate_again() {
         fx.iter().all(|e| !matches!(e, Effect::Log(_))),
         "nothing was dropped: {fx:?}"
     );
-    assert_eq!(st.cockpit.waiting, [CockpitOp::Vacate { pane: PaneId(9) }]);
+    assert_eq!(st.cockpit.waiting, [vacate(9, 2)]);
     let n = the_listing(&feed(&mut st, connected(10)));
     let (_, lines) = the_chain(&feed(&mut st, answer(n, lists(kite_in_its_tab()))));
     assert_eq!(lines, ["kill-pane -t %9"]);
@@ -284,7 +292,7 @@ fn a_lost_link_queues_an_in_flight_vacate_again() {
 #[test]
 fn a_vacate_leaves_the_spot_whole() {
     let mut st = up();
-    let n = the_listing(&vacate_of(&mut st, 9));
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
     let (n, lines) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
     assert_eq!(
         lines[0],
@@ -300,7 +308,7 @@ fn a_vacate_leaves_the_spot_whole() {
     assert_eq!(st.tmux.topology.moa_session(PaneId(9)), None);
 
     let mut st = up();
-    let n = the_listing(&vacate_of(&mut st, 9));
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
     let (n, lines) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(true)))));
     assert_eq!(lines, ["swap-pane -d -s %5 -t %9", "kill-pane -t %9"]);
     feed(&mut st, answer(n, vec![Ok(Vec::new())]));
@@ -352,12 +360,14 @@ fn a_refill_is_dropped_only_behind_a_build() {
         pane: PaneId(8),
         tells: Vec::new(),
     };
-    let vacate = CockpitOp::Vacate { pane: PaneId(9) };
-    for op in [goto.clone(), show.clone(), vacate.clone()] {
+    for op in [goto.clone(), show.clone(), vacate(9, 1)] {
         queue(&mut st, op);
     }
     queue(&mut st, CockpitOp::Refill);
-    assert_eq!(st.cockpit.waiting, [goto, show, vacate, CockpitOp::Refill]);
+    assert_eq!(
+        st.cockpit.waiting,
+        [goto, show, vacate(9, 1), CockpitOp::Refill]
+    );
 }
 
 /// A vacate tmux refuses is logged as the agent's, whatever tmux's words: a vacate builds no
@@ -365,7 +375,7 @@ fn a_refill_is_dropped_only_behind_a_build() {
 #[test]
 fn a_failed_vacate_says_whose_it_was() {
     let mut st = up();
-    let n = the_listing(&vacate_of(&mut st, 9));
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
     let (n, _) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(true)))));
     let fx = feed(
         &mut st,
@@ -435,11 +445,11 @@ fn a_listing_older_than_a_chain_keeps_its_tags() {
 }
 
 /// A vacate queued again after a lost link may find its chain already ran: the pane is the
-/// empty slot now, and it is left alone. So is any pane that isn't an agent's.
+/// empty slot now, and it is left alone. So is a panel, and another session's agent.
 #[test]
 fn a_vacate_run_again_kills_no_panel() {
     let mut st = up();
-    let n = the_listing(&vacate_of(&mut st, 9));
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
     // Its chain goes out, and tmux runs it, but the link goes before the answer.
     the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
     feed(&mut st, TmuxIn::Down(Down::Lost));
@@ -450,13 +460,33 @@ fn a_vacate_run_again_kills_no_panel() {
     assert!(queries(&fx).is_empty(), "the empty slot stays: {fx:?}");
     assert!(st.cockpit.in_flight.is_none());
 
-    // A panel parked, or a shell, is never killed by a vacate either.
-    for view in ["tree", ""] {
+    // A panel parked, or another session's agent, is never killed by a vacate either.
+    for (moa, view) in [(String::new(), "tree"), (sid(3).to_string(), "")] {
         let mut st = up();
-        let n = the_listing(&vacate_of(&mut st, 9));
+        let n = the_listing(&vacate_of(&mut st, 9, 2));
         let mut panes = kite_in_its_tab();
-        panes[3] = pane(9, 7, 0, false, "", view);
+        panes[3] = pane(9, 7, 0, false, &moa, view);
         let fx = feed(&mut st, answer(n, lists(panes)));
         assert!(queries(&fx).is_empty(), "{view:?}: {fx:?}");
     }
+}
+
+/// M1: the vacate knows its own pane by its id. Untagged and unbound (the commit deleted the
+/// binding, and the session tag never landed), it is still taken down: a plain kill in a
+/// tab of its own, the spot's chain when tagged `agent` in the cockpit.
+#[test]
+fn a_vacate_takes_down_its_pane_whose_session_tag_never_landed() {
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9, 2));
+    let mut panes = kite_in_its_tab();
+    panes[3] = pane(9, 7, 0, false, "", "");
+    let (_, lines) = the_chain(&feed(&mut st, answer(n, lists(panes))));
+    assert_eq!(lines, ["kill-pane -t %9"]);
+
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
+    let mut panes = lantern_in_the_spot(true);
+    panes[2] = pane(9, 1, 0, true, "", "agent");
+    let (_, lines) = the_chain(&feed(&mut st, answer(n, lists(panes))));
+    assert_eq!(lines, ["swap-pane -d -s %5 -t %9", "kill-pane -t %9"]);
 }

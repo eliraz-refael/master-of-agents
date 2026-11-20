@@ -9,7 +9,7 @@ use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, T
 use crate::hooks;
 use crate::keys;
 use crate::live::{QUIET_AFTER, quiet_candidate};
-use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
+use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind, SessionId};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::ops::term::Tell;
@@ -37,6 +37,9 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
+    // A restart held for its old agent's vacate opens its new tab, or is refused (R24).
+    let released = ops::launch::released(state, &now);
+    fold_in(&mut fx, released);
     // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
     sleep::run(state, &now, sleep_fired, &mut fx);
     // Last, so the status line shows what this input saved, after its `Persist`.
@@ -594,10 +597,10 @@ pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
         }
     }
     if saved {
-        for pane in vacates {
+        for (pane, id) in vacates {
             fx.extend(cockpit::run::queue(
                 state,
-                cockpit::run::CockpitOp::Vacate { pane },
+                cockpit::run::CockpitOp::Vacate { pane, id },
             ));
         }
     }
@@ -684,7 +687,7 @@ pub(crate) struct Tx {
     pub(crate) cmds: Vec<Cmd>,
     /// Agents' tabs taken down through the cockpit's queue after the commit: see
     /// [`Tx::vacate`].
-    pub(crate) vacates: Vec<PaneId>,
+    pub(crate) vacates: Vec<(PaneId, SessionId)>,
     /// The last id handed out per table, for ids asked for before the commit.
     issued: Vec<(Table, i64)>,
 }
@@ -710,12 +713,12 @@ impl Tx {
         self.cmds.push(cmd);
     }
 
-    /// Queues the agent in `pane` to be taken down by the cockpit's queue once this
-    /// transaction is saved (L17), as [`Tx::tmux`] would kill it: only after a successful
-    /// [`Tx::commit`].
-    pub(crate) fn vacate(&mut self, pane: PaneId) {
+    /// Queues session `id`'s agent in `pane` to be taken down by the cockpit's queue once
+    /// this transaction is saved (L17), as [`Tx::tmux`] would kill it: only after a
+    /// successful [`Tx::commit`].
+    pub(crate) fn vacate(&mut self, pane: PaneId, id: SessionId) {
         debug_assert!(!self.changes.is_empty(), "a vacate before any commit");
-        self.vacates.push(pane);
+        self.vacates.push((pane, id));
     }
 
     /// Checks every change, then applies all of them to `state` and records them. A refusal

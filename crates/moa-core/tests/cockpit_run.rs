@@ -2,6 +2,8 @@
 //! cockpit (L6, L9, L12, L13, L18), and the agent spot's swap (L11). Every operation takes a
 //! listing of its own, sends one chain, and the next starts only once that chain is answered.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,6 +25,8 @@ use moa_core::tmux::ids::{ClientName, Generation, PaneId, WindowId};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
+
+use common::queries;
 
 const TTY: &str = "/dev/ttys1";
 const LOST: &str = "moa lost its terminal; try again";
@@ -155,20 +159,6 @@ fn focus_built() -> Vec<String> {
         shown(5, "empty-slot"),
         shown(3, "console"),
     ]
-}
-
-/// Each tokened query in `fx`: its number and its commands.
-fn queries(fx: &[Effect]) -> Vec<(u64, Vec<Cmd>)> {
-    fx.iter()
-        .filter_map(|e| match e {
-            Effect::Tmux {
-                conn: 1,
-                cmds,
-                token: Some(TmuxToken::Query(n)),
-            } => Some((*n, cmds.clone())),
-            _ => None,
-        })
-        .collect()
 }
 
 /// The one listing an operation asked in `fx`: its query number.
@@ -1517,7 +1507,15 @@ fn sleeping_the_spots_agent_with_no_spare_respawns_the_spot() {
         ]
     );
     assert!(chain.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
-    assert!(chain.contains(&"set-option -p -t %9 remain-on-exit on".to_string()));
+    // Kept on exit, with its stopped line: a crashed slot stays for Repair (L11).
+    let kept = chain
+        .iter()
+        .position(|l| l == "set-option -p -t %9 remain-on-exit on")
+        .expect("kept on exit");
+    assert!(
+        chain[kept + 1].starts_with("set-option -p -t %9 remain-on-exit-format "),
+        "{chain:?}"
+    );
     assert!(
         !chain.iter().any(|l| l.starts_with("kill-pane")),
         "{chain:?}"
@@ -1615,8 +1613,33 @@ fn sleep_right_after_a_show_vacates_the_spot() {
     assert_eq!(chain, ["swap-pane -d -s %5 -t %9", "kill-pane -t %9"]);
 }
 
+/// M1: the agent's session tag never landed, and the sleep's commit deleted its binding, so
+/// the vacate's listing shows a pane of no one's. The vacate still knows it as its own: a
+/// sleep that says `asleep` never leaves the agent running.
+#[test]
+fn a_sleep_takes_down_its_agent_whose_tag_never_landed() {
+    // Lantern in the spot (with a spare slot), then in a tab of its own.
+    for (panes, pane) in [(lantern_in_the_spot(true), 3), (focus_and_tabs(), 5)] {
+        let mut st = with_agents(&panes);
+        let fx = sleep(&mut st, 1, L);
+        assert!(
+            reply_text(&fx).unwrap().starts_with("asleep: Lantern"),
+            "{fx:?}"
+        );
+        let n = committed_then_listed(&fx);
+        let mut untagged = panes.clone();
+        untagged[pane] = untagged[pane].replace(&format!(" {L} "), "  ");
+        let (_, chain) = the_chain(&feed(&mut st, answer(n, lists(&untagged, true))));
+        assert!(
+            chain.iter().any(|l| l == "kill-pane -t %9"),
+            "{untagged:?}: {chain:?}"
+        );
+    }
+}
+
 /// L17: a vacate waits behind a build already running. When that build sent the agent home,
-/// the vacate kills it plainly; when its pane is gone, it does nothing.
+/// the vacate kills it plainly; when its pane is gone, it does nothing, and the queue moves
+/// on to what waits behind it.
 #[test]
 fn a_vacate_whose_pane_left_the_spot_just_kills_it() {
     for gone in [false, true] {
@@ -1630,6 +1653,8 @@ fn a_vacate_whose_pane_left_the_spot_just_kills_it() {
         );
         let (n, _) = the_chain(&fx);
         let vacate = the_listing(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+        // A key behind the vacate waits for it.
+        assert!(queries(&key(&mut st, "layout-2")).is_empty());
         // The build sent Lantern home, to a tab of its own.
         let mut home = cockpit_built();
         home.push(agent_tab(8, K));
@@ -1638,8 +1663,9 @@ fn a_vacate_whose_pane_left_the_spot_just_kills_it() {
         }
         let fx = feed(&mut st, answer(vacate, lists(&home, true)));
         if gone {
-            assert!(queries(&fx).is_empty(), "{fx:?}");
             assert!(!kills_any(&fx), "{fx:?}");
+            // Nothing to do: the queue is free, and the key's listing goes out.
+            the_listing(&fx);
         } else {
             assert_eq!(the_chain(&fx).1, ["kill-pane -t %9"]);
         }
