@@ -588,3 +588,17 @@ fn a_panel_tmux_kills_logs_one_plain_end_line() {
     assert_eq!(ends.len(), 1, "{ends:?}\n{written}");
     assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
 }
+
+/// `plain` drops every escape sequence `capture-pane -e` or a terminal may write, and only
+/// those: a CSI up to its final byte, an OSC, DCS, APC or PM up to BEL or ST, a charset
+/// designation with its one character, and any other two-character escape.
+#[test]
+fn plain_skips_whole_escapes_and_nothing_more() {
+    assert_eq!(plain("\x1b[48;2;94;129;172mKite\x1b[0m"), "Kite");
+    assert_eq!(plain("a\x1b]0;title\x07b"), "ab");
+    assert_eq!(plain("a\x1b]2;title\x1b\\b"), "ab");
+    assert_eq!(plain("a\x1bPq#0\x1b\\b"), "ab");
+    assert_eq!(plain("a\x1b(Bb"), "ab");
+    assert_eq!(plain("a\x1b=b"), "ab");
+    assert_eq!(plain("Harbor\x1b"), "Harbor");
+}

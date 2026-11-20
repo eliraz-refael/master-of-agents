@@ -498,22 +498,42 @@ pub fn cockpit_up(tb: &TempBrain) -> Terminal {
 /// The selection bar's background, `sel` (`#5e81ac`), as `capture-pane -e` writes it.
 pub const SEL_BG: &str = "48;2;94;129;172";
 
-/// `text` without its escape sequences.
+/// `text` without its escape sequences, skipped whole as `screen::Screen` skips them.
 pub fn plain(text: &str) -> String {
     let mut out = String::new();
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
             // `ESC [ params final`: up to the final byte.
-            if chars.next() == Some('[') {
+            Some('[') => {
                 for c in chars.by_ref() {
                     if ('\x40'..='\x7e').contains(&c) {
                         break;
                     }
                 }
             }
-        } else {
-            out.push(c);
+            // OSC, DCS, APC, PM: up to BEL or ST (`ESC \`).
+            Some(']' | 'P' | '_' | '^') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // A charset designation: one more character.
+            Some('(' | ')' | '*' | '+' | '#') => {
+                chars.next();
+            }
+            // Any other escape is two characters, both gone now.
+            _ => {}
         }
     }
     out

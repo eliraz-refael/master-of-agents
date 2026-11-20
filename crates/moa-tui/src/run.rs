@@ -480,11 +480,8 @@ struct Loop {
 
 impl Loop {
     fn new(opts: PanelOptions, theme: Theme, size: Size) -> Loop {
-        let mut panel = Panel::new(opts.view.unwrap_or(View::Picture));
-        // moa tags a panel it places as it starts it (L7), so a placed panel is moa's
-        // before its row says so; a panel started by hand isn't.
-        panel.set_managed(opts.client.autostart.is_none());
-        Loop {
+        let panel = Panel::new(opts.view.unwrap_or(View::Picture));
+        let mut lp = Loop {
             opts,
             theme,
             panel,
@@ -500,7 +497,11 @@ impl Loop {
             started: std::time::Instant::now(),
             tick: None,
             deadline: None,
-        }
+        };
+        // moa tags a panel it places as it starts it (L7), so a placed panel is moa's
+        // before its row says so; a panel started by hand isn't.
+        lp.panel.set_managed(lp.placed());
+        lp
     }
 
     fn ctx(&self) -> Ctx {
@@ -538,8 +539,8 @@ impl Loop {
 
     /// Writes `what` to `panel.log`, naming the view the panel shows now.
     fn log(&self, what: &str) {
+        self.note_view();
         if let Some(log) = &self.log {
-            log.shows(self.known_view());
             log.write(what);
         }
     }
@@ -596,18 +597,24 @@ impl Loop {
     }
 
     /// Input, a push, a connect's end, a timer.
-    fn turn(&mut self, wake: Wake) -> Result<Turn, String> {
+    fn turn(&mut self, wake: Wake) -> Turn {
         let redraw = match wake {
             // The terminal is gone: nothing more can be shown or read there.
             Wake::Input(None) => {
                 self.log("stopped: the terminal closed");
-                return Ok(Turn::Quit);
+                return Turn::Quit;
             }
             Wake::Input(Some(Err(e))) => {
                 self.log(&format!("stopped: can't read the terminal: {e}"));
-                return Ok(Turn::Quit);
+                return Turn::Quit;
             }
-            Wake::Input(Some(Ok(event))) => return Ok(self.input(event)),
+            Wake::Input(Some(Ok(event))) => {
+                let turn = self.input(event);
+                if matches!(turn, Turn::Quit) {
+                    self.log("stopped: quit");
+                }
+                return turn;
+            }
             Wake::Msg(msg) => self.take(msg),
             Wake::Linked(result) => self.linked(result),
             Wake::Retry => {
@@ -623,10 +630,10 @@ impl Loop {
             }
             Wake::Signal(name) => {
                 self.log(&format!("stopped by {name}"));
-                return Ok(Turn::Quit);
+                return Turn::Quit;
             }
         };
-        Ok(Turn::Go(redraw))
+        Turn::Go(redraw)
     }
 
     fn input(&mut self, event: Event) -> Turn {
@@ -636,13 +643,18 @@ impl Loop {
                 let Some(key) = key_of(k) else {
                     return Turn::Go(false);
                 };
-                // Ctrl-c is the panel's however the connection is (L14), and what it says
-                // isn't covered by the connection's line.
+                // Ctrl-c is the panel's however the connection is (L14). A cancel gives the
+                // footer back to the connection's line, as Esc does; the managed panel's
+                // line answers the key, so it stays.
                 if key == Key::Ctrl('c') {
-                    return match self.panel.interrupt() {
-                        Some(Out::Quit) => Turn::Quit,
-                        _ => Turn::Go(true),
-                    };
+                    let cancels = self.panel.typing();
+                    if let Some(Out::Quit) = self.panel.interrupt() {
+                        return Turn::Quit;
+                    }
+                    if let Some(line) = self.link_line().filter(|_| cancels) {
+                        self.panel.note(&line);
+                    }
+                    return Turn::Go(true);
                 }
                 if matches!(self.link, Link::Down(_)) {
                     match down_key(&self.panel, key) {
@@ -887,7 +899,7 @@ impl Loop {
     /// One turn of the loop: `wake`, then everything the connection already holds, then one
     /// draw. True to quit.
     fn step<B: Backend>(&mut self, wake: Wake, term: &mut Terminal<B>) -> Result<bool, String> {
-        let mut redraw = match self.turn(wake)? {
+        let mut redraw = match self.turn(wake) {
             Turn::Quit => return Ok(true),
             Turn::Go(redraw) => redraw,
         };
@@ -988,6 +1000,7 @@ mod tests {
     use moa_core::state::CallerInfo;
     use moa_platform::Paths;
     use moa_view::geometry::Size;
+    use moa_view::keys::Key;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1042,7 +1055,7 @@ mod tests {
     }
 
     fn input(lp: &mut Loop, event: Event) -> Turn {
-        lp.turn(Wake::Input(Some(Ok(event)))).unwrap()
+        lp.turn(Wake::Input(Some(Ok(event))))
     }
 
     fn ctrl_c() -> Event {
@@ -1117,13 +1130,34 @@ mod tests {
         assert!(matches!(input(&mut by_hand, ctrl_c()), Turn::Quit));
     }
 
+    /// Ctrl-c cancelling a prompt while moa is down gives the footer back to the down line,
+    /// as Esc does: the line that says how to bring moa back isn't lost to `cancelled`.
+    #[tokio::test]
+    async fn a_cancel_while_moa_is_down_keeps_the_down_line() {
+        let (data, ctx) = moa_view::fixture::lantern();
+        let down = "moa isn't running: press any key to try again";
+        for cancel in [ctrl_c(), Event::Key(KeyEvent::from(KeyCode::Esc))] {
+            let mut lp = looped(Some(View::Tree), false);
+            lp.data = data.clone();
+            lp.panel.note(down);
+            lp.panel.key(Key::Char('+'), &lp.data, &ctx, SIZE);
+            assert!(lp.panel.typing(), "a prompt is open");
+            assert!(matches!(input(&mut lp, cancel), Turn::Go(true)));
+            assert!(!lp.panel.typing());
+            let footer = lp.panel.screen(&lp.data, &ctx, SIZE).footer.text;
+            assert_eq!(footer, down);
+        }
+    }
+
     /// L14: a terminal that closes, or can't be read, ends the panel cleanly with one plain
-    /// line in `panel.log`, never an error that would be printed to the gone terminal.
+    /// line in `panel.log`, never an error that would be printed to the gone terminal. A
+    /// quit from the keyboard gets its end line too.
     #[tokio::test]
     async fn a_terminal_that_goes_ends_the_panel_with_one_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("panel.log");
-        let ends: [(Wake, &str); 2] = [
+        let ends: [(Wake, &str); 3] = [
+            (Wake::Input(Some(Ok(ctrl_c()))), "stopped: quit"),
             (Wake::Input(None), "stopped: the terminal closed"),
             (
                 Wake::Input(Some(Err(std::io::Error::other("gone")))),
@@ -1136,7 +1170,7 @@ mod tests {
                 log: Some(path.clone()),
                 ..lp.opts.clone()
             });
-            assert!(matches!(lp.turn(wake), Ok(Turn::Quit)));
+            assert!(matches!(lp.turn(wake), Turn::Quit));
             let written = std::fs::read_to_string(&path).unwrap();
             assert!(
                 written
