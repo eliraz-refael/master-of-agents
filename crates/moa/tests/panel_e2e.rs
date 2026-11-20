@@ -668,12 +668,6 @@ fn a_panel_tmux_kills_logs_one_plain_end_line() {
     assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
 }
 
-/// Whether a `panel.log` line's text says how a panel ended: `stopped…`, or `panicked…`
-/// (which a test must see to fail on it). A note such as `can't watch the terminal…` isn't.
-fn is_end(what: &str) -> bool {
-    what.starts_with("stopped") || what.starts_with("panicked")
-}
-
 /// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
 /// panel behind.
 struct Reaped(std::process::Child);

@@ -44,119 +44,6 @@ fn moa_key(tb: &TempBrain, term: &Terminal, key: &str, says: &str) {
     );
 }
 
-/// What the picker's full tab shows: its footer hint.
-const PICKER_SHOWS: &str = "esc close";
-/// What help's popup shows: its first heading.
-const HELP_SHOWS: &str = "Ctrl-a keys";
-
-/// `press` opens a sheet (S9): the terminal's tab becomes one whose panel shows `says`, linked
-/// into session `moa` from `_moa`. Ctrl-c closes it: the terminal is back on the tab it
-/// was on, and session `moa` no longer has the sheet's tab.
-#[track_caller]
-fn a_sheet_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl Fn(), says: &str) {
-    let before = client_field(tb, term, "#{window_id}");
-    press();
-    let sheet = wait_for(SHOWS, || {
-        let pane = client_field(tb, term, "#{pane_id}")?;
-        screen_of(tb, &pane)
-            .contains(says)
-            .then(|| client_field(tb, term, "#{window_id}"))
-            .flatten()
-    });
-    let Some(sheet) = sheet else {
-        let pane = client_field(tb, term, "#{pane_id}").unwrap_or_default();
-        panic!(
-            "no sheet showed {says:?}; {pane} shows:\n{}\n{}",
-            tab_shows(tb, &pane),
-            what_happened(tb, term)
-        )
-    };
-    term.press(b"\x03");
-    let closed = wait_for(SHOWS, || {
-        let tabs = tmux(tb, &["list-windows", "-t", "=moa:", "-F", "#{window_id}"]);
-        let back = client_field(tb, term, "#{window_id}") == before;
-        (back && !tabs.lines().any(|w| w == sheet)).then_some(())
-    });
-    assert!(
-        closed.is_some(),
-        "the sheet {sheet} never closed\n{}",
-        what_happened(tb, term)
-    );
-}
-
-/// Whether a popup's help panel is connected to moa: a `panels` row showing help in no tab.
-fn help_popups(tb: &TempBrain) -> usize {
-    panels(tb)
-        .iter()
-        .filter(|row| row["view"] == "help" && row["pane"].is_null())
-        .count()
-}
-
-/// The pid of help's popup's moa: the child of this root's tmux server that runs
-/// `panel help --once` (tmux runs a popup's program itself, without a shell).
-fn help_popup_pid(tb: &TempBrain) -> Option<u32> {
-    let server = server_pid(tb);
-    let ps = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,command="])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&ps.stdout).lines().find_map(|l| {
-        let mut f = l.split_whitespace();
-        let (pid, ppid) = (f.next()?, f.next()?);
-        let command = f.collect::<Vec<_>>().join(" ");
-        (ppid == server && command.contains("panel help --once"))
-            .then(|| pid.parse().ok())
-            .flatten()
-    })
-}
-
-/// What `panel.log` says of help's popups, in order: each line's end.
-fn help_popup_log(tb: &TempBrain) -> Vec<String> {
-    let log = std::fs::read_to_string(tb.paths().log_dir().join("panel.log")).unwrap_or_default();
-    log.lines()
-        .filter_map(|l| {
-            l.split_once("panel help (popup) in -: ")
-                .map(|(_, w)| w.to_string())
-        })
-        .collect()
-}
-
-/// `press` opens help's popup (S10): it draws help over the tab, as a panel moa hears from.
-/// `q` closes it: the panel goes, its moa ends well (`panel.log` says it started, then
-/// quit) and tmux reaps it, so the next key reaches tmux; the terminal is still on the tab
-/// it was on.
-#[track_caller]
-fn the_help_popup_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl Fn()) {
-    let before = client_field(tb, term, "#{window_id}");
-    let logged = help_popup_log(tb).len();
-    term.mark();
-    press();
-    assert!(
-        term.wait_for_text(HELP_SHOWS, SHOWS),
-        "help's popup never drew; the terminal showed: {}",
-        term.tail(600)
-    );
-    let up = wait_for(SHOWS, || (help_popups(tb) == 1).then_some(()));
-    assert!(up.is_some(), "panels: {:?}", panels(tb));
-    let pid = wait_for(SHOWS, || help_popup_pid(tb)).expect("no moa runs help's popup");
-    term.press(b"q");
-    let gone = wait_for(SHOWS, || (help_popups(tb) == 0).then_some(()));
-    assert!(
-        gone.is_some(),
-        "help's popup never closed\n{}",
-        what_happened(tb, term)
-    );
-    let reaped = wait_for(SHOWS, || {
-        // tmux 3.4 and 3.5 built with utempter can lose the exit until tmux reaps a child
-        // of its own; the daemon nudges, and so does the test, unordered with it.
-        tmux(tb, &["run-shell", "true"]);
-        (!moa_platform::pid_alive(pid)).then_some(())
-    });
-    assert!(reaped.is_some(), "tmux never reaped help's popup ({pid})");
-    assert_eq!(help_popup_log(tb)[logged..], ["started", "stopped: quit"]);
-    assert_eq!(client_field(tb, term, "#{window_id}"), before);
-}
-
 fn launches(tb: &TempBrain) -> u64 {
     let s = status_json(tb);
     s["launches"].as_u64().unwrap_or_else(|| panic!("{s}"))
@@ -213,8 +100,8 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
             term.press(key.as_bytes());
         }
     };
-    a_sheet_opens_and_closes(&tb, &term, press("s"), PICKER_SHOWS);
-    the_help_popup_opens_and_closes(&tb, &term, press("?"));
+    a_sheet_opens_and_closes(&tb, &term, press("s"), &[PICKER_SHOWS], CTRL_C);
+    the_help_popup_opens_and_closes(&tb, &term, TERM_SIZE, press("?"), &[HELP_SHOWS]);
     // `n` asks for a folder in the status line; Ctrl-c puts it away and answers nothing.
     // (Esc would too, but tmux reads an Esc then the next Ctrl-a as one key.)
     moa_key(&tb, &term, KeyAction::New.key(), "new session · folder:");
@@ -230,7 +117,7 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
         );
         term.press(KeyAction::Help.key().as_bytes());
     };
-    the_help_popup_opens_and_closes(&tb, &term, menu_help);
+    the_help_popup_opens_and_closes(&tb, &term, TERM_SIZE, menu_help, &[HELP_SHOWS]);
 
     // Pure keys: the next and previous tab, and no split in the cockpit.
     tmux(&tb, &["new-window", "-d", "-t", "=moa:"]);
@@ -330,7 +217,7 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
         ctrl_a(&tb, &term);
         term.press(b"s");
     };
-    a_sheet_opens_and_closes(&tb, &term, find, PICKER_SHOWS);
+    a_sheet_opens_and_closes(&tb, &term, find, &[PICKER_SHOWS], CTRL_C);
 
     // A crash.
     let pid = status_json(&tb)["pid"].to_string();
@@ -490,7 +377,7 @@ fn help_opens_as_a_full_tab_in_the_tab_form() {
         ctrl_a(&tb, &term);
         term.press(b"?");
     };
-    a_sheet_opens_and_closes(&tb, &term, help, "find a session in a popup");
+    a_sheet_opens_and_closes(&tb, &term, help, &["find a session in a popup"], CTRL_C);
     // The menu's `?` is the daemon's `help` too: an item that reaches the daemon.
     let menu_help = || {
         ctrl_a(&tb, &term);
@@ -501,7 +388,13 @@ fn help_opens_as_a_full_tab_in_the_tab_form() {
         );
         term.press(KeyAction::Help.key().as_bytes());
     };
-    a_sheet_opens_and_closes(&tb, &term, menu_help, "find a session in a popup");
+    a_sheet_opens_and_closes(
+        &tb,
+        &term,
+        menu_help,
+        &["find a session in a popup"],
+        CTRL_C,
+    );
 }
 
 /// The user's own file, with screen's prefix (Ctrl-a), a waiting command and a hook.
@@ -522,7 +415,7 @@ fn a_user_tmux_conf_with_run_shell_and_hooks() {
         ctrl_a(&tb, &term);
         term.press(b"s");
     };
-    a_sheet_opens_and_closes(&tb, &term, find, PICKER_SHOWS);
+    a_sheet_opens_and_closes(&tb, &term, find, &[PICKER_SHOWS], CTRL_C);
 
     assert_eq!(option(&tb, "@user_opt"), "1");
     let set = hooks(&tb);

@@ -22,8 +22,22 @@ pub const STATUS_LINE: &str = "^a keys";
 /// so this only lengthens a failure.
 pub const SHOWS: Duration = Duration::from_secs(10);
 
-/// `moa args…` on a terminal, with the root's environment plus `extra`.
+/// The size `open` gives a terminal: columns, rows.
+pub const TERM_SIZE: (usize, usize) = (120, 30);
+
+/// `moa args…` on a terminal ([`TERM_SIZE`]), with the root's environment plus `extra`.
 pub fn open(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Terminal {
+    open_sized(tb, TERM_SIZE, args, extra)
+}
+
+/// `moa args…` on a terminal of `size` (columns, rows), with the root's environment plus
+/// `extra`.
+pub fn open_sized(
+    tb: &TempBrain,
+    size: (usize, usize),
+    args: &[&str],
+    extra: &[(&str, &str)],
+) -> Terminal {
     let mut env = tb.env();
     env.extend(
         extra
@@ -31,7 +45,9 @@ pub fn open(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Terminal {
             .map(|(k, v)| (OsString::from(k), OsString::from(v))),
     );
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    Terminal::spawn(Path::new(MOA), &args, &env, 120, 30).unwrap()
+    let (cols, rows) = size;
+    let (cols, rows) = (u16::try_from(cols).unwrap(), u16::try_from(rows).unwrap());
+    Terminal::spawn(Path::new(MOA), &args, &env, cols, rows).unwrap()
 }
 
 /// `exe args…` to the end, with the root's environment plus `extra`.
@@ -464,12 +480,18 @@ pub fn cockpit_panes(tb: &TempBrain) -> Vec<PaneRow> {
         .collect()
 }
 
-/// `moa` on a terminal (120x30), once the daemon has built the cockpit on the first attach:
-/// its tab holds the tree, console and plan panels. The user's own `~/.tmux.conf` gets a
-/// line saying the terminal draws true colour first, as a user's would for theirs, so tmux
-/// sends moa's colours as they are, not cut to 256, on every tmux version.
+/// `moa` on a terminal ([`TERM_SIZE`]), once the daemon has built the cockpit on the first
+/// attach: its tab holds the tree, console and plan panels. The user's own `~/.tmux.conf`
+/// gets a line saying the terminal draws true colour first, as a user's would for theirs, so
+/// tmux sends moa's colours as they are, not cut to 256, on every tmux version.
 #[track_caller]
 pub fn cockpit_up(tb: &TempBrain) -> Terminal {
+    cockpit_up_sized(tb, TERM_SIZE)
+}
+
+/// [`cockpit_up`] on a terminal of `size` (columns, rows).
+#[track_caller]
+pub fn cockpit_up_sized(tb: &TempBrain, size: (usize, usize)) -> Terminal {
     let mut conf = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -480,7 +502,7 @@ pub fn cockpit_up(tb: &TempBrain) -> Terminal {
         b"set -as terminal-features 'xterm-256color:RGB'\n",
     )
     .unwrap();
-    let term = open(tb, &[], &[]);
+    let term = open_sized(tb, size, &[], &[]);
     came_up(tb, &term);
     let built = wait_for(SHOWS, || {
         let tags: Vec<String> = cockpit_panes(tb).into_iter().map(|p| p.tag).collect();
@@ -756,4 +778,179 @@ pub fn shows(tb: &TempBrain, pane: &str, texts: &[&str]) {
         "{pane} never showed {texts:?}\n{}",
         tab_shows(tb, pane)
     );
+}
+
+/// Ctrl-c, typed on a terminal.
+pub const CTRL_C: &[u8] = b"\x03";
+/// What the picker's full tab shows: its footer hint.
+pub const PICKER_SHOWS: &str = "esc close";
+/// What help shows, as a popup or a tab: its first heading.
+pub const HELP_SHOWS: &str = "Ctrl-a keys";
+/// The title tmux draws on help's popup's border.
+pub const HELP_TITLE: &str = "keys and help";
+
+/// Whether a `panel.log` line's text says how a panel ended: `stopped…`, or `panicked…`
+/// (which a test must see to fail on it). A note such as `can't watch the terminal…` isn't.
+pub fn is_end(what: &str) -> bool {
+    what.starts_with("stopped") || what.starts_with("panicked")
+}
+
+/// How many of `view`'s popups are connected to moa: `panels` rows showing it in no tab.
+pub fn popups(tb: &TempBrain, view: &str) -> usize {
+    panels(tb)
+        .iter()
+        .filter(|row| row["view"] == view && row["pane"].is_null())
+        .count()
+}
+
+/// The pid of `view`'s popup's moa: the child of this root's tmux server that runs
+/// `panel <view> --once` (tmux runs a popup's program itself, without a shell).
+pub fn popup_pid(tb: &TempBrain, view: &str) -> Option<u32> {
+    let server = server_pid(tb);
+    let runs = format!("panel {view} --once");
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,command="])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&ps.stdout).lines().find_map(|l| {
+        let mut f = l.split_whitespace();
+        let (pid, ppid) = (f.next()?, f.next()?);
+        let command = f.collect::<Vec<_>>().join(" ");
+        (ppid == server && command.contains(&runs))
+            .then(|| pid.parse().ok())
+            .flatten()
+    })
+}
+
+/// What `panel.log` says of `view`'s popups, in order: each line's end.
+pub fn popup_log(tb: &TempBrain, view: &str) -> Vec<String> {
+    let log = std::fs::read_to_string(tb.paths().log_dir().join("panel.log")).unwrap_or_default();
+    let mine = format!("panel {view} (popup) in -: ");
+    log.lines()
+        .filter_map(|l| l.split_once(&mine).map(|(_, w)| w.to_string()))
+        .collect()
+}
+
+/// Waits until tmux has reaped the popup moa `pid`, which closes the popup, so the next key
+/// reaches tmux rather than the popup.
+#[track_caller]
+pub fn popup_reaped(tb: &TempBrain, pid: u32) {
+    let reaped = wait_for(SHOWS, || {
+        // tmux 3.4 and 3.5 built with utempter can lose the exit until tmux reaps a child
+        // of its own; the daemon nudges, and so does the test, unordered with it.
+        tmux(tb, &["run-shell", "true"]);
+        (!moa_platform::pid_alive(pid)).then_some(())
+    });
+    assert!(
+        reaped.is_some(),
+        "tmux never reaped the popup's moa ({pid})"
+    );
+}
+
+/// Waits until `term`, `size` (columns, rows), shows each of `texts` on its screen, or with
+/// `shown` false until it shows none of them: what a popup draws, which is no pane's, so
+/// `capture-pane` can't read it.
+#[track_caller]
+pub fn screen_shows(term: &Terminal, size: (usize, usize), texts: &[&str], shown: bool) {
+    let (cols, rows) = size;
+    let seen = wait_for(SHOWS, || {
+        let text = screen::Screen::of(term, cols, rows).text();
+        let ok = if shown {
+            texts.iter().all(|t| text.contains(t))
+        } else {
+            !texts.iter().any(|t| text.contains(t))
+        };
+        ok.then_some(())
+    });
+    assert!(
+        seen.is_some(),
+        "the terminal {} {texts:?}:\n{}",
+        if shown { "never showed" } else { "still shows" },
+        screen::Screen::of(term, cols, rows).text()
+    );
+}
+
+/// `press` opens a sheet (S9): the terminal's tab becomes one whose panel shows each of
+/// `says`, linked into session `moa` from `_moa`. `close`, typed, closes it: the terminal is
+/// back on the tab it was on, and session `moa` no longer has the sheet's tab.
+#[track_caller]
+pub fn a_sheet_opens_and_closes(
+    tb: &TempBrain,
+    term: &Terminal,
+    press: impl Fn(),
+    says: &[&str],
+    close: &[u8],
+) {
+    let before = client_field(tb, term, "#{window_id}");
+    press();
+    let sheet = wait_for(SHOWS, || {
+        let pane = client_field(tb, term, "#{pane_id}")?;
+        let screen = screen_of(tb, &pane);
+        says.iter()
+            .all(|t| screen.contains(t))
+            .then(|| client_field(tb, term, "#{window_id}"))
+            .flatten()
+    });
+    let Some(sheet) = sheet else {
+        let pane = client_field(tb, term, "#{pane_id}").unwrap_or_default();
+        panic!(
+            "no sheet showed {says:?}; {pane} shows:\n{}\n{}",
+            tab_shows(tb, &pane),
+            what_happened(tb, term)
+        )
+    };
+    term.press(close);
+    let closed = wait_for(SHOWS, || {
+        let tabs = tmux(tb, &["list-windows", "-t", "=moa:", "-F", "#{window_id}"]);
+        let back = client_field(tb, term, "#{window_id}") == before;
+        (back && !tabs.lines().any(|w| w == sheet)).then_some(())
+    });
+    assert!(
+        closed.is_some(),
+        "the sheet {sheet} never closed\n{}",
+        what_happened(tb, term)
+    );
+}
+
+/// `press` opens help's popup (S10) on `term`, `size` (columns, rows): it draws help over
+/// the tab, its title and each of `shows`, as a panel moa hears from. `q` closes it: the
+/// panel goes, its moa ends well (`panel.log` says it started, then quit) and tmux reaps
+/// it, so the next key reaches tmux; the popup is off the screen, and the terminal is still
+/// on the tab it was on.
+#[track_caller]
+pub fn the_help_popup_opens_and_closes(
+    tb: &TempBrain,
+    term: &Terminal,
+    size: (usize, usize),
+    press: impl Fn(),
+    shows: &[&str],
+) {
+    let before = client_field(tb, term, "#{window_id}");
+    let logged = popup_log(tb, "help").len();
+    press();
+    let up = wait_for(SHOWS, || (popups(tb, "help") == 1).then_some(()));
+    assert!(
+        up.is_some(),
+        "help's popup never connected: {:?}\n{}",
+        panels(tb),
+        what_happened(tb, term)
+    );
+    let mut all = vec![HELP_TITLE];
+    all.extend(shows);
+    screen_shows(term, size, &all, true);
+    let pid = wait_for(SHOWS, || popup_pid(tb, "help")).expect("no moa runs help's popup");
+    term.press(b"q");
+    let gone = wait_for(SHOWS, || (popups(tb, "help") == 0).then_some(()));
+    assert!(
+        gone.is_some(),
+        "help's popup never closed\n{}",
+        what_happened(tb, term)
+    );
+    popup_reaped(tb, pid);
+    screen_shows(term, size, &[HELP_TITLE], false);
+    assert_eq!(
+        popup_log(tb, "help")[logged..],
+        ["started", "stopped: quit"]
+    );
+    assert_eq!(client_field(tb, term, "#{window_id}"), before);
 }
