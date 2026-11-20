@@ -855,3 +855,58 @@ fn ui_close_with_no_link_says_so() {
     ));
     assert_eq!(replies(&fx), [(ReqId(2), no)]);
 }
+
+/// PR review: with the picker open, `Ctrl-a c` (a build) then `Ctrl-a s` (an open, waiting
+/// its turn). The build's select takes the terminal off the picker's tab, but that close
+/// would replace the open you asked for since: the open runs, and nothing closes it.
+#[test]
+fn an_automatic_close_never_replaces_a_newer_open() {
+    let mut st = open_picker();
+    let build = the_listing(&key_in(&mut st, "console", 0));
+    let fx = find(&mut st);
+    assert!(queries(&fx).is_empty(), "the open waits: {fx:?}");
+    let fx = feed(
+        &mut st,
+        answer(build, lists(&with_picker(false, &[0]), user())),
+    );
+    let (n, _) = the_chain(&fx);
+    let fx = notify(&mut st, window_changed(0, 1));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+
+    let n = the_listing(&feed(&mut st, answer(n, ok())));
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0]), user())));
+    let (n, chain) = the_chain(&fx);
+    assert_eq!(chain, opens(format!("select-window -t $0:@{PICKER_TAB}")));
+    let fx = feed(&mut st, answer(n, ok()));
+    assert!(queries(&fx).is_empty(), "nothing closes it: {fx:?}");
+    assert_eq!(st.tmux().queries().count(), 0);
+    assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL + 1));
+}
+
+/// PR review: a terminal that switches to another session leaves the picker's session as a
+/// detach does. The last one to leave closes the picker; one leaving while another still
+/// shows the session doesn't.
+#[test]
+fn switching_sessions_unlinks_the_sheet() {
+    let mut st = up(&with_picker(false, &[]));
+    let n = the_listing(&find(&mut st));
+    let terminals: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 0)];
+    let fx = feed(
+        &mut st,
+        answer(n, lists(&with_picker(false, &[]), terminals)),
+    );
+    let (n, _) = the_chain(&fx);
+    feed(&mut st, answer(n, ok()));
+
+    let switched = |tty: &str| Notification::ClientSessionChanged {
+        client: ClientName(tty.into()),
+        session: TmuxSessionId(2),
+    };
+    let fx = notify(&mut st, switched("/dev/ttys2"));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    let n = the_listing(&notify(&mut st, switched(TTY)));
+    let gone: &[(&str, u32)] = &[(TTY, 2), ("/dev/ttys2", 2)];
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0]), gone)));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(chain, [format!("unlink-window -t $0:@{PICKER_TAB}")]);
+}

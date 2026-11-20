@@ -80,7 +80,8 @@ pub(crate) enum SheetNews {
         session: TmuxSessionId,
         window: WindowId,
     },
-    /// A user's terminal on session `session` detached (`%client-detached`).
+    /// A user's terminal left session `session`: it detached (`%client-detached`), or
+    /// switched to another session (`%client-session-changed`).
     Detached { session: TmuxSessionId },
 }
 
@@ -98,20 +99,34 @@ pub(crate) fn sheet_news(state: &State, t: &TmuxIn) -> Option<SheetNews> {
             let session = state.tmux.topology.client_session(client)?;
             Some(SheetNews::Detached { session })
         }
+        TmuxIn::Notification(Notification::ClientSessionChanged {
+            client,
+            session: to,
+        }) => {
+            let session = state.tmux.topology.client_session(client)?;
+            (session != *to).then_some(SheetNews::Detached { session })
+        }
         _ => None,
     }
 }
 
 /// What `news` means for the sheets open, once the topology took it in: one whose tab a
 /// user's session left for another of its tabs, or whose session the last user's terminal
-/// detached from, is closed, so nobody comes back to a stale sheet.
+/// detached from, is closed, so nobody comes back to a stale sheet. Not while an open or
+/// close of that sheet is under way: a close queued now would replace an open you asked for
+/// since, or unlink one just made.
 pub(crate) fn sheets_notified(state: &mut State, news: SheetNews) -> Vec<Effect> {
+    let busy = busy(state);
     let topology = &state.tmux.topology;
     let done: Vec<PaneId> = state
         .sheets
         .keys()
         .copied()
         .filter(|pane| {
+            let view = topology.view_of(*pane).and_then(|v| v.parse::<View>().ok());
+            if view.is_some_and(|v| busy.contains(&v)) {
+                return false;
+            }
             let Some(window) = topology.window_of(*pane) else {
                 return false;
             };
@@ -130,19 +145,23 @@ pub(crate) fn sheets_notified(state: &mut State, news: SheetNews) -> Vec<Effect>
     fx
 }
 
+/// The sheets an open or close is under way for: running, or waiting its turn.
+fn busy(state: &State) -> BTreeSet<View> {
+    let run = &state.cockpit;
+    run.in_flight
+        .iter()
+        .map(|(_, op)| op)
+        .chain(run.waiting.iter())
+        .filter_map(|op| sheet_of(state, op))
+        .collect()
+}
+
 /// What a listing (an operation's, or the link's) shows of sheets left open with nothing
 /// recording their open: a daemon that restarted forgot them, or a lost link dropped their
 /// close, and they are closed. Not while an open or close of that sheet is under way: its
 /// open isn't recorded until tmux answers its link.
 pub(super) fn stale_sheets(state: &mut State) -> Vec<Effect> {
-    let run = &state.cockpit;
-    let busy: BTreeSet<View> = run
-        .in_flight
-        .iter()
-        .map(|(_, op)| op)
-        .chain(run.waiting.iter())
-        .filter_map(|op| sheet_of(state, op))
-        .collect();
+    let busy = busy(state);
     let topology = &state.tmux.topology;
     let stale: Vec<PaneId> = topology
         .panes()
