@@ -1270,7 +1270,7 @@ mod tests {
         let mut term = terminal();
         placed.draw(&mut term).unwrap();
         assert!(
-            shown(&term).contains("part of moa's layout"),
+            shown(&term).contains("moa's layout · Ctrl-a r repairs"),
             "{}",
             shown(&term)
         );

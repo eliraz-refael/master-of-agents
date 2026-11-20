@@ -170,6 +170,20 @@ pub fn cut(s: &str, w: usize) -> String {
     s[..end].to_string()
 }
 
+/// `s` as it fits `w` cells: one that is wider is cut at a grapheme boundary, loses the
+/// spaces the cut left at its end, and ends in `…`. `w` of 0 leaves nothing.
+pub fn ellipsize(s: &str, w: usize) -> String {
+    if width(s) <= w {
+        return s.to_string();
+    }
+    if w == 0 {
+        return String::new();
+    }
+    let mut out = cut(s, w - 1).trim_end().to_string();
+    out.push('…');
+    out
+}
+
 /// `s` in exactly `w` cells: cut, then padded with spaces on the right.
 pub fn fit(s: &str, w: usize) -> String {
     let mut out = cut(s, w);
@@ -268,17 +282,7 @@ pub fn when(due: Date, today: Date) -> String {
     }
 }
 
-/// `path` with the home folder as `~`.
-pub fn tilde(path: &str, home: &Path) -> String {
-    let home = home.to_string_lossy();
-    let home = home.trim_end_matches('/');
-    match path.strip_prefix(home) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
-            format!("~{rest}")
-        }
-        _ => path.to_string(),
-    }
-}
+pub use moa_core::folders::tilde;
 
 /// A folder as the spike showed it: the home folder as `~`, and only the last two
 /// components when there are more than three.

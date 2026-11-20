@@ -89,15 +89,6 @@ fn named(source: &str, value: &str) -> Result<BrainName, String> {
     })
 }
 
-/// `~/x` for a path under `home`, else the path.
-fn with_tilde(path: &Path, home: &Path) -> String {
-    match path.strip_prefix(home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
-    }
-}
-
 /// The brain a command goes to: `flag` (`--brain`), else `MOA_BRAIN`, else where this folder
 /// and account route to. `writes` is whether the command changes the brain.
 pub(crate) fn pick_brain(
@@ -131,7 +122,7 @@ fn pick_brain_for(
                 return Err(format!(
                     "{} isn't an account in moa.toml, so moa won't save anything from it; \
                      add it under [accounts] or set MOA_BRAIN",
-                    with_tilde(&store, home)
+                    moa_core::folders::tilde(&store.to_string_lossy(), home)
                 ));
             }
             match route(config, account, folder, None) {

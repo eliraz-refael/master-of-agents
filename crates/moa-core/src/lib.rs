@@ -7,6 +7,7 @@ pub mod config;
 mod core;
 pub mod due;
 pub mod effect;
+pub mod folders;
 pub mod hook;
 mod hooks;
 mod keys;

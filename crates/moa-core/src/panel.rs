@@ -89,7 +89,8 @@ impl View {
         }
     }
 
-    /// Whether the panel draws its own frame: the spike's `FRAMED`.
+    /// Whether the panel draws its own frame: the spike's `FRAMED`, plus the picker, help and
+    /// setup (S11).
     pub fn framed(self) -> bool {
         matches!(
             self,
@@ -100,6 +101,9 @@ impl View {
                 | View::Activity
                 | View::Projects
                 | View::Status
+                | View::Picker
+                | View::Help
+                | View::Setup
         )
     }
 }

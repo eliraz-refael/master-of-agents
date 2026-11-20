@@ -16,7 +16,7 @@ use crate::geometry::{Geometry, Rect, Size, geometry};
 use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
-use crate::text::clean;
+use crate::text::{self, clean};
 use crate::views::{self, ViewUi, picture, tree};
 
 mod ask;
@@ -174,6 +174,10 @@ pub struct Panel {
 const CANCELLED: &str = "cancelled";
 /// What Ctrl-c, or `q` in the picture, says in a panel moa manages (L14).
 const MANAGED: &str = "this panel is part of moa's layout; Ctrl-a r repairs the layout";
+/// How every y/N question ends.
+const QUESTION_END: &str = "? y/N";
+/// The managed line for a footer too narrow for [`MANAGED`] (31 columns).
+const MANAGED_SHORT: &str = "moa's layout · Ctrl-a r repairs";
 
 /// How long a broadcast event stays in the footer, in milliseconds.
 pub const EVENT_SHOWN_MS: i64 = 8_000;
@@ -290,7 +294,7 @@ impl Panel {
     /// Rebuilds the lines from `data`, keeps the selection on its item (V8) and the view on
     /// the selection, and drops a hover whose item left the list.
     fn refresh(&mut self, data: &Data, ctx: &Ctx, size: Size) -> Geometry {
-        let g = geometry(self.view, size);
+        let g = geometry(self.view, self.view.framed(), size);
         let was = self.selected().cloned();
         self.lines = views::build(self.view, data, ctx, &self.ui, build_width(&g));
         self.list.reselect(was.as_ref(), &self.lines);
@@ -560,7 +564,10 @@ impl Panel {
             return Span::bold(shown, Tone::Text);
         }
         if let Some(confirm) = &self.confirm {
-            return Span::new(clean(&confirm.question), Tone::Warn);
+            return Span::new(
+                fit_question(&clean(&confirm.question), usize::from(width)),
+                Tone::Warn,
+            );
         }
         if let Some(message) = self.message_at(now) {
             let tone = if message.until.is_some() {
@@ -568,12 +575,20 @@ impl Panel {
             } else {
                 Tone::Warn
             };
-            return Span::new(clean(&message.text), tone);
+            let text = if message.text == MANAGED && text::width(MANAGED) > usize::from(width) {
+                MANAGED_SHORT.to_string()
+            } else {
+                clean(&message.text)
+            };
+            return Span::new(text::ellipsize(&text, usize::from(width)), tone);
         }
         let unreadable = data.unreadable();
         if unreadable > 0 {
             return Span::new(
-                format!("{unreadable} rows from moa couldn't be shown"),
+                text::ellipsize(
+                    &format!("{unreadable} rows from moa couldn't be shown"),
+                    usize::from(width),
+                ),
                 Tone::Warn,
             );
         }
@@ -758,5 +773,17 @@ impl Panel {
         }
         // A move through the list: nothing to send.
         Some(Vec::new())
+    }
+}
+
+/// A y/N question as it fits `w` cells: a long one loses the end of its text, never its
+/// `? y/N`, so what is being asked stays clear.
+fn fit_question(question: &str, w: usize) -> String {
+    match question.strip_suffix(QUESTION_END) {
+        Some(head) if text::width(question) > w && w > text::width(QUESTION_END) => {
+            let room = w.saturating_sub(text::width(QUESTION_END));
+            format!("{}{QUESTION_END}", text::ellipsize(head, room))
+        }
+        _ => text::ellipsize(question, w),
     }
 }

@@ -730,7 +730,7 @@ fn the_wheel_hovers_what_comes_under_the_pointer() {
 
 #[test]
 fn a_framed_view_keeps_the_spikes_padding() {
-    let g = geometry(View::Tree, SIZE);
+    let g = geometry(View::Tree, true, SIZE);
     assert!(g.framed);
     assert_eq!(g.tabs, None);
     assert_eq!(g.strip, None);
@@ -756,7 +756,7 @@ fn a_framed_view_keeps_the_spikes_padding() {
 
 #[test]
 fn the_picture_has_tabs_a_strip_and_a_footer() {
-    let g = geometry(View::Picture, Size { w: 80, h: 24 });
+    let g = geometry(View::Picture, false, Size { w: 80, h: 24 });
     assert!(!g.framed);
     assert_eq!(
         g.tabs,
@@ -809,7 +809,7 @@ fn any_size_lays_out_inside_itself() {
         for w in 0..12 {
             for h in 0..14 {
                 let size = Size { w, h };
-                let g = geometry(view, size);
+                let g = geometry(view, view.framed(), size);
                 for r in [Some(g.body), Some(g.footer), g.tabs, g.strip]
                     .into_iter()
                     .flatten()
@@ -973,4 +973,111 @@ fn a_panel_follows_its_row() {
     assert!(!p.follow(&panels_row("c7", View::Plan, false), "c7"));
     assert_eq!(p.view(), View::Plan);
     assert!(!p.managed());
+}
+
+#[test]
+fn unframed_views_share_the_empty_slots_layout() {
+    let size = Size { w: 80, h: 24 };
+    let picker = geometry(View::Picker, false, size);
+    assert_eq!(picker, geometry(View::EmptySlot, false, size));
+    assert!(!picker.framed);
+}
+
+#[test]
+fn framed_follows_the_view() {
+    for view in [View::Picker, View::Help, View::Setup] {
+        assert!(view.framed(), "{view:?}");
+    }
+    for view in [View::EmptySlot, View::Picture] {
+        assert!(!view.framed(), "{view:?}");
+    }
+}
+
+#[test]
+fn the_managed_line_fits_a_narrow_panel() {
+    for (w, want) in [
+        (40, "moa's layout · Ctrl-a r repairs"),
+        (
+            80,
+            "this panel is part of moa's layout; Ctrl-a r repairs the layout",
+        ),
+    ] {
+        let size = Size { w, h: 16 };
+        let (data, ctx) = lantern();
+        let mut panel = Panel::new(View::Tree);
+        panel.follow(&panels_row("c7", View::Tree, true), "c7");
+        panel.screen(&data, &ctx, size);
+        panel.key(Key::Ctrl('c'), &data, &ctx, size);
+        assert_eq!(panel.screen(&data, &ctx, size).footer.text, want, "{w}");
+    }
+}
+
+#[test]
+fn a_long_footer_message_ends_in_an_ellipsis() {
+    let size = Size { w: 30, h: 16 };
+    let (data, ctx) = lantern();
+    let mut panel = Panel::new(View::Tree);
+    panel.screen(&data, &ctx, size);
+    panel.note(&"漢".repeat(50));
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    let room = usize::from(size.w) - 3;
+    assert!(moa_view::text::width(&footer) <= room, "{footer}");
+    assert!(footer.ends_with('…'), "{footer}");
+    assert_eq!(footer, format!("{}…", "漢".repeat((room - 1) / 2)));
+}
+
+#[test]
+fn a_footer_message_that_straddles_the_edge_stops_a_cell_short() {
+    let size = Size { w: 31, h: 16 };
+    let (data, ctx) = lantern();
+    let mut panel = Panel::new(View::Tree);
+    panel.screen(&data, &ctx, size);
+    panel.note(&"漢".repeat(50));
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    assert_eq!(footer, format!("{}…", "漢".repeat(13)));
+    assert_eq!(moa_view::text::width(&footer), 27, "one cell short of 28");
+}
+
+#[test]
+fn a_long_question_keeps_its_y_n() {
+    let size = Size { w: 30, h: 16 };
+    let (mut data, ctx) = lantern();
+    let id = data.sessions.keys().next().copied().unwrap();
+    let row = data.sessions.get_mut(&id).unwrap();
+    row.session.title = Some("a very long session name indeed".to_string());
+    let mut panel = Panel::new(View::Tree);
+    panel.screen(&data, &ctx, size);
+    assert!(panel.select(&Item::Session(id)));
+    panel.key(Key::Char('x'), &data, &ctx, size);
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    assert!(footer.ends_with("…? y/N"), "{footer}");
+    assert!(footer.starts_with("close "), "{footer}");
+    assert!(moa_view::text::width(&footer) <= 27, "{footer}");
+}
+
+#[test]
+fn a_question_in_a_footer_no_wider_than_its_y_n_is_cut_whole() {
+    for w in [3u16, 5] {
+        let size = Size { w: w + 3, h: 16 };
+        let (data, ctx) = lantern();
+        let id = *data.sessions.keys().next().unwrap();
+        let mut panel = Panel::new(View::Tree);
+        panel.screen(&data, &ctx, size);
+        assert!(panel.select(&Item::Session(id)));
+        panel.key(Key::Char('x'), &data, &ctx, size);
+        let footer = panel.screen(&data, &ctx, size).footer.text;
+        assert!(footer.ends_with('…'), "{w}: {footer}");
+        assert_eq!(moa_view::text::width(&footer), usize::from(w), "{w}");
+    }
+}
+
+#[test]
+fn the_unreadable_rows_message_fits_a_narrow_panel() {
+    let size = Size { w: 23, h: 16 };
+    let (mut data, ctx) = lantern();
+    data.upsert(Topic::Sessions, vec![serde_json::json!({"key": "nope"})]);
+    let mut panel = Panel::new(View::Tree);
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    assert!(footer.ends_with('…'), "{footer}");
+    assert!(moa_view::text::width(&footer) <= 20, "{footer}");
 }

@@ -7,8 +7,8 @@ use moa_core::UtcMs;
 use moa_core::live::DisplayState;
 use moa_core::panel::View;
 use moa_view::text::{
-    CHROME, SPIN, ago, clean, cut, fit, fit_right, next_ago_change, short_account, short_path,
-    when, width, wrap,
+    CHROME, SPIN, ago, clean, cut, ellipsize, fit, fit_right, next_ago_change, short_account,
+    short_path, when, width, wrap,
 };
 use proptest::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
@@ -196,4 +196,22 @@ fn short_paths_and_accounts() {
     assert_eq!(short_path("/h/a/b/c", home), "b/c");
     assert_eq!(short_account("claude-acct-b"), "acct-b");
     assert_eq!(short_account("acct-a"), "acct-a");
+}
+
+#[test]
+fn ellipsize_cuts_to_the_width_and_ends_in_an_ellipsis() {
+    assert_eq!(ellipsize("short", 5), "short");
+    assert_eq!(ellipsize("short", 9), "short");
+    assert_eq!(ellipsize("shorter", 0), "");
+    assert_eq!(ellipsize("shorter", 1), "…");
+    assert_eq!(ellipsize("shorter", 4), "sho…");
+    // A wide character at the edge is left out whole, so the line ends a cell short.
+    let wide = "漢".repeat(20);
+    assert_eq!(ellipsize(&wide, 28), format!("{}…", "漢".repeat(13)));
+    assert_eq!(width(&ellipsize(&wide, 28)), 27);
+    // The cut doesn't leave a space before the ellipsis.
+    assert_eq!(
+        ellipsize("moa's layout · Ctrl-a r repairs", 14),
+        "moa's layout…"
+    );
 }

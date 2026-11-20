@@ -749,6 +749,32 @@ fn a_terms_name_is_literal_and_cut() {
     assert_eq!(the_query(&fx).1, [new_window(&name, &shown(&b.home))]);
 }
 
+/// A home that ends in `/` is still home: the tab is `⌨ ~`, by the op and by the key.
+#[test]
+fn a_home_with_a_trailing_slash_still_names_its_tab_tilde() {
+    let b = TypicalBrain::new();
+    let home = PathBuf::from(format!("{}/", b.home.display()));
+    let deps = Deps {
+        session_plugin: PathBuf::from(PLUGIN),
+        home: home.clone(),
+        ..Deps::default()
+    };
+    let mut st = loaded_with(&b, TOML, deps, b.snapshot());
+    link_up(&b, &mut st);
+    let fx = send(&b, &mut st, 1, term_op(home.clone(), None));
+    assert_eq!(the_query(&fx).1, [new_window("⌨ ~", &shown(&home))]);
+
+    // The key from the menu has no pane: it opens at home.
+    let fx = feed(
+        &b,
+        &mut st,
+        TmuxIn::Notification(Notification::Message(
+            "moa:key terminal - $0 /dev/ttys1".into(),
+        )),
+    );
+    assert_eq!(the_query(&fx).1, [new_window("⌨ ~", &shown(&home))]);
+}
+
 /// R26: the caller went before tmux answered. The tab is on its way: it still gets its tags.
 #[test]
 fn a_term_whose_caller_left_is_still_tagged() {
@@ -858,4 +884,18 @@ fn term_needs_the_terminal() {
             ))
         )]
     );
+}
+
+/// A folder with no last part, like `/`, names the tab as written; home stays `~`.
+#[test]
+fn term_at_the_root_is_named_slash_and_home_stays_a_tilde() {
+    let (b, mut st) = linked();
+    let fx = send(&b, &mut st, 1, term_op(PathBuf::from("/"), None));
+    let (_, cmds) = the_query(&fx);
+    assert_eq!(cmds, [new_window("⌨ /", "/")]);
+
+    let (b, mut st) = linked();
+    let fx = send(&b, &mut st, 1, term_op(b.home.clone(), None));
+    let (_, cmds) = the_query(&fx);
+    assert_eq!(cmds, [new_window("⌨ ~", &shown(&b.home))]);
 }
