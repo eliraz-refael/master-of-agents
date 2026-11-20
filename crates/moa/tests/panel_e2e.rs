@@ -8,9 +8,11 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use moa_platform::{canonical, kill_term, pid_alive};
-use moa_testkit::{TempBrain, Terminal, wait_for};
+use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for};
+use serde_json::Map;
 
 use common::*;
 
@@ -210,6 +212,64 @@ fn the_terminal_key_opens_where_the_panel_points() {
 
     select_row(&r.tb, &pane, "Harbor");
     r.terminal_key_opens(&pane, "⌨ b", &harbor.dir);
+}
+
+/// What `select_row` takes for the item under the bar, on rows as the tree draws them: a
+/// spinner frame, an age or a group's counts changing leave the item the same, another
+/// session is another item, and a name matches only whole.
+#[test]
+fn a_row_is_known_by_its_item_not_its_spinner() {
+    let lantern = "│ ├─ ⠋ Lantern          now│";
+    for same in [
+        "│ ├─ ⠙ Lantern          now│",
+        "│ ├─ ● Lantern           1m│",
+        "│ ├─ ! Lantern          12h│",
+    ] {
+        assert_eq!(item_of(lantern), item_of(same), "{same}");
+    }
+    assert_eq!(
+        item_of("│ ▾ Loose  2 · 2 live ⠋   │"),
+        item_of("│ ▾ Loose  3 · 1 live ⠸   │")
+    );
+    assert_ne!(item_of(lantern), item_of("│ └─ ⠋ Kite             now│"));
+    assert_ne!(item_of(lantern), item_of("│ ▾ Loose  2 · 2 live ⠋   │"));
+
+    assert!(names(lantern, "Lantern"));
+    assert!(names("│ ▾ Private  1           │", "Private"));
+    assert!(!names("│ └─ ● Kitesurf         now│", "Kite"));
+    assert!(!names("│ ▾ Private  1           │", "Priv"));
+    assert!(!names("╭─ ▤ sessions ───────────╮", "Kite"));
+}
+
+/// `select_row` knows a session by its name: with every session working, each one's glyph
+/// spins and so does its group's label, and the bar still lands on the session asked for,
+/// from above and from below, and stays there.
+#[test]
+fn select_row_lands_among_spinning_rows() {
+    let r = rig();
+    let prompt = FakeStep::Hook {
+        event: "UserPromptSubmit".into(),
+        fields: Map::new(),
+    };
+    for (name, title) in [("a", "Kite"), ("b", "Harbor"), ("c", "Beacon")] {
+        let steps = [start_hook(), prompt.clone(), FakeStep::Hang];
+        open_session_with(&r.tb, &r.term, name, title, None, &steps);
+    }
+    let pane = r.tree(&["Kite", "Harbor", "Beacon", "3 working"]);
+    for target in ["Harbor", "Kite", "Harbor", "Beacon", "Harbor", "Kite"] {
+        select_row(&r.tb, &pane, target);
+        // No key it sent is still on its way: a moment on, the bar is where it was left.
+        let stays = wait_for(Duration::from_millis(300), || {
+            let rows = colours(&r.tb, &pane);
+            let bar = rows.iter().find(|l| l.contains(SEL_BG)).map(|l| plain(l));
+            bar.filter(|b| !names(b, target))
+        });
+        assert!(
+            stays.is_none(),
+            "the bar left {target:?}: {stays:?}\n{}",
+            tab_shows(&r.tb, &pane)
+        );
+    }
 }
 
 #[test]

@@ -545,35 +545,69 @@ pub fn colours(tb: &TempBrain, pane: &str) -> Vec<String> {
     shown.lines().map(str::to_string).collect()
 }
 
+/// The words a list row shows: its runs of letters, digits and `-_./~`, less its age
+/// (`now`, `5m`, `2h`, `3d`), which changes by itself. Glyphs, spinner frames, tree guides
+/// and the frame are no words.
+pub fn row_words(row: &str) -> Vec<String> {
+    let age = |w: &str| {
+        w == "now"
+            || w.strip_suffix(['m', 'h', 'd'])
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    row.split(|c: char| !(c.is_alphanumeric() || "-_./~".contains(c)))
+        .filter(|w| !w.is_empty() && !age(w))
+        .map(str::to_string)
+        .collect()
+}
+
+/// What tells the item on a row from another: [`row_words`] less the counts that change
+/// while it stays the same item (a group's members and its `live` count). A working
+/// session's spinner, an age ticking or a group's count going up is never another item.
+pub fn item_of(row: &str) -> Vec<String> {
+    row_words(row)
+        .into_iter()
+        .filter(|w| w.chars().any(char::is_alphabetic) && w != "live")
+        .collect()
+}
+
+/// Whether `row` names `text`: `text`'s words are among the row's, whole and in a row, so
+/// `Kite` never matches `Kitesurf`.
+pub fn names(row: &str, text: &str) -> bool {
+    let want = row_words(text);
+    !want.is_empty() && row_words(row).windows(want.len()).any(|w| w == want)
+}
+
 /// The selection bar in `rows` (`capture-pane -e`'s): its row, and that row as text.
 fn bar_of(rows: &[String]) -> Option<(usize, String)> {
     let at = rows.iter().position(|l| l.contains(SEL_BG))?;
     Some((at, plain(&rows[at])))
 }
 
-/// Presses `j` or `k` in `pane` until the selection bar is on the row showing `text`.
+/// Presses `j` or `k` in `pane` until the selection bar is on the row naming `text`.
 ///
-/// The bar is judged by what its row shows, never by the row's number alone: rows can
+/// The bar is judged by the item it is on, never by the row's number alone: rows can
 /// change places under it (the tree lists sessions newest first, so a session whose agent
 /// starts moves up), and the selection follows its item there (V8). A key has landed once
-/// the bar's row or what it shows changed.
+/// the bar's row or its item ([`item_of`]) changed; a spinner, an age or a count that
+/// changes by itself is no move.
 #[track_caller]
 pub fn select_row(tb: &TempBrain, pane: &str, text: &str) {
     for _ in 0..20 {
-        // Where the bar is, and the row showing `text`.
+        // Where the bar is, and the row naming `text`.
         let found = wait_for(SHOWS, || {
             let rows = colours(tb, pane);
             let bar = bar_of(&rows)?;
-            let want = rows.iter().position(|l| plain(l).contains(text))?;
+            let want = rows.iter().position(|l| names(&plain(l), text))?;
             Some((bar, want))
         });
         let Some(((bar, on), want)) = found else {
             panic!(
-                "{pane} draws no bar, or no {text:?}\n{}",
+                "{pane} draws no bar, or no {text:?}
+{}",
                 tab_shows(tb, pane)
             );
         };
-        if on.contains(text) {
+        if names(&on, text) {
             return;
         }
         let key = if want > bar { "j" } else { "k" };
@@ -592,7 +626,7 @@ pub fn select_row(tb: &TempBrain, pane: &str, text: &str) {
             if seen.last().is_none_or(|(_, s)| *s != shown) {
                 seen.push((format!("{}ms", started.elapsed().as_millis()), shown));
             }
-            now.filter(|now| *now != (bar, on.clone()))
+            now.filter(|(at, row)| (*at, item_of(row)) != (bar, item_of(&on)))
         });
         if moved.is_none() {
             // The report itself never panics: each thing it can't read, it says why.
@@ -640,6 +674,14 @@ pub struct Opened {
     pub dir: PathBuf,
 }
 
+/// fake-claude's `SessionStart` hook, as a new session's agent sends it.
+pub fn start_hook() -> FakeStep {
+    FakeStep::Hook {
+        event: "SessionStart".into(),
+        fields: Map::from_iter([("source".to_string(), Value::String("startup".into()))]),
+    }
+}
+
 /// `moactl open --bg <root>/work/<name> --title <title>` (and `--group` when given), with
 /// fake-claude starting and hanging there.
 #[track_caller]
@@ -650,13 +692,29 @@ pub fn open_session(
     title: &str,
     group: Option<&str>,
 ) -> Opened {
+    open_session_with(
+        tb,
+        term,
+        name,
+        title,
+        group,
+        &[start_hook(), FakeStep::Hang],
+    )
+}
+
+/// [`open_session`], with fake-claude playing `steps`.
+#[track_caller]
+pub fn open_session_with(
+    tb: &TempBrain,
+    term: &Terminal,
+    name: &str,
+    title: &str,
+    group: Option<&str>,
+    steps: &[FakeStep],
+) -> Opened {
     let dir = tb.root().join("work").join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    let start = FakeStep::Hook {
-        event: "SessionStart".into(),
-        fields: Map::from_iter([("source".to_string(), Value::String("startup".into()))]),
-    };
-    write_script(&dir, &[start, FakeStep::Hang]);
+    write_script(&dir, steps);
     let path = dir.display().to_string();
     let mut args = vec!["--json", "open", "--bg", &path, "--title", title];
     if let Some(group) = group {
