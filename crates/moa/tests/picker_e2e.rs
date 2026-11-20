@@ -170,9 +170,9 @@ impl Rig {
     }
 
     /// `Ctrl-a /`: the picker's popup draws each of `shows` inside its border, and its panel
-    /// is connected to moa. The pid of the popup's moa.
+    /// is connected to moa.
     #[track_caller]
-    fn open_picker_popup(&self, shows: &[&str]) -> u32 {
+    fn open_picker_popup(&self, shows: &[&str]) {
         self.key("/");
         let up = wait_for(SHOWS, || (popups(&self.tb, "picker") == 1).then_some(()));
         assert!(
@@ -182,21 +182,19 @@ impl Rig {
             what_happened(&self.tb, &self.term)
         );
         popup_shows(&self.term, PICKER_TITLE, shows);
-        wait_for(SHOWS, || popup_pid(&self.tb, "picker")).expect("no moa runs the picker's popup")
     }
 
-    /// The picker's popup, its moa `pid`, is gone: its panel left moa, tmux reaped its moa,
-    /// and the terminal's screen no longer shows it.
+    /// The picker's popup is gone: its panel left moa, and tmux closed it, off the
+    /// terminal's screen.
     #[track_caller]
-    fn picker_popup_goes(&self, pid: u32) {
+    fn picker_popup_goes(&self) {
         let gone = wait_for(SHOWS, || (popups(&self.tb, "picker") == 0).then_some(()));
         assert!(
             gone.is_some(),
             "the picker's popup never closed\n{}",
             what_happened(&self.tb, &self.term)
         );
-        popup_reaped(&self.tb, pid);
-        self.on_screen(&[PICKER_TITLE], false);
+        popup_closes(&self.tb, &self.term, PICKER_TITLE);
     }
 
     /// Waits until the query inside the picker's popup is `want`.
@@ -285,11 +283,11 @@ fn the_popup_picker_finds_and_focuses() {
     let counts = r.counts();
 
     let logged = popup_log(&r.tb, "picker").len();
-    let pid = r.open_picker_popup(&["Lantern", "Kite", "Harbor"]);
+    r.open_picker_popup(&["Lantern", "Kite", "Harbor"]);
     r.term.press(b"kit");
     r.popup_query_becomes("kit");
     r.term.press(ENTER);
-    r.picker_popup_goes(pid);
+    r.picker_popup_goes();
     let resumed = wait_for(SHOWS, || {
         (r.spot_session().as_deref() == Some(kite.as_str())).then_some(())
     });
@@ -308,9 +306,9 @@ fn the_popup_picker_finds_and_focuses() {
 
     // Again: one more start line and one more end line, and nothing started.
     let logged = popup_log(&r.tb, "picker").len();
-    let pid = r.open_picker_popup(&["Lantern", "Kite", "Harbor"]);
+    r.open_picker_popup(&["Lantern", "Kite", "Harbor"]);
     r.term.press(ESC);
-    r.picker_popup_goes(pid);
+    r.picker_popup_goes();
     one_popup_logged(&r.tb, logged, QUIT);
     assert_eq!(r.counts(), counts, "the popup started something");
 }

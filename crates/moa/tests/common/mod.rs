@@ -802,25 +802,6 @@ pub fn popups(tb: &TempBrain, view: &str) -> usize {
         .count()
 }
 
-/// The pid of `view`'s popup's moa: the child of this root's tmux server that runs
-/// `panel <view> --once` (tmux runs a popup's program itself, without a shell).
-pub fn popup_pid(tb: &TempBrain, view: &str) -> Option<u32> {
-    let server = server_pid(tb);
-    let runs = format!("panel {view} --once");
-    let ps = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,command="])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&ps.stdout).lines().find_map(|l| {
-        let mut f = l.split_whitespace();
-        let (pid, ppid) = (f.next()?, f.next()?);
-        let command = f.collect::<Vec<_>>().join(" ");
-        (ppid == server && command.contains(&runs))
-            .then(|| pid.parse().ok())
-            .flatten()
-    })
-}
-
 /// What `panel.log` says of `view`'s popups, in order: each line's end.
 pub fn popup_log(tb: &TempBrain, view: &str) -> Vec<String> {
     let log = std::fs::read_to_string(tb.paths().log_dir().join("panel.log")).unwrap_or_default();
@@ -830,19 +811,22 @@ pub fn popup_log(tb: &TempBrain, view: &str) -> Vec<String> {
         .collect()
 }
 
-/// Waits until tmux has reaped the popup moa `pid`, which closes the popup, so the next key
-/// reaches tmux rather than the popup.
+/// Waits until tmux has closed the popup titled `title` on `term`, as the user sees it: its
+/// border, which tmux draws until it reaps the popup's moa, is off the screen. Then the
+/// next key reaches tmux rather than the popup. No process is looked up: `ps` isn't there
+/// in every place the tests run (nix's build sandbox).
 #[track_caller]
-pub fn popup_reaped(tb: &TempBrain, pid: u32) {
-    let reaped = wait_for(SHOWS, || {
+pub fn popup_closes(tb: &TempBrain, term: &Terminal, title: &str) {
+    let closed = wait_for(SHOWS, || {
         // tmux 3.4 and 3.5 built with utempter can lose the exit until tmux reaps a child
         // of its own; the daemon nudges, and so does the test, unordered with it.
         tmux(tb, &["run-shell", "true"]);
-        (!moa_platform::pid_alive(pid)).then_some(())
+        (!screen::Screen::of(term).text().contains(title)).then_some(())
     });
     assert!(
-        reaped.is_some(),
-        "tmux never reaped the popup's moa ({pid})"
+        closed.is_some(),
+        "tmux never closed the popup {title:?}; the terminal shows:\n{}",
+        screen::Screen::of(term).text()
     );
 }
 
@@ -954,8 +938,8 @@ pub fn a_sheet_opens_and_closes(
 
 /// `press` opens help's popup (S10) on `term`: it draws help over the tab, each of `shows`
 /// inside its border, as a panel moa hears from. `q` closes it: the panel goes, its moa ends
-/// well (`panel.log` says it started, then quit) and tmux reaps it, so the next key reaches
-/// tmux; the popup is off the screen, and the terminal is still on the tab it was on.
+/// well (`panel.log` says it started, then quit) and tmux closes the popup, so the next key
+/// reaches tmux; the terminal is still on the tab it was on.
 #[track_caller]
 pub fn the_help_popup_opens_and_closes(
     tb: &TempBrain,
@@ -974,7 +958,6 @@ pub fn the_help_popup_opens_and_closes(
         what_happened(tb, term)
     );
     popup_shows(term, HELP_TITLE, shows);
-    let pid = wait_for(SHOWS, || popup_pid(tb, "help")).expect("no moa runs help's popup");
     term.press(b"q");
     let gone = wait_for(SHOWS, || (popups(tb, "help") == 0).then_some(()));
     assert!(
@@ -982,8 +965,7 @@ pub fn the_help_popup_opens_and_closes(
         "help's popup never closed\n{}",
         what_happened(tb, term)
     );
-    popup_reaped(tb, pid);
-    screen_shows(term, &[HELP_TITLE], false);
+    popup_closes(tb, term, HELP_TITLE);
     assert_eq!(
         popup_log(tb, "help")[logged..],
         ["started", "stopped: quit"]
