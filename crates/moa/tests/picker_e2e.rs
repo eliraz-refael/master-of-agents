@@ -24,14 +24,13 @@ const ENTER: &[u8] = b"\r";
 const CTRL_U: &[u8] = b"\x15";
 /// A terminal tall enough for help to show its "In every panel" section unscrolled, as a
 /// popup (90% of it) and as a tab.
-const TALL: (usize, usize) = (120, 60);
+const TALL: (u16, u16) = (120, 60);
 
 /// A root with the fake account, and `moa` on a terminal with the cockpit built.
 struct Rig {
     // Dropped before `tb`, as a test's own terminal is.
     term: Terminal,
     tb: TempBrain,
-    size: (usize, usize),
 }
 
 fn rig() -> Rig {
@@ -39,20 +38,21 @@ fn rig() -> Rig {
 }
 
 /// [`rig`] on a terminal of `size`, with `more` added to the root's `moa.toml`.
-fn rig_with(size: (usize, usize), more: &str) -> Rig {
+fn rig_with(size: (u16, u16), more: &str) -> Rig {
     let tb = TempBrain::new(None);
     moa_toml_with_fake_account(&tb);
     let file = tb.paths().config_file();
     let toml = fs::read_to_string(&file).unwrap() + more;
     fs::write(&file, toml).unwrap();
     let term = cockpit_up_sized(&tb, size);
-    Rig { term, tb, size }
+    Rig { term, tb }
 }
 
-/// The query a picker shows on `screen`'s query line (`› query   3/3 · 3 live`): the words
-/// after `›`, up to the match count.
-fn query_on(screen: &str) -> Option<String> {
-    let line = screen.lines().find(|l| l.contains('›'))?;
+/// The query a picker shows on its query line (`› query   3/3 · 3 live`), the first line of
+/// `drawn` (a panel's screen, or the inside of its popup) that has a `›`: the words after
+/// it, up to the match count.
+fn query_on(drawn: &str) -> Option<String> {
+    let line = drawn.lines().find(|l| l.contains('›'))?;
     let (_, after) = line.split_once('›')?;
     let count = |w: &str| {
         w.split_once('/').is_some_and(|(a, b)| {
@@ -82,16 +82,10 @@ impl Rig {
         );
     }
 
-    /// What the terminal shows now.
-    fn screen(&self) -> String {
-        let (cols, rows) = self.size;
-        Screen::of(&self.term, cols, rows).text()
-    }
-
     /// Waits until the terminal's screen shows each of `texts`, or with `shown` false none.
     #[track_caller]
     fn on_screen(&self, texts: &[&str], shown: bool) {
-        screen_shows(&self.term, self.size, texts, shown);
+        screen_shows(&self.term, texts, shown);
     }
 
     /// The daemon's launches and its panel starts.
@@ -175,8 +169,8 @@ impl Rig {
         );
     }
 
-    /// `Ctrl-a /`: the picker's popup draws its title and each of `shows`, and its panel is
-    /// connected to moa. The pid of the popup's moa.
+    /// `Ctrl-a /`: the picker's popup draws each of `shows` inside its border, and its panel
+    /// is connected to moa. The pid of the popup's moa.
     #[track_caller]
     fn open_picker_popup(&self, shows: &[&str]) -> u32 {
         self.key("/");
@@ -187,9 +181,7 @@ impl Rig {
             panels(&self.tb),
             what_happened(&self.tb, &self.term)
         );
-        let mut all = vec![PICKER_TITLE];
-        all.extend(shows);
-        self.on_screen(&all, true);
+        popup_shows(&self.term, PICKER_TITLE, shows);
         wait_for(SHOWS, || popup_pid(&self.tb, "picker")).expect("no moa runs the picker's popup")
     }
 
@@ -207,16 +199,17 @@ impl Rig {
         self.on_screen(&[PICKER_TITLE], false);
     }
 
-    /// Waits until the popup's query is `want`.
+    /// Waits until the query inside the picker's popup is `want`.
     #[track_caller]
     fn popup_query_becomes(&self, want: &str) {
         let seen = wait_for(SHOWS, || {
-            (query_on(&self.screen()).as_deref() == Some(want)).then_some(())
+            let inside = popup_text(&self.term, PICKER_TITLE)?;
+            (query_on(&inside).as_deref() == Some(want)).then_some(())
         });
         assert!(
             seen.is_some(),
             "the popup's query never became {want:?}:\n{}",
-            self.screen()
+            Screen::of(&self.term).text()
         );
     }
 
@@ -240,17 +233,16 @@ fn resume_hook() -> FakeStep {
     }
 }
 
-/// How many start lines and end lines `lines` (`popup_log`'s) hold.
-fn starts_and_ends(lines: &[String]) -> (usize, usize) {
-    let starts = lines.iter().filter(|l| *l == "started").count();
-    let ends = lines.iter().filter(|l| is_end(l)).count();
-    (starts, ends)
-}
+/// What `panel.log` ends a picker popup with: after a pick moa took (the panel closes on its
+/// reply), and after Esc (a key that quits it).
+const PICKED: &str = "stopped: closed";
+const QUIT: &str = "stopped: quit";
 
-/// Waits until `panel.log` has, after its first `from` lines for the picker's popup, one
-/// start line and one end line, and nothing else.
+/// Waits until `panel.log` has, after its first `from` lines for the picker's popup, its
+/// start line and then `end`, and nothing else: a popup that panicked, or ended another
+/// way, fails.
 #[track_caller]
-fn one_popup_logged(tb: &TempBrain, from: usize) {
+fn one_popup_logged(tb: &TempBrain, from: usize, end: &str) {
     let logged = wait_for(SHOWS, || {
         let lines = popup_log(tb, "picker");
         (lines.len() >= from + 2).then(|| lines[from..].to_vec())
@@ -261,8 +253,7 @@ fn one_popup_logged(tb: &TempBrain, from: usize) {
             popup_log(tb, "picker")
         )
     });
-    assert_eq!(starts_and_ends(&lines), (1, 1), "{lines:?}");
-    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines, ["started", end]);
 }
 
 /// S8 and Review Focus 5: `Ctrl-a /` opens the picker as a popup tmux runs; typing finds
@@ -289,7 +280,9 @@ fn the_popup_picker_finds_and_focuses() {
         (ls_display(&r.tb, &kite).as_deref() == Some("asleep")).then_some(())
     });
     assert!(asleep.is_some(), "{:?}", ls_display(&r.tb, &kite));
-    let launches = r.counts().0;
+    // Neither moa's launches nor its panel starts: tmux starts the popup, and the resume's
+    // tab is tmux's too.
+    let counts = r.counts();
 
     let logged = popup_log(&r.tb, "picker").len();
     let pid = r.open_picker_popup(&["Lantern", "Kite", "Harbor"]);
@@ -306,15 +299,20 @@ fn the_popup_picker_finds_and_focuses() {
         cockpit_panes(&r.tb),
         what_happened(&r.tb, &r.term)
     );
-    one_popup_logged(&r.tb, logged);
+    one_popup_logged(&r.tb, logged, PICKED);
+    assert_eq!(
+        r.counts(),
+        counts,
+        "the popup or its pick started something"
+    );
 
-    // Again: one more start line and one more end line.
+    // Again: one more start line and one more end line, and nothing started.
     let logged = popup_log(&r.tb, "picker").len();
     let pid = r.open_picker_popup(&["Lantern", "Kite", "Harbor"]);
     r.term.press(ESC);
     r.picker_popup_goes(pid);
-    one_popup_logged(&r.tb, logged);
-    assert_eq!(r.counts().0, launches, "a popup was moa's launch");
+    one_popup_logged(&r.tb, logged, QUIT);
+    assert_eq!(r.counts(), counts, "the popup started something");
 }
 
 /// S9: the first `Ctrl-a s` starts the picker's panel, parked in `_moa`, and links its tab
@@ -342,8 +340,9 @@ fn the_full_tab_picker_starts_once_then_never() {
         "Esc left the terminal on {:?}",
         client_field(&r.tb, &r.term, "#{window_name}")
     );
+    let counts = (launches, starts + 1);
+    assert_eq!(r.counts(), counts, "closing the picker started something");
 
-    let counts = r.counts();
     let again = r.open_picker_tab(&[]);
     assert_eq!((&again.id, again.pid), (&picker.id, picker.pid));
     assert_eq!(
@@ -441,7 +440,7 @@ fn a_layout_switch_with_the_picker_open_keeps_it() {
 fn help_shows_the_keys_in_both_forms() {
     let shows = ["find a session", "hold Shift to select text"];
     let r = rig_with(TALL, "");
-    the_help_popup_opens_and_closes(&r.tb, &r.term, TALL, || r.key("?"), &shows);
+    the_help_popup_opens_and_closes(&r.tb, &r.term, || r.key("?"), &shows);
     drop(r);
 
     let r = rig_with(TALL, "\n[ui]\npicker = \"tab\"\n");
@@ -454,9 +453,8 @@ fn help_shows_the_keys_in_both_forms() {
 /// columns, and `q` closes it.
 #[test]
 fn help_opens_on_a_small_terminal() {
-    let small = (80, 24);
-    let r = rig_with(small, "");
-    the_help_popup_opens_and_closes(&r.tb, &r.term, small, || r.key("?"), &[HELP_SHOWS]);
+    let r = rig_with((80, 24), "");
+    the_help_popup_opens_and_closes(&r.tb, &r.term, || r.key("?"), &[HELP_SHOWS]);
 }
 
 /// S5, S6 and Review Focus 3: `Ctrl-a n` asks for a folder, prefilled with the brain's
@@ -479,11 +477,7 @@ fn ctrl_a_n_opens_a_session() {
     fs::create_dir_all(&kite).unwrap();
     write_script(&kite, &[start_hook(), FakeStep::Hang]);
     let term = cockpit_up(&tb);
-    let r = Rig {
-        term,
-        tb,
-        size: TERM_SIZE,
-    };
+    let r = Rig { term, tb };
 
     let title = r#"it's "a" $HOME #1"#;
     r.key("n");
@@ -526,6 +520,8 @@ fn ctrl_a_n_opens_a_session() {
     r.term.press(b"~/nope");
     r.on_screen(&["new session · folder: ~/nope"], true);
     r.term.press(ENTER);
-    r.on_screen(&["moa: no folder ~/nope"], true);
+    // Read from what the terminal was sent since `Ctrl-a`, not the screen: tmux takes the
+    // notice down after 4 s.
+    r.says("moa: no folder ~/nope");
     assert!(!r.tb.root().join("nope").exists(), "~/nope was made");
 }

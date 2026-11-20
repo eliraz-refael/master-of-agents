@@ -26,6 +26,8 @@ pub struct Terminal {
     tty: String,
     out: Arc<Mutex<Vec<u8>>>,
     mark: Mutex<usize>,
+    /// Its columns and rows, as last set.
+    size: Mutex<(u16, u16)>,
 }
 
 /// Makes `cmd`'s child start a session of its own, so it has no controlling terminal, as a
@@ -119,7 +121,13 @@ impl Terminal {
             tty,
             out,
             mark: Mutex::new(0),
+            size: Mutex::new((cols, rows)),
         })
+    }
+
+    /// Its columns and rows: what it was opened at, or last resized to.
+    pub fn size(&self) -> (u16, u16) {
+        *lock(&self.size)
     }
 
     /// Types `bytes` as if the user did.
@@ -177,6 +185,7 @@ impl Terminal {
                 ws_ypixel: 0,
             },
         )?;
+        *lock(&self.size) = (cols, rows);
         let sent = Command::new("kill")
             .args(["-WINCH", &self.child.id().to_string()])
             .status()?;

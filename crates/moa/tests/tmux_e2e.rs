@@ -101,7 +101,7 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
         }
     };
     a_sheet_opens_and_closes(&tb, &term, press("s"), &[PICKER_SHOWS], CTRL_C);
-    the_help_popup_opens_and_closes(&tb, &term, TERM_SIZE, press("?"), &[HELP_SHOWS]);
+    the_help_popup_opens_and_closes(&tb, &term, press("?"), &[HELP_SHOWS]);
     // `n` asks for a folder in the status line; Ctrl-c puts it away and answers nothing.
     // (Esc would too, but tmux reads an Esc then the next Ctrl-a as one key.)
     moa_key(&tb, &term, KeyAction::New.key(), "new session · folder:");
@@ -117,7 +117,7 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
         );
         term.press(KeyAction::Help.key().as_bytes());
     };
-    the_help_popup_opens_and_closes(&tb, &term, TERM_SIZE, menu_help, &[HELP_SHOWS]);
+    the_help_popup_opens_and_closes(&tb, &term, menu_help, &[HELP_SHOWS]);
 
     // Pure keys: the next and previous tab, and no split in the cockpit.
     tmux(&tb, &["new-window", "-d", "-t", "=moa:"]);

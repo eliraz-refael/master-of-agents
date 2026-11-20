@@ -225,7 +225,7 @@ impl Rig {
 
     /// What the terminal shows now.
     fn screen(&self) -> Screen {
-        Screen::of(&self.term, COLS, ROWS)
+        Screen::of(&self.term)
     }
 
     /// Waits until `pane` is the cockpit's active pane.

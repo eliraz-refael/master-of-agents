@@ -23,7 +23,7 @@ pub const STATUS_LINE: &str = "^a keys";
 pub const SHOWS: Duration = Duration::from_secs(10);
 
 /// The size `open` gives a terminal: columns, rows.
-pub const TERM_SIZE: (usize, usize) = (120, 30);
+pub const TERM_SIZE: (u16, u16) = (120, 30);
 
 /// `moa args…` on a terminal ([`TERM_SIZE`]), with the root's environment plus `extra`.
 pub fn open(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Terminal {
@@ -34,7 +34,7 @@ pub fn open(tb: &TempBrain, args: &[&str], extra: &[(&str, &str)]) -> Terminal {
 /// `extra`.
 pub fn open_sized(
     tb: &TempBrain,
-    size: (usize, usize),
+    size: (u16, u16),
     args: &[&str],
     extra: &[(&str, &str)],
 ) -> Terminal {
@@ -46,7 +46,6 @@ pub fn open_sized(
     );
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     let (cols, rows) = size;
-    let (cols, rows) = (u16::try_from(cols).unwrap(), u16::try_from(rows).unwrap());
     Terminal::spawn(Path::new(MOA), &args, &env, cols, rows).unwrap()
 }
 
@@ -491,7 +490,7 @@ pub fn cockpit_up(tb: &TempBrain) -> Terminal {
 
 /// [`cockpit_up`] on a terminal of `size` (columns, rows).
 #[track_caller]
-pub fn cockpit_up_sized(tb: &TempBrain, size: (usize, usize)) -> Terminal {
+pub fn cockpit_up_sized(tb: &TempBrain, size: (u16, u16)) -> Terminal {
     let mut conf = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -847,14 +846,13 @@ pub fn popup_reaped(tb: &TempBrain, pid: u32) {
     );
 }
 
-/// Waits until `term`, `size` (columns, rows), shows each of `texts` on its screen, or with
-/// `shown` false until it shows none of them: what a popup draws, which is no pane's, so
-/// `capture-pane` can't read it.
+/// Waits until `term`'s screen shows each of `texts`, or with `shown` false until it shows
+/// none of them: what tmux draws over the panes (a popup, the status line), which
+/// `capture-pane` can't read.
 #[track_caller]
-pub fn screen_shows(term: &Terminal, size: (usize, usize), texts: &[&str], shown: bool) {
-    let (cols, rows) = size;
+pub fn screen_shows(term: &Terminal, texts: &[&str], shown: bool) {
     let seen = wait_for(SHOWS, || {
-        let text = screen::Screen::of(term, cols, rows).text();
+        let text = screen::Screen::of(term).text();
         let ok = if shown {
             texts.iter().all(|t| text.contains(t))
         } else {
@@ -866,7 +864,49 @@ pub fn screen_shows(term: &Terminal, size: (usize, usize), texts: &[&str], shown
         seen.is_some(),
         "the terminal {} {texts:?}:\n{}",
         if shown { "never showed" } else { "still shows" },
-        screen::Screen::of(term, cols, rows).text()
+        screen::Screen::of(term).text()
+    );
+}
+
+/// What the popup titled `title` on `term`'s screen holds inside its border, row by row:
+/// the columns between the corners around the title, from the row below it to the bottom
+/// corner. `None` while no popup with that title is drawn. What the tabs behind it show,
+/// beside or below it, is never read.
+pub fn popup_text(term: &Terminal, title: &str) -> Option<String> {
+    let rows: Vec<Vec<char>> = screen::Screen::of(term)
+        .text()
+        .lines()
+        .map(|l| l.chars().collect())
+        .collect();
+    let want: Vec<char> = title.chars().collect();
+    let (top, at) = rows.iter().enumerate().find_map(|(y, row)| {
+        let x = row.windows(want.len()).position(|w| w == want.as_slice())?;
+        Some((y, x))
+    })?;
+    let row = &rows[top];
+    let left = row[..at].iter().rposition(|c| matches!(c, '╭' | '┌'))?;
+    let right = at + row[at..].iter().position(|c| matches!(c, '╮' | '┐'))?;
+    let mut inside = Vec::new();
+    for row in &rows[top + 1..] {
+        if matches!(row.get(left), Some('╰' | '└')) {
+            return Some(inside.join("\n"));
+        }
+        inside.push(row.get(left + 1..right)?.iter().collect::<String>());
+    }
+    None
+}
+
+/// Waits until the popup titled `title` on `term` shows each of `texts` inside its border.
+#[track_caller]
+pub fn popup_shows(term: &Terminal, title: &str, texts: &[&str]) {
+    let seen = wait_for(SHOWS, || {
+        let inside = popup_text(term, title)?;
+        texts.iter().all(|t| inside.contains(t)).then_some(())
+    });
+    assert!(
+        seen.is_some(),
+        "no popup {title:?} showed {texts:?}; the terminal shows:\n{}",
+        screen::Screen::of(term).text()
     );
 }
 
@@ -912,16 +952,14 @@ pub fn a_sheet_opens_and_closes(
     );
 }
 
-/// `press` opens help's popup (S10) on `term`, `size` (columns, rows): it draws help over
-/// the tab, its title and each of `shows`, as a panel moa hears from. `q` closes it: the
-/// panel goes, its moa ends well (`panel.log` says it started, then quit) and tmux reaps
-/// it, so the next key reaches tmux; the popup is off the screen, and the terminal is still
-/// on the tab it was on.
+/// `press` opens help's popup (S10) on `term`: it draws help over the tab, each of `shows`
+/// inside its border, as a panel moa hears from. `q` closes it: the panel goes, its moa ends
+/// well (`panel.log` says it started, then quit) and tmux reaps it, so the next key reaches
+/// tmux; the popup is off the screen, and the terminal is still on the tab it was on.
 #[track_caller]
 pub fn the_help_popup_opens_and_closes(
     tb: &TempBrain,
     term: &Terminal,
-    size: (usize, usize),
     press: impl Fn(),
     shows: &[&str],
 ) {
@@ -935,9 +973,7 @@ pub fn the_help_popup_opens_and_closes(
         panels(tb),
         what_happened(tb, term)
     );
-    let mut all = vec![HELP_TITLE];
-    all.extend(shows);
-    screen_shows(term, size, &all, true);
+    popup_shows(term, HELP_TITLE, shows);
     let pid = wait_for(SHOWS, || popup_pid(tb, "help")).expect("no moa runs help's popup");
     term.press(b"q");
     let gone = wait_for(SHOWS, || (popups(tb, "help") == 0).then_some(()));
@@ -947,7 +983,7 @@ pub fn the_help_popup_opens_and_closes(
         what_happened(tb, term)
     );
     popup_reaped(tb, pid);
-    screen_shows(term, size, &[HELP_TITLE], false);
+    screen_shows(term, &[HELP_TITLE], false);
     assert_eq!(
         popup_log(tb, "help")[logged..],
         ["started", "stopped: quit"]
