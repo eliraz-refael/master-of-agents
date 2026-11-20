@@ -68,10 +68,20 @@ pub struct Topology {
 /// The name of the session that holds the cockpit, and of the cockpit window in it.
 const COCKPIT: &str = "moa";
 
-/// A terminal's name: its label without the `⌨ ` moa puts first. A label set by hand is
-/// the name as it is.
+/// What a terminal with no label is called: an agent that ran in it, in the spot, took its
+/// label (`● <title>`) and left with it. The cockpit names a shell it sends home the same
+/// (`⌨ shell`).
+const UNNAMED: &str = "shell";
+
+/// A terminal's name: its label without the `⌨ ` moa puts first, or [`UNNAMED`] when that
+/// leaves nothing. A label set by hand is the name as it is.
 fn term_name(label: &str) -> &str {
-    label.strip_prefix("⌨ ").unwrap_or(label)
+    let name = label.strip_prefix("⌨ ").unwrap_or(label);
+    if name.trim().is_empty() {
+        UNNAMED
+    } else {
+        name
+    }
 }
 
 /// Replace a value, saying whether it differed.

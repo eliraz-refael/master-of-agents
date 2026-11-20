@@ -19,6 +19,7 @@ use moa_core::model::{
     Location, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
+use moa_core::publish::Topic;
 use moa_core::state::{Deps, LoadNote, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::link::NOT_READY;
@@ -747,6 +748,48 @@ fn a_terms_name_is_literal_and_cut() {
     let fx = send(&b, &mut st, 3, term_op(b.home.clone(), Some(long)));
     let name: String = format!("⌨ {long}").chars().take(24).collect();
     assert_eq!(the_query(&fx).1, [new_window(&name, &shown(&b.home))]);
+}
+
+/// S's agent was typed into a terminal moa opened, `%9`: while S is tagged there, the tab is
+/// S's session, not a terminal. Its agent left, a `close` (a client's input, not tmux's)
+/// takes the session tag off, and the `terms` topic has the terminal at once.
+#[test]
+fn a_terminal_whose_agent_left_is_published_by_the_close() {
+    AGENT_RUNS.with(|c| c.set(true));
+    let mut r = World::adopted().reconciled();
+    // The link's own listing: `%9` tagged with S, and marked a terminal.
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: vec![
+                Ok(vec!["S $0 moa".into()]),
+                Ok(vec![format!("P %9 @9 $0 1 1 0 0 {S} 0 ")]),
+                Ok(Vec::new()),
+                Ok(vec!["T %9 ⌨ lantern".into()]),
+            ],
+        },
+    );
+    let terms = |st: &State| st.model().topics[&Topic::Terms].clone();
+    assert!(terms(&r.st).is_empty(), "S's, not a terminal");
+
+    AGENT_RUNS.with(|c| c.set(false));
+    let fx = r.close(1);
+    // Each model published carries every topic: the close's own commit still has none, the
+    // last one has the terminal.
+    let published: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Publish(Publish::Model(m)) => m.topics.get(&Topic::Terms),
+            _ => None,
+        })
+        .map(|t| serde_json::to_value(&**t).unwrap())
+        .collect();
+    let want = json!({ "%9": { "key": "%9", "name": "lantern" } });
+    assert_eq!(published.last(), Some(&want), "{fx:?}");
+    assert_eq!(serde_json::to_value(&*terms(&r.st)).unwrap(), want);
 }
 
 /// A home that ends in `/` is still home: the tab is `⌨ ~`, by the op and by the key.

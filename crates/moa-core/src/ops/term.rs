@@ -11,7 +11,7 @@ use crate::effect::{Effect, LogLevel};
 use crate::folders::tilde;
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::state::State;
-use crate::tmux::cmd::{Cmd, literal_format};
+use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
 use crate::tmux::link::{
@@ -153,7 +153,7 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
         // A folder with no name, like `/`, is named as it is written.
         .unwrap_or_else(|| folder.clone());
     // On one line: a newline in the label would print as a line of the terminals' list.
-    let named = named.replace(char::is_control, " ");
+    let named = one_line(&named);
     // Cut before `literal_format`, as a launch's name is.
     let name = cut(&format!("⌨ {named}"), WINDOW_NAME_CUT);
     let cmd = Cmd::new("new-window")

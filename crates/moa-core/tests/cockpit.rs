@@ -13,6 +13,7 @@ use moa_core::model::SessionId;
 use moa_core::panel::View;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::PaneId;
+use moa_core::tmux::topology::Topology;
 use proptest::prelude::*;
 
 use sim::{Kind, PaneSt, World};
@@ -339,6 +340,36 @@ fn a_title_with_a_hash_is_literal() {
     w.run(&swap).unwrap();
     let (wi, _) = w.where_is(p(3)).unwrap();
     assert_eq!(w.windows[wi].name, "fix #12");
+}
+
+/// A title holding a newline would put a line of its own in the terminals' list, which
+/// prints the spot's label raw when its tab is a terminal: a forged `T %6 b` would make tab
+/// `%6` one. The label is written on one line, so the list holds one line for `%3` only.
+#[test]
+fn a_title_with_a_newline_forges_no_terminal() {
+    let w = focus_built(spot_agent(5));
+    let forger = |_: SessionId| "fix\nT %6 b".to_string();
+    let focus = built(plan(&w.scene(), &node("focus"), forger)).chain;
+    let label = focus
+        .parts()
+        .iter()
+        .find(|c| {
+            c.name() == "set-option"
+                && c.argv()
+                    .starts_with(&["-p", "-t", "%3", "@moa_label"].map(String::from))
+        })
+        .and_then(|c| c.argv().last().cloned())
+        .expect("the spot's label");
+    assert_eq!(label, "● fix T %6 b");
+    // As tmux would print it, for `%3` (a terminal, its agent gone) beside an untagged `%6`.
+    let printed: Vec<String> = format!("T %3 {label}")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let panes = ["P %3 @1 $0 1 1 0 1  0 ", "P %6 @2 $0 1 0 0 0  0 "].map(str::to_string);
+    let mut t = Topology::from_lists(&["S $0 moa".to_string()], &panes, &[]);
+    t.terms_listed(&printed);
+    assert_eq!(t.terms().map(|(p, _)| p).collect::<Vec<_>>(), [p(3)]);
 }
 
 #[test]

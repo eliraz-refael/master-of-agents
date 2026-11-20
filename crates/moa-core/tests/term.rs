@@ -155,7 +155,8 @@ const SESSION: &str = "00000000-0000-4000-8000-0000000000c1";
 /// An agent typed into a terminal moa opened: its tab keeps the terminal mark, but it runs
 /// a session's agent (it is tagged with the session), so it is that session and no
 /// terminal. In the spot its label is the agent's (`● fix`); back in a tab of its own it
-/// has none. Once the agent is gone and the tag with it, it is a terminal again.
+/// has none. Once the agent is gone and the tag with it, it is a terminal again, still with
+/// no label: it is called `shell`, as the cockpit calls a shell it sends home.
 #[test]
 fn a_terminal_running_an_agent_is_its_session() {
     let (b, mut st) = loaded(TOML);
@@ -180,10 +181,28 @@ fn a_terminal_running_an_agent_is_its_session() {
         [(ReqId(1), Err(OpError("that terminal is gone".into())))]
     );
 
+    let home = "P %5 @4 $0 1 1 0 0  0 ";
+    feed(&b, &mut st, notified.clone());
+    let fx = refreshed(&b, &mut st, &[home, BOTH[1]], &["T %5 "]);
+    let want = BTreeMap::from([row("%5", "shell")]);
+    assert_eq!(published_terms(&fx), std::slice::from_ref(&want));
+    let fx = show(&b, &mut st, "%5");
+    assert_eq!(reply_text(&fx), Ok("went to shell".to_string()));
+
+    // Labelled again by hand, it goes by that.
     feed(&b, &mut st, notified);
-    let fx = refreshed(&b, &mut st, BOTH, &["T %5 ⌨ kite"]);
+    let fx = refreshed(&b, &mut st, &[home, BOTH[1]], &["T %5 ⌨ kite"]);
     let want = BTreeMap::from([row("%5", "kite")]);
     assert_eq!(published_terms(&fx), std::slice::from_ref(&want));
+}
+
+/// The text of the one reply in `fx`, or its refusal.
+fn reply_text(fx: &[Effect]) -> Result<String, String> {
+    match &replies(fx)[..] {
+        [(_, Ok(done))] => Ok(done.text.clone()),
+        [(_, Err(OpError(why)))] => Err(why.clone()),
+        other => panic!("one reply: {other:?}"),
+    }
 }
 
 /// A listing that changes no terminal publishes none.
