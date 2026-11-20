@@ -9,7 +9,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use moa_platform::{canonical, pid_alive};
+use moa_platform::{canonical, kill_term, pid_alive};
 use moa_testkit::{TempBrain, Terminal, wait_for};
 
 use common::*;
@@ -591,6 +591,113 @@ fn a_panel_tmux_kills_logs_one_plain_end_line() {
         .collect();
     assert_eq!(ends.len(), 1, "{ends:?}\n{written}");
     assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
+}
+
+/// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
+/// panel behind.
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// L14: a panel whose terminal goes with no signal at all (its pty's master closed; the pty
+/// isn't its controlling terminal, so nothing sends SIGHUP) ends by itself, with one end
+/// line, rather than spinning in the terminal's read and ignoring SIGTERM.
+///
+/// The panel is linked to moa and idle (an empty tree: no timer, no push), so the only
+/// thing that can end it is noticing its terminal went.
+#[test]
+fn a_panel_whose_terminal_goes_ends_by_itself() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    let r = rig();
+    let log = r.tb.paths().log_dir().join("panel.log");
+    let (master, slave, _) = moa_testkit::pty(80, 24).unwrap();
+    let child = Command::new(MOA)
+        .args(["panel", "tree"])
+        .env_clear()
+        .envs(r.tb.env())
+        .current_dir(r.tb.root())
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut child = Reaped(child);
+    let pid = child.0.id();
+
+    // What the panel draws is read until it is linked and in its loop; then the reader lets
+    // go of its copy of the master, so dropping `master` closes the pty's last master end.
+    let seen = Arc::new(Mutex::new(String::new()));
+    let reader = {
+        let mut master = master.try_clone().unwrap();
+        let seen = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = master.read(&mut buf) {
+                let mut seen = seen.lock().unwrap();
+                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if n == 0 || plain(&seen).contains(TREE_HINT) {
+                    return;
+                }
+            }
+        })
+    };
+    let drawn = wait_for(SHOWS, || reader.is_finished().then_some(()));
+    assert!(
+        drawn.is_some(),
+        "the panel never drew: {:?}",
+        seen.lock().unwrap()
+    );
+    drop(master);
+
+    let ended = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+    if ended.is_none() {
+        kill_term(pid);
+        let termed = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+        panic!(
+            "the panel outlived its terminal; SIGTERM {} it",
+            if termed.is_some() {
+                "ended"
+            } else {
+                "didn't end"
+            }
+        );
+    }
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
+        .filter(|what| *what != "started")
+        .collect();
+    assert_eq!(ends, ["stopped: the terminal closed"], "{written}");
+}
+
+/// What a panel's input thread relies on: `terminal_gone` says no while the terminal is
+/// there (input waiting unread included) and yes once its master end closes, and
+/// `wait_hangup` returns then.
+#[test]
+fn a_closed_master_is_heard_as_the_terminal_going() {
+    use std::io::Write;
+    use std::os::fd::AsFd;
+
+    let (mut master, slave, _) = moa_testkit::pty(80, 24).unwrap();
+    master.write_all(b"typed\n").unwrap();
+    assert!(!moa_platform::terminal_gone(slave.as_fd()), "unread input");
+
+    let watched = slave.try_clone().unwrap();
+    let waiting = std::thread::spawn(move || moa_platform::wait_hangup(watched.as_fd()));
+    drop(master);
+    let woke = wait_for(SHOWS, || waiting.is_finished().then_some(()));
+    assert!(woke.is_some(), "a closed master never woke it");
+    waiting.join().unwrap().unwrap();
+    assert!(moa_platform::terminal_gone(slave.as_fd()));
 }
 
 /// `plain` drops every escape sequence `capture-pane -e` or a terminal may write, and only

@@ -9,16 +9,16 @@ use std::collections::BTreeSet;
 use std::future::{Future, pending};
 use std::io::{self, Write};
 use std::mem::ManuallyDrop;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use futures_util::{FutureExt, StreamExt};
+use futures_util::FutureExt;
 use jiff::tz::TimeZone;
 use moa_client::{Client, ClientOptions, Live, LiveMsg};
 use moa_core::UtcMs;
@@ -41,9 +41,11 @@ use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep, interval_at, sle
 use crate::draw::draw;
 use crate::theme::{self, Theme};
 
+mod input;
 mod logbook;
 mod signals;
 
+use input::Input;
 pub use logbook::log_line;
 use logbook::{Logbook, panic_message};
 use signals::Signals;
@@ -404,7 +406,7 @@ async fn link_wake(link: &mut Link) -> Wake {
 /// The next wake: input, the connection, the tick (only while it exists), the deadline
 /// (only while there is one) and a signal, in no fixed order.
 async fn next_wake(
-    events: &mut EventStream,
+    input: &mut Input,
     link: &mut Link,
     tick: Option<&mut Interval>,
     deadline: Option<&mut Pin<Box<Sleep>>>,
@@ -425,7 +427,7 @@ async fn next_wake(
         }
     };
     tokio::select! {
-        e = events.next() => Wake::Input(e),
+        e = input.next() => Wake::Input(e),
         w = link_wake(link) => w,
         () = tick => Wake::Tick,
         () = deadline => Wake::Deadline,
@@ -955,14 +957,14 @@ async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), Stri
         w: area.width,
         h: area.height,
     };
-    let mut events = EventStream::new();
+    let mut input = Input::start().map_err(|e| format!("can't use this terminal: {e}"))?;
     let mut lp = Loop::new(opts, theme, size);
     lp.log = log;
     lp.connect(0);
     lp.draw(&mut *term)?;
     loop {
         let mut wake = next_wake(
-            &mut events,
+            &mut input,
             &mut lp.link,
             lp.tick.as_mut(),
             lp.deadline.as_mut(),
@@ -979,10 +981,15 @@ async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), Stri
         match lp.step(wake, &mut *term) {
             Ok(false) => {}
             Ok(true) => return Ok(()),
-            // A draw into a terminal that went with its tab fails too.
+            // A draw into a terminal that went with its tab fails too: the signal, or the
+            // terminal's going, is why the panel ends, not the failed draw.
             Err(e) => match signals.pending().await {
                 Some(name) => {
                     lp.log(&format!("stopped by {name}"));
+                    return Ok(());
+                }
+                None if moa_platform::terminal_gone(io::stdin().as_fd()) => {
+                    lp.log("stopped: the terminal closed");
                     return Ok(());
                 }
                 None => return Err(e),

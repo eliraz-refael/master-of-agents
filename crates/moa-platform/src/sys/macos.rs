@@ -39,6 +39,42 @@ pub fn alarm_create() -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
+/// Blocks until the terminal on `fd` hangs up (its other end closed). A kqueue read
+/// filter cleared on every delivery (`EV_CLEAR`) wakes once per new input and stays
+/// asleep while input waits unread, so this never spins; the hang-up is its `EV_EOF`.
+/// macOS's `poll` reports a hang-up only to a poll for input, which would spin there.
+pub fn wait_hangup(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    let kq = alarm_create()?;
+    let mut ev = kevent_zeroed();
+    ev.ident = fd.as_raw_fd() as libc::uintptr_t;
+    ev.filter = libc::EVFILT_READ;
+    ev.flags = libc::EV_ADD | libc::EV_CLEAR;
+    change(&kq, &ev)?;
+    loop {
+        let mut got = kevent_zeroed();
+        // SAFETY: no change list, room for one event, no timeout: it waits for one.
+        let r = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &mut got,
+                1,
+                std::ptr::null(),
+            )
+        };
+        match check(r) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+            Ok(_) if got.flags & libc::EV_ERROR != 0 => {
+                return Err(io::Error::from_raw_os_error(got.data as i32));
+            }
+            Ok(_) if got.flags & libc::EV_EOF != 0 => return Ok(()),
+            Ok(_) => {}
+        }
+    }
+}
+
 fn change(fd: &OwnedFd, ev: &libc::kevent) -> io::Result<()> {
     // SAFETY: one valid change record, no event list, on an open kqueue.
     let r = unsafe {
