@@ -4,11 +4,8 @@ use crate::model::SessionId;
 use crate::panel::View;
 use crate::tmux::ids::{PaneId, WindowId};
 use crate::tmux::topology::Topology;
+pub(crate) use crate::tmux::topology::{HIDDEN, MOA};
 
-/// The session the user's terminal shows, which holds the cockpit and the agents' tabs.
-pub(crate) const MOA: &str = "moa";
-/// The hidden session where panels wait, parked.
-pub(crate) const HIDDEN: &str = "_moa";
 /// The `@moa_view` of the agent in the spot.
 pub(crate) const AGENT: &str = "agent";
 

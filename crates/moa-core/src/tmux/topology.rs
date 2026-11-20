@@ -66,11 +66,12 @@ pub struct Topology {
     terms: BTreeMap<PaneId, String>,
 }
 
-/// The name of the session that holds the cockpit, and of the cockpit window in it.
-const COCKPIT: &str = "moa";
+/// The session the user's terminal shows, which holds the cockpit (the window of the same
+/// name) and the agents' tabs.
+pub(crate) const MOA: &str = "moa";
 
 /// The hidden session where panels wait, parked.
-const HIDDEN: &str = "_moa";
+pub(crate) const HIDDEN: &str = "_moa";
 
 /// What [`Topology::sessions_of`] gives a window the lists don't hold.
 static NO_SESSIONS: BTreeSet<TmuxSessionId> = BTreeSet::new();
@@ -208,10 +209,10 @@ impl Topology {
         let Some(sessions) = self.window_sessions.get(&w) else {
             return Applied::Refresh;
         };
-        let cockpit = name == COCKPIT
+        let cockpit = name == MOA
             && sessions
                 .iter()
-                .any(|s| self.sessions.get(s).is_some_and(|n| n == COCKPIT));
+                .any(|s| self.sessions.get(s).is_some_and(|n| n == MOA));
         let changed = if cockpit {
             self.cockpits.insert(w)
         } else {
@@ -235,7 +236,7 @@ impl Topology {
             return Applied::Same;
         }
         self.sessions.insert(s, name.to_string());
-        if name == COCKPIT {
+        if name == MOA {
             return Applied::Refresh;
         }
         let in_session = &self.window_sessions;

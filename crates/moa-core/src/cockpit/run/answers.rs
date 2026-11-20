@@ -88,13 +88,7 @@ fn vacate_plainly(state: &mut State, seq: u64, pane: PaneId) -> Vec<Effect> {
     )];
     let then = Then {
         tags: vec![(pane, None)],
-        untagged: Vec::new(),
-        moved: None,
-        views: None,
-        starts: 0,
-        sheet: None,
-        layout: String::new(),
-        ok: Said::Nothing,
+        ..Then::quiet(Said::Nothing)
     };
     fx.extend(act(
         state,
@@ -162,13 +156,7 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
                 ];
                 let then = Then {
                     tags: vec![(pane, None)],
-                    untagged: Vec::new(),
-                    moved: None,
-                    views: None,
-                    starts: 0,
-                    sheet: None,
-                    layout: String::new(),
-                    ok: Said::Nothing,
+                    ..Then::quiet(Said::Nothing)
                 };
                 fx.extend(act(
                     state,
@@ -273,6 +261,16 @@ pub(crate) fn chain_answered(
             };
             let answer = match answers.into_iter().next() {
                 Some(Ok(_)) => Ok(()),
+                // A close whose tab is gone from a session is done there (S9). Sessions in
+                // a group share their tabs, so the first unlink takes it from them all, and
+                // the next one finds no tab. Should a session tmux skipped after it still
+                // hold the tab, the next listing finds it linked with no open, and closes it.
+                Some(Err(e))
+                    if matches!(op, CockpitOp::Unsheet { .. })
+                        && first_line(&e).starts_with("can't find window") =>
+                {
+                    Ok(())
+                }
                 Some(Err(e)) => Err(e),
                 None => Err(NO_ANSWER.to_string()),
             };

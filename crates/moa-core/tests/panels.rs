@@ -1310,20 +1310,21 @@ fn an_untagged_placed_panel_is_tagged_at_the_first_listing() {
     );
 }
 
-/// S11: help has a frame, so choosing it for a panel sets the frame's three options.
+/// S11: setup has a frame, so choosing it for a panel sets the frame's three options. (Help
+/// has one too, but it is a sheet, never a panel's to choose: S9.)
 #[test]
-fn select_view_help_sets_the_frame() {
+fn select_view_setup_sets_the_frame() {
     let (b, mut st) = listed_up();
     send_on(&b, &mut st, 7, 1, panel(Some("%3"), Some(View::Tree)));
-    let fx = send_on(&b, &mut st, 7, 2, select_view("%3", View::Help));
+    let fx = send_on(&b, &mut st, 7, 2, select_view("%3", View::Setup));
     let (n, _) = the_ask(&fx);
     let fx = answer_lists(&b, &mut st, n, the_panes());
     let (_, chain) = the_ask(&fx);
     assert_eq!(
         chain,
         [
-            "set-option -p -t %3 @moa_view help",
-            "set-option -p -t %3 @moa_label help",
+            "set-option -p -t %3 @moa_view setup",
+            "set-option -p -t %3 @moa_label setup",
             "set-option -p -t %3 @moa_framed 1",
             "set-option -p -t %3 window-style fg=#4c566a",
             "set-option -p -t %3 window-active-style fg=#88c0d0",

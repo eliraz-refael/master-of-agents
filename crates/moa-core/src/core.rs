@@ -325,7 +325,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 more.extend(cockpit::run::queue(state, cockpit::run::CockpitOp::Refill));
             }
             if let Some(news) = sheet_news {
-                more.extend(cockpit::run::notified(state, news));
+                more.extend(cockpit::run::sheets_notified(state, news));
             }
             if no_server {
                 more.extend(reconcile::no_server(state, now));
@@ -441,7 +441,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             req,
             op: Op::UiClose(_),
             ..
-        } => cockpit::run::close(state, conn, req),
+        } => cockpit::run::ui_close(state, conn, req),
         // `layouts.json` is read again first, and only the daemon writes it: nothing is saved.
         Input::Client {
             conn,

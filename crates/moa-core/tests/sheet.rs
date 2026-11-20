@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, Publish, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{Down, Effect, Input, LogLevel, Publish, TmuxIn, TmuxToken, handle_checked};
 use moa_core::op::{ConnId, NoParams, Op, OpError, ReqId};
 use moa_core::panel::View;
 use moa_core::publish::Topic;
@@ -726,4 +726,132 @@ fn help_opens_its_own_sheet() {
         spawn.ends_with("/x/moa panel help --brain default"),
         "{spawn}"
     );
+}
+
+/// Task 9 review M1: a close the queue dropped with the link (it waited behind a build)
+/// forgets the open, so the first listing on the new connection finds the tab linked with no
+/// open and closes it: you never come back to a stale picker.
+#[test]
+fn a_close_a_lost_link_dropped_still_happens() {
+    let mut st = open_picker();
+    the_listing(&key_in(&mut st, "layout-1", 0));
+    let fx = notify(&mut st, window_changed(0, 1));
+    assert!(queries(&fx).is_empty(), "the close waits: {fx:?}");
+
+    feed(&mut st, TmuxIn::Down(Down::Lost));
+    assert_eq!(st.sheet(PaneId(PICKER)), None);
+    assert_eq!(picker_row(&st)["sheet"], Value::Null);
+
+    feed(&mut st, connected());
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&with_picker(false, &[0]), user()),
+        },
+    );
+    let n = the_listing(&fx);
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0]), user())));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(chain, [format!("unlink-window -t $0:@{PICKER_TAB}")]);
+}
+
+/// Task 9 review M2: sessions in a group share their tabs, so the first unlink takes the
+/// tab from both, and the second finds none. The close is done, and nothing is logged.
+/// Another refusal is still logged (nobody asked the close).
+#[test]
+fn a_grouped_session_closes_quietly() {
+    let mut st = open_picker();
+    opened_in(&mut st, 2, &[0]);
+    let n = the_listing(&ui_close(&mut st, PANEL));
+    let users: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 2)];
+    let fx = feed(
+        &mut st,
+        answer(n, lists(&with_picker(false, &[0, 2]), users)),
+    );
+    let (n, chain) = the_chain(&fx);
+    assert_eq!(chain.len(), 2, "{chain:?}");
+    let gone = format!("can't find window: @{PICKER_TAB}");
+    let fx = feed(&mut st, answer(n, vec![Err(gone)]));
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Log(_))), "{fx:?}");
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+
+    opened_in(&mut st, 0, &[]);
+    let n = the_listing(&ui_close(&mut st, PANEL));
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0]), user())));
+    let (n, _) = the_chain(&fx);
+    let fx = feed(&mut st, answer(n, vec![Err("no such thing".into())]));
+    let warned = fx
+        .iter()
+        .filter(|e| matches!(e, Effect::Log(l) if l.level == LogLevel::Warn))
+        .count();
+    assert_eq!(warned, 2, "tmux's words, and the plain line: {fx:?}");
+}
+
+/// Task 9 review M3: a sheet is never a panel's to pick, and a pane tagged with a sheet's
+/// view outside `_moa` is no sheet of moa's: its tab, linked out, could never be unlinked.
+#[test]
+fn only_a_parked_panel_is_a_sheet() {
+    let mut st = up(&cockpit());
+    for view in [View::Picker, View::Help] {
+        let fx = send_on(
+            &mut st,
+            1,
+            1,
+            Op::UiSelectView {
+                pane: "%2".into(),
+                view,
+            },
+        );
+        let refused = Err(OpError(format!("{view} can't be chosen for a panel")));
+        assert_eq!(replies(&fx), [(ReqId(1), refused)], "{view}");
+        assert!(queries(&fx).is_empty(), "{view}");
+    }
+
+    // A cockpit pane tagged `help` (by hand, say): help starts a panel of its own.
+    let mut panes = cockpit();
+    panes[1] = pane(3, 1, 0, true, "help", false);
+    let mut st = up(&panes);
+    let n = the_listing(&key_in(&mut st, "help", 0));
+    let fx = feed(&mut st, answer(n, lists(&panes, user())));
+    let [(_, cmds)] = &queries(&fx)[..] else {
+        panic!("not one spawn: {fx:?}")
+    };
+    let spawn = lines(&cmds[0]).join(" ");
+    assert!(spawn.starts_with("new-window"), "{spawn}");
+    assert!(spawn.ends_with("panel help --brain default"), "{spawn}");
+}
+
+/// Task 9 review M4: a picker whose restart failed is never linked dead: the key is told it
+/// couldn't start.
+#[test]
+fn a_picker_whose_restart_failed_isnt_linked() {
+    let mut st = up(&with_picker(true, &[]));
+    let n = the_listing(&find(&mut st));
+    let fx = feed(&mut st, answer(n, lists(&with_picker(true, &[]), user())));
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("not one respawn: {fx:?}")
+    };
+    let fx = feed(&mut st, answer(*n, vec![Err("no such tab".into())]));
+    let n = the_listing(&fx);
+    let fx = feed(&mut st, answer(n, lists(&with_picker(true, &[]), user())));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        notices(&fx),
+        ["moa: couldn't start the picker; see panel.log"]
+    );
+    assert_eq!(st.sheet(PaneId(PICKER)), None);
+}
+
+/// Task 9 review M5: with no link, a close can't run, and `ui.close` says so.
+#[test]
+fn ui_close_with_no_link_says_so() {
+    let mut st = open_picker();
+    feed(&mut st, TmuxIn::Down(Down::Lost));
+    let fx = ui_close(&mut st, PANEL);
+    let no = Err(OpError(
+        "moa isn't open in a terminal yet; run moa first".into(),
+    ));
+    assert_eq!(replies(&fx), [(ReqId(2), no)]);
 }

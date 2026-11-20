@@ -51,6 +51,23 @@ pub(super) struct Then {
     pub(super) ok: Said,
 }
 
+impl Then {
+    /// A chain that records nothing and ends as `ok`: each plan sets what its chain does
+    /// over it (`Then { tags, ..Then::quiet(ok) }`).
+    pub(super) fn quiet(ok: Said) -> Then {
+        Then {
+            tags: Vec::new(),
+            untagged: Vec::new(),
+            moved: None,
+            views: None,
+            starts: 0,
+            sheet: None,
+            layout: String::new(),
+            ok,
+        }
+    }
+}
+
 /// What a sheet's chain did (S9).
 #[derive(Clone, Debug)]
 pub(super) enum Sheeted {
@@ -138,14 +155,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                         return Next::Chain(
                             focus_cmds(pane).to_vec(),
                             Then {
-                                tags: Vec::new(),
-                                untagged: Vec::new(),
-                                moved: None,
-                                views: None,
-                                starts: 0,
-                                sheet: None,
                                 layout,
-                                ok: went_to(*leaf),
+                                ..Then::quiet(went_to(*leaf))
                             },
                         );
                     }
@@ -216,12 +227,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let then = |tags, untagged, starts| Then {
                 tags,
                 untagged,
-                moved: None,
-                views: None,
                 starts,
-                sheet: None,
-                layout: String::new(),
-                ok: Said::Nothing,
+                ..Then::quiet(Said::Nothing)
             };
             if !in_spot {
                 return Next::TakeDown(
@@ -271,13 +278,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 panel_tags(*pane, *view),
                 Then {
                     tags: vec![(*pane, Some(view.word()))],
-                    untagged: Vec::new(),
-                    moved: None,
                     views: Some(vec![(*pane, *view)]),
-                    starts: 0,
-                    sheet: None,
-                    layout: String::new(),
-                    ok: Said::Reply(Ok(done)),
+                    ..Then::quiet(Said::Reply(Ok(done)))
                 },
             )
         }
@@ -289,13 +291,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             };
             let then = |tags, moved: Option<Moved>| Then {
                 tags,
-                untagged: Vec::new(),
                 moved,
-                views: None,
-                starts: 0,
-                sheet: None,
-                layout: String::new(),
-                ok: Said::Reply(Ok(shown(state, id, moved.is_some()))),
+                ..Then::quiet(Said::Reply(Ok(shown(state, id, moved.is_some()))))
             };
             let swap = swap_in(scene, *pane, |id| title(state, id));
             match (swap, scene.spot(), scene.pane(*pane)) {
@@ -344,14 +341,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
 /// A sheet's chain: it records only the sheet's change, and says nothing.
 fn sheet_then(sheeted: Sheeted) -> Then {
     Then {
-        tags: Vec::new(),
-        untagged: Vec::new(),
-        moved: None,
-        views: None,
-        starts: 0,
         sheet: Some(sheeted),
-        layout: String::new(),
-        ok: Said::Nothing,
+        ..Then::quiet(Said::Nothing)
     }
 }
 
@@ -368,22 +359,30 @@ fn sheet(state: &State, op: &CockpitOp, scene: &Scene, view: View, session: Tmux
         None => return Next::Done(Said::Nothing),
         Some(_) => {}
     }
-    // Its panel: a live one first, else a stopped one.
+    // Its panel, parked in `_moa` (a linked one reads as parked there): a live one first,
+    // else a stopped one. A pane tagged with the view anywhere else is no sheet of moa's: its
+    // tab, linked out, could never be unlinked.
     let panel = |dead: bool| {
-        scene
-            .panes
-            .iter()
-            .find(|at| at.panel_view() == Some(view) && at.dead == dead)
+        scene.panes.iter().find(|at| {
+            at.panel_view() == Some(view) && at.place == Place::Hidden && at.dead == dead
+        })
+    };
+    let cant_start = || {
+        let text = format!("couldn't start the {view}; see panel.log");
+        Next::Done(refused(op, text))
     };
     let Some(at) = panel(false).or_else(|| panel(true)) else {
         if state.cockpit.replanned {
-            let text = format!("couldn't start the {view}; see panel.log");
-            return Next::Done(refused(op, text));
+            return cant_start();
         }
         return Next::Spawn(vec![view]);
     };
-    if at.dead && state.cockpit.restarted.is_none() {
-        return Next::Respawn(vec![(at.pane, view)]);
+    // Stopped: restarted in place once; still stopped after that, it isn't linked.
+    if at.dead {
+        return match state.cockpit.restarted {
+            None => Next::Respawn(vec![(at.pane, view)]),
+            Some(_) => cant_start(),
+        };
     }
     let mut cmds = vec![if topology.sessions_of(at.window).contains(&session) {
         Cmd::new("select-window").args(["-t", &format!("{session}:{}", at.window)])
@@ -479,13 +478,9 @@ fn build(
         cmds,
         Then {
             tags,
-            untagged: Vec::new(),
-            moved: None,
             views: Some(b.views),
-            starts: 0,
-            sheet: None,
             layout,
-            ok,
+            ..Then::quiet(ok)
         },
     )
 }
