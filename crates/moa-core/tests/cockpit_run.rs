@@ -1025,6 +1025,123 @@ fn each_death_of_a_panel_is_logged() {
     assert_eq!(said, [line.clone(), line]);
 }
 
+/// The `run-shell true` nudges in `fx`: tmux reaps a pane's lost exit (tmux 3.4 and 3.5
+/// with utempter).
+fn reaps(fx: &[Effect]) -> usize {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|c| c.parts())
+        .filter(|c| c.name() == "run-shell")
+        .inspect(|c| {
+            assert_eq!(c.argv(), ["true"]);
+            assert_eq!(c.check(), Ok(()));
+        })
+        .count()
+}
+
+/// Whether `fx` asks the link's own listing.
+fn relists(fx: &[Effect]) -> bool {
+    fx.iter().any(|e| {
+        matches!(
+            e,
+            Effect::Tmux {
+                token: Some(TmuxToken::Refresh),
+                ..
+            }
+        )
+    })
+}
+
+/// L12 on a tmux that loses a pane's exit: a panel moa placed whose connection goes has
+/// ended, so moa lists again; one that the user started, or a connection that was no panel,
+/// asks nothing.
+#[test]
+fn a_placed_panel_going_asks_a_listing() {
+    for (placed, want) in [(true, true), (false, false)] {
+        let mut st = up();
+        send(
+            &mut st,
+            9,
+            Op::UiPanel {
+                pane: Some("%4".into()),
+                view: Some(View::Plan),
+                placed,
+            },
+        );
+        let fx = handle_checked(&mut st, Input::ClientGone(ConnId(1)), now());
+        assert_eq!(relists(&fx), want, "placed: {placed}: {fx:?}");
+    }
+    let mut st = up();
+    let fx = handle_checked(&mut st, Input::ClientGone(ConnId(1)), now());
+    assert!(!relists(&fx), "{fx:?}");
+}
+
+/// A listing that shows a panel dead with no `pane-died` for it nudges tmux to reap, once
+/// per death; the `pane-died` that follows is logged as ever. Nothing dead, or a death
+/// already said, nudges nothing.
+#[test]
+fn a_dead_panel_with_no_pane_died_is_nudged_once() {
+    let mut st = up();
+    let mut dead = cockpit_built();
+    dead[3] = pane(4, 1, 0, true, "plan", true);
+    let listed = |st: &mut State, panes: &[String]| {
+        feed(st, TmuxIn::Notification(Notification::SessionsChanged));
+        feed(st, refresh(lists(panes, false)))
+    };
+    assert_eq!(reaps(&listed(&mut st, &cockpit_built())), 0);
+    assert_eq!(reaps(&listed(&mut st, &dead)), 1);
+    assert_eq!(reaps(&listed(&mut st, &dead)), 0, "nudged again");
+    assert_eq!(
+        logs(&message(&mut st, "moa:hook pane-died %4")),
+        [(LogLevel::Info, "panel plan in %4 stopped".to_string())]
+    );
+    assert_eq!(reaps(&listed(&mut st, &dead)), 0);
+
+    // `pane-died` came first: tmux already reaped, so no nudge.
+    let mut st = up();
+    listed(&mut st, &cockpit_built());
+    message(&mut st, "moa:hook pane-died %4");
+    assert_eq!(reaps(&listed(&mut st, &dead)), 0);
+
+    // An agent's dead pane is no panel's.
+    let mut st = up();
+    let mut agent = cockpit_built();
+    agent.push(pane(8, 7, 0, false, "agent", true));
+    assert_eq!(reaps(&listed(&mut st, &agent)), 0);
+}
+
+/// The nudge's mark goes once the panel runs again: when a listing shows it running, or
+/// once Repair restarted it. Its next death is nudged too.
+#[test]
+fn the_nudge_mark_clears_when_the_panel_runs_again() {
+    let mut st = up();
+    let mut dead = cockpit_built();
+    dead[3] = pane(4, 1, 0, true, "plan", true);
+    let listed = |st: &mut State, panes: &[String]| {
+        feed(st, TmuxIn::Notification(Notification::SessionsChanged));
+        feed(st, refresh(lists(panes, false)))
+    };
+    assert_eq!(reaps(&listed(&mut st, &dead)), 1);
+    assert_eq!(reaps(&listed(&mut st, &cockpit_built())), 0);
+    assert_eq!(reaps(&listed(&mut st, &dead)), 1, "the next death");
+
+    // Repair's own listing still shows it dead: it was nudged already, so only the respawn.
+    let n = the_listing(&key(&mut st, "repair"));
+    let fx = feed(&mut st, answer(n, lists(&dead, true)));
+    assert_eq!(reaps(&fx), 0);
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("{fx:?}")
+    };
+    let fx = feed(&mut st, answer(*n, vec![Ok(Vec::new())]));
+    // Respawned, the mark is gone: a listing that shows it dead again nudges again.
+    let n = the_listing(&fx);
+    assert_eq!(reaps(&feed(&mut st, answer(n, lists(&dead, true)))), 1);
+}
+
 /// `panels` is published when a build gives a registered panel another view, and only then.
 #[test]
 fn panels_publish_only_when_a_view_changed() {

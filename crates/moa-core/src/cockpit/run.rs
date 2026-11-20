@@ -106,6 +106,9 @@ pub(crate) struct CockpitRun {
     restarted: Option<u32>,
     /// The panels logged as stopped, until they run again: one line per death (L12).
     stopped: BTreeSet<PaneId>,
+    /// The dead panels tmux was nudged to reap (`run-shell true`) while no `pane-died` had
+    /// come for them, until a listing shows them running or gone: once per death.
+    nudged: BTreeSet<PaneId>,
     /// The link just came up: its first listing may queue the lazy build (L9).
     lazy_armed: bool,
     /// The vacate in flight took its agent down: its kill (or the spot's respawn) was
@@ -679,9 +682,9 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         fx.extend(finish(state, said));
         return fx;
     }
-    forget_running(state);
+    let mut fx: Vec<Effect> = stopped_listed(state).into_iter().collect();
     // The operation's own listing: a panel healed now is tagged before its chain goes out.
-    let mut fx = crate::panel::listed(state, true);
+    fx.extend(crate::panel::listed(state, true));
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     let Some((_, op)) = state.cockpit.in_flight.clone() else {
         return fx;
@@ -1061,6 +1064,7 @@ pub(crate) fn chain_answered(
                     Some(Ok(_)) => {
                         n += 1;
                         state.cockpit.stopped.remove(&pane);
+                        state.cockpit.nudged.remove(&pane);
                     }
                     Some(Err(e)) => fx.push(log(
                         LogLevel::Warn,
@@ -1251,32 +1255,61 @@ pub(crate) fn linked(state: &mut State, another_server: bool) -> Vec<Effect> {
             .waiting
             .retain(|op| !matches!(op, CockpitOp::Vacate { .. }));
         state.cockpit.stopped.clear();
+        state.cockpit.nudged.clear();
     }
     state.cockpit.lazy_armed = true;
     pump(state)
 }
 
-/// The panels logged as stopped that a listing shows running again: their next death is
-/// logged too (L12).
-fn forget_running(state: &mut State) {
+/// What every listing does for stopped panels (L12):
+/// - the ones it shows running again, or gone, are forgotten, so their next death is logged
+///   and nudged too;
+/// - a panel it shows dead with no `pane-died` yet gets tmux nudged to reap it, once per
+///   death. tmux 3.4 and 3.5 built with utempter can lose a pane's exit when its pty closes
+///   first: the pane is dead, but tmux never draws its stopped line nor says `pane-died`
+///   until a child of its own ends. `run-shell true` is that child; tmux then draws the line
+///   and says `pane-died`, which [`died`] logs. Elsewhere it changes nothing.
+fn stopped_listed(state: &mut State) -> Option<Effect> {
     let topology = &state.tmux.topology;
-    state.cockpit.stopped.retain(|p| topology.is_dead(*p));
+    let run = &mut state.cockpit;
+    run.stopped.retain(|p| topology.is_dead(*p));
+    run.nudged.retain(|p| topology.is_dead(*p));
+    let conn = state.tmux.conn()?;
+    let unsaid: Vec<PaneId> = topology
+        .panes()
+        .filter(|p| topology.is_dead(*p) && !run.stopped.contains(p) && !run.nudged.contains(p))
+        .filter(|p| {
+            topology
+                .view_of(*p)
+                .is_some_and(|v| v.parse::<View>().is_ok())
+        })
+        .collect();
+    if unsaid.is_empty() {
+        return None;
+    }
+    run.nudged.extend(unsaid);
+    Some(Effect::Tmux {
+        conn,
+        cmds: vec![Cmd::new("run-shell").arg("true")],
+        token: None,
+    })
 }
 
-/// The link's own listing came back: the stopped panels it shows running are forgotten.
-/// The first after a link-up queues the lazy build when
+/// The link's own listing came back: what it shows of stopped panels is taken in
+/// ([`stopped_listed`]). The first after a link-up queues the lazy build when
 /// it shows what the build looks for, a user's terminal and a cockpit with no panel in it;
 /// the build then takes a listing of its own, as every operation does (L17).
 pub(crate) fn link_listed(state: &mut State) -> Vec<Effect> {
-    forget_running(state);
+    let mut fx: Vec<Effect> = stopped_listed(state).into_iter().collect();
     if !std::mem::take(&mut state.cockpit.lazy_armed) {
-        return Vec::new();
+        return fx;
     }
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     if !wants_lazy(&scene) {
-        return Vec::new();
+        return fx;
     }
-    queue(state, CockpitOp::Lazy)
+    fx.extend(queue(state, CockpitOp::Lazy));
+    fx
 }
 
 /// `conn` closed: its requests still run, with nobody to answer.

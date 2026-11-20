@@ -25,6 +25,7 @@ pub const ALLOWED: &[&str] = &[
     "respawn-pane",
     "rename-window",
     "resize-window",
+    "run-shell",
 ];
 
 /// A command that must not be sent, with the reason.
@@ -50,6 +51,7 @@ const RENAME: &str = "rename-window needs a tab id, then -- and a name";
 const RENAME_FORMAT: &str = "rename-window's name must keep # literal (##)";
 const RESIZE_WINDOW: &str = "resize-window needs -A and a tab id";
 const WINDOW_SIZE: &str = "window-size is only unset, on a tab id's window";
+const REAP: &str = "run-shell only runs true";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
 /// What a chain is called where a name is asked for (a log line). It is no tmux command.
@@ -252,6 +254,13 @@ impl Cmd {
                     }
                 }
                 _ => Err(Refused(RENAME)),
+            },
+            // tmux 3.4 and 3.5 built with utempter can lose a pane's exit, and with it the
+            // dead pane's line and `pane-died` (moa-tmux's `every_hook_reaches_the_mailbox`).
+            // A job ending makes tmux reap: `true` is that job, and the only one moa runs.
+            "run-shell" => match self.args.as_slice() {
+                [t] if t == "true" => Ok(()),
+                _ => Err(Refused(REAP)),
             },
             _ => Ok(()),
         }

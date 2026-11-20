@@ -57,9 +57,32 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
         assert!(Cmd::new(name).check().is_err(), "{name}");
     }
     assert_eq!(
-        Cmd::new("run-shell").check().unwrap_err().0,
+        Cmd::new("wait-for").check().unwrap_err().0,
         "that isn't a command moa sends"
     );
+    // One job only, `true`, which makes tmux reap a pane's lost exit: no shell runs moa's
+    // words, and no other job.
+    assert_eq!(Cmd::new("run-shell").arg("true").check(), Ok(()));
+    for args in [
+        &[][..],
+        &["false"],
+        &["true; rm -rf ~"],
+        &["-b", "true"],
+        &["true", "-b"],
+        &["-C", "true"],
+        &["-t", "%3", "true"],
+        &["true", "true"],
+    ] {
+        assert_eq!(
+            Cmd::new("run-shell")
+                .args(args.iter().copied())
+                .check()
+                .unwrap_err()
+                .0,
+            "run-shell only runs true",
+            "{args:?}"
+        );
+    }
     for name in ALLOWED {
         // These have rules of their own, tested in `cmd.rs`.
         let ruled = [
@@ -76,6 +99,7 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             "respawn-pane",
             "rename-window",
             "resize-window",
+            "run-shell",
         ];
         if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");
