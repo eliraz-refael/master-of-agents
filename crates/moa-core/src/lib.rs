@@ -10,6 +10,7 @@ pub mod effect;
 pub mod folders;
 pub mod hook;
 mod hooks;
+pub mod keymap;
 mod keys;
 pub mod layout;
 pub mod live;

@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use moa_core::keymap::{Does, ctrl_a};
 use moa_core::tmux::cmd::{Cmd, quote};
 use moa_core::tmux::ids::ClientName;
 use moa_core::tmux::mailbox::KeyAction;
@@ -40,55 +41,55 @@ fn guarded(action: KeyAction, pane: &str) -> String {
     )
 }
 
-/// The menu: the spike's items, with the daemon's going through `guarded`.
-fn menu() -> String {
+/// The menu command for what a key does.
+fn menu_command(does: Does) -> String {
     let split = |flag: &str| {
         format!(
             "if -F '#{{==:#{{window_name}},moa}}' 'display \"split an agent or terminal tab; the cockpit is a layout\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
         )
     };
-    let daemon = |a: KeyAction| (a.label(), a.key(), guarded(a, "-"));
-    let plain = |label: &'static str, key: &'static str, cmd: &str| (label, key, cmd.to_string());
-    let items: Vec<Option<(&str, &str, String)>> = vec![
-        Some(daemon(KeyAction::Console)),
-        Some(daemon(KeyAction::Tree)),
-        Some(daemon(KeyAction::Plan)),
-        Some(daemon(KeyAction::Agent)),
-        Some(daemon(KeyAction::Find)),
-        Some(daemon(KeyAction::New)),
-        Some(daemon(KeyAction::Terminal)),
-        Some(plain("Split: shell beside", "|", &split("h"))),
-        Some(plain("Split: shell below", "-", &split("v"))),
-        Some(plain("Back to moa", "m", "select-window -t moa:moa")),
-        Some(plain("Zoom in/out", "z", "resize-pane -Z")),
-        None,
-        Some(daemon(KeyAction::Layout(1))),
-        Some(daemon(KeyAction::Layout(2))),
-        Some(daemon(KeyAction::Layout(3))),
-        Some(daemon(KeyAction::Layout(4))),
-        Some(daemon(KeyAction::Repair)),
-        None,
-        // A greyed note, not an item.
-        Some(("-Ctrl-a ←↑↓→  move between splits", "", String::new())),
-        Some(plain("Previous tab", "[", "previous-window")),
-        Some(plain("Next tab", "]", "next-window")),
-        Some(daemon(KeyAction::Help)),
-        Some(plain("Send Ctrl-a to the app", "a", "send-keys C-a")),
-    ];
+    match does {
+        Does::Moa(a) => guarded(a, "-"),
+        Does::SplitBeside => split("h"),
+        Does::SplitBelow => split("v"),
+        Does::BackToMoa => "select-window -t moa:moa".into(),
+        Does::Zoom => "resize-pane -Z".into(),
+        Does::PrevTab => "previous-window".into(),
+        Does::NextTab => "next-window".into(),
+        Does::SendCtrlA => "send-keys C-a".into(),
+        Does::Move => String::new(),
+    }
+}
+
+/// The menu, written from the key table: its groups, with a separator between them. The
+/// daemon's items go through `guarded`.
+fn menu() -> String {
+    let mut items: Vec<String> = Vec::new();
+    for (i, group) in ctrl_a().into_iter().enumerate() {
+        if i > 0 {
+            items.push("\"\"".into());
+        }
+        for b in group {
+            // A leading `-` greys the note: tmux shows it but it isn't an item.
+            let label = match b.does {
+                Does::Move => format!("-{}", b.label),
+                _ => b.label.to_string(),
+            };
+            items.push(format!(
+                "\"{label}\" {} {}",
+                quote(b.key),
+                quote(&menu_command(b.does))
+            ));
+        }
+    }
     let mut out =
         String::from("display-menu -T \"#[align=centre fg=#88c0d0 bold] moa \" -x C -y C \\\n");
-    let last = items.len() - 1;
     for (i, item) in items.iter().enumerate() {
-        out.push_str("  ");
-        match item {
-            Some((label, key, cmd)) => {
-                out.push_str(&format!("\"{label}\" {} {}", quote(key), quote(cmd)));
-            }
-            None => out.push_str("\"\""),
-        }
-        if i != last {
+        if i > 0 {
             out.push_str(" \\\n");
         }
+        out.push_str("  ");
+        out.push_str(item);
     }
     out
 }
@@ -105,8 +106,10 @@ pub fn moa_tmux(brain: &str, mouse: bool) -> String {
     } else {
         format!("moa {} · #W", in_double_quotes(brain))
     };
+    // The daemon's keys, in the table's order; the plain tmux ones are in the template.
     let mut keys = String::new();
-    for a in KeyAction::ALL {
+    for b in ctrl_a().into_iter().flatten() {
+        let Does::Moa(a) = b.does else { continue };
         keys.push_str(&format!(
             "bind -T moa {:<7} {}\n",
             quote(a.key()),
