@@ -522,6 +522,19 @@ struct Loop {
     deadline: Option<Pin<Box<Sleep>>>,
 }
 
+impl Drop for Loop {
+    /// A popup's connection outlives its loop: its program exits with the connection still
+    /// open (`moa panel --once`), so moa hears the popup go only once tmux can reap it, and
+    /// the reap nudge moa sends then on tmux 3.4 and 3.5 comes after the exit (S8).
+    fn drop(&mut self) {
+        if self.opts.once
+            && let Link::Up { live, .. } = std::mem::replace(&mut self.link, Link::Down(None))
+        {
+            std::mem::forget(live);
+        }
+    }
+}
+
 impl Loop {
     fn new(opts: PanelOptions, theme: Theme, size: Size) -> Loop {
         let panel = Panel::new(opts.view.unwrap_or(View::Picture));
@@ -1525,6 +1538,114 @@ mod tests {
         lp.link = Link::Mismatch;
         assert!(matches!(input(&mut lp, key()), Turn::Quit));
         assert_eq!(lp.here(), None);
+    }
+
+    /// The daemon's side of one connection, in a fresh `/tmp` folder: it says hello and
+    /// answers every request, then says when the connection closes.
+    fn scripted_daemon() -> (
+        tempfile::TempDir,
+        ClientOptions,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        use moa_proto::{Call, HelloOk, Incoming, SnapshotMsg, decode_incoming, encode_result};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::Builder::new()
+            .prefix("moa")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let paths = Paths::with_root(dir.path());
+        moa_platform::ensure_private_dir(&paths.run_dir()).unwrap();
+        let listener = tokio::net::UnixListener::bind(paths.socket("default").unwrap()).unwrap();
+        let (closed_tx, closed) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(Incoming::Request { id, call }) = decode_incoming(&line) else {
+                    continue;
+                };
+                let answer = match call {
+                    Call::Hello(_) => encode_result(
+                        &id,
+                        &HelloOk {
+                            brain: "default".into(),
+                            build: "b".into(),
+                            rev: 0,
+                            matched: true,
+                            pid: std::process::id(),
+                        },
+                    ),
+                    Call::Subscribe(_) => encode_result(
+                        &id,
+                        &SnapshotMsg {
+                            rev: 0,
+                            topics: Default::default(),
+                        },
+                    ),
+                    _ => encode_result(
+                        &id,
+                        &Done {
+                            text: String::new(),
+                            data: Default::default(),
+                        },
+                    ),
+                };
+                write
+                    .write_all(format!("{answer}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let _ = closed_tx.send(());
+        });
+        let client = ClientOptions {
+            paths,
+            brain: BrainName::default_brain(),
+            client: "panel",
+            caller: CallerInfo::default(),
+            autostart: None,
+            on_mismatch: OnMismatch::Accept,
+            build: "b".into(),
+        };
+        (dir, client, closed)
+    }
+
+    /// S8: a popup's loop leaves its connection open when it goes, so the program exits
+    /// with it still open (`moa panel --once`) and moa hears the popup go only with that
+    /// exit, never before it. Any other panel's connection closes with its loop.
+    #[tokio::test]
+    async fn a_popups_connection_outlives_its_loop() {
+        for once in [false, true] {
+            let (_dir, client, mut closed) = scripted_daemon();
+            let mut lp = looped(Some(View::Picker), true);
+            lp.opts.once = once;
+            let topics = super::topics(View::Picker, once);
+            let Ok(linked) = super::connect(client, super::once_ops(View::Picker), topics).await
+            else {
+                panic!("the connect failed");
+            };
+            lp.link = Link::Up {
+                live: linked.live,
+                key: linked.key,
+            };
+            drop(lp);
+            if once {
+                // Time enough for the connection's task to see its loop go and close.
+                for _ in 0..50 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    closed.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+                    "the popup's connection closed with its loop"
+                );
+            } else {
+                let heard =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), &mut closed).await;
+                assert!(heard.is_ok(), "the panel's connection outlived its loop");
+            }
+        }
     }
 
     /// Ctrl-c cancelling a prompt while moa is down gives the footer back to the down line,

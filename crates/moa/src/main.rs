@@ -39,7 +39,7 @@ enum Command {
     Status(ctl::StatusArgs),
     /// Show a live view of the brain in this terminal: its sessions, plan, status and more.
     Panel(panel::PanelArgs),
-    /// Find a session and jump to it: the picker, as Ctrl-a / opens it.
+    /// Find a session and jump to it: the picker, as a popup.
     Pick(panel::PickArgs),
     /// Stop the brain's moa.
     Shutdown(ctl::BrainArgs),

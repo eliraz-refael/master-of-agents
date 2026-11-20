@@ -979,10 +979,10 @@ fn a_once_panel_with_moa_down_says_so_and_exits() {
     for (cmd, key) in picks {
         let pane = tab_running(&r.tb, &cmd, &["MOA_NO_AUTOSTART=1"]);
         r.shows(&pane, &["moa isn't running", "›"]);
+        // That it ends is the check that it isn't moa's: a managed panel's Ctrl-c shows the
+        // managed line and stays.
         tmux(&r.tb, &["send-keys", "-t", &pane, key]);
         ended_well(&r.tb, &pane);
-        let shown = screen_of(&r.tb, &pane);
-        assert!(!shown.contains("moa's layout"), "{cmd}: {shown}");
         assert!(free().is_some(), "{cmd} started moa");
     }
 }

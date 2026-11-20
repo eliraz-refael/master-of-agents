@@ -1,5 +1,6 @@
 //! `moa panel [VIEW] [--brain B]`: a live view in any terminal (V15).
 
+use std::io::Write;
 use std::path::Path;
 
 use clap::Args;
@@ -24,8 +25,7 @@ pub struct PanelArgs {
     /// Which brain; the default is the one this folder belongs to.
     #[arg(long)]
     brain: Option<String>,
-    /// Draw once in a popup and end when it closes: the picker or help, as `Ctrl-a /` opens
-    /// them.
+    /// Draw in a popup and end when it closes: the picker or help, as Ctrl-a's popups do.
     #[arg(long)]
     once: bool,
 }
@@ -97,7 +97,25 @@ pub fn panel(args: &PanelArgs) -> Result<(), String> {
         log: Some(here.paths.log_dir().join(PANEL_LOG)),
         once: args.once,
     };
-    runtime()?.block_on(run(opts))
+    let runtime = runtime()?;
+    let ended = runtime.block_on(run(opts));
+    if args.once {
+        // A popup exits here, its runtime and its moa connection still alive (its loop
+        // leaves the connection open): the connection then closes in the same exit that
+        // closes the popup's terminal. moa hears the popup go only once tmux can reap it,
+        // so the reap nudge moa sends then on tmux 3.4 and 3.5 comes after the exit, not
+        // before it (S8). The terminal is given back and the end line written by now.
+        let code = match ended {
+            Ok(()) => 0,
+            Err(message) => {
+                // Not `eprintln!`, which panics when the terminal is gone.
+                let _ = writeln!(std::io::stderr(), "{message}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
+    ended
 }
 
 /// `moa pick`: `moa panel picker --once`, the picker as `Ctrl-a /`'s popup runs it.

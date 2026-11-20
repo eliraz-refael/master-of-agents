@@ -277,8 +277,8 @@ fn the_popup_env_is_the_panels_env() {
 }
 
 /// A popup's command line as the sandbox's tmux runs it: the fake `moa` at a path with a
-/// space, a quote and a `#`, at a home with a `#`, writes its folder, its environment and
-/// its arguments next to itself, then ends, and tmux closes the popup.
+/// space, a quote and a `#`, at a home with a `#`, writes its pid, its folder, its
+/// environment and its arguments next to itself, then ends, and tmux closes the popup.
 struct OddPaths {
     exe: PathBuf,
     home: PathBuf,
@@ -290,10 +290,12 @@ impl OddPaths {
         let dir = sb.home().join("a b/it's/#1");
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("moa");
+        // Written aside, then moved: `ran` is never seen half written.
         std::fs::write(
             &exe,
-            "#!/bin/sh\nprintf '%s\\n' \"$(pwd -P)\" \"$MOA_BRAIN\" \"$MOA_NO_AUTOSTART\" \
-             \"$MOA_ROOT\" \"$@\" > \"$(dirname \"$0\")/ran\"\n",
+            "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$$\" \"$(pwd -P)\" \"$MOA_BRAIN\" \
+             \"$MOA_NO_AUTOSTART\" \"$MOA_ROOT\" \"$@\" > \"$d/ran.part\"\n\
+             mv \"$d/ran.part\" \"$d/ran\"\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -314,9 +316,10 @@ impl OddPaths {
         }
     }
 
-    /// Waits for the fake `moa`'s run and checks what it was given; ready for another.
+    /// Waits for the fake `moa`'s run and checks what it was given; then for tmux to reap
+    /// it, which closes the popup, so the next key reaches tmux rather than the popup.
     #[track_caller]
-    fn ran_as_told(&self, term: &Terminal) {
+    fn ran_as_told(&self, sb: &Sandbox, term: &Terminal) {
         let got = wait_for(Duration::from_secs(10), || {
             std::fs::read_to_string(&self.ran).ok()
         });
@@ -326,6 +329,7 @@ impl OddPaths {
                 term.tail(600)
             )
         });
+        let (pid, got) = got.split_once('\n').unwrap();
         let home = std::fs::canonicalize(&self.home).unwrap();
         let want = format!(
             "{}\ndefault\n1\n{}\npanel\npicker\n--once\n--brain\ndefault\n",
@@ -334,6 +338,14 @@ impl OddPaths {
         );
         assert_eq!(got, want);
         std::fs::remove_file(&self.ran).unwrap();
+        let pid: u32 = pid.parse().unwrap();
+        let reaped = wait_for(Duration::from_secs(10), || {
+            // tmux 3.4 and 3.5 built with utempter can lose the exit until tmux reaps a
+            // child of its own (`every_hook_reaches_the_mailbox`).
+            let _ = sb.tmux(&["run-shell", "true"]);
+            (!moa_platform::pid_alive(pid)).then_some(())
+        });
+        assert!(reaped.is_some(), "tmux never reaped the popup's moa");
     }
 }
 
@@ -370,10 +382,10 @@ fn a_path_with_spaces_quotes_and_hashes_survives() {
         .unwrap();
     let term = attach(&sb);
     term.press(b"\x01/");
-    odd.ran_as_told(&term);
+    odd.ran_as_told(&sb, &term);
     open_menu(&term, b"\x01 ");
     term.press(b"/");
-    odd.ran_as_told(&term);
+    odd.ran_as_told(&sb, &term);
 }
 
 /// Each key the status line's hint names (`/ find · c console · …`, the arrows among them)

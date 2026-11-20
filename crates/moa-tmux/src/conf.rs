@@ -68,9 +68,10 @@ impl Popups<'_> {
             true => literal_format(s),
             false => s.to_string(),
         };
+        // Help's popup has a size and a title of its own (S10), which nothing writes yet.
         let title = match view {
             View::Picker => "⌕ find a session",
-            other => other.label(),
+            other => unreachable!("no popup is written for the {other} view"),
         };
         let mut words = vec![
             "display-popup -E -w 80% -h 70% -d".to_string(),

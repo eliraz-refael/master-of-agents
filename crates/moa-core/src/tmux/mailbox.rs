@@ -61,7 +61,9 @@ impl KeyAction {
         KeyAction::ALL.into_iter().find(|a| a.word() == w)
     }
 
-    /// The key that triggers it, after moa's prefix.
+    /// The key that triggers it, after moa's prefix. Not for `Find` and `FindOther`: `[ui]
+    /// picker` decides which key is `find`'s, so `keymap::ctrl_a` is the only source for
+    /// their keys and labels (S8); `FindOther` is no key's.
     pub fn key(self) -> &'static str {
         match self {
             KeyAction::Console => "c",
@@ -81,7 +83,7 @@ impl KeyAction {
         }
     }
 
-    /// The menu text.
+    /// The menu text. Not for `Find` and `FindOther`, as with [`key`](KeyAction::key).
     pub fn label(self) -> &'static str {
         match self {
             KeyAction::Console => "Console",
