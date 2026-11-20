@@ -1269,11 +1269,7 @@ mod tests {
         assert!(matches!(input(&mut placed, ctrl_c()), Turn::Go(true)));
         let mut term = terminal();
         placed.draw(&mut term).unwrap();
-        assert!(
-            shown(&term).contains("part of moa's layout"),
-            "{}",
-            shown(&term)
-        );
+        assert!(shown(&term).contains("moa's layout"), "{}", shown(&term));
 
         let mut by_hand = looped(Some(View::Tree), false);
         assert!(!by_hand.panel.managed());

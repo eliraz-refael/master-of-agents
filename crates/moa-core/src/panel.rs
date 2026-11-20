@@ -100,6 +100,9 @@ impl View {
                 | View::Activity
                 | View::Projects
                 | View::Status
+                | View::Picker
+                | View::Help
+                | View::Setup
         )
     }
 }

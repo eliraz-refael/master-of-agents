@@ -16,7 +16,7 @@ use crate::geometry::{Geometry, Rect, Size, geometry};
 use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
-use crate::text::clean;
+use crate::text::{self, clean};
 use crate::views::{self, ViewUi, picture, tree};
 
 mod ask;
@@ -174,6 +174,8 @@ pub struct Panel {
 const CANCELLED: &str = "cancelled";
 /// What Ctrl-c, or `q` in the picture, says in a panel moa manages (L14).
 const MANAGED: &str = "this panel is part of moa's layout; Ctrl-a r repairs the layout";
+/// The managed line for a footer too narrow for [`MANAGED`] (31 columns).
+const MANAGED_SHORT: &str = "moa's layout · Ctrl-a r repairs";
 
 /// How long a broadcast event stays in the footer, in milliseconds.
 pub const EVENT_SHOWN_MS: i64 = 8_000;
@@ -290,7 +292,7 @@ impl Panel {
     /// Rebuilds the lines from `data`, keeps the selection on its item (V8) and the view on
     /// the selection, and drops a hover whose item left the list.
     fn refresh(&mut self, data: &Data, ctx: &Ctx, size: Size) -> Geometry {
-        let g = geometry(self.view, size);
+        let g = geometry(self.view, self.view.framed(), size);
         let was = self.selected().cloned();
         self.lines = views::build(self.view, data, ctx, &self.ui, build_width(&g));
         self.list.reselect(was.as_ref(), &self.lines);
@@ -568,7 +570,12 @@ impl Panel {
             } else {
                 Tone::Warn
             };
-            return Span::new(clean(&message.text), tone);
+            let text = if message.text == MANAGED && text::width(MANAGED) > usize::from(width) {
+                MANAGED_SHORT.to_string()
+            } else {
+                clean(&message.text)
+            };
+            return Span::new(ellipsize(&text, usize::from(width)), tone);
         }
         let unreadable = data.unreadable();
         if unreadable > 0 {
@@ -759,4 +766,16 @@ impl Panel {
         // A move through the list: nothing to send.
         Some(Vec::new())
     }
+}
+
+/// `s` as it fits `w` cells: one that is wider is cut at a grapheme boundary and ends in `…`.
+fn ellipsize(s: &str, w: usize) -> String {
+    if text::width(s) <= w {
+        return s.to_string();
+    }
+    let mut out = text::cut(s, w.saturating_sub(1));
+    if w > 0 {
+        out.push('…');
+    }
+    out
 }

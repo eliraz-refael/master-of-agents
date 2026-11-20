@@ -730,7 +730,7 @@ fn the_wheel_hovers_what_comes_under_the_pointer() {
 
 #[test]
 fn a_framed_view_keeps_the_spikes_padding() {
-    let g = geometry(View::Tree, SIZE);
+    let g = geometry(View::Tree, true, SIZE);
     assert!(g.framed);
     assert_eq!(g.tabs, None);
     assert_eq!(g.strip, None);
@@ -756,7 +756,7 @@ fn a_framed_view_keeps_the_spikes_padding() {
 
 #[test]
 fn the_picture_has_tabs_a_strip_and_a_footer() {
-    let g = geometry(View::Picture, Size { w: 80, h: 24 });
+    let g = geometry(View::Picture, false, Size { w: 80, h: 24 });
     assert!(!g.framed);
     assert_eq!(
         g.tabs,
@@ -809,7 +809,7 @@ fn any_size_lays_out_inside_itself() {
         for w in 0..12 {
             for h in 0..14 {
                 let size = Size { w, h };
-                let g = geometry(view, size);
+                let g = geometry(view, view.framed(), size);
                 for r in [Some(g.body), Some(g.footer), g.tabs, g.strip]
                     .into_iter()
                     .flatten()
@@ -973,4 +973,55 @@ fn a_panel_follows_its_row() {
     assert!(!p.follow(&panels_row("c7", View::Plan, false), "c7"));
     assert_eq!(p.view(), View::Plan);
     assert!(!p.managed());
+}
+
+#[test]
+fn unframed_views_share_the_empty_slots_layout() {
+    let size = Size { w: 80, h: 24 };
+    let picker = geometry(View::Picker, false, size);
+    assert_eq!(picker, geometry(View::EmptySlot, false, size));
+    assert!(!picker.framed);
+}
+
+#[test]
+fn framed_follows_the_view() {
+    for view in [View::Picker, View::Help, View::Setup] {
+        assert!(view.framed(), "{view:?}");
+    }
+    for view in [View::EmptySlot, View::Picture] {
+        assert!(!view.framed(), "{view:?}");
+    }
+}
+
+#[test]
+fn the_managed_line_fits_a_narrow_panel() {
+    for (w, want) in [
+        (40, "moa's layout · Ctrl-a r repairs"),
+        (
+            80,
+            "this panel is part of moa's layout; Ctrl-a r repairs the layout",
+        ),
+    ] {
+        let size = Size { w, h: 16 };
+        let (data, ctx) = lantern();
+        let mut panel = Panel::new(View::Tree);
+        panel.follow(&panels_row("c7", View::Tree, true), "c7");
+        panel.screen(&data, &ctx, size);
+        panel.key(Key::Ctrl('c'), &data, &ctx, size);
+        assert_eq!(panel.screen(&data, &ctx, size).footer.text, want, "{w}");
+    }
+}
+
+#[test]
+fn a_long_footer_message_ends_in_an_ellipsis() {
+    let size = Size { w: 30, h: 16 };
+    let (data, ctx) = lantern();
+    let mut panel = Panel::new(View::Tree);
+    panel.screen(&data, &ctx, size);
+    panel.note(&"漢".repeat(50));
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    let room = usize::from(size.w) - 3;
+    assert!(moa_view::text::width(&footer) <= room, "{footer}");
+    assert!(footer.ends_with('…'), "{footer}");
+    assert_eq!(footer, format!("{}…", "漢".repeat((room - 1) / 2)));
 }
