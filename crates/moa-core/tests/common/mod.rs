@@ -13,6 +13,7 @@ use moa_core::state::{CallerInfo, Deps, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::link::Link;
+use moa_core::tmux::topology::refresh_cmds;
 use moa_testkit::brain::TypicalBrain;
 
 /// The plugin sessions are started with.
@@ -115,6 +116,14 @@ pub fn queries(fx: &[Effect]) -> Vec<(u64, Vec<Cmd>)> {
             _ => None,
         })
         .collect()
+}
+
+/// The one query asked in `fx`, which is a listing (the cockpit queue's): its number.
+pub fn the_listing(fx: &[Effect]) -> u64 {
+    match &queries(fx)[..] {
+        [(n, cmds)] if *cmds == refresh_cmds() => *n,
+        other => panic!("not one listing: {other:?}"),
+    }
 }
 
 /// The commands of the one tokened `Open`, and its session.

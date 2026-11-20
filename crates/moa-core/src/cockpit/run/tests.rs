@@ -294,15 +294,20 @@ fn a_vacate_leaves_the_spot_whole() {
     let mut st = up();
     let n = the_listing(&vacate_of(&mut st, 9, 1));
     let (n, lines) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
+    // The respawn takes the agent down on its own; the slot's tags follow once it is `Ok`.
     assert_eq!(
-        lines[0],
-        "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
+        lines,
+        [
+            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
+        ]
     );
-    assert!(lines.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
     assert_eq!(st.panel_starts, 0);
+    let (n, lines) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    assert_eq!(st.panel_starts, 1);
+    assert!(lines.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
     assert_eq!(st.tmux.topology.moa_session(PaneId(9)), Some(sid(1)));
     feed(&mut st, answer(n, vec![Ok(Vec::new())]));
-    assert_eq!(st.panel_starts, 1);
+    assert!(st.cockpit.in_flight.is_none());
     assert_eq!(st.tmux.topology.view_of(PaneId(9)), Some("empty-slot"));
     // No longer a session's tab, at once: the chain took its session tag off.
     assert_eq!(st.tmux.topology.moa_session(PaneId(9)), None);
@@ -489,4 +494,53 @@ fn a_vacate_takes_down_its_pane_whose_session_tag_never_landed() {
     panes[2] = pane(9, 1, 0, true, "", "agent");
     let (_, lines) = the_chain(&feed(&mut st, answer(n, lists(panes))));
     assert_eq!(lines, ["swap-pane -d -s %5 -t %9", "kill-pane -t %9"]);
+}
+
+/// A session's agent in the cockpit with another view's tag isn't the spot's occupant: a
+/// plain kill, never a second empty slot.
+#[test]
+fn a_vacate_of_an_agent_tagged_as_a_panel_just_kills_it() {
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
+    let mut panes = lantern_in_the_spot(true);
+    panes[2] = pane(9, 1, 0, true, &sid(1).to_string(), "tree");
+    let (_, lines) = the_chain(&feed(&mut st, answer(n, lists(panes))));
+    assert_eq!(lines, ["kill-pane -t %9"]);
+}
+
+/// With no listing to plan from, the vacate's saved commit still closes its agent, as 4b's
+/// plain kill did, and says so; a pane moa last knew as a panel is left alone.
+#[test]
+fn a_vacate_with_an_unreadable_listing_still_kills_its_agent() {
+    let mut st = up();
+    feed(&mut st, refresh(kite_in_its_tab()));
+    let n = the_listing(&vacate_of(&mut st, 9, 2));
+    let fx = feed(&mut st, answer(n, vec![Err("server exited".into())]));
+    let logged: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(l.message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [
+            "moa couldn't read the terminal's state: server exited; the agent in %9 is closed without it"
+        ]
+    );
+    let (n, lines) = the_chain(&fx);
+    assert_eq!(lines, ["kill-pane -t %9"]);
+    feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert!(st.cockpit.in_flight.is_none());
+
+    // The empty slot (a vacate run again after its chain ran) is never killed blind.
+    let mut st = up();
+    let mut slot = lantern_in_the_spot(false);
+    slot[2] = pane(9, 1, 0, true, "", "empty-slot");
+    feed(&mut st, refresh(slot));
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
+    let fx = feed(&mut st, answer(n, vec![Err("server exited".into())]));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert!(st.cockpit.in_flight.is_none());
 }

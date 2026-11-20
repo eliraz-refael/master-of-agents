@@ -26,7 +26,7 @@ use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
 
-use common::queries;
+use common::{queries, the_listing};
 
 const TTY: &str = "/dev/ttys1";
 const LOST: &str = "moa lost its terminal; try again";
@@ -159,14 +159,6 @@ fn focus_built() -> Vec<String> {
         shown(5, "empty-slot"),
         shown(3, "console"),
     ]
-}
-
-/// The one listing an operation asked in `fx`: its query number.
-fn the_listing(fx: &[Effect]) -> u64 {
-    match &queries(fx)[..] {
-        [(n, cmds)] if *cmds == refresh_cmds() => *n,
-        other => panic!("not one listing: {other:?}"),
-    }
 }
 
 /// Each command of a chain (or of a plain command), as one line of its words.
@@ -1498,14 +1490,16 @@ fn sleeping_the_spots_agent_with_no_spare_respawns_the_spot() {
         &mut st,
         answer(n, lists(&lantern_in_the_spot(false), false)),
     );
+    // The respawn takes the agent down; the slot's tags go once it is answered.
     let (n, chain) = the_chain(&fx);
     assert_eq!(
-        chain[..2],
+        chain,
         [
-            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default",
-            "set-option -p -u -t %9 @moa_session",
+            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
         ]
     );
+    let (n, chain) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    assert_eq!(chain[0], "set-option -p -u -t %9 @moa_session");
     assert!(chain.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
     // Kept on exit, with its stopped line: a crashed slot stays for Repair (L11).
     let kept = chain
@@ -1536,8 +1530,9 @@ fn closing_the_spots_agent_leaves_the_empty_slot() {
     assert_eq!(st.session(sid(L)).unwrap().lifecycle, Lifecycle::Ended);
     let n = committed_then_listed(&fx);
     let fx = feed(&mut st, answer(n, lists(&lantern_in_the_spot(false), true)));
-    let (_, chain) = the_chain(&fx);
+    let (n, chain) = the_chain(&fx);
     assert!(chain[0].starts_with("respawn-pane -k -t %9 "), "{chain:?}");
+    let (_, chain) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
     assert!(chain.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
 }
 

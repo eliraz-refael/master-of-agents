@@ -842,7 +842,8 @@ pub(crate) fn resumed(
         prompt: None,
     };
     let window = new_window(state, link, &spec);
-    // Held before the vacate is queued: it may end at once (no link to ask on).
+    // Held before `post_commit` queues the vacate, so its end always finds the window
+    // waiting. With the link up, the vacate first asks its listing: it ends in a later input.
     if let Some(pane) = held {
         state.cockpit.held.insert(pane, Held { id, window });
         fx.extend(post_commit(state, tx));
@@ -875,6 +876,10 @@ pub(crate) fn released(state: &mut State, now: &Now) -> Vec<Effect> {
             continue;
         };
         state.restarted.remove(&id);
+        // Its old agent still runs: its events are no longer a killed tab's.
+        if state.killed.get(&id).is_some_and(|(_, p)| *p == pane) {
+            state.killed.remove(&id);
+        }
         let mut tx = Tx::new(now);
         let mut logs = vec![warn(format!(
             "session {id} wasn't restarted: its old agent in {pane} couldn't be taken down"

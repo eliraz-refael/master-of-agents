@@ -550,19 +550,6 @@ fn answer_on(
     )
 }
 
-/// The one query in `fx` that is a listing: its number.
-fn the_listing(fx: &[Effect]) -> u64 {
-    let listings: Vec<u64> = queries(fx)
-        .into_iter()
-        .filter(|(_, cmds)| *cmds == refresh_cmds())
-        .map(|(n, _)| n)
-        .collect();
-    match listings[..] {
-        [n] => n,
-        _ => panic!("one listing: {fx:?}"),
-    }
-}
-
 /// Whether `fx` sends a window for a launch.
 fn opens(fx: &[Effect]) -> bool {
     fx.iter().any(|e| {
@@ -621,13 +608,53 @@ fn restarting_the_spots_agent_leaves_the_empty_slot() {
             &["-k".to_string(), "-t".into(), "%5".into()][..]
         )
     );
+    assert_eq!(chain[0].parts().len(), 1, "the respawn alone: {chain:?}");
     assert!(!opens(&fx), "{fx:?}");
 
+    // The old agent is gone; the empty slot's tags follow, then the new tab opens.
+    let fx = answer_on(&mut r, 1, *n, vec![Ok(Vec::new())]);
+    assert!(!opens(&fx), "{fx:?}");
+    let [(n, tags)] = &queries(&fx)[..] else {
+        panic!("the slot's tags: {fx:?}");
+    };
+    assert!(
+        tags[0]
+            .parts()
+            .iter()
+            .any(|c| c.argv().iter().any(|a| a == "empty-slot")),
+        "{tags:?}"
+    );
     let fx = answer_on(&mut r, 1, *n, vec![Ok(Vec::new())]);
     let (id, cmds) = the_open(&fx);
     assert_eq!((id, cmds[0].name()), (s_id(), "new-window"));
     assert!(replies(&fx).is_empty(), "{fx:?}");
     assert_eq!(replies(&r.bound("%7")), [(ReqId(1), restarted())]);
+}
+
+/// The respawn took the old agent down, but tmux refused a tag after it: the agent is gone,
+/// so the restart goes ahead; the missing slot is logged.
+#[test]
+fn a_restart_whose_old_agent_went_resumes_though_a_tag_failed() {
+    let mut r = World::new().reconciled();
+    let n = restart_with_a_cockpit(&mut r);
+    let fx = answer_on(&mut r, 1, n, cockpit_scene(true));
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("the respawn: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Ok(Vec::new())]);
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("the slot's tags: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Err("invalid option: @moa_view".into())]);
+    assert_eq!(the_open(&fx).0, s_id());
+    let said = "the agent in %5 was taken down, but the empty slot there couldn't be set up: \
+                invalid option: @moa_view";
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Log(l) if l.message == said)),
+        "{fx:?}"
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
 }
 
 /// The old tab went before the vacate's turn: nothing to take down, so the new tab opens.
@@ -665,6 +692,14 @@ fn a_restart_whose_old_agent_stays_isnt_resumed() {
     );
     assert!(is_asleep(r.s()), "{:?}", r.s());
     assert_ne!(why_not(&r.st, s_id(), r.b.now().wall, 0), Some("opening"));
+
+    // Its old agent still runs in %5: what it says counts again, neither the restart's fence
+    // nor a killed tab's.
+    let started = HookKind::SessionStarted {
+        source: StartSource::Startup,
+    };
+    hook(&mut r, false, started, 1000, 901);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live, "{:?}", r.s());
 }
 
 /// The link goes while the restart waits for its vacate: the restart hears so, and its new
@@ -692,7 +727,15 @@ fn a_restart_held_for_its_vacate_ends_with_the_link() {
             socket: "moa".into(),
         },
     );
-    let n = the_listing(&fx);
+    // The vacate's listing, beside the reconcile's look at the tabs.
+    let listings: Vec<u64> = queries(&fx)
+        .into_iter()
+        .filter(|(_, cmds)| *cmds == refresh_cmds())
+        .map(|(n, _)| n)
+        .collect();
+    let [n] = listings[..] else {
+        panic!("the vacate's listing: {fx:?}");
+    };
     let fx = answer_on(&mut r, 2, n, cockpit_scene(true));
     let chains: Vec<u64> = queries(&fx)
         .into_iter()

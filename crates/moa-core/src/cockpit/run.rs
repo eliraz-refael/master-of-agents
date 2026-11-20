@@ -108,6 +108,11 @@ pub(crate) struct CockpitRun {
     stopped: BTreeSet<PaneId>,
     /// The link just came up: its first listing may queue the lazy build (L9).
     lazy_armed: bool,
+    /// The vacate in flight took its agent down: its kill (or the spot's respawn) was
+    /// answered `Ok`, whatever becomes of the tags after it (R24).
+    taken: bool,
+    /// The vacate's chain still to go once its agent is taken down: the empty slot's tags.
+    rest: Option<(Vec<Cmd>, Then)>,
     /// Restarts whose new tab waits for the old agent to go (R24), by the vacated pane.
     pub(crate) held: BTreeMap<PaneId, Held>,
     /// The held vacates that ended since, and whether they took the agent down: the end of
@@ -128,6 +133,8 @@ impl CockpitRun {
         self.step = Step::Listing;
         self.replanned = false;
         self.restarted = None;
+        self.taken = false;
+        self.rest = None;
     }
 }
 
@@ -184,6 +191,10 @@ enum Next {
     Spawn(Vec<View>),
     Respawn(Vec<(PaneId, View)>),
     Chain(Vec<Cmd>, Then),
+    /// A vacate's chain that takes its agent down, then, once that is answered `Ok`, the
+    /// rest (the empty slot's tags), as a chain of its own: tmux's one answer for a chain
+    /// can't tell which command failed (R24 asks whether the agent went).
+    TakeDown(Vec<Cmd>, Then, Option<(Vec<Cmd>, Then)>),
 }
 
 /// Whom `op` answers: none for an operation nobody asked for, or whose asker left.
@@ -220,6 +231,18 @@ fn first_line(e: &str) -> &str {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("tmux gave no reason")
+}
+
+/// A vacate's second chain refused, its agent taken down already: only the empty slot's
+/// tags are missing. `None` for any other chain.
+fn vacate_failed(state: &State, op: &CockpitOp, e: &str) -> Option<Said> {
+    match op {
+        CockpitOp::Vacate { pane, .. } if state.cockpit.taken => Some(Said::Logged(format!(
+            "the agent in {pane} was taken down, but the empty slot there couldn't be set up: {}",
+            first_line(e)
+        ))),
+        _ => None,
+    }
 }
 
 /// A chain's error in plain words (L18).
@@ -490,13 +513,16 @@ fn lost_now(state: &mut State) -> Vec<Effect> {
 fn finish(state: &mut State, said: Said) -> Vec<Effect> {
     let run = &mut state.cockpit;
     let op = run.in_flight.take().map(|(_, op)| op);
+    let taken = run.taken;
     run.reset_op();
-    // A vacate a restart waits for: done when it ended with nothing to say (its chain's
-    // `Ok`, or nothing left to take down), else not (L17, R24).
+    // A vacate a restart waits for: done when its agent went (its kill or respawn answered
+    // `Ok`, whatever became of the slot's tags) or there was nothing left to take down;
+    // else not (L17, R24).
     if let Some(CockpitOp::Vacate { pane, .. }) = &op
         && run.held.contains_key(pane)
     {
-        run.vacated.push((*pane, matches!(said, Said::Nothing)));
+        run.vacated
+            .push((*pane, taken || matches!(said, Said::Nothing)));
     }
     let mut fx = Vec::new();
     match said {
@@ -527,6 +553,40 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
             .iter()
             .find_map(|a| a.as_ref().err())
             .map_or("tmux's answer didn't parse", |e| first_line(e));
+        // A vacate can't plan with no listing, but its commit is saved: its agent is killed
+        // plainly, as 4b did (a pane id names one pane on its server), unless moa last knew
+        // the pane as a panel (its chain already ran).
+        if let Some((_, CockpitOp::Vacate { pane, .. })) = &state.cockpit.in_flight {
+            let pane = *pane;
+            let panel = state
+                .tmux
+                .topology
+                .view_of(pane)
+                .is_some_and(|v| v.parse::<View>().is_ok());
+            if !panel {
+                let mut fx = vec![log(
+                    LogLevel::Warn,
+                    format!(
+                        "moa couldn't read the terminal's state: {why}; the agent in {pane} is closed without it"
+                    ),
+                )];
+                let then = Then {
+                    tags: vec![(pane, None)],
+                    untagged: Vec::new(),
+                    moved: None,
+                    views: None,
+                    starts: 0,
+                    layout: String::new(),
+                    ok: Said::Nothing,
+                };
+                fx.extend(act(
+                    state,
+                    seq,
+                    Next::TakeDown(vec![kill_pane(pane)], then, None),
+                ));
+                return fx;
+            }
+        }
         let text = format!("moa couldn't read the terminal's state: {why}; try again");
         // Logged either way; an operation nobody asked for has the log line only (and a
         // vacate's ends as not done).
@@ -649,9 +709,11 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             if !ours {
                 return Next::Done(Said::Nothing);
             }
-            // The spot's occupant, tagged `agent` there, with or without its session tag.
-            let in_spot =
-                at.place == Place::Cockpit && (matches!(at.role, Role::Spot(Some(_))) || at.tagged);
+            // The spot's occupant, tagged `agent` there, with or without its session tag (an
+            // agent with a session and another view isn't the spot's).
+            let in_spot = at.place == Place::Cockpit
+                && (matches!(at.role, Role::Spot(Some(_)))
+                    || (matches!(at.role, Role::Other) && at.tagged));
             let then = |tags, untagged, starts| Then {
                 tags,
                 untagged,
@@ -661,19 +723,29 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 layout: String::new(),
                 ok: Said::Nothing,
             };
-            if in_spot {
-                let v = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
-                // In place, the spot becomes the empty slot, no longer a session's tab; a spare
-                // one swapped in already is the slot, and the agent's pane is gone: no longer
-                // the spot's, so nothing reads an exit of it as the spot's agent ending.
-                let then = match v.respawned {
-                    true => then(vec![(*pane, Some(View::EmptySlot.word()))], vec![*pane], 1),
-                    false => then(vec![(*pane, None)], Vec::new(), 0),
-                };
-                Next::Chain(v.chain.parts().to_vec(), then)
-            } else {
-                Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), Vec::new(), 0))
+            if !in_spot {
+                return Next::TakeDown(
+                    vec![kill_pane(*pane)],
+                    then(Vec::new(), Vec::new(), 0),
+                    None,
+                );
             }
+            let v = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
+            let cmds = v.chain.parts().to_vec();
+            if !v.respawned {
+                // A spare one swapped in already is the slot, and the agent's pane is gone: no
+                // longer the spot's, so nothing reads an exit of it as the spot's agent ending.
+                return Next::TakeDown(cmds, then(vec![(*pane, None)], Vec::new(), 0), None);
+            }
+            // In place: the respawn takes the agent down (a panel start), then the spot
+            // becomes the empty slot, no longer a session's tab.
+            let (respawn, tags) = cmds.split_at(1);
+            let slot = then(vec![(*pane, Some(View::EmptySlot.word()))], vec![*pane], 0);
+            Next::TakeDown(
+                respawn.to_vec(),
+                then(Vec::new(), Vec::new(), 1),
+                Some((tags.to_vec(), slot)),
+            )
         }
         CockpitOp::SelectView { pane, view, .. } => {
             // Only a pane moa tagged as a panel; never the spot (its empty slot or its agent),
@@ -863,6 +935,10 @@ fn act(state: &mut State, seq: u64, next: Next) -> Vec<Effect> {
                 None => lost_now(state),
             }
         }
+        Next::TakeDown(cmds, then, rest) => {
+            state.cockpit.rest = rest;
+            act(state, seq, Next::Chain(cmds, then))
+        }
     }
 }
 
@@ -949,9 +1025,18 @@ pub(crate) fn chain_answered(
                     if let Some(views) = then.views {
                         fx.extend(views_given(state, &views));
                     }
+                    // A vacate's first chain took its agent down; its tags go next.
+                    if matches!(op, CockpitOp::Vacate { .. }) {
+                        state.cockpit.taken = true;
+                        if let Some((cmds, then)) = state.cockpit.rest.take() {
+                            fx.extend(act(state, seq, Next::Chain(cmds, then)));
+                            return fx;
+                        }
+                    }
                     said
                 }
-                Some(Err(e)) => chain_failed(&op, &then.layout, &e),
+                Some(Err(e)) => vacate_failed(state, &op, &e)
+                    .unwrap_or_else(|| chain_failed(&op, &then.layout, &e)),
                 None => chain_failed(&op, &then.layout, "tmux didn't answer"),
             };
             fx.extend(finish(state, said));
