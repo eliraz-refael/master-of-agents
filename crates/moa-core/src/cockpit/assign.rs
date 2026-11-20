@@ -25,11 +25,12 @@ pub(crate) struct Assignment {
 
 /// The panes for `layout`'s leaves (in layout order), as L5 picks them.
 pub(crate) fn assign(scene: &Scene, layout: &[Leaf]) -> Assignment {
-    // Panels a leaf can take: in the cockpit first, then parked; elsewhere, never.
+    // Panels a leaf can take: in the cockpit first, then parked; elsewhere, never. A sheet
+    // never: it is parked between opens, and may be open in your session right now (S9).
     let mut panels: Vec<&PaneAt> = scene
         .panes
         .iter()
-        .filter(|at| at.panel_view().is_some())
+        .filter(|at| at.panel_view().is_some_and(|v| !v.is_sheet()))
         .filter(|at| matches!(at.place, Place::Cockpit | Place::Hidden))
         .collect();
     panels.sort_by_key(|at| at.place != Place::Cockpit);

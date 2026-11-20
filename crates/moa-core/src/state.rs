@@ -332,6 +332,13 @@ pub struct State {
     pub(crate) prompts: BTreeMap<u64, Asking>,
     /// The last prompt's token: tokens never repeat while this daemon runs.
     pub(crate) last_prompt: u64,
+    /// The sheets open (S9), by their panel's pane: each open's number, its wall-clock
+    /// milliseconds, which never repeat across moa's restarts. A panel's `panels` row reads
+    /// its open here, so one that registers after its link still knows it. Kept in memory: a
+    /// listing after a restart unlinks a sheet left open.
+    pub(crate) sheets: BTreeMap<PaneId, i64>,
+    /// The last open's number: two opens in one millisecond still differ.
+    pub(crate) last_sheet: i64,
 }
 
 impl State {
@@ -374,6 +381,8 @@ impl State {
             cockpit: CockpitRun::default(),
             prompts: BTreeMap::new(),
             last_prompt: 0,
+            sheets: BTreeMap::new(),
+            last_sheet: 0,
         }
     }
 
@@ -466,6 +475,11 @@ impl State {
     /// The folder the selection of the panel in tab `pane` is in (`ui.here`).
     pub fn here_of(&self, pane: PaneId) -> Option<&str> {
         self.panel_in(pane).and_then(|p| p.here.as_deref())
+    }
+
+    /// The number of the sheet open in the panel in tab `pane`, if one is (S9).
+    pub fn sheet(&self, pane: PaneId) -> Option<i64> {
+        self.sheets.get(&pane).copied()
     }
 
     /// The panel drawing in tab `pane`, if one is.

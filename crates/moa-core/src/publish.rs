@@ -80,6 +80,10 @@ pub struct PanelRow {
     /// Absent from an older daemon's rows.
     #[serde(default)]
     pub managed: bool,
+    /// A sheet's open (S9): its number while the sheet in this row's tab is open, which a new
+    /// open changes; `None` (absent) while it is closed, and for every other panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<i64>,
 }
 
 /// A `layouts` row (key: its name): its place in the layouts' order (the rows are by name),
@@ -240,6 +244,7 @@ impl State {
                     pane: reg.pane.map(|p| p.to_string()),
                     view: reg.view,
                     managed: reg.managed,
+                    sheet: reg.pane.and_then(|p| self.sheets.get(&p).copied()),
                 };
                 let v = keyed(&key, &row);
                 (key, v)

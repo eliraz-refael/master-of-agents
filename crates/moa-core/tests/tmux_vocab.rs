@@ -100,6 +100,8 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             "rename-window",
             "resize-window",
             "run-shell",
+            "link-window",
+            "unlink-window",
         ];
         if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");
@@ -271,6 +273,53 @@ fn only_moas_prompt_shape_is_allowed() {
     }
 }
 
+/// S9: a sheet is linked into a user's session by its pane and the session's id alone (the
+/// next free index), selected and unlinked by both ids. Never by name, never at an index,
+/// never with `-k`, which would kill a window linked nowhere else.
+#[test]
+fn only_the_sheet_shapes_link_and_unlink() {
+    let check =
+        |name: &'static str, args: &[&str]| Cmd::new(name).args(args.iter().copied()).check();
+    assert_eq!(check("link-window", &["-s", "%3", "-t", "$0:"]), Ok(()));
+    assert_eq!(check("unlink-window", &["-t", "$0:@3"]), Ok(()));
+    assert_eq!(check("select-window", &["-t", "$0:@3"]), Ok(()));
+    assert_eq!(check("select-window", &["-t", "%3"]), Ok(()));
+    let link = "link-window needs -s and a tab id, then -t and a session id with a colon";
+    for args in [
+        &["-s", "picker", "-t", "moa:"][..],
+        &["-s", "%3", "-t", "$0:5"],
+        &["-s", "%3", "-t", "$0"],
+        &["-s", "%3", "-t", "moa:"],
+        &["-s", "@3", "-t", "$0:"],
+        &["-k", "-s", "%3", "-t", "$0:"],
+        &["-s", "%3", "-t", "$0:", "-k"],
+        &["-d", "-s", "%3", "-t", "$0:"],
+    ] {
+        assert_eq!(check("link-window", args), Err(Refused(link)), "{args:?}");
+    }
+    let unlink = "unlink-window needs -t and a session id with a window id";
+    for args in [
+        &["-k", "-t", "$0:@3"][..],
+        &["-t", "$0:@3", "-k"],
+        &["-t", "moa:@3"],
+        &["-t", "$0:3"],
+        &["-t", "@3"],
+        &["-t", "$0:"],
+        &[],
+    ] {
+        assert_eq!(
+            check("unlink-window", args),
+            Err(Refused(unlink)),
+            "{args:?}"
+        );
+    }
+    for args in [&["-t", "$0:"][..], &["-t", "moa:@3"], &["-t", "$0:@3x"]] {
+        assert!(check("select-window", args).is_err(), "{args:?}");
+    }
+    // Only a window is selected by both ids.
+    assert!(check("select-pane", &["-t", "$0:@3"]).is_err());
+}
+
 #[test]
 fn source_file_checks_every_path() {
     let source = |args: &[&str]| Cmd::new("source-file").args(args.iter().copied()).check();
@@ -391,16 +440,12 @@ fn mailbox_lines_parse() {
 }
 
 #[test]
-fn every_action_has_a_word_key_label_and_notice() {
+fn every_action_has_a_word_key_and_label() {
     let mut keys = BTreeSet::new();
     for a in KeyAction::ALL {
         assert_eq!(KeyAction::from_word(&a.word()), Some(a));
         assert!(keys.insert(a.key()), "{a:?}");
         assert!(!a.label().is_empty());
-        for word in ["tmux", "pane", "window"] {
-            let text = a.not_yet().unwrap_or_default();
-            assert!(!text.contains(word), "{a:?}: {text}");
-        }
         // Whole words: "Repair panels" is fine.
         let label = a.label().to_lowercase();
         for w in label.split(|c: char| !c.is_alphanumeric()) {
@@ -412,20 +457,12 @@ fn every_action_has_a_word_key_label_and_notice() {
             );
         }
     }
-    assert_eq!(KeyAction::ALL.len(), 14);
+    assert_eq!(KeyAction::ALL.len(), 13);
     assert_eq!(KeyAction::from_word("layout-5"), None);
     assert_eq!(KeyAction::from_word("layout-0"), None);
+    // `s` is the daemon's `find` since S8, and `find-other` no word any more (S9).
+    assert_eq!(KeyAction::from_word("find-other"), None);
     assert_eq!(KeyAction::Layout(2).label(), "Layout: focus (agent)");
-    assert_eq!(KeyAction::FindOther.not_yet(), KeyAction::Find.not_yet());
-    // The keys the core acts on say nothing is coming (L13).
-    let coming: Vec<KeyAction> = KeyAction::ALL
-        .into_iter()
-        .filter(|a| a.not_yet().is_some())
-        .collect();
-    assert_eq!(
-        coming,
-        [KeyAction::Find, KeyAction::FindOther, KeyAction::Help]
-    );
 }
 
 const MOA_SESSION: &str = "0b9e6c6e-2a43-4a7e-9d51-6e3f0d3c8a11";

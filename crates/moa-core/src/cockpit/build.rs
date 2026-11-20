@@ -64,7 +64,7 @@ fn break_to(pane: PaneId, to: &str, name: Option<&str>) -> Cmd {
 
 /// The window of `pane` sized to its session's largest terminal, then given back to
 /// tmux's own sizing (`resize-window` fixes the size until the option is unset).
-fn fit_to_terminal(pane: PaneId) -> [Cmd; 2] {
+pub(crate) fn fit_to_terminal(pane: PaneId) -> [Cmd; 2] {
     let p = pane.to_string();
     [
         Cmd::new("resize-window").args(["-A", "-t", &p]),

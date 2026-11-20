@@ -6,7 +6,7 @@ use moa_core::live::DisplayState;
 use moa_core::model::{Location, SessionId};
 use moa_core::op::{Done, Op};
 use moa_core::panel::View;
-use moa_core::publish::Topic;
+use moa_core::publish::{PanelRow, Topic};
 use moa_view::ctx::Ctx;
 use moa_view::data::{Data, SessionRow};
 use moa_view::fixture::{lantern, session};
@@ -830,4 +830,91 @@ fn lines_are_selectable_rows() {
     let lines: Vec<Line> = views::build(View::Picker, &data, &ctx, &ViewUi::default(), 80);
     assert_eq!(lines.len(), 12);
     assert!(lines.iter().all(Line::selectable));
+}
+
+// ---------- the sheet (S9) ----------
+
+/// The picker's own `panels` row, `c7`, followed: in tab `%3`, `managed` or not, with its
+/// sheet's open `sheet`.
+fn row(t: &mut T, managed: bool, sheet: Option<i64>) {
+    t.data.panels.insert(
+        "c7".into(),
+        PanelRow {
+            pane: Some("%3".into()),
+            view: View::Picker,
+            managed,
+            sheet,
+        },
+    );
+    t.panel.follow(&t.data, "c7");
+}
+
+/// A sheet moa placed waits, parked, while it is closed: it draws nothing, and nothing in
+/// it moves or wakes the panel, though a working session's glyph would.
+#[test]
+fn a_closed_sheet_draws_nothing_and_never_animates() {
+    let mut t = T::new();
+    row(&mut t, true, Some(1));
+    let open = t.screen();
+    assert!(open.animate, "the working session's glyph moves");
+    assert!(!open.body.is_empty());
+
+    row(&mut t, true, None);
+    let closed = t.screen();
+    assert!(closed.body.is_empty() && closed.head.is_empty() && closed.strip.is_empty());
+    assert_eq!((closed.title.as_deref(), closed.cursor), (None, None));
+    assert_eq!(closed.footer.text, "");
+    assert!(!closed.geometry.framed);
+    assert!(!closed.animate);
+    assert_eq!(closed.wake_at, None);
+}
+
+/// A picker you started (`moa panel picker`), or a popup, has no open to wait for: it always
+/// draws, and its close quits it.
+#[test]
+fn a_picker_you_started_always_draws() {
+    let mut t = T::new();
+    row(&mut t, false, None);
+    let screen = t.screen();
+    assert!(!screen.body.is_empty() && screen.animate);
+    assert_eq!(t.key(Key::Esc), [Out::Close]);
+    assert!(t.panel.quits(Key::Esc));
+
+    let mut popup = T::new();
+    popup.panel.set_popup(true);
+    row(&mut popup, true, None);
+    assert!(!popup.screen().body.is_empty());
+}
+
+/// Each open starts the picker afresh: the query empty and the first row selected. The same
+/// open said again keeps what was typed.
+#[test]
+fn a_new_sheet_number_clears_the_query() {
+    let mut t = T::new();
+    row(&mut t, true, Some(1));
+    let first = t.selected();
+    t.typed("harb");
+    row(&mut t, true, Some(1));
+    assert_eq!(t.query_line(), "› harb");
+
+    // Closed, then open again.
+    row(&mut t, true, None);
+    row(&mut t, true, Some(2));
+    assert_eq!(t.query_line(), "› ");
+    t.key(Key::Down);
+    assert_ne!(t.selected(), first);
+    row(&mut t, true, Some(3));
+    assert_eq!(t.selected(), first);
+    assert_eq!(t.footer(), "↵ jump · ↑↓ move · esc close");
+}
+
+/// In a sheet, Ctrl-c closes, as Esc does: it never says the managed line. Help too.
+#[test]
+fn ctrl_c_closes_a_sheet() {
+    let mut t = T::new();
+    row(&mut t, true, Some(1));
+    assert_eq!(t.key(Key::Ctrl('c')), [Out::Close]);
+    let mut help = Panel::new(View::Help);
+    help.set_managed(true);
+    assert_eq!(help.interrupt(), Some(Out::Close));
 }

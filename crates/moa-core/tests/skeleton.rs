@@ -485,6 +485,7 @@ fn op_methods_match_the_variants() {
         Op::UiHere {
             folder: Some("/x".into()),
         },
+        Op::UiClose(NoParams),
         Op::LayoutList(NoParams),
         Op::LayoutShow {
             name: "cockpit".into(),
@@ -584,6 +585,7 @@ fn ops_without_params_take_missing_null_or_empty_params() {
         ("attention", Op::Attention(NoParams)),
         ("suggestion.ls", Op::SuggestionLs(NoParams)),
         ("layout.list", Op::LayoutList(NoParams)),
+        ("ui.close", Op::UiClose(NoParams)),
     ] {
         for text in [
             format!(r#"{{"method":"{method}"}}"#),

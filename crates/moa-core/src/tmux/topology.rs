@@ -54,8 +54,9 @@ pub struct Topology {
     clients: BTreeMap<ClientName, TmuxSessionId>,
     moa_sessions: BTreeMap<PaneId, SessionId>,
     cockpits: BTreeSet<WindowId>,
-    /// Each window's session, from the pane lines: a rename is judged by it.
-    window_sessions: BTreeMap<WindowId, TmuxSessionId>,
+    /// Each window's sessions, from the pane lines: a rename is judged by them. A window is
+    /// in more than one when it is linked into another (a sheet, S9).
+    window_sessions: BTreeMap<WindowId, BTreeSet<TmuxSessionId>>,
     /// `@moa_view`, the panel a pane shows (or `agent` for the agent spot).
     views: BTreeMap<PaneId, String>,
     /// The panes whose program has exited and that tmux keeps (`remain-on-exit`).
@@ -67,6 +68,12 @@ pub struct Topology {
 
 /// The name of the session that holds the cockpit, and of the cockpit window in it.
 const COCKPIT: &str = "moa";
+
+/// The hidden session where panels wait, parked.
+const HIDDEN: &str = "_moa";
+
+/// What [`Topology::sessions_of`] gives a window the lists don't hold.
+static NO_SESSIONS: BTreeSet<TmuxSessionId> = BTreeSet::new();
 
 /// What a terminal with no label is called: an agent that ran in it, in the spot, took its
 /// label (`● <title>`) and left with it. The cockpit names a shell it sends home the same
@@ -183,7 +190,10 @@ impl Topology {
         if let Some(m) = moa {
             self.moa_sessions.insert(pane, m);
         }
-        self.window_sessions.insert(window, session);
+        self.window_sessions
+            .entry(window)
+            .or_default()
+            .insert(session);
         if dead {
             self.dead.insert(pane);
         }
@@ -195,10 +205,13 @@ impl Topology {
     /// The window is renamed: it is the cockpit when its new name and its session's are both
     /// `moa`. A window the lists don't hold yet is read again.
     fn window_renamed(&mut self, w: WindowId, name: &str) -> Applied {
-        let Some(session) = self.window_sessions.get(&w) else {
+        let Some(sessions) = self.window_sessions.get(&w) else {
             return Applied::Refresh;
         };
-        let cockpit = name == COCKPIT && self.sessions.get(session).is_some_and(|n| n == COCKPIT);
+        let cockpit = name == COCKPIT
+            && sessions
+                .iter()
+                .any(|s| self.sessions.get(s).is_some_and(|n| n == COCKPIT));
         let changed = if cockpit {
             self.cockpits.insert(w)
         } else {
@@ -226,7 +239,8 @@ impl Topology {
             return Applied::Refresh;
         }
         let in_session = &self.window_sessions;
-        self.cockpits.retain(|w| in_session.get(w) != Some(&s));
+        self.cockpits
+            .retain(|w| !in_session.get(w).is_some_and(|ss| ss.contains(&s)));
         Applied::Changed
     }
 
@@ -345,10 +359,55 @@ impl Topology {
             .flat_map(|w| w.panes.iter().copied())
     }
 
-    /// The name of the session that holds pane `p`.
+    /// The name of the session that holds pane `p`. A window in more than one is `_moa`'s
+    /// when that is one of them: a sheet linked into a user's session lives there (S9).
+    /// Otherwise the name that sorts last, as when the last line `list-panes -a` printed for
+    /// it won (tmux lists sessions by name).
     pub fn session_name_of(&self, p: PaneId) -> Option<&str> {
-        let session = self.window_sessions.get(&self.window_of(p)?)?;
-        self.sessions.get(session).map(String::as_str)
+        let names = self
+            .sessions_of(self.window_of(p)?)
+            .iter()
+            .filter_map(|s| self.session_name(*s));
+        names.clone().find(|n| *n == HIDDEN).or_else(|| names.max())
+    }
+
+    /// The sessions window `w` is in: none for a window the lists don't hold.
+    pub fn sessions_of(&self, w: WindowId) -> &BTreeSet<TmuxSessionId> {
+        self.window_sessions.get(&w).unwrap_or(&NO_SESSIONS)
+    }
+
+    /// Session `s`'s name, if the lists hold it.
+    pub fn session_name(&self, s: TmuxSessionId) -> Option<&str> {
+        self.sessions.get(&s).map(String::as_str)
+    }
+
+    /// The session user's terminal `c` shows, if it is attached.
+    pub fn client_session(&self, c: &ClientName) -> Option<TmuxSessionId> {
+        self.clients.get(c).copied()
+    }
+
+    /// Whether a user's terminal shows session `s`.
+    pub fn attached(&self, s: TmuxSessionId) -> bool {
+        self.clients.values().any(|c| *c == s)
+    }
+
+    /// Records that moa linked window `w` into session `s` (`link-window`), as tmux just
+    /// answered it. A window the lists don't hold changes nothing.
+    pub fn linked(&mut self, w: WindowId, s: TmuxSessionId) {
+        if let Some(sessions) = self.window_sessions.get_mut(&w) {
+            sessions.insert(s);
+        }
+    }
+
+    /// Records that moa unlinked window `w` from session `s` (`unlink-window`), as tmux just
+    /// answered it: the window lives on in its other sessions.
+    pub fn unlinked(&mut self, w: WindowId, s: TmuxSessionId) {
+        if let Some(sessions) = self.window_sessions.get_mut(&w) {
+            sessions.remove(&s);
+        }
+        if self.current.get(&s) == Some(&w) {
+            self.current.remove(&s);
+        }
     }
 
     /// A pane's `@moa_view` tag, as tmux printed it: a view's name, or `agent`.
@@ -538,6 +597,49 @@ mod tests {
         t.lifted(PaneId(9));
         assert_eq!(t.cockpit(), Some(WindowId(1)), "the cockpit keeps the tree");
         assert_eq!(t.panes_in(WindowId(1)).collect::<Vec<_>>(), [PaneId(1)]);
+    }
+
+    /// S9: a sheet linked into a user's session is listed once per session, `_moa` first.
+    /// The window is known in both, and it lives in `_moa`, whichever line came last.
+    #[test]
+    fn a_window_in_two_sessions_is_known_in_both() {
+        let s = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let mut t = Topology::from_lists(
+            &s(&["S $0 _moa", "S $1 moa"]),
+            &s(&[
+                "P %3 @3 $0 1 1 0 0  0 picker",
+                "P %3 @3 $1 1 1 0 0  0 picker",
+            ]),
+            &s(&["C 0 $1 /dev/ttys1"]),
+        );
+        let both = BTreeSet::from([TmuxSessionId(0), TmuxSessionId(1)]);
+        assert_eq!(t.sessions_of(WindowId(3)), &both);
+        assert_eq!(t.session_name_of(PaneId(3)), Some("_moa"));
+        assert!(t.sessions_of(WindowId(9)).is_empty());
+        assert!(t.attached(TmuxSessionId(1)) && !t.attached(TmuxSessionId(0)));
+
+        // An unlink moa just made is known at once; the window stays in `_moa`.
+        t.unlinked(WindowId(3), TmuxSessionId(1));
+        assert_eq!(
+            t.sessions_of(WindowId(3)),
+            &BTreeSet::from([TmuxSessionId(0)])
+        );
+        t.linked(WindowId(3), TmuxSessionId(1));
+        assert_eq!(t.sessions_of(WindowId(3)), &both);
+        assert_eq!(t.session_name_of(PaneId(3)), Some("_moa"));
+    }
+
+    /// A window that isn't `_moa`'s keeps the last line's session, as before S9: tmux lists
+    /// sessions by name.
+    #[test]
+    fn a_window_in_two_other_sessions_reads_as_the_last_listed() {
+        let s = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let t = Topology::from_lists(
+            &s(&["S $4 work", "S $0 moa"]),
+            &s(&["P %3 @3 $0 1 1 0 0  0 ", "P %3 @3 $4 1 1 0 0  0 "]),
+            &s(&[]),
+        );
+        assert_eq!(t.session_name_of(PaneId(3)), Some("work"));
     }
 
     /// A terminal whose shell exited, kept by tmux, is listed as no terminal: there is

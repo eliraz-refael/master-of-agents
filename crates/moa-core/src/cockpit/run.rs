@@ -10,8 +10,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::scene::{Role, Scene};
-use crate::effect::{Effect, LogLevel, Publish};
+use serde_json::json;
+
+use super::scene::{HIDDEN, Role, Scene};
+use crate::effect::{Effect, LogLevel, Publish, TmuxIn};
 use crate::layout::{DEFAULT_LAYOUT, Leaf, Node, current_layout};
 use crate::model::SessionId;
 use crate::op::{ConnId, Done, OpError, ReqId};
@@ -22,9 +24,10 @@ use crate::publish::Topic;
 use crate::state::State;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::bound_session;
-use crate::tmux::ids::PaneId;
+use crate::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
 use crate::tmux::link::{Asked, NO_TERMINAL, log};
-use crate::tmux::topology::refresh_cmds;
+use crate::tmux::notify::Notification;
+use crate::tmux::topology::{Topology, refresh_cmds};
 
 mod answers;
 mod decide;
@@ -38,6 +41,8 @@ pub(crate) const LOST: &str = "moa lost its terminal; try again";
 const REPLACED: &str = "replaced by a later layout request";
 /// A waiting `goto` a newer one took the place of.
 const REPLACED_GOTO: &str = "replaced by a later key";
+/// `ui.close` from a panel that isn't a sheet moa placed.
+const ONLY_SHEETS: &str = "only the picker and help close this way";
 
 /// One operation on the cockpit.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -76,6 +81,18 @@ pub(crate) enum CockpitOp {
     /// for the tab (the launch's own caller was answered by it). Never replaced, and never
     /// replaces a waiting operation: each runs in its turn.
     Show { pane: PaneId, tells: Vec<Tell> },
+    /// Opens the `view` sheet in tmux session `session` (S9): the tab of its panel, parked
+    /// in `_moa`, linked into the session and selected, or selected when it is there
+    /// already. With no panel, one is started first; a stopped one is restarted in place.
+    /// `client` pressed the key, and hears a refusal.
+    Sheet {
+        view: View,
+        session: TmuxSessionId,
+        client: ClientName,
+    },
+    /// Closes the sheet whose panel is in `pane` (S9): its tab unlinked from every session
+    /// but `_moa`, where it waits for the next open. Nobody hears of it.
+    Unsheet { pane: PaneId },
 }
 
 /// Which pane a build selects once it is done (L6 step 7).
@@ -148,7 +165,11 @@ fn tells_of(op: &CockpitOp) -> Vec<Tell> {
         | CockpitOp::Repair { tell }
         | CockpitOp::SelectView { tell, .. } => tell.iter().cloned().collect(),
         CockpitOp::Show { tells, .. } => tells.clone(),
-        CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => Vec::new(),
+        CockpitOp::Sheet { client, .. } => vec![Tell::Notice(client.clone())],
+        CockpitOp::Lazy
+        | CockpitOp::Refill
+        | CockpitOp::Vacate { .. }
+        | CockpitOp::Unsheet { .. } => Vec::new(),
     }
 }
 
@@ -225,9 +246,26 @@ fn refills(state: &State, op: &CockpitOp) -> bool {
     }
 }
 
+/// The sheet `op` opens or closes, by its view (a sheet has one panel): a newer open or close
+/// of it replaces a waiting one (S9).
+fn sheet_of(state: &State, op: &CockpitOp) -> Option<View> {
+    match op {
+        CockpitOp::Sheet { view, .. } => Some(*view),
+        CockpitOp::Unsheet { pane } => state
+            .tmux
+            .topology
+            .view_of(*pane)?
+            .parse::<View>()
+            .ok()
+            .filter(|v| v.is_sheet()),
+        _ => None,
+    }
+}
+
 /// Runs `op` after those queued before it, now if none is. A build replaces a waiting
-/// build of its kind, which is told so; a refill behind a build is dropped. With no link,
-/// only a vacate waits; the rest are refused.
+/// build of its kind, which is told so; a refill behind a build is dropped; a sheet's open
+/// or close replaces a waiting one of the same sheet, which nobody hears of (a key has no
+/// reply). With no link, only a vacate waits; the rest are refused.
 pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     if state.tmux.conn().is_none() && !matches!(op, CockpitOp::Vacate { .. }) {
         let no = Err(OpError(NO_TERMINAL.into()));
@@ -235,6 +273,14 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     }
     if op == CockpitOp::Refill && state.cockpit.waiting.iter().any(|w| refills(state, w)) {
         return Vec::new();
+    }
+    if let Some(sheet) = sheet_of(state, &op) {
+        let waiting = std::mem::take(&mut state.cockpit.waiting);
+        let kept = waiting
+            .into_iter()
+            .filter(|w| sheet_of(state, w) != Some(sheet))
+            .collect();
+        state.cockpit.waiting = kept;
     }
     let mut fx = Vec::new();
     let kind = build_kind(&op);
@@ -347,6 +393,133 @@ pub(crate) fn select_view(
     )
 }
 
+/// `ui.close` (S9): the sheet in the asking panel's tab is closed, in its turn. Answered at
+/// once: closing has nothing to say. Only a sheet moa placed asks it.
+pub(crate) fn close(state: &mut State, conn: ConnId, req: ReqId) -> Vec<Effect> {
+    let pane = state
+        .panels
+        .get(&conn)
+        .filter(|reg| reg.view.is_sheet() && reg.managed)
+        .and_then(|reg| reg.pane);
+    let Some(pane) = pane else {
+        let result = Err(OpError(ONLY_SHEETS.into()));
+        return vec![Effect::Reply { conn, req, result }];
+    };
+    let mut fx = queue(state, CockpitOp::Unsheet { pane });
+    let done = Done {
+        text: String::new(),
+        data: json!({}),
+    };
+    fx.push(Effect::Reply {
+        conn,
+        req,
+        result: Ok(done),
+    });
+    fx
+}
+
+/// The user's sessions window `w` is linked into: every one but `_moa`, while `_moa` holds
+/// it too. A window `_moa` doesn't hold is no sheet of moa's to unlink (its only link can't
+/// be unlinked).
+pub(super) fn linked_out(topology: &Topology, w: WindowId) -> Vec<TmuxSessionId> {
+    let hidden = |s: &TmuxSessionId| topology.session_name(*s) == Some(HIDDEN);
+    let sessions = topology.sessions_of(w);
+    if !sessions.iter().any(hidden) {
+        return Vec::new();
+    }
+    sessions.iter().filter(|s| !hidden(s)).copied().collect()
+}
+
+/// What a notification may mean for the sheets open (S9).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SheetNews {
+    /// Session `session` shows its tab `window` now (`%session-window-changed`).
+    Shows {
+        session: TmuxSessionId,
+        window: WindowId,
+    },
+    /// A user's terminal on session `session` detached (`%client-detached`).
+    Detached { session: TmuxSessionId },
+}
+
+/// The news in `t` for the sheets, read before the topology takes it in: a detached
+/// terminal's session is known only until then.
+pub(crate) fn sheet_news(state: &State, t: &TmuxIn) -> Option<SheetNews> {
+    match t {
+        TmuxIn::Notification(Notification::SessionWindowChanged { session, window }) => {
+            Some(SheetNews::Shows {
+                session: *session,
+                window: *window,
+            })
+        }
+        TmuxIn::Notification(Notification::ClientDetached { client }) => {
+            let session = state.tmux.topology.client_session(client)?;
+            Some(SheetNews::Detached { session })
+        }
+        _ => None,
+    }
+}
+
+/// What `news` means for the sheets open (S9), once the topology took it in: one whose tab a
+/// user's session left for another of its tabs, or whose session the last user's terminal
+/// detached from, is closed, so nobody comes back to a stale sheet.
+pub(crate) fn notified(state: &mut State, news: SheetNews) -> Vec<Effect> {
+    let topology = &state.tmux.topology;
+    let done: Vec<PaneId> = state
+        .sheets
+        .keys()
+        .copied()
+        .filter(|pane| {
+            let Some(window) = topology.window_of(*pane) else {
+                return false;
+            };
+            let (session, left) = match news {
+                SheetNews::Shows { session, window: w } => (session, w != window),
+                SheetNews::Detached { session } => (session, !topology.attached(session)),
+            };
+            left && topology.sessions_of(window).contains(&session)
+                && topology.session_name(session) != Some(HIDDEN)
+        })
+        .collect();
+    let mut fx = Vec::new();
+    for pane in done {
+        fx.extend(queue(state, CockpitOp::Unsheet { pane }));
+    }
+    fx
+}
+
+/// What a listing (an operation's, or the link's) shows of sheets left open with nothing
+/// recording their open (S9): a daemon that restarted forgot them, and they are closed. Not
+/// while an open or close of that sheet is under way: its open isn't recorded until tmux
+/// answers its link.
+pub(super) fn stale_sheets(state: &mut State) -> Vec<Effect> {
+    let run = &state.cockpit;
+    let busy: BTreeSet<View> = run
+        .in_flight
+        .iter()
+        .map(|(_, op)| op)
+        .chain(run.waiting.iter())
+        .filter_map(|op| sheet_of(state, op))
+        .collect();
+    let topology = &state.tmux.topology;
+    let stale: Vec<PaneId> = topology
+        .panes()
+        .filter(|p| {
+            let view = topology.view_of(*p).and_then(|v| v.parse::<View>().ok());
+            view.is_some_and(|v| v.is_sheet() && !busy.contains(&v))
+                && !state.sheets.contains_key(p)
+                && topology
+                    .window_of(*p)
+                    .is_some_and(|w| !linked_out(topology, w).is_empty())
+        })
+        .collect();
+    let mut fx = Vec::new();
+    for pane in stale {
+        fx.extend(queue(state, CockpitOp::Unsheet { pane }));
+    }
+    fx
+}
+
 /// Starts the operations waiting, while none is in flight.
 fn pump(state: &mut State) -> Vec<Effect> {
     let mut fx = Vec::new();
@@ -370,7 +543,11 @@ fn start(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     let mut fx = Vec::new();
     if !matches!(
         op,
-        CockpitOp::Vacate { .. } | CockpitOp::SelectView { .. } | CockpitOp::Show { .. }
+        CockpitOp::Vacate { .. }
+            | CockpitOp::SelectView { .. }
+            | CockpitOp::Show { .. }
+            | CockpitOp::Sheet { .. }
+            | CockpitOp::Unsheet { .. }
     ) {
         state.layouts = crate::ops::layout::read(state);
         fx.extend(
@@ -557,11 +734,13 @@ pub(crate) fn reap_nudge(conn: u64) -> Effect {
 }
 
 /// The link's own listing came back: what it shows of stopped panels is taken in
-/// ([`stopped_listed`]). The first after a link-up queues the lazy build when
+/// ([`stopped_listed`]), and of sheets left open ([`stale_sheets`]). The first after a
+/// link-up queues the lazy build when
 /// it shows what the build looks for, a user's terminal and a cockpit with no panel in it;
 /// the build then takes a listing of its own, as every operation does (L17).
 pub(crate) fn link_listed(state: &mut State) -> Vec<Effect> {
     let mut fx: Vec<Effect> = stopped_listed(state).into_iter().collect();
+    fx.extend(stale_sheets(state));
     if !std::mem::take(&mut state.cockpit.lazy_armed) {
         return fx;
     }
@@ -592,7 +771,12 @@ pub(crate) fn client_gone(state: &mut State, conn: ConnId) {
                 }
             }
             CockpitOp::Show { tells, .. } => tells.retain(|t| !gone(t)),
-            CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => {}
+            // A sheet's key tells its client, which no connection is.
+            CockpitOp::Lazy
+            | CockpitOp::Refill
+            | CockpitOp::Vacate { .. }
+            | CockpitOp::Sheet { .. }
+            | CockpitOp::Unsheet { .. } => {}
         }
     }
 }
