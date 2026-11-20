@@ -174,6 +174,8 @@ pub struct Panel {
 const CANCELLED: &str = "cancelled";
 /// What Ctrl-c, or `q` in the picture, says in a panel moa manages (L14).
 const MANAGED: &str = "this panel is part of moa's layout; Ctrl-a r repairs the layout";
+/// How every y/N question ends.
+const QUESTION_END: &str = "? y/N";
 /// The managed line for a footer too narrow for [`MANAGED`] (31 columns).
 const MANAGED_SHORT: &str = "moa's layout · Ctrl-a r repairs";
 
@@ -562,7 +564,10 @@ impl Panel {
             return Span::bold(shown, Tone::Text);
         }
         if let Some(confirm) = &self.confirm {
-            return Span::new(clean(&confirm.question), Tone::Warn);
+            return Span::new(
+                fit_question(&clean(&confirm.question), usize::from(width)),
+                Tone::Warn,
+            );
         }
         if let Some(message) = self.message_at(now) {
             let tone = if message.until.is_some() {
@@ -575,7 +580,7 @@ impl Panel {
             } else {
                 clean(&message.text)
             };
-            return Span::new(ellipsize(&text, usize::from(width)), tone);
+            return Span::new(text::ellipsize(&text, usize::from(width)), tone);
         }
         let unreadable = data.unreadable();
         if unreadable > 0 {
@@ -768,14 +773,14 @@ impl Panel {
     }
 }
 
-/// `s` as it fits `w` cells: one that is wider is cut at a grapheme boundary and ends in `…`.
-fn ellipsize(s: &str, w: usize) -> String {
-    if text::width(s) <= w {
-        return s.to_string();
+/// A y/N question as it fits `w` cells: a long one loses the end of its text, never its
+/// `? y/N`, so what is being asked stays clear.
+fn fit_question(question: &str, w: usize) -> String {
+    match question.strip_suffix(QUESTION_END) {
+        Some(head) if text::width(question) > w => {
+            let room = w.saturating_sub(text::width(QUESTION_END));
+            format!("{}{QUESTION_END}", text::ellipsize(head, room))
+        }
+        _ => text::ellipsize(question, w),
     }
-    let mut out = text::cut(s, w.saturating_sub(1));
-    if w > 0 {
-        out.push('…');
-    }
-    out
 }

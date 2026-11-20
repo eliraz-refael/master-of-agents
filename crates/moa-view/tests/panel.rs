@@ -1025,3 +1025,32 @@ fn a_long_footer_message_ends_in_an_ellipsis() {
     assert!(footer.ends_with('…'), "{footer}");
     assert_eq!(footer, format!("{}…", "漢".repeat((room - 1) / 2)));
 }
+
+#[test]
+fn a_footer_message_that_straddles_the_edge_stops_a_cell_short() {
+    let size = Size { w: 31, h: 16 };
+    let (data, ctx) = lantern();
+    let mut panel = Panel::new(View::Tree);
+    panel.screen(&data, &ctx, size);
+    panel.note(&"漢".repeat(50));
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    assert_eq!(footer, format!("{}…", "漢".repeat(13)));
+    assert_eq!(moa_view::text::width(&footer), 27, "one cell short of 28");
+}
+
+#[test]
+fn a_long_question_keeps_its_y_n() {
+    let size = Size { w: 30, h: 16 };
+    let (mut data, ctx) = lantern();
+    let id = data.sessions.keys().next().copied().unwrap();
+    let row = data.sessions.get_mut(&id).unwrap();
+    row.session.title = Some("a very long session name indeed".to_string());
+    let mut panel = Panel::new(View::Tree);
+    panel.screen(&data, &ctx, size);
+    assert!(panel.select(&Item::Session(id)));
+    panel.key(Key::Char('x'), &data, &ctx, size);
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    assert!(footer.ends_with("…? y/N"), "{footer}");
+    assert!(footer.starts_with("close "), "{footer}");
+    assert!(moa_view::text::width(&footer) <= 27, "{footer}");
+}
