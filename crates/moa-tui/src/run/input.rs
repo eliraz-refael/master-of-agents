@@ -47,17 +47,16 @@ impl Input {
         std::thread::Builder::new()
             .name("panel-input".into())
             .spawn(move || read(&reader))?;
-        let tty = match read_terminal() {
-            Ok(tty) => Some(tty),
-            Err(e) => {
-                note(log.as_ref(), &e);
-                None
+        let tty = read_terminal().inspect_err(|e| note(log.as_ref(), e)).ok();
+        // The watch gets its own copy of the terminal; one that can't be made is said too.
+        match tty.as_ref().map(OwnedFd::try_clone) {
+            Some(Ok(watched)) => {
+                std::thread::Builder::new()
+                    .name("panel-hangup".into())
+                    .spawn(move || watch(&watched, &tx, log.as_ref()))?;
             }
-        };
-        if let Some(watched) = tty.as_ref().and_then(|t| t.try_clone().ok()) {
-            std::thread::Builder::new()
-                .name("panel-hangup".into())
-                .spawn(move || watch(&watched, &tx, log.as_ref()))?;
+            Some(Err(e)) => note(log.as_ref(), &e),
+            None => {}
         }
         Ok(Input { rx, tty })
     }

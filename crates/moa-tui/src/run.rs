@@ -851,7 +851,10 @@ impl Loop {
     }
 
     /// Draws the panel once, then sets the tick and the deadline from what it showed.
-    fn draw<B: Backend>(&mut self, term: &mut Terminal<B>) -> Result<(), String> {
+    fn draw<B: Backend>(&mut self, term: &mut Terminal<B>) -> Result<(), Fault>
+    where
+        B::Error: 'static,
+    {
         // With no view asked, nothing is drawn until the first connect ends: moa may give
         // the panel another view than the picture it starts with, which would flash (L14).
         if self.known_view().is_none() {
@@ -872,7 +875,13 @@ impl Loop {
             }
             shown = Some((size, screen.animate, screen.wake_at));
         })
-        .map_err(|e| format!("can't draw the panel: {e}"))?;
+        .map_err(|e| {
+            let io = (&e as &(dyn std::error::Error + 'static)).downcast_ref::<io::Error>();
+            match io {
+                Some(io) => Fault::terminal("can't draw the panel", io),
+                None => Fault::Line(format!("can't draw the panel: {e}")),
+            }
+        })?;
         let Some((size, animate, wake_at)) = shown else {
             return Ok(());
         };
@@ -899,7 +908,10 @@ impl Loop {
 
     /// One turn of the loop: `wake`, then everything the connection already holds, then one
     /// draw. True to quit.
-    fn step<B: Backend>(&mut self, wake: Wake, term: &mut Terminal<B>) -> Result<bool, String> {
+    fn step<B: Backend>(&mut self, wake: Wake, term: &mut Terminal<B>) -> Result<bool, Fault>
+    where
+        B::Error: 'static,
+    {
         let mut redraw = match self.turn(wake) {
             Turn::Quit => return Ok(true),
             Turn::Go(redraw) => redraw,
@@ -929,46 +941,96 @@ pub async fn run(opts: PanelOptions) -> Result<(), String> {
     ended
 }
 
-/// [`run`], which logs how it ended when it ends with an error.
+/// Why a run stopped before the panel quit.
+#[derive(Debug)]
+enum Fault {
+    /// The terminal went: a write into it, or a question to it, failed as only a gone
+    /// terminal fails.
+    Gone,
+    /// Anything else, in its line.
+    Line(String),
+}
+
+impl Fault {
+    /// `e`, met using the terminal while doing `what`.
+    fn terminal(what: &str, e: &io::Error) -> Fault {
+        if moa_platform::terminal_gone_error(e) {
+            Fault::Gone
+        } else {
+            Fault::Line(format!("{what}: {e}"))
+        }
+    }
+}
+
+/// [`run`], which logs how it ended when it ends with an error. A run that fails while a
+/// signal came, or while its terminal went, ends for that reason, however it found out:
+/// a failed draw (the first one included), a write, or a question to the terminal.
 async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), String> {
+    let mut signals = Signals::new().map_err(|e| format!("can't watch for signals: {e}"))?;
+    let mut input = None;
+    let fault = match drive(opts, log.clone(), &mut input, &mut signals).await {
+        Ok(()) => return Ok(()),
+        Err(fault) => fault,
+    };
+    let end = match (signals.pending().await, fault) {
+        (Some(name), _) => format!("stopped by {name}"),
+        (None, Fault::Gone) => "stopped: the terminal closed".to_string(),
+        (None, Fault::Line(_)) if input.as_ref().is_some_and(Input::gone) => {
+            "stopped: the terminal closed".to_string()
+        }
+        (None, Fault::Line(line)) => return Err(line),
+    };
+    if let Some(log) = &log {
+        log.write(&end);
+    }
+    Ok(())
+}
+
+/// Takes the terminal and runs the loop until the panel quits or something fails. The
+/// terminal's input, once started, is left in `input`, for the caller to ask whether the
+/// terminal went.
+async fn drive(
+    opts: PanelOptions,
+    log: Option<Logbook>,
+    input: &mut Option<Input>,
+    signals: &mut Signals,
+) -> Result<(), Fault> {
     let in_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
     let colorterm = std::env::var("COLORTERM").ok();
     let theme = Theme {
         mode: theme::detect(in_tmux, colorterm.as_deref()),
     };
-    let mut signals = Signals::new().map_err(|e| format!("can't watch for signals: {e}"))?;
-    let _taken = Taken::take(log.clone()).map_err(|e| format!("can't use this terminal: {e}"))?;
+    let unusable = |e: io::Error| Fault::terminal("can't use this terminal", &e);
+    let _taken = Taken::take(log.clone()).map_err(unusable)?;
     // Never dropped: ratatui's `Terminal` shows the cursor again as it drops, and prints a
     // failure with `eprintln!`, which panics on a terminal that is gone (tmux killed the
     // tab). `restore` shows the cursor anyway.
-    let mut term = ManuallyDrop::new(
-        Terminal::new(CrosstermBackend::new(io::stdout()))
-            .map_err(|e| format!("can't use this terminal: {e}"))?,
-    );
+    let mut term =
+        ManuallyDrop::new(Terminal::new(CrosstermBackend::new(io::stdout())).map_err(unusable)?);
     // Not `Terminal::clear`, which asks the terminal where its cursor is.
     term.backend_mut()
         .clear_region(ClearType::All)
-        .map_err(|e| format!("can't use this terminal: {e}"))?;
-    let area = term
-        .size()
-        .map_err(|e| format!("can't use this terminal: {e}"))?;
+        .map_err(unusable)?;
+    let area = term.size().map_err(unusable)?;
     let size = Size {
         w: area.width,
         h: area.height,
     };
-    let mut input =
-        Input::start(log.clone()).map_err(|e| format!("can't use this terminal: {e}"))?;
+    let input = input.insert(
+        Input::start(log.clone())
+            .map_err(|e| Fault::Line(format!("can't use this terminal: {e}")))?,
+    );
     let mut lp = Loop::new(opts, theme, size);
     lp.log = log;
     lp.connect(0);
     lp.draw(&mut *term)?;
     loop {
         let mut wake = next_wake(
-            &mut input,
+            input,
             &mut lp.link,
             lp.tick.as_mut(),
             lp.deadline.as_mut(),
-            &mut signals,
+            signals,
         )
         .await;
         // When tmux kills the tab, the terminal closes and its SIGHUP comes at the same
@@ -978,22 +1040,9 @@ async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), Stri
         {
             wake = Wake::Signal(name);
         }
-        match lp.step(wake, &mut *term) {
-            Ok(false) => {}
-            Ok(true) => return Ok(()),
-            // A draw into a terminal that went with its tab fails too: the signal, or the
-            // terminal's going, is why the panel ends, not the failed draw.
-            Err(e) => match signals.pending().await {
-                Some(name) => {
-                    lp.log(&format!("stopped by {name}"));
-                    return Ok(());
-                }
-                None if input.gone() => {
-                    lp.log("stopped: the terminal closed");
-                    return Ok(());
-                }
-                None => return Err(e),
-            },
+        // A failed draw goes to `run_logged`, which tells a gone terminal from a failure.
+        if lp.step(wake, &mut *term)? {
+            return Ok(());
         }
     }
 }
@@ -1011,7 +1060,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::{Failed, Logbook, Loop, PanelOptions, Turn, Wake, now};
+    use super::{Failed, Fault, Logbook, Loop, PanelOptions, Turn, Wake, now};
     use crate::theme::{ColorMode, Theme};
 
     const SIZE: Size = Size { w: 60, h: 12 };
@@ -1067,6 +1116,52 @@ mod tests {
 
     fn ctrl_c() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+    }
+
+    /// A terminal whose every write fails with `error`.
+    struct Failing(fn() -> std::io::Error);
+
+    impl std::io::Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err((self.0)())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err((self.0)())
+        }
+    }
+
+    /// L14: a draw that fails as only a gone terminal fails (EIO, ENXIO, EPIPE) is the
+    /// terminal gone, whichever draw it is: the run then ends with `stopped: the terminal
+    /// closed`. Any other failure is reported as it is.
+    #[tokio::test]
+    async fn a_draw_into_a_gone_terminal_is_the_terminal_gone() {
+        use ratatui::backend::CrosstermBackend;
+        use ratatui::layout::Rect;
+        use ratatui::{TerminalOptions, Viewport};
+
+        let errors: [(fn() -> std::io::Error, bool); 4] = [
+            (|| std::io::Error::from_raw_os_error(5), true),
+            (|| std::io::Error::from_raw_os_error(6), true),
+            (|| std::io::Error::from_raw_os_error(32), true),
+            (|| std::io::Error::other("disk full"), false),
+        ];
+        for (error, gone) in errors {
+            let mut lp = looped(Some(View::Tree), false);
+            let viewport = Viewport::Fixed(Rect::new(0, 0, SIZE.w, SIZE.h));
+            let mut term = Terminal::with_options(
+                CrosstermBackend::new(Failing(error)),
+                TerminalOptions { viewport },
+            )
+            .unwrap();
+            match lp.draw(&mut term) {
+                Err(Fault::Gone) => assert!(gone, "{}", error()),
+                Err(Fault::Line(line)) => {
+                    assert!(!gone, "{line}");
+                    assert_eq!(line, "can't draw the panel: disk full");
+                }
+                Ok(()) => panic!("a failed write drew"),
+            }
+        }
     }
 
     /// M7: focus coming back redraws, and the draw sets the deadline again from what shows,

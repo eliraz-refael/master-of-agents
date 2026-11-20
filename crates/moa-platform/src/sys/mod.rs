@@ -82,6 +82,15 @@ pub fn terminal_gone(fd: std::os::fd::BorrowedFd<'_>) -> bool {
     n > 0 && p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
 
+/// Whether `e`, from writing to or asking a terminal, is how only a terminal that has gone
+/// fails: EIO (a tty whose other end closed), ENXIO (no such device any more) or EPIPE.
+pub fn terminal_gone_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EIO | libc::ENXIO | libc::EPIPE)
+    )
+}
+
 /// A copy of `fd` that a child process inherits: `dup` leaves close-on-exec off on the copy.
 pub(crate) fn dup_inheritable(
     fd: std::os::fd::BorrowedFd<'_>,

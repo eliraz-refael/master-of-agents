@@ -19,7 +19,7 @@ pub use build_id::{build_id, build_id_of, canonical, fnv1a64};
 pub use paths::{Paths, PathsError, TmuxSocket, ensure_private_dir, sandbox_root, which};
 pub use spawn::Spawner;
 pub use sys::{
-    current_uid, kill_term, peer_uid, pid_alive, stdout_to_null, terminal_gone, wait_exited,
-    wait_hangup,
+    current_uid, kill_term, peer_uid, pid_alive, stdout_to_null, terminal_gone,
+    terminal_gone_error, wait_exited, wait_hangup,
 };
 pub use zone::ZoneWatch;

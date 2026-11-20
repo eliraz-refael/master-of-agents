@@ -745,6 +745,51 @@ fn a_panel_whose_terminal_goes_ends_by_itself() {
     assert_eq!(ends, ["stopped: the terminal closed"], "{written}");
 }
 
+/// L14: a terminal that goes while the panel is still taking it or drawing its first
+/// frame ends the panel the same way: nobody reads the pty, so the panel's first writes
+/// fill it and wait, and the master end closes under them. Whichever part notices first
+/// (that write, the first draw, the hang-up watch), the one end line is `stopped: the
+/// terminal closed`.
+#[test]
+fn a_panel_whose_terminal_goes_before_its_first_frame_says_so() {
+    use std::process::{Command, Stdio};
+
+    let tb = TempBrain::new(None);
+    let log = tb.paths().log_dir().join("panel.log");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let (master, slave, _) = moa_testkit::pty(200, 60).unwrap();
+    // A placed panel, so it starts no moa.
+    let child = Command::new(MOA)
+        .args(["panel", "tree"])
+        .env_clear()
+        .envs(tb.env())
+        .env("MOA_NO_AUTOSTART", "1")
+        .current_dir(tb.root())
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut child = Reaped(child);
+
+    let started = wait_for(SHOWS, || {
+        let written = fs::read_to_string(&log).unwrap_or_default();
+        written.contains("panel tree in -: started").then_some(())
+    });
+    assert!(started.is_some(), "the panel never started");
+    drop(master);
+
+    let ended = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+    assert!(ended.is_some(), "the panel outlived its terminal");
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
+        .filter(|what| *what != "started")
+        .collect();
+    assert_eq!(ends, ["stopped: the terminal closed"], "{written}");
+}
+
 /// What a panel's input thread relies on: `terminal_gone` says no while the terminal is
 /// there (input waiting unread included) and yes once its master end closes, and
 /// `wait_hangup` returns then.
