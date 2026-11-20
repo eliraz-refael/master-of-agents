@@ -25,7 +25,8 @@ pub enum Does {
 /// A key after `Ctrl-a`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Binding {
-    /// The key, as tmux names it; empty for `Move`, which is the arrows.
+    /// The key, as tmux names it. `Move`'s is the four arrows as they're shown, `←↑↓→`: it
+    /// isn't one key, and no binding is written from it.
     pub key: &'static str,
     /// The menu's text.
     pub label: &'static str,
@@ -57,7 +58,7 @@ fn plain(key: &'static str, label: &'static str, help: &'static str, does: Does)
 pub fn ctrl_a() -> Vec<Vec<Binding>> {
     vec![
         vec![
-            moa(KeyAction::Console, "the console: talk to moa"),
+            moa(KeyAction::Console, "go to the console panel"),
             moa(
                 KeyAction::Tree,
                 "the sessions tree: every session, by group",
@@ -87,13 +88,15 @@ pub fn ctrl_a() -> Vec<Vec<Binding>> {
             plain(
                 "|",
                 "Split: shell beside",
-                "split what you're on: a shell beside it, in the same folder; `exit` closes it",
+                "split the agent or terminal tab you're on: a shell beside it, in the same \
+                 folder; `exit` closes it",
                 Does::SplitBeside,
             ),
             plain(
                 "-",
                 "Split: shell below",
-                "split what you're on: a shell below it, in the same folder; `exit` closes it",
+                "split the agent or terminal tab you're on: a shell below it, in the same \
+                 folder; `exit` closes it",
                 Does::SplitBelow,
             ),
             plain(
@@ -105,27 +108,17 @@ pub fn ctrl_a() -> Vec<Vec<Binding>> {
             plain(
                 "z",
                 "Zoom in/out",
-                "zoom this split to the whole tab (again to unzoom)",
+                "zoom the panel or split you're on to the whole tab (again to unzoom)",
                 Does::Zoom,
             ),
         ],
         vec![
-            moa(
-                KeyAction::Layout(1),
-                "the cockpit layout: tree, console and big picture",
-            ),
-            moa(
-                KeyAction::Layout(2),
-                "the focus layout: tree and big picture, the live agent, the console",
-            ),
-            moa(
-                KeyAction::Layout(3),
-                "the classic layout: console, big picture and tree",
-            ),
-            moa(
-                KeyAction::Layout(4),
-                "the triage layout: status, console and big picture",
-            ),
+            // Only the layout's name: the user can change what a layout holds, so help
+            // lists that from moa's own layouts.
+            moa(KeyAction::Layout(1), "switch to the cockpit layout"),
+            moa(KeyAction::Layout(2), "switch to the focus layout"),
+            moa(KeyAction::Layout(3), "switch to the classic layout"),
+            moa(KeyAction::Layout(4), "switch to the triage layout"),
             moa(
                 KeyAction::Repair,
                 "restart any of moa's panels that stopped",
@@ -133,8 +126,8 @@ pub fn ctrl_a() -> Vec<Vec<Binding>> {
         ],
         vec![
             plain(
-                "",
-                "Ctrl-a ←↑↓→  move between splits",
+                "←↑↓→",
+                "move between splits",
                 "move to the split that way (or h j k l); tap more arrows right after to \
                  keep moving",
                 Does::Move,
@@ -156,17 +149,29 @@ pub fn ctrl_a() -> Vec<Vec<Binding>> {
 mod tests {
     use super::*;
 
+    /// `text` says "pane" or "window" (or their plurals) as a whole word; "panel" is fine.
+    fn says_tmux_words(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        lower.split(|c: char| !c.is_alphanumeric()).any(|word| {
+            let one = word.strip_suffix('s').unwrap_or(word);
+            one == "pane" || one == "window"
+        })
+    }
+
     #[test]
     fn every_binding_has_help() {
         for b in ctrl_a().into_iter().flatten() {
             assert!(!b.help.trim().is_empty(), "{b:?} has no help");
-            // Whole words: "panel" is fine.
-            let lower = b.help.to_lowercase();
-            for word in lower.split(|c: char| !c.is_alphanumeric()) {
-                let one = word.strip_suffix('s').unwrap_or(word);
-                assert!(one != "pane" && one != "window", "{b:?} says {word:?}");
-            }
+            assert!(!says_tmux_words(b.help), "{b:?}: its help");
+            assert!(!says_tmux_words(b.label), "{b:?}: its label");
         }
+    }
+
+    #[test]
+    fn the_word_check_catches_tmux_words_only() {
+        assert!(says_tmux_words("split the Pane"));
+        assert!(says_tmux_words("two windows."));
+        assert!(!says_tmux_words("restart moa's panels"));
     }
 
     /// The daemon's keys are written from the table, so every action must be in it, once.
@@ -185,12 +190,7 @@ mod tests {
 
     #[test]
     fn no_key_is_in_the_table_twice() {
-        let keys: Vec<&str> = ctrl_a()
-            .into_iter()
-            .flatten()
-            .map(|b| b.key)
-            .filter(|k| !k.is_empty())
-            .collect();
+        let keys: Vec<&str> = ctrl_a().into_iter().flatten().map(|b| b.key).collect();
         for k in &keys {
             assert_eq!(keys.iter().filter(|x| *x == k).count(), 1, "{k}");
         }

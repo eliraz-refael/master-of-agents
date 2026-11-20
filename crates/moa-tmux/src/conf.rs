@@ -10,6 +10,9 @@ use moa_core::tmux::mailbox::KeyAction;
 
 const TEMPLATE: &str = include_str!("moa.tmux.tpl");
 
+/// The status line's height: a blank line, then the bar. The menu fits above it.
+const STATUS_LINES: usize = 2;
+
 /// The hook index moa owns; a user's hooks at other indexes are never touched.
 const HOOK_INDEX: u32 = 90;
 
@@ -61,27 +64,35 @@ fn menu_command(does: Does) -> String {
     }
 }
 
-/// The menu, written from the key table: its groups, with a separator between them. The
-/// daemon's items go through `guarded`.
-fn menu() -> String {
+/// The menu's lines, written from the key table. `tall`: a separator between groups, and
+/// the greyed note on moving between splits; otherwise neither, for a short terminal.
+fn menu_items(tall: bool) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
     for (i, group) in ctrl_a().into_iter().enumerate() {
-        if i > 0 {
+        if tall && i > 0 {
             items.push("\"\"".into());
         }
         for b in group {
-            // A leading `-` greys the note: tmux shows it but it isn't an item.
-            let label = match b.does {
-                Does::Move => format!("-{}", b.label),
-                _ => b.label.to_string(),
+            let item = match b.does {
+                // A leading `-` greys the note: tmux shows it but it isn't an item.
+                Does::Move if tall => {
+                    format!("\"-Ctrl-a {}  {}\" '' ''", b.key, b.label)
+                }
+                Does::Move => continue,
+                _ => format!(
+                    "\"{}\" {} {}",
+                    b.label,
+                    quote(b.key),
+                    quote(&menu_command(b.does))
+                ),
             };
-            items.push(format!(
-                "\"{label}\" {} {}",
-                quote(b.key),
-                quote(&menu_command(b.does))
-            ));
+            items.push(item);
         }
     }
+    items
+}
+
+fn display_menu(items: &[String]) -> String {
     let mut out =
         String::from("display-menu -T \"#[align=centre fg=#88c0d0 bold] moa \" -x C -y C \\\n");
     for (i, item) in items.iter().enumerate() {
@@ -92,6 +103,21 @@ fn menu() -> String {
         out.push_str(item);
     }
     out
+}
+
+/// The menu. tmux 3.4 never opens a menu taller than the terminal, and later versions draw
+/// the status line over its end, so a terminal shorter than the tall menu (its lines and
+/// the border) and the status line gets the short one. The short one's items all show
+/// down to 24 rows (on 3.8, its bottom border is under the status line's blank line).
+fn menu() -> String {
+    let tall = menu_items(true);
+    let rows = tall.len() + 2 + STATUS_LINES;
+    let indent = |menu: String| menu.replace('\n', "\n  ");
+    format!(
+        "if -F '#{{e|<:#{{client_height}},{rows}}}' {{\n  {}\n}} {{\n  {}\n}}",
+        indent(display_menu(&menu_items(false))),
+        indent(display_menu(&tall))
+    )
 }
 
 /// The mouse line (V11): panels take clicks, motion and the wheel, which tmux forwards only
@@ -112,7 +138,7 @@ pub fn moa_tmux(brain: &str, mouse: bool) -> String {
         let Does::Moa(a) = b.does else { continue };
         keys.push_str(&format!(
             "bind -T moa {:<7} {}\n",
-            quote(a.key()),
+            quote(b.key),
             guarded(a, "##{pane_id}")
         ));
     }
@@ -120,6 +146,7 @@ pub fn moa_tmux(brain: &str, mouse: bool) -> String {
     // The menu text is inlined into each of the three bindings.
     TEMPLATE
         .replace("{{TITLE}}", &title)
+        .replace("{{STATUS_LINES}}", &STATUS_LINES.to_string())
         .replace("{{MOUSE}}\n", if mouse { MOUSE_ON } else { "" })
         .replace("{{DAEMON_KEYS}}", keys.trim_end())
         .replace("{{MENU}}", &menu)

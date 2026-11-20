@@ -151,80 +151,155 @@ bind -T moa k        select-pane -U
 bind -T moa j        select-pane -D
 # The full menu: Space, a second Ctrl-a, and tmux's own prefix (Ctrl-b) Space, so that
 # doesn't fall back to next-layout and scramble the cockpit.
-bind -T moa Space   display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
-  "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
-  "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
-  "Back to moa" m 'select-window -t moa:moa' \
-  "Zoom in/out" z 'resize-pane -Z' \
-  "" \
-  "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "" \
-  "-Ctrl-a ←↑↓→  move between splits" '' '' \
-  "Previous tab" '[' previous-window \
-  "Next tab" ']' next-window \
-  "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Send Ctrl-a to the app" a 'send-keys C-a'
-bind -T moa C-a     display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
-  "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
-  "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
-  "Back to moa" m 'select-window -t moa:moa' \
-  "Zoom in/out" z 'resize-pane -Z' \
-  "" \
-  "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "" \
-  "-Ctrl-a ←↑↓→  move between splits" '' '' \
-  "Previous tab" '[' previous-window \
-  "Next tab" ']' next-window \
-  "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Send Ctrl-a to the app" a 'send-keys C-a'
-bind Space display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
-  "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
-  "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
-  "Back to moa" m 'select-window -t moa:moa' \
-  "Zoom in/out" z 'resize-pane -Z' \
-  "" \
-  "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "" \
-  "-Ctrl-a ←↑↓→  move between splits" '' '' \
-  "Previous tab" '[' previous-window \
-  "Next tab" ']' next-window \
-  "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
-  "Send Ctrl-a to the app" a 'send-keys C-a'
+bind -T moa Space   if -F '#{e|<:#{client_height},28}' {
+  display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
+    "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Back to moa" m 'select-window -t moa:moa' \
+    "Zoom in/out" z 'resize-pane -Z' \
+    "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Previous tab" '[' previous-window \
+    "Next tab" ']' next-window \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Send Ctrl-a to the app" a 'send-keys C-a'
+} {
+  display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
+    "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Back to moa" m 'select-window -t moa:moa' \
+    "Zoom in/out" z 'resize-pane -Z' \
+    "" \
+    "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "" \
+    "-Ctrl-a ←↑↓→  move between splits" '' '' \
+    "Previous tab" '[' previous-window \
+    "Next tab" ']' next-window \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Send Ctrl-a to the app" a 'send-keys C-a'
+}
+bind -T moa C-a     if -F '#{e|<:#{client_height},28}' {
+  display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
+    "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Back to moa" m 'select-window -t moa:moa' \
+    "Zoom in/out" z 'resize-pane -Z' \
+    "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Previous tab" '[' previous-window \
+    "Next tab" ']' next-window \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Send Ctrl-a to the app" a 'send-keys C-a'
+} {
+  display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
+    "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Back to moa" m 'select-window -t moa:moa' \
+    "Zoom in/out" z 'resize-pane -Z' \
+    "" \
+    "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "" \
+    "-Ctrl-a ←↑↓→  move between splits" '' '' \
+    "Previous tab" '[' previous-window \
+    "Next tab" ']' next-window \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Send Ctrl-a to the app" a 'send-keys C-a'
+}
+bind Space if -F '#{e|<:#{client_height},28}' {
+  display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
+    "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Back to moa" m 'select-window -t moa:moa' \
+    "Zoom in/out" z 'resize-pane -Z' \
+    "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Previous tab" '[' previous-window \
+    "Next tab" ']' next-window \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Send Ctrl-a to the app" a 'send-keys C-a'
+} {
+  display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
+    "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Big picture" p 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key plan - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Agent spot" g 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key agent - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session…" / 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find-other - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Split: shell beside" '|' 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Split: shell below" - 'if -F '\''#{==:#{window_name},moa}'\'' '\''display "split an agent or terminal tab; the cockpit is a layout"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell"'\''' \
+    "Back to moa" m 'select-window -t moa:moa' \
+    "Zoom in/out" z 'resize-pane -Z' \
+    "" \
+    "Layout: cockpit" 1 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-1 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: focus (agent)" 2 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-2 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: classic" 3 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-3 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Layout: triage (status)" 4 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key layout-4 - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "" \
+    "-Ctrl-a ←↑↓→  move between splits" '' '' \
+    "Previous tab" '[' previous-window \
+    "Next tab" ']' next-window \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Send Ctrl-a to the app" a 'send-keys C-a'
+}
 bind m select-window -t moa:moa
 bind C if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key repair - ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
