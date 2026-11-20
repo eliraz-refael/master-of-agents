@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -94,7 +95,9 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("{message}");
+            // Not `eprintln!`, which panics when the terminal is gone (a panel whose tab
+            // tmux killed).
+            let _ = writeln!(std::io::stderr(), "{message}");
             ExitCode::from(1)
         }
     }

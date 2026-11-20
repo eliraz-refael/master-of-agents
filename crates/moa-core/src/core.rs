@@ -345,9 +345,19 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
         // gets its tags (R26). A panel on it goes, and `panels` says so.
         Input::ClientGone(conn) => {
+            // A panel moa placed keeps its connection for life: once it goes, its program
+            // has ended, and a listing shows whether its pane is dead (L12).
+            let ended = state
+                .panels
+                .get(&conn)
+                .is_some_and(|r| r.placed && r.pane.is_some());
             state.tmux.client_gone(conn);
             cockpit::run::client_gone(state, conn);
-            panel::gone(state, conn).into_iter().collect()
+            let mut fx: Vec<Effect> = panel::gone(state, conn).into_iter().collect();
+            if ended {
+                fx.extend(state.tmux.refresh());
+            }
+            fx
         }
         // Reconcile waits for it (R2): the connection's panes are looked at now, or, when
         // the link found no server, every session that ran in one goes to sleep.

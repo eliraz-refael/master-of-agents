@@ -13,6 +13,8 @@ use crate::ctl::{Here, pick_brain, runtime};
 
 /// The views `moa panel` names when it doesn't know one.
 const VIEWS: &str = "tree, plan, status, today, projects, activity, picture";
+/// Every panel's log, in moa's log folder: a line per start, give-up, signal and panic (L14).
+const PANEL_LOG: &str = "panel.log";
 
 #[derive(Args)]
 pub struct PanelArgs {
@@ -69,6 +71,8 @@ pub fn panel(args: &PanelArgs) -> Result<(), String> {
         pane,
         home: here.paths.home().to_path_buf(),
         tz: TimeZone::system(),
+        // Beside moa's own logs: what `see panel.log` points to.
+        log: Some(here.paths.log_dir().join(PANEL_LOG)),
     };
     runtime()?.block_on(run(opts))
 }

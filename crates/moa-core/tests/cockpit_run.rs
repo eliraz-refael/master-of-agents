@@ -404,9 +404,21 @@ fn a_failed_build_says_so_and_the_next_apply_mends_it() {
     let n = the_listing(&apply(&mut st, 1, "focus"));
     let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&shell_and_parked(), true))));
     let fx = feed(&mut st, answer(n, vec![Err("can't find pane: %4".into())]));
+    // A plain reason for the user; tmux's own words in the log.
     assert_eq!(
         reply_text(&fx),
-        Err("layout focus couldn't be applied: can't find pane: %4; Ctrl-a r tries again".into())
+        Err(
+            "layout focus couldn't be applied: something moa was moving closed meanwhile; \
+             Ctrl-a r tries again"
+                .into()
+        )
+    );
+    assert_eq!(
+        logs(&fx),
+        [(
+            LogLevel::Warn,
+            "tmux refused a cockpit change: can't find pane: %4".to_string()
+        )]
     );
     assert!(!fx.iter().any(|e| matches!(e, Effect::Persist(_))));
     assert_eq!(st.meta(CURRENT_KEY), None);
@@ -1013,6 +1025,123 @@ fn each_death_of_a_panel_is_logged() {
     assert_eq!(said, [line.clone(), line]);
 }
 
+/// The `run-shell true` nudges in `fx`: tmux reaps a pane's lost exit (tmux 3.4 and 3.5
+/// with utempter).
+fn reaps(fx: &[Effect]) -> usize {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|c| c.parts())
+        .filter(|c| c.name() == "run-shell")
+        .inspect(|c| {
+            assert_eq!(c.argv(), ["true"]);
+            assert_eq!(c.check(), Ok(()));
+        })
+        .count()
+}
+
+/// Whether `fx` asks the link's own listing.
+fn relists(fx: &[Effect]) -> bool {
+    fx.iter().any(|e| {
+        matches!(
+            e,
+            Effect::Tmux {
+                token: Some(TmuxToken::Refresh),
+                ..
+            }
+        )
+    })
+}
+
+/// L12 on a tmux that loses a pane's exit: a panel moa placed whose connection goes has
+/// ended, so moa lists again; one that the user started, or a connection that was no panel,
+/// asks nothing.
+#[test]
+fn a_placed_panel_going_asks_a_listing() {
+    for (placed, want) in [(true, true), (false, false)] {
+        let mut st = up();
+        send(
+            &mut st,
+            9,
+            Op::UiPanel {
+                pane: Some("%4".into()),
+                view: Some(View::Plan),
+                placed,
+            },
+        );
+        let fx = handle_checked(&mut st, Input::ClientGone(ConnId(1)), now());
+        assert_eq!(relists(&fx), want, "placed: {placed}: {fx:?}");
+    }
+    let mut st = up();
+    let fx = handle_checked(&mut st, Input::ClientGone(ConnId(1)), now());
+    assert!(!relists(&fx), "{fx:?}");
+}
+
+/// A listing that shows a panel dead with no `pane-died` for it nudges tmux to reap, once
+/// per death; the `pane-died` that follows is logged as ever. Nothing dead, or a death
+/// already said, nudges nothing.
+#[test]
+fn a_dead_panel_with_no_pane_died_is_nudged_once() {
+    let mut st = up();
+    let mut dead = cockpit_built();
+    dead[3] = pane(4, 1, 0, true, "plan", true);
+    let listed = |st: &mut State, panes: &[String]| {
+        feed(st, TmuxIn::Notification(Notification::SessionsChanged));
+        feed(st, refresh(lists(panes, false)))
+    };
+    assert_eq!(reaps(&listed(&mut st, &cockpit_built())), 0);
+    assert_eq!(reaps(&listed(&mut st, &dead)), 1);
+    assert_eq!(reaps(&listed(&mut st, &dead)), 0, "nudged again");
+    assert_eq!(
+        logs(&message(&mut st, "moa:hook pane-died %4")),
+        [(LogLevel::Info, "panel plan in %4 stopped".to_string())]
+    );
+    assert_eq!(reaps(&listed(&mut st, &dead)), 0);
+
+    // `pane-died` came first: tmux already reaped, so no nudge.
+    let mut st = up();
+    listed(&mut st, &cockpit_built());
+    message(&mut st, "moa:hook pane-died %4");
+    assert_eq!(reaps(&listed(&mut st, &dead)), 0);
+
+    // An agent's dead pane is no panel's.
+    let mut st = up();
+    let mut agent = cockpit_built();
+    agent.push(pane(8, 7, 0, false, "agent", true));
+    assert_eq!(reaps(&listed(&mut st, &agent)), 0);
+}
+
+/// The nudge's mark goes once the panel runs again: when a listing shows it running, or
+/// once Repair restarted it. Its next death is nudged too.
+#[test]
+fn the_nudge_mark_clears_when_the_panel_runs_again() {
+    let mut st = up();
+    let mut dead = cockpit_built();
+    dead[3] = pane(4, 1, 0, true, "plan", true);
+    let listed = |st: &mut State, panes: &[String]| {
+        feed(st, TmuxIn::Notification(Notification::SessionsChanged));
+        feed(st, refresh(lists(panes, false)))
+    };
+    assert_eq!(reaps(&listed(&mut st, &dead)), 1);
+    assert_eq!(reaps(&listed(&mut st, &cockpit_built())), 0);
+    assert_eq!(reaps(&listed(&mut st, &dead)), 1, "the next death");
+
+    // Repair's own listing still shows it dead: it was nudged already, so only the respawn.
+    let n = the_listing(&key(&mut st, "repair"));
+    let fx = feed(&mut st, answer(n, lists(&dead, true)));
+    assert_eq!(reaps(&fx), 0);
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("{fx:?}")
+    };
+    let fx = feed(&mut st, answer(*n, vec![Ok(Vec::new())]));
+    // Respawned, the mark is gone: a listing that shows it dead again nudges again.
+    let n = the_listing(&fx);
+    assert_eq!(reaps(&feed(&mut st, answer(n, lists(&dead, true)))), 1);
+}
+
 /// `panels` is published when a build gives a registered panel another view, and only then.
 #[test]
 fn panels_publish_only_when_a_view_changed() {
@@ -1374,7 +1503,16 @@ fn a_swap_tmux_refuses_says_why() {
     let fx = feed(&mut st, answer(n, vec![Err("can't find pane: %9".into())]));
     assert_eq!(
         reply_text(&fx),
-        Err("moa couldn't bring it to the screen: can't find pane: %9".into())
+        Err(
+            "moa couldn't bring it to the screen: something moa was moving closed meanwhile".into()
+        )
+    );
+    assert!(
+        logs(&fx).contains(&(
+            LogLevel::Warn,
+            "tmux refused a cockpit change: can't find pane: %9".to_string()
+        )),
+        "{fx:?}"
     );
     assert_eq!(st.tmux().topology.view_of(PaneId(9)), None);
 }
@@ -1490,16 +1628,19 @@ fn sleeping_the_spots_agent_with_no_spare_respawns_the_spot() {
         &mut st,
         answer(n, lists(&lantern_in_the_spot(false), false)),
     );
-    // The respawn takes the agent down; the slot's tags go once it is answered.
+    // The respawn takes the agent down, its session's marks off with it; the slot's tags go
+    // once it is answered.
     let (n, chain) = the_chain(&fx);
     assert_eq!(
         chain,
         [
-            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
+            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default",
+            "set-option -p -u -t %9 @moa_session",
+            "set-option -p -u -t %9 @moa_adopted",
+            "set-option -p -u -t %9 @moa_term",
         ]
     );
     let (n, chain) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
-    assert_eq!(chain[0], "set-option -p -u -t %9 @moa_session");
     assert!(chain.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
     // Kept on exit, with its stopped line: a crashed slot stays for Repair (L11).
     let kept = chain
@@ -1630,6 +1771,39 @@ fn a_sleep_takes_down_its_agent_whose_tag_never_landed() {
             "{untagged:?}: {chain:?}"
         );
     }
+}
+
+/// M5: the respawned empty slot registers between the vacate's two chains, while its tab
+/// still reads `agent`: unmanaged then. Once the slot's tags land, moa manages it, at once.
+#[test]
+fn an_empty_slot_registered_mid_vacate_is_managed_once_tagged() {
+    let mut st = with_agents(&lantern_in_the_spot(false));
+    let n = committed_then_listed(&sleep(&mut st, 1, L));
+    let fx = feed(&mut st, answer(n, lists(&lantern_in_the_spot(false), true)));
+    let (n, _) = the_chain(&fx);
+    let (n, _) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    let fx = send(
+        &mut st,
+        2,
+        Op::UiPanel {
+            pane: Some("%9".into()),
+            view: Some(View::EmptySlot),
+            placed: true,
+        },
+    );
+    let [(_, Ok(done))] = &replies(&fx)[..] else {
+        panic!("{fx:?}");
+    };
+    assert_eq!(done.data["managed"], false);
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    let Some(Effect::Publish(Publish::Model(m))) = fx
+        .iter()
+        .rfind(|e| matches!(e, Effect::Publish(Publish::Model(_))))
+    else {
+        panic!("{fx:?}")
+    };
+    assert_eq!(m.topics[&Topic::Panels]["c1"]["managed"], true);
+    assert_eq!(m.topics[&Topic::Panels]["c1"]["view"], "empty-slot");
 }
 
 /// L17: a vacate waits behind a build already running. When that build sent the agent home,

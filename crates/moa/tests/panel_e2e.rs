@@ -8,15 +8,14 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use moa_platform::{canonical, pid_alive};
-use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
-use serde_json::{Map, Value};
+use moa_platform::{canonical, kill_term, pid_alive};
+use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for};
+use serde_json::Map;
 
 use common::*;
 
-/// The selection bar's background, `sel` (`#5e81ac`), as `capture-pane -e` writes it.
-const SEL_BG: &str = "48;2;94;129;172";
 /// The hover mark's background, `surface` (`#3b4252`), as `capture-pane -e` writes it.
 const HOVER_BG: &str = "48;2;59;66;82";
 /// What the tree's footer says while nothing else is said: its key hints begin so.
@@ -37,75 +36,17 @@ fn rig() -> Rig {
     Rig { term, tb }
 }
 
-/// A session `moactl open` started, and where.
-struct Opened {
-    id: String,
-    dir: PathBuf,
-}
-
-/// `text` without its escape sequences.
-fn plain(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // `ESC [ params final`: up to the final byte.
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&c) {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 impl Rig {
-    /// `moactl args…` to the end.
-    fn moactl(&self, args: &[&str]) -> std::process::Output {
-        run_exe(&self.tb, &moactl(&self.tb), args, &[("MOA_BRAIN", B)])
-    }
-
     /// `moactl args…`, which must succeed; its stdout.
     #[track_caller]
     fn ok(&self, args: &[&str]) -> String {
-        let o = self.moactl(args);
-        assert!(
-            o.status.success(),
-            "moactl {args:?}: {}{}\n{}",
-            out(&o),
-            err(&o),
-            what_happened(&self.tb, &self.term)
-        );
-        out(&o)
+        moactl_ok(&self.tb, &self.term, args)
     }
 
-    /// `moactl open --bg <root>/work/<name> --title <title>` (and `--group` when given),
-    /// with fake-claude starting and hanging there.
+    /// A session `moactl open --bg` started in `<root>/work/<name>`, titled `title`.
     #[track_caller]
     fn session(&self, name: &str, title: &str, group: Option<&str>) -> Opened {
-        let dir = self.tb.root().join("work").join(name);
-        fs::create_dir_all(&dir).unwrap();
-        let start = FakeStep::Hook {
-            event: "SessionStart".into(),
-            fields: Map::from_iter([("source".to_string(), Value::String("startup".into()))]),
-        };
-        write_script(&dir, &[start, FakeStep::Hang]);
-        let path = dir.display().to_string();
-        let mut args = vec!["--json", "open", "--bg", &path, "--title", title];
-        if let Some(group) = group {
-            args.extend(["--group", group]);
-        }
-        let data: Value = serde_json::from_str(&self.ok(&args)).unwrap();
-        let id = data["id"].as_str().unwrap_or_else(|| panic!("{data}"));
-        Opened {
-            id: id.to_string(),
-            dir: canonical(&dir),
-        }
+        open_session(&self.tb, &self.term, name, title, group)
     }
 
     /// A tree panel's tab, once it shows its frame and `texts`; its pane.
@@ -121,26 +62,12 @@ impl Rig {
     /// Waits until `pane` shows every one of `texts`.
     #[track_caller]
     fn shows(&self, pane: &str, texts: &[&str]) {
-        let seen = wait_for(SHOWS, || {
-            let screen = screen_of(&self.tb, pane);
-            texts.iter().all(|t| screen.contains(t)).then_some(())
-        });
-        assert!(
-            seen.is_some(),
-            "{pane} never showed {texts:?}\n{}",
-            tab_shows(&self.tb, pane)
-        );
-    }
-
-    /// `pane`'s rows with their colours, as `capture-pane -e` writes them.
-    fn colours(&self, pane: &str) -> Vec<String> {
-        let shown = tmux(&self.tb, &["capture-pane", "-p", "-e", "-t", pane]);
-        shown.lines().map(str::to_string).collect()
+        shows(&self.tb, pane, texts);
     }
 
     /// The text of `pane`'s row drawn on background `bg`, if one is.
     fn row_on(&self, pane: &str, bg: &str) -> Option<String> {
-        self.colours(pane)
+        colours(&self.tb, pane)
             .into_iter()
             .find(|l| l.contains(bg))
             .map(|l| plain(&l))
@@ -166,57 +93,10 @@ impl Rig {
         );
     }
 
-    /// Presses `j` or `k` in `pane` until the selection bar is on the row showing `text`.
-    #[track_caller]
-    fn select(&self, pane: &str, text: &str) {
-        for _ in 0..20 {
-            // Where the bar is, and the row showing `text`.
-            let found = wait_for(SHOWS, || {
-                let rows = self.colours(pane);
-                let bar = rows.iter().position(|l| l.contains(SEL_BG))?;
-                let want = rows.iter().position(|l| plain(l).contains(text))?;
-                Some((bar, want))
-            });
-            let Some((bar, want)) = found else {
-                panic!(
-                    "{pane} draws no bar, or no {text:?}\n{}",
-                    tab_shows(&self.tb, pane)
-                );
-            };
-            if bar == want {
-                return;
-            }
-            let key = if want > bar { "j" } else { "k" };
-            tmux(&self.tb, &["send-keys", "-t", pane, key]);
-            // The key has landed once the bar is on another row.
-            let moved = wait_for(SHOWS, || {
-                let rows = self.colours(pane);
-                let now = rows.iter().position(|l| l.contains(SEL_BG));
-                now.filter(|now| *now != bar)
-            });
-            assert!(
-                moved.is_some(),
-                "{key} left the bar on row {bar}, not {text:?}'s {want}\n{}",
-                tab_shows(&self.tb, pane)
-            );
-        }
-        panic!("the bar never reached {text:?}");
-    }
-
     /// The pane of the tab running session `id`.
     #[track_caller]
     fn session_pane(&self, id: &str) -> String {
-        let found = wait_for(SHOWS, || {
-            let list = tmux(
-                &self.tb,
-                &["list-panes", "-a", "-F", "#{pane_id} #{@moa_session}"],
-            );
-            list.lines().find_map(|l| {
-                let (pane, session) = l.split_once(' ')?;
-                (session == id).then(|| pane.to_string())
-            })
-        });
-        found.unwrap_or_else(|| panic!("no tab runs {id}\n{}", what_happened(&self.tb, &self.term)))
+        session_pane(&self.tb, &self.term, id)
     }
 
     /// Waits until the attached client shows the tab of `pane`.
@@ -315,7 +195,7 @@ fn keys_and_a_click_act() {
     let harbor = r.session("b", "Harbor", None);
     let pane = r.tree(&["Kite", "Harbor"]);
 
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
     tmux(&r.tb, &["send-keys", "-t", &pane, "Enter"]);
     r.client_shows(&r.session_pane(&harbor.id));
 
@@ -330,8 +210,66 @@ fn the_terminal_key_opens_where_the_panel_points() {
     let harbor = r.session("b", "Harbor", None);
     let pane = r.tree(&["Kite", "Harbor"]);
 
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
     r.terminal_key_opens(&pane, "⌨ b", &harbor.dir);
+}
+
+/// What `select_row` takes for the item under the bar, on rows as the tree draws them: a
+/// spinner frame, an age or a group's counts changing leave the item the same, another
+/// session is another item, and a name matches only whole.
+#[test]
+fn a_row_is_known_by_its_item_not_its_spinner() {
+    let lantern = "│ ├─ ⠋ Lantern          now│";
+    for same in [
+        "│ ├─ ⠙ Lantern          now│",
+        "│ ├─ ● Lantern           1m│",
+        "│ ├─ ! Lantern          12h│",
+    ] {
+        assert_eq!(item_of(lantern), item_of(same), "{same}");
+    }
+    assert_eq!(
+        item_of("│ ▾ Loose  2 · 2 live ⠋   │"),
+        item_of("│ ▾ Loose  3 · 1 live ⠸   │")
+    );
+    assert_ne!(item_of(lantern), item_of("│ └─ ⠋ Kite             now│"));
+    assert_ne!(item_of(lantern), item_of("│ ▾ Loose  2 · 2 live ⠋   │"));
+
+    assert!(names(lantern, "Lantern"));
+    assert!(names("│ ▾ Private  1           │", "Private"));
+    assert!(!names("│ └─ ● Kitesurf         now│", "Kite"));
+    assert!(!names("│ ▾ Private  1           │", "Priv"));
+    assert!(!names("╭─ ▤ sessions ───────────╮", "Kite"));
+}
+
+/// `select_row` knows a session by its name: with every session working, each one's glyph
+/// spins and so does its group's label, and the bar still lands on the session asked for,
+/// from above and from below, and stays there.
+#[test]
+fn select_row_lands_among_spinning_rows() {
+    let r = rig();
+    let prompt = FakeStep::Hook {
+        event: "UserPromptSubmit".into(),
+        fields: Map::new(),
+    };
+    for (name, title) in [("a", "Kite"), ("b", "Harbor"), ("c", "Beacon")] {
+        let steps = [start_hook(), prompt.clone(), FakeStep::Hang];
+        open_session_with(&r.tb, &r.term, name, title, None, &steps);
+    }
+    let pane = r.tree(&["Kite", "Harbor", "Beacon", "3 working"]);
+    for target in ["Harbor", "Kite", "Harbor", "Beacon", "Harbor", "Kite"] {
+        select_row(&r.tb, &pane, target);
+        // No key it sent is still on its way: a moment on, the bar is where it was left.
+        let stays = wait_for(Duration::from_millis(300), || {
+            let rows = colours(&r.tb, &pane);
+            let bar = rows.iter().find(|l| l.contains(SEL_BG)).map(|l| plain(l));
+            bar.filter(|b| !names(b, target))
+        });
+        assert!(
+            stays.is_none(),
+            "the bar left {target:?}: {stays:?}\n{}",
+            tab_shows(&r.tb, &pane)
+        );
+    }
 }
 
 #[test]
@@ -340,7 +278,7 @@ fn a_fold_is_kept_across_panels() {
     r.session("a", "Kite", Some("Private"));
     let first = r.tree(&["▾ Private", "Kite"]);
 
-    r.select(&first, "Private");
+    select_row(&r.tb, &first, "Private");
     tmux(&r.tb, &["send-keys", "-t", &first, "Enter"]);
     r.shows(&first, &["▸ Private"]);
 
@@ -496,7 +434,7 @@ fn panels_launch_nothing_in_the_daemon() {
     tmux(&r.tb, &["send-keys", "-t", &pane, "Escape"]);
     r.shows(&pane, &["cancelled"]);
 
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
     r.terminal_key_opens(&pane, "⌨ b", &harbor.dir);
 
     assert_eq!(r.launches(), before, "a panel launched something");
@@ -511,7 +449,7 @@ fn a_panel_comes_back_after_moa_restarts() {
     let kite = r.session("a", "Kite", None);
     let harbor = r.session("b", "Harbor", None);
     let pane = r.tree(&["Kite", "Harbor"]);
-    r.select(&pane, "Harbor");
+    select_row(&r.tb, &pane, "Harbor");
 
     shutdown(&r.tb);
     r.shows(
@@ -575,6 +513,9 @@ fn a_panel_started_at_the_end_leaves_nothing_behind() {
 fn a_panel_moa_placed_never_starts_moa() {
     let r = rig();
     shutdown(&r.tb);
+    // No moa holds the brain's lock: it catches one still starting, which its socket
+    // wouldn't yet. Only where no moa should be starting: one starting in the instant the
+    // lock is tried finds it held, takes it for another moa, and gives up.
     let free = || {
         fs::File::open(r.tb.paths().lock(B))
             .is_ok_and(|f| f.try_lock().is_ok())
@@ -601,9 +542,348 @@ fn a_panel_moa_placed_never_starts_moa() {
     r.shows(&placed, &["moa isn't running; trying again…"]);
     assert!(free().is_some(), "the placed panel started moa");
 
-    // One started by hand starts it, and the placed one links then.
+    // One started by hand starts it, and the placed one links then. That moa is starting
+    // now, so it is asked on its socket, never by its lock.
     panel_tab(&r.tb, "tree");
-    let held = wait_for(SHOWS, || free().is_none().then_some(()));
+    let socket = r.tb.paths().socket(B).unwrap();
+    let answers = || {
+        std::os::unix::net::UnixStream::connect(&socket)
+            .is_ok()
+            .then_some(())
+    };
+    let held = wait_for(SHOWS, answers);
     assert!(held.is_some(), "a panel started by hand didn't start moa");
     r.shows(&placed, &[TREE_HINT]);
+}
+
+/// L14: a panel told to stop by a signal (`kill`, or tmux's hang-up when it kills the tab)
+/// gives its terminal back first: the tab it leaves is off the alternate screen with the
+/// mouse off, and `panel.log` names the signal. The tab stays after the exit
+/// (`remain-on-exit`), so tmux can still be asked.
+#[test]
+fn sigterm_and_sighup_give_the_terminal_back() {
+    let r = rig();
+    let log = r.tb.paths().log_dir().join("panel.log");
+    for signal in ["TERM", "HUP"] {
+        let cmd = format!("exec '{MOA}' panel tree");
+        let pane = tmux(
+            &r.tb,
+            &[
+                "new-window",
+                "-d",
+                "-t",
+                "=moa:",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                &cmd,
+            ],
+        );
+        tmux(
+            &r.tb,
+            &["set-option", "-p", "-t", &pane, "remain-on-exit", "on"],
+        );
+        r.shows(&pane, &["▤ sessions", TREE_HINT]);
+        let field = |f: &str| tmux(&r.tb, &["display-message", "-p", "-t", &pane, f]);
+        assert_eq!(field("#{alternate_on} #{mouse_any_flag}"), "1 1");
+
+        let pid = field("#{pane_pid}");
+        let killed = std::process::Command::new("kill")
+            .args([&format!("-{signal}"), &pid])
+            .status()
+            .unwrap();
+        assert!(killed.success(), "kill -{signal} {pid}");
+        let dead = wait_for(SHOWS, || (field("#{pane_dead}") == "1").then_some(()));
+        assert!(dead.is_some(), "{}", tab_shows(&r.tb, &pane));
+        // tmux 3.4 and 3.5 built with utempter can lose the panel's exit (moa-tmux's
+        // `every_hook_reaches_the_mailbox` says how): the pane is dead with no exit status
+        // until tmux reaps a child. moa nudges only the panes it tagged; this one is the
+        // test's, so the test nudges.
+        tmux(&r.tb, &["run-shell", "true"]);
+
+        let ended = wait_for(SHOWS, || {
+            let f = field("#{alternate_on} #{mouse_any_flag} #{pane_dead_status}");
+            (f == "0 0 0").then_some(())
+        });
+        assert!(
+            ended.is_some(),
+            "SIG{signal}: {:?}\n{}",
+            field("#{alternate_on} #{mouse_any_flag} #{pane_dead_status}"),
+            tab_shows(&r.tb, &pane)
+        );
+        let written = fs::read_to_string(&log).unwrap_or_default();
+        let line = format!("panel tree in {pane}: stopped by SIG{signal}");
+        assert!(written.contains(&line), "{line:?} not in:\n{written}");
+        assert!(
+            written.contains(&format!("panel tree in {pane}: started")),
+            "{written}"
+        );
+    }
+}
+
+/// L14's third way out, the one moa's own layout changes take: tmux kills the panel's pane
+/// (`kill-pane`) while its tab lives on. The terminal closes and tmux's SIGHUP comes at the
+/// same moment; whichever the panel hears first, `panel.log` gets exactly one end line for
+/// it, and it isn't a panic.
+#[test]
+fn a_panel_tmux_kills_logs_one_plain_end_line() {
+    let r = rig();
+    let log = r.tb.paths().log_dir().join("panel.log");
+    let cmd = format!("exec '{MOA}' panel tree");
+    let pane = tmux(
+        &r.tb,
+        &[
+            "new-window",
+            "-d",
+            "-t",
+            "=moa:",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &cmd,
+        ],
+    );
+    // A second pane keeps the tab when the panel's goes.
+    tmux(&r.tb, &["split-window", "-d", "-t", &pane]);
+    r.shows(&pane, &["▤ sessions", TREE_HINT]);
+    let pid: u32 = tmux(
+        &r.tb,
+        &["display-message", "-p", "-t", &pane, "#{pane_pid}"],
+    )
+    .parse()
+    .unwrap();
+
+    tmux(&r.tb, &["kill-pane", "-t", &pane]);
+    let gone = wait_for(SHOWS, || (!pid_alive(pid)).then_some(()));
+    assert!(gone.is_some(), "the panel outlived its pane");
+
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let mine = format!("panel tree in {pane}: ");
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once(&mine).map(|(_, what)| what))
+        .filter(|what| is_end(what))
+        .collect();
+    assert_eq!(ends.len(), 1, "{ends:?}\n{written}");
+    assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
+}
+
+/// Whether a `panel.log` line's text says how a panel ended: `stopped…`, or `panicked…`
+/// (which a test must see to fail on it). A note such as `can't watch the terminal…` isn't.
+fn is_end(what: &str) -> bool {
+    what.starts_with("stopped") || what.starts_with("panicked")
+}
+
+/// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
+/// panel behind.
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// L14: a panel whose terminal goes with no signal at all (its pty's master closed; the pty
+/// isn't its controlling terminal, so nothing sends SIGHUP) ends by itself, with one end
+/// line, rather than spinning in the terminal's read and ignoring SIGTERM.
+///
+/// The panel is linked to moa and idle (an empty tree: no timer, no push), so the only
+/// thing that can end it is noticing its terminal went.
+#[test]
+fn a_panel_whose_terminal_goes_ends_by_itself() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    let r = rig();
+    let log = r.tb.paths().log_dir().join("panel.log");
+    let (master, slave, _) = moa_testkit::pty(80, 24).unwrap();
+    let child = Command::new(MOA)
+        .args(["panel", "tree"])
+        .env_clear()
+        .envs(r.tb.env())
+        .current_dir(r.tb.root())
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut child = Reaped(child);
+    let pid = child.0.id();
+
+    // What the panel draws is read until it is linked and in its loop; then the reader lets
+    // go of its copy of the master, so dropping `master` closes the pty's last master end.
+    let seen = Arc::new(Mutex::new(String::new()));
+    let reader = {
+        let mut master = master.try_clone().unwrap();
+        let seen = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = master.read(&mut buf) {
+                let mut seen = seen.lock().unwrap();
+                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if n == 0 || plain(&seen).contains(TREE_HINT) {
+                    return;
+                }
+            }
+        })
+    };
+    let drawn = wait_for(SHOWS, || reader.is_finished().then_some(()));
+    assert!(
+        drawn.is_some(),
+        "the panel never drew: {:?}",
+        seen.lock().unwrap()
+    );
+    drop(master);
+
+    let ended = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+    if ended.is_none() {
+        kill_term(pid);
+        let termed = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+        panic!(
+            "the panel outlived its terminal; SIGTERM {} it",
+            if termed.is_some() {
+                "ended"
+            } else {
+                "didn't end"
+            }
+        );
+    }
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
+        .filter(|what| is_end(what))
+        .collect();
+    assert_eq!(ends, ["stopped: the terminal closed"], "{written}");
+}
+
+/// A panel with no terminal at all (stdin `/dev/null`, no controlling terminal, as from a
+/// script or a service) refuses with one line and fails: it never takes "no terminal" for
+/// a terminal that went.
+#[test]
+fn a_panel_with_no_terminal_refuses() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let tb = TempBrain::new(None);
+    let log = tb.paths().log_dir().join("panel.log");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let mut cmd = Command::new(MOA);
+    cmd.args(["panel", "tree"])
+        .env_clear()
+        .envs(tb.env())
+        .env("MOA_NO_AUTOSTART", "1")
+        .current_dir(tb.root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    moa_testkit::without_terminal(&mut cmd);
+    let mut child = Reaped(cmd.spawn().unwrap());
+    let status = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+    let status = status.expect("the panel with no terminal never ended");
+    let mut err = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert!(!status.success(), "it succeeded; stderr: {err}");
+    assert!(err.starts_with("can't use this terminal: "), "{err:?}");
+    assert_eq!(err.lines().count(), 1, "{err:?}");
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
+        .filter(|what| is_end(what))
+        .collect();
+    assert_eq!(ends.len(), 1, "{written}");
+    assert!(
+        ends[0].starts_with("stopped: can't use this terminal: "),
+        "{written}"
+    );
+}
+
+/// L14: a terminal that goes while the panel is still taking it or drawing its first
+/// frame ends the panel the same way. Nobody reads the pty: on macOS, whose pty buffer is
+/// small, the panel's first writes fill it and wait, and the master end closes under them;
+/// on Linux they fit, and the hang-up watch ends it. Whichever part notices first (a
+/// write, the first draw, the watch), the one end line is `stopped: the terminal closed`.
+#[test]
+fn a_panel_whose_terminal_goes_before_its_first_frame_says_so() {
+    use std::process::{Command, Stdio};
+
+    let tb = TempBrain::new(None);
+    let log = tb.paths().log_dir().join("panel.log");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let (master, slave, _) = moa_testkit::pty(200, 60).unwrap();
+    // A placed panel, so it starts no moa.
+    let child = Command::new(MOA)
+        .args(["panel", "tree"])
+        .env_clear()
+        .envs(tb.env())
+        .env("MOA_NO_AUTOSTART", "1")
+        .current_dir(tb.root())
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut child = Reaped(child);
+
+    let started = wait_for(SHOWS, || {
+        let written = fs::read_to_string(&log).unwrap_or_default();
+        written.contains("panel tree in -: started").then_some(())
+    });
+    assert!(started.is_some(), "the panel never started");
+    drop(master);
+
+    let ended = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+    assert!(ended.is_some(), "the panel outlived its terminal");
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
+        .filter(|what| is_end(what))
+        .collect();
+    assert_eq!(ends, ["stopped: the terminal closed"], "{written}");
+}
+
+/// What a panel's input thread relies on: `terminal_gone` says no while the terminal is
+/// there (input waiting unread included) and yes once its master end closes, and
+/// `wait_hangup` returns then.
+#[test]
+fn a_closed_master_is_heard_as_the_terminal_going() {
+    use std::io::Write;
+    use std::os::fd::AsFd;
+
+    let (mut master, slave, _) = moa_testkit::pty(80, 24).unwrap();
+    master.write_all(b"typed\n").unwrap();
+    assert!(!moa_platform::terminal_gone(slave.as_fd()), "unread input");
+
+    let watched = slave.try_clone().unwrap();
+    let waiting = std::thread::spawn(move || moa_platform::wait_hangup(watched.as_fd()));
+    drop(master);
+    let woke = wait_for(SHOWS, || waiting.is_finished().then_some(()));
+    assert!(woke.is_some(), "a closed master never woke it");
+    waiting.join().unwrap().unwrap();
+    assert!(moa_platform::terminal_gone(slave.as_fd()));
+}
+
+/// `plain` drops every escape sequence `capture-pane -e` or a terminal may write, and only
+/// those: a CSI up to its final byte, an OSC, DCS, APC or PM up to BEL or ST, a charset
+/// designation with its one character, and any other two-character escape.
+#[test]
+fn plain_skips_whole_escapes_and_nothing_more() {
+    assert_eq!(plain("\x1b[48;2;94;129;172mKite\x1b[0m"), "Kite");
+    assert_eq!(plain("a\x1b]0;title\x07b"), "ab");
+    assert_eq!(plain("a\x1b]2;title\x1b\\b"), "ab");
+    assert_eq!(plain("a\x1bPq#0\x1b\\b"), "ab");
+    assert_eq!(plain("a\x1b(Bb"), "ab");
+    assert_eq!(plain("a\x1b=b"), "ab");
+    assert_eq!(plain("Harbor\x1b"), "Harbor");
 }

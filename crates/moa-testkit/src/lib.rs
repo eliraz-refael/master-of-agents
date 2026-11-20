@@ -10,7 +10,7 @@ mod terminal;
 pub use sandbox::{Sandbox, TMUX_NOT_FOUND, tmux_path, wait_for};
 pub use spike_fixture::{OLD_SCHEMA_SQL, Scenario, SpikeBrain, SpikeFixture, ids};
 pub use temp_brain::TempBrain;
-pub use terminal::Terminal;
+pub use terminal::{Terminal, pty, without_terminal};
 
 use std::path::{Path, PathBuf};
 

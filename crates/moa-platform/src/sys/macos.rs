@@ -28,15 +28,58 @@ fn kevent_zeroed() -> libc::kevent {
     unsafe { std::mem::zeroed() }
 }
 
-/// A kqueue holding no timer yet, close-on-exec. (A kqueue rejects O_NONBLOCK, and
-/// every `kevent` on it uses a zero timeout, so it never blocks anyway.)
-pub fn alarm_create() -> io::Result<OwnedFd> {
+/// A new, empty kqueue, close-on-exec. A kqueue rejects O_NONBLOCK: whether a `kevent`
+/// on it waits is up to that call's timeout.
+fn new_kqueue() -> io::Result<OwnedFd> {
     // SAFETY: `kqueue` takes no arguments and returns a new descriptor or -1.
     let raw = check(unsafe { libc::kqueue() })?;
     // SAFETY: `raw` is a fresh descriptor that nothing else owns.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
     set_cloexec(&fd)?;
     Ok(fd)
+}
+
+/// A kqueue holding no timer yet, close-on-exec. Every `kevent` on the alarm's kqueue uses
+/// a zero timeout, so the alarm never blocks.
+pub fn alarm_create() -> io::Result<OwnedFd> {
+    new_kqueue()
+}
+
+/// Blocks until the terminal on `fd` hangs up (its other end closed). A kqueue read
+/// filter cleared on every delivery (`EV_CLEAR`) wakes once per new input and stays
+/// asleep while input waits unread, so this never spins; the hang-up is its `EV_EOF`.
+/// macOS's `poll` reports a hang-up only to a poll for input, which would spin there.
+pub fn wait_hangup(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    // Its own kqueue, which this call blocks on (unlike the alarm's).
+    let kq = new_kqueue()?;
+    let mut ev = kevent_zeroed();
+    ev.ident = fd.as_raw_fd() as libc::uintptr_t;
+    ev.filter = libc::EVFILT_READ;
+    ev.flags = libc::EV_ADD | libc::EV_CLEAR;
+    change(&kq, &ev)?;
+    loop {
+        let mut got = kevent_zeroed();
+        // SAFETY: no change list, room for one event, no timeout: it waits for one.
+        let r = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &mut got,
+                1,
+                std::ptr::null(),
+            )
+        };
+        match check(r) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+            Ok(_) if got.flags & libc::EV_ERROR != 0 => {
+                return Err(io::Error::from_raw_os_error(got.data as i32));
+            }
+            Ok(_) if got.flags & libc::EV_EOF != 0 => return Ok(()),
+            Ok(_) => {}
+        }
+    }
 }
 
 fn change(fd: &OwnedFd, ev: &libc::kevent) -> io::Result<()> {

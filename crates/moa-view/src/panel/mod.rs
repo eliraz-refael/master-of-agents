@@ -172,6 +172,8 @@ pub struct Panel {
 }
 
 const CANCELLED: &str = "cancelled";
+/// What Ctrl-c, or `q` in the picture, says in a panel moa manages (L14).
+const MANAGED: &str = "this panel is part of moa's layout; Ctrl-a r repairs the layout";
 
 /// How long a broadcast event stays in the footer, in milliseconds.
 pub const EVENT_SHOWN_MS: i64 = 8_000;
@@ -229,6 +231,34 @@ impl Panel {
         changed
     }
 
+    /// Marks the panel as moa's before any row says so: moa tags a panel it places as it
+    /// starts it (L7). The panel's row, once it comes, decides from then on.
+    pub fn set_managed(&mut self, managed: bool) {
+        self.managed = managed;
+    }
+
+    /// Ctrl-c (L14): it cancels an open prompt or y/N; with nothing open it quits as `q`
+    /// does in the picture (see [`quit`](Panel::quit)).
+    pub fn interrupt(&mut self) -> Option<Out> {
+        self.hover = None;
+        if self.prompt.take().is_some() || self.confirm.take().is_some() {
+            self.say(CANCELLED);
+            return None;
+        }
+        self.quit()
+    }
+
+    /// Quits a panel you started, and leaves one moa manages where it is, saying why
+    /// (L14): a managed panel that quit would leave a hole in moa's layout.
+    fn quit(&mut self) -> Option<Out> {
+        if self.managed {
+            self.say(MANAGED);
+            None
+        } else {
+            Some(Out::Quit)
+        }
+    }
+
     /// The view the picture's shown tab draws; `None` for every other view.
     fn tab(&self) -> Option<View> {
         (self.view == View::Picture).then(|| picture::tab_view(&self.ui))
@@ -277,14 +307,15 @@ impl Panel {
         g
     }
 
-    /// A key press. It clears the hover and the last message; a prompt or a question takes
-    /// it first, and Ctrl-c quits from anywhere.
+    /// A key press. It clears the hover and the last message; Ctrl-c is
+    /// [`interrupt`](Panel::interrupt) from anywhere, and a prompt or a question takes any
+    /// other key first.
     pub fn key(&mut self, k: Key, data: &Data, ctx: &Ctx, size: Size) -> Vec<Out> {
         let g = self.refresh(data, ctx, size);
         self.hover = None;
         self.message = None;
         if k == Key::Ctrl('c') {
-            return vec![Out::Quit];
+            return self.interrupt().into_iter().collect();
         }
         if let Some(confirm) = self.confirm.take() {
             return if k == Key::Char('y') {
@@ -394,10 +425,10 @@ impl Panel {
         self.prompt.is_some() || self.confirm.is_some()
     }
 
-    /// Whether `k` quits this panel when nothing is being typed: Ctrl-c anywhere, `q` in the
-    /// picture.
+    /// Whether `k` quits this panel when nothing is being typed: Ctrl-c, and `q` in the
+    /// picture, in a panel moa doesn't manage (L14).
     pub fn quits(&self, k: Key) -> bool {
-        keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
+        !self.managed && keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
     }
 
     /// Pasted text goes to the prompt being answered, if any.
@@ -617,7 +648,7 @@ impl Panel {
                 self.list
                     .page(&self.lines, body, action == Action::PageDown);
             }
-            Action::Quit => return Some(vec![Out::Quit]),
+            Action::Quit => return Some(self.quit().into_iter().collect()),
             Action::Activate => {
                 return match selected? {
                     Item::Session(id) => {

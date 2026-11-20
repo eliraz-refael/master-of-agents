@@ -931,6 +931,74 @@ fn a_late_start_from_the_killed_tab_stays_history_across_a_reconnect_to_the_same
     assert!(is_asleep(r.s()), "{:?}", r.s());
 }
 
+/// I1: a sleep's or close's take-down waits out a lost link; back on the same server, the
+/// reconnect's reconcile is answered first and sees the tab still tagged with S. It isn't
+/// bound again: S stays asleep (or closed), and the vacate then takes the agent down.
+#[test]
+fn a_take_down_waiting_out_a_reconnect_isnt_undone_by_reconcile() {
+    for close in [false, true] {
+        let mut r = World::new().up();
+        let fx = if close {
+            send(&r.b, &mut r.st, 1, Op::SessionClose { q: S.into() })
+        } else {
+            r.sleep_unplayed(1, &[S], None, false)
+        };
+        assert!(kills(&fx).is_empty(), "{fx:?}");
+        feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+        let fx = feed(
+            &r.b,
+            &mut r.st,
+            TmuxIn::Connected {
+                conn: 2,
+                generation: generation(),
+                version: "3.5a".into(),
+                ctl: ClientName("client-9".into()),
+                socket: "moa".into(),
+            },
+        );
+        let asked = queries(&fx);
+        let find = |listing: bool| {
+            asked
+                .iter()
+                .find(|(_, cmds)| (*cmds == refresh_cmds()) == listing)
+                .map(|(n, _)| *n)
+                .unwrap_or_else(|| panic!("{asked:?}"))
+        };
+        let (reconcile, vacate) = (find(false), find(true));
+        // The reconcile's look at the tabs first: %1 still runs S's agent, tagged with S.
+        let cwd = r.s().cwd.clone().unwrap();
+        let info = format!("I\t%1\t101\t0\t\t\t{S}\t{cwd}");
+        feed(
+            &r.b,
+            &mut r.st,
+            TmuxIn::Replies {
+                conn: 2,
+                token: TmuxToken::Query(reconcile),
+                results: vec![Ok(vec![info]), Ok(Vec::new())],
+            },
+        );
+        assert!(r.st.tmux().reconciled());
+        assert!(r.st.binding(s_id()).is_none(), "bound again: close {close}");
+        let still = |r: &Rig| match close {
+            true => r.s().lifecycle == Lifecycle::Ended && r.s().asleep_at.is_none(),
+            false => is_asleep(r.s()),
+        };
+        assert!(still(&r), "close {close}: {:?}", r.s());
+        // Then the vacate's own listing: the agent is taken down.
+        let fx = feed(
+            &r.b,
+            &mut r.st,
+            TmuxIn::Replies {
+                conn: 2,
+                token: TmuxToken::Query(vacate),
+                results: listing_of(&base_panes()),
+            },
+        );
+        assert_eq!(kills(&fx), [&kill("%1")], "{fx:?}");
+        assert!(still(&r), "close {close}: {:?}", r.s());
+    }
+}
+
 // --- by name ---
 
 #[test]

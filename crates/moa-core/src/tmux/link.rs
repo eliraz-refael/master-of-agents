@@ -871,7 +871,7 @@ impl TmuxState {
     }
 
     /// Reads the lists again, at most one in flight and one more after it.
-    fn refresh(&mut self) -> Vec<Effect> {
+    pub(crate) fn refresh(&mut self) -> Vec<Effect> {
         let Some(conn) = self.conn() else {
             return Vec::new();
         };

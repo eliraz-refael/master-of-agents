@@ -106,11 +106,17 @@ pub(crate) struct CockpitRun {
     restarted: Option<u32>,
     /// The panels logged as stopped, until they run again: one line per death (L12).
     stopped: BTreeSet<PaneId>,
+    /// The dead panels tmux was nudged to reap (`run-shell true`) while no `pane-died` had
+    /// come for them, until a listing shows them running or gone: once per death.
+    nudged: BTreeSet<PaneId>,
     /// The link just came up: its first listing may queue the lazy build (L9).
     lazy_armed: bool,
     /// The vacate in flight took its agent down: its kill (or the spot's respawn) was
     /// answered `Ok`, whatever becomes of the tags after it (R24).
     taken: bool,
+    /// The vacate in flight takes its agent down by a plain `kill-pane`: a refusal of it has
+    /// nothing plainer to fall back on.
+    plain_kill: bool,
     /// The vacate's chain still to go once its agent is taken down: the empty slot's tags.
     rest: Option<(Vec<Cmd>, Then)>,
     /// Restarts whose new tab waits for the old agent to go (R24), by the vacated pane.
@@ -134,6 +140,7 @@ impl CockpitRun {
         self.replanned = false;
         self.restarted = None;
         self.taken = false;
+        self.plain_kill = false;
         self.rest = None;
     }
 }
@@ -233,30 +240,97 @@ fn first_line(e: &str) -> &str {
         .unwrap_or("tmux gave no reason")
 }
 
-/// A vacate's second chain refused, its agent taken down already: only the empty slot's
-/// tags are missing. `None` for any other chain.
-fn vacate_failed(state: &State, op: &CockpitOp, e: &str) -> Option<Said> {
-    match op {
-        CockpitOp::Vacate { pane, .. } if state.cockpit.taken => Some(Said::Logged(format!(
-            "the agent in {pane} was taken down, but the empty slot there couldn't be set up: {}",
-            first_line(e)
-        ))),
-        _ => None,
+/// A chain tmux gave no answer for (the link went first).
+const NO_ANSWER: &str = "tmux didn't answer";
+
+/// Why a chain didn't go through, in plain words, from tmux's: never tmux's own (they go to
+/// the log).
+fn plainly(e: &str) -> &'static str {
+    let why = first_line(e);
+    if ["can't find pane", "can't find window", "can't find session"]
+        .iter()
+        .any(|s| why.contains(s))
+    {
+        "something moa was moving closed meanwhile"
+    } else if why == NO_ANSWER {
+        "the terminal didn't answer"
+    } else {
+        "the terminal refused the change"
     }
 }
 
-/// A chain's error in plain words (L18).
+/// A vacate's chain refused (`e`), or not answered:
+/// - its agent was taken down already: only the empty slot's tags are missing;
+/// - its pane is gone: nothing runs there, so it is done (R24);
+/// - the plain kill itself, or a pane moa last knew as a panel: it ends, said;
+/// - else `None`: the agent is killed plainly instead ([`vacate_plainly`]).
+fn vacate_refused(state: &State, pane: PaneId, e: &str) -> Option<Said> {
+    let why = plainly(e);
+    if state.cockpit.taken {
+        return Some(Said::Logged(format!(
+            "the agent in {pane} was taken down, but the empty slot there couldn't be set up: {why}"
+        )));
+    }
+    if first_line(e) == format!("can't find pane: {pane}") {
+        return Some(Said::Nothing);
+    }
+    if state.cockpit.plain_kill || known_panel(state, pane) {
+        return Some(Said::Logged(format!(
+            "the agent in {pane} couldn't be taken down: {why}; it may still be running"
+        )));
+    }
+    None
+}
+
+/// Whether moa last knew `pane` as a panel (the empty slot included): never killed blind.
+fn known_panel(state: &State, pane: PaneId) -> bool {
+    state
+        .tmux
+        .topology
+        .view_of(pane)
+        .is_some_and(|v| v.parse::<View>().is_ok())
+}
+
+/// The vacate's agent in `pane` killed plainly, as 4b did (a pane id names one pane on its
+/// server), when its own chain was refused: an agent running while the brain says it's gone
+/// is worse than a spot left empty, which a refill builds again.
+fn vacate_plainly(state: &mut State, seq: u64, pane: PaneId) -> Vec<Effect> {
+    let mut fx = vec![log(
+        LogLevel::Warn,
+        format!("the agent in {pane} is closed plainly; the cockpit is built again after"),
+    )];
+    let then = Then {
+        tags: vec![(pane, None)],
+        untagged: Vec::new(),
+        moved: None,
+        views: None,
+        starts: 0,
+        layout: String::new(),
+        ok: Said::Nothing,
+    };
+    fx.extend(act(
+        state,
+        seq,
+        Next::TakeDown(vec![kill_pane(pane)], then, None),
+    ));
+    fx.extend(queue(state, CockpitOp::Refill));
+    fx
+}
+
+/// A chain's error in plain words (L18): the layout's fit said as such, the rest with a
+/// plain reason.
 fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
-    let why = first_line(e);
+    let raw = first_line(e);
+    let why = plainly(e);
     let text = match op {
         CockpitOp::Vacate { pane, .. } => {
-            format!("the agent in {pane} couldn't be taken down: {why}")
+            format!("the agent in {pane} couldn't be taken down: {why}; it may still be running")
         }
         CockpitOp::SelectView { pane, view, .. } => {
             format!("the panel in {pane} couldn't show {view}: {why}")
         }
         CockpitOp::Show { .. } => format!("moa couldn't bring it to the screen: {why}"),
-        _ if why.contains("no space for") || why.contains("pane too small") => {
+        _ if raw.contains("no space for") || raw.contains("pane too small") => {
             format!("the {layout} layout doesn't fit this window; make the terminal bigger")
         }
         _ => format!("layout {layout} couldn't be applied: {why}; Ctrl-a r tries again"),
@@ -367,6 +441,20 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
 /// no spot: the session's tab is selected, or killed, at once (4b).
 pub(crate) fn through_queue(state: &State) -> bool {
     state.tmux.topology.cockpit().is_some() || !idle(state)
+}
+
+/// The panes a vacate is taking down, running or waiting: their sessions are saved as gone,
+/// so nothing binds them again meanwhile (reconcile).
+pub(crate) fn vacating(state: &State) -> impl Iterator<Item = PaneId> + '_ {
+    let run = &state.cockpit;
+    run.in_flight
+        .iter()
+        .map(|(_, op)| op)
+        .chain(run.waiting.iter())
+        .filter_map(|op| match op {
+            CockpitOp::Vacate { pane, .. } => Some(*pane),
+            _ => None,
+        })
 }
 
 /// Nothing runs in the queue and nothing waits: a command sent now can't land between an
@@ -558,12 +646,7 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         // the pane as a panel (its chain already ran).
         if let Some((_, CockpitOp::Vacate { pane, .. })) = &state.cockpit.in_flight {
             let pane = *pane;
-            let panel = state
-                .tmux
-                .topology
-                .view_of(pane)
-                .is_some_and(|v| v.parse::<View>().is_ok());
-            if !panel {
+            if !known_panel(state, pane) {
                 let mut fx = vec![log(
                     LogLevel::Warn,
                     format!(
@@ -599,9 +682,9 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         fx.extend(finish(state, said));
         return fx;
     }
-    forget_running(state);
+    let mut fx: Vec<Effect> = stopped_listed(state).into_iter().collect();
     // The operation's own listing: a panel healed now is tagged before its chain goes out.
-    let mut fx = crate::panel::listed(state, true);
+    fx.extend(crate::panel::listed(state, true));
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     let Some((_, op)) = state.cockpit.in_flight.clone() else {
         return fx;
@@ -737,13 +820,13 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 // longer the spot's, so nothing reads an exit of it as the spot's agent ending.
                 return Next::TakeDown(cmds, then(vec![(*pane, None)], Vec::new(), 0), None);
             }
-            // In place: the respawn takes the agent down (a panel start), then the spot
-            // becomes the empty slot, no longer a session's tab.
-            let (respawn, tags) = cmds.split_at(1);
-            let slot = then(vec![(*pane, Some(View::EmptySlot.word()))], vec![*pane], 0);
+            // In place: the respawn takes the agent down (a panel start) and its pane is no
+            // longer a session's tab, then the spot is tagged as the empty slot.
+            let (respawn, tags) = cmds.split_at(v.taken_down);
+            let slot = then(vec![(*pane, Some(View::EmptySlot.word()))], Vec::new(), 0);
             Next::TakeDown(
                 respawn.to_vec(),
-                then(Vec::new(), Vec::new(), 1),
+                then(Vec::new(), vec![*pane], 1),
                 Some((tags.to_vec(), slot)),
             )
         }
@@ -936,6 +1019,7 @@ fn act(state: &mut State, seq: u64, next: Next) -> Vec<Effect> {
             }
         }
         Next::TakeDown(cmds, then, rest) => {
+            state.cockpit.plain_kill = matches!(&cmds[..], [c] if c.name() == "kill-pane");
             state.cockpit.rest = rest;
             act(state, seq, Next::Chain(cmds, then))
         }
@@ -980,6 +1064,7 @@ pub(crate) fn chain_answered(
                     Some(Ok(_)) => {
                         n += 1;
                         state.cockpit.stopped.remove(&pane);
+                        state.cockpit.nudged.remove(&pane);
                     }
                     Some(Err(e)) => fx.push(log(
                         LogLevel::Warn,
@@ -999,9 +1084,17 @@ pub(crate) fn chain_answered(
             let Some((_, op)) = state.cockpit.in_flight.clone() else {
                 return fx;
             };
-            let said = match answers.into_iter().next() {
-                Some(Ok(_)) => {
+            let answer = match answers.into_iter().next() {
+                Some(Ok(_)) => Ok(()),
+                Some(Err(e)) => Err(e),
+                None => Err(NO_ANSWER.to_string()),
+            };
+            let said = match answer {
+                Ok(()) => {
                     state.tmux.views_set(&then.tags);
+                    // A panel that registered while its tab still read the old view gets
+                    // its view, and whether moa manages it, from the tags just set (L8).
+                    fx.extend(crate::panel::resolve_panels(state));
                     for pane in &then.untagged {
                         state.tmux.untag_sent(*pane);
                     }
@@ -1035,9 +1128,24 @@ pub(crate) fn chain_answered(
                     }
                     said
                 }
-                Some(Err(e)) => vacate_failed(state, &op, &e)
-                    .unwrap_or_else(|| chain_failed(&op, &then.layout, &e)),
-                None => chain_failed(&op, &then.layout, "tmux didn't answer"),
+                Err(e) => {
+                    // tmux's own words go to the log; whoever asked hears a plain reason.
+                    let tmux_said = match e.as_str() {
+                        NO_ANSWER => "tmux didn't answer a cockpit change".to_string(),
+                        e => format!("tmux refused a cockpit change: {}", first_line(e)),
+                    };
+                    fx.push(log(LogLevel::Warn, tmux_said));
+                    match op {
+                        CockpitOp::Vacate { pane, .. } => match vacate_refused(state, pane, &e) {
+                            Some(said) => said,
+                            None => {
+                                fx.extend(vacate_plainly(state, seq, pane));
+                                return fx;
+                            }
+                        },
+                        _ => chain_failed(&op, &then.layout, &e),
+                    }
+                }
             };
             fx.extend(finish(state, said));
         }
@@ -1147,32 +1255,61 @@ pub(crate) fn linked(state: &mut State, another_server: bool) -> Vec<Effect> {
             .waiting
             .retain(|op| !matches!(op, CockpitOp::Vacate { .. }));
         state.cockpit.stopped.clear();
+        state.cockpit.nudged.clear();
     }
     state.cockpit.lazy_armed = true;
     pump(state)
 }
 
-/// The panels logged as stopped that a listing shows running again: their next death is
-/// logged too (L12).
-fn forget_running(state: &mut State) {
+/// What every listing does for stopped panels (L12):
+/// - the ones it shows running again, or gone, are forgotten, so their next death is logged
+///   and nudged too;
+/// - a panel it shows dead with no `pane-died` yet gets tmux nudged to reap it, once per
+///   death. tmux 3.4 and 3.5 built with utempter can lose a pane's exit when its pty closes
+///   first: the pane is dead, but tmux never draws its stopped line nor says `pane-died`
+///   until a child of its own ends. `run-shell true` is that child; tmux then draws the line
+///   and says `pane-died`, which [`died`] logs. Elsewhere it changes nothing.
+fn stopped_listed(state: &mut State) -> Option<Effect> {
     let topology = &state.tmux.topology;
-    state.cockpit.stopped.retain(|p| topology.is_dead(*p));
+    let run = &mut state.cockpit;
+    run.stopped.retain(|p| topology.is_dead(*p));
+    run.nudged.retain(|p| topology.is_dead(*p));
+    let conn = state.tmux.conn()?;
+    let unsaid: Vec<PaneId> = topology
+        .panes()
+        .filter(|p| topology.is_dead(*p) && !run.stopped.contains(p) && !run.nudged.contains(p))
+        .filter(|p| {
+            topology
+                .view_of(*p)
+                .is_some_and(|v| v.parse::<View>().is_ok())
+        })
+        .collect();
+    if unsaid.is_empty() {
+        return None;
+    }
+    run.nudged.extend(unsaid);
+    Some(Effect::Tmux {
+        conn,
+        cmds: vec![Cmd::new("run-shell").arg("true")],
+        token: None,
+    })
 }
 
-/// The link's own listing came back: the stopped panels it shows running are forgotten.
-/// The first after a link-up queues the lazy build when
+/// The link's own listing came back: what it shows of stopped panels is taken in
+/// ([`stopped_listed`]). The first after a link-up queues the lazy build when
 /// it shows what the build looks for, a user's terminal and a cockpit with no panel in it;
 /// the build then takes a listing of its own, as every operation does (L17).
 pub(crate) fn link_listed(state: &mut State) -> Vec<Effect> {
-    forget_running(state);
+    let mut fx: Vec<Effect> = stopped_listed(state).into_iter().collect();
     if !std::mem::take(&mut state.cockpit.lazy_armed) {
-        return Vec::new();
+        return fx;
     }
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
     if !wants_lazy(&scene) {
-        return Vec::new();
+        return fx;
     }
-    queue(state, CockpitOp::Lazy)
+    fx.extend(queue(state, CockpitOp::Lazy));
+    fx
 }
 
 /// `conn` closed: its requests still run, with nobody to answer.

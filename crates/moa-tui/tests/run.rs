@@ -16,8 +16,8 @@ use moa_core::publish::PanelRow;
 use moa_core::tmux::ids::PaneId;
 use moa_platform::TmuxSocket;
 use moa_tui::run::{
-    DownKey, INIT, RESTORE, claim_pane, cursor, down_key, down_line, first_ops, key_of, mouse_of,
-    reconnect_delays, reconnect_ops,
+    DownKey, INIT, RESTORE, claim_pane, cursor, down_key, down_line, first_ops, key_of, log_line,
+    mouse_of, reconnect_delays, reconnect_ops,
 };
 use moa_view::data::Data;
 use moa_view::fixture::lantern;
@@ -281,14 +281,14 @@ fn the_cursor_follows_the_prompt() {
 }
 
 /// While moa is down and the panel waits for a key: what types into the footer still types,
-/// `q` in the picture (and Ctrl-c anywhere) quits, and any other key tries again.
+/// `q` in the picture quits, Ctrl-c is the panel's own (L14), and any other key tries again.
 #[test]
 fn a_key_while_down_types_quits_or_tries_again() {
     let (data, ctx) = lantern();
     let size = Size { w: 80, h: 16 };
     let mut picture = Panel::new(View::Picture);
     assert_eq!(down_key(&picture, Key::Char('q')), DownKey::Quit);
-    assert_eq!(down_key(&picture, Key::Ctrl('c')), DownKey::Quit);
+    assert_eq!(down_key(&picture, Key::Ctrl('c')), DownKey::Panel);
     assert_eq!(down_key(&picture, Key::Char('j')), DownKey::Retry);
     picture.key(Key::Char('2'), &data, &ctx, size);
     assert_eq!(down_key(&picture, Key::Char('q')), DownKey::Quit, "any tab");
@@ -299,13 +299,13 @@ fn a_key_while_down_types_quits_or_tries_again() {
         DownKey::Retry,
         "q isn't the tree's"
     );
-    assert_eq!(down_key(&tree, Key::Ctrl('c')), DownKey::Quit);
+    assert_eq!(down_key(&tree, Key::Ctrl('c')), DownKey::Panel);
     tree.key(Key::Char('+'), &data, &ctx, size);
     assert!(tree.prompting());
     for k in [Key::Char('q'), Key::Char('x'), Key::Esc, Key::Enter] {
         assert_eq!(down_key(&tree, k), DownKey::Panel, "{k:?}");
     }
-    assert_eq!(down_key(&tree, Key::Ctrl('c')), DownKey::Quit);
+    assert_eq!(down_key(&tree, Key::Ctrl('c')), DownKey::Panel);
 }
 
 /// After a first connect that failed, the footer says why and that a key tries again; once
@@ -324,5 +324,23 @@ fn the_down_line_is_honest() {
     assert_eq!(
         down_line(None, true),
         "moa isn't running: run moa, then press any key"
+    );
+}
+
+/// L14: each `panel.log` line names the brain, the view (`-` before one is known) and the
+/// pane (`-` outside moa's terminal), then what happened, on one line.
+#[test]
+fn a_log_line_names_the_view_and_the_pane() {
+    assert_eq!(
+        log_line("default", Some(View::Tree), Some(pane("%3")), "started"),
+        "[default] panel tree in %3: started"
+    );
+    assert_eq!(
+        log_line("work", None, None, "stopped by SIGTERM"),
+        "[work] panel - in -: stopped by SIGTERM"
+    );
+    assert_eq!(
+        log_line("default", Some(View::Plan), None, "panicked: one\ntwo"),
+        "[default] panel plan in -: panicked: one two"
     );
 }

@@ -14,7 +14,7 @@ jiff.workspace = true
 moa-store = { path = "../moa-store" }
 proptest.workspace = true
 rusqlite.workspace = true
-rustix = { version = "1", features = ["pty", "termios", "fs"] }
+rustix = { version = "1", features = ["pty", "termios", "fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

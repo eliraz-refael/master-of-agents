@@ -28,6 +28,51 @@ pub struct Terminal {
     mark: Mutex<usize>,
 }
 
+/// Makes `cmd`'s child start a session of its own, so it has no controlling terminal, as a
+/// program a service or a script started may not: `/dev/tty` can't be opened there.
+/// Tests only.
+#[allow(unsafe_code)]
+pub fn without_terminal(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook runs in the child between fork and exec, and only calls `setsid`,
+    // which is async-signal-safe and touches no memory of the parent's.
+    unsafe { cmd.pre_exec(|| rustix::process::setsid().map(drop).map_err(io::Error::from)) }
+}
+
+/// A pseudo-terminal of `cols` × `rows`: its master, its slave and the slave's name. Both
+/// ends are close-on-exec. The slave is never anyone's controlling terminal (`NOCTTY`), so
+/// closing the master sends a program on it no SIGHUP: its terminal just goes. Tests only.
+pub fn pty(cols: u16, rows: u16) -> io::Result<(File, OwnedFd, String)> {
+    // Linux sets CLOEXEC atomically at open, so a parallel test's spawn can't inherit the
+    // master; elsewhere there is no open flag for it, so it is set right after.
+    #[cfg(target_os = "linux")]
+    let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY;
+    let master = openpt(flags)?;
+    // A child must never inherit it.
+    fcntl_setfd(&master, FdFlags::CLOEXEC)?;
+    grantpt(&master)?;
+    unlockpt(&master)?;
+    let tty = ptsname(&master, Vec::new())?;
+    let tty = tty.to_string_lossy().into_owned();
+    let slave: OwnedFd = rustix::fs::open(
+        tty.as_str(),
+        OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    tcsetwinsize(
+        &slave,
+        Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    )?;
+    Ok((File::from(master), slave, tty))
+}
+
 impl Terminal {
     /// Runs `program` with the pty as its stdin, stdout and stderr. The environment is
     /// cleared, then `env` is set, then `TERM=xterm-256color` and `LANG=C.UTF-8` are added
@@ -39,34 +84,7 @@ impl Terminal {
         cols: u16,
         rows: u16,
     ) -> io::Result<Terminal> {
-        // Linux sets CLOEXEC atomically at open, so a parallel test's spawn can't inherit the
-        // master; elsewhere there is no open flag for it, so it is set right after.
-        #[cfg(target_os = "linux")]
-        let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC;
-        #[cfg(not(target_os = "linux"))]
-        let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY;
-        let master = openpt(flags)?;
-        // A child must never inherit it.
-        fcntl_setfd(&master, FdFlags::CLOEXEC)?;
-        grantpt(&master)?;
-        unlockpt(&master)?;
-        let tty = ptsname(&master, Vec::new())?;
-        let tty = tty.to_string_lossy().into_owned();
-        let slave: OwnedFd = rustix::fs::open(
-            tty.as_str(),
-            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        tcsetwinsize(
-            &slave,
-            Winsize {
-                ws_row: rows,
-                ws_col: cols,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            },
-        )?;
-
+        let (master, slave, tty) = pty(cols, rows)?;
         let mut cmd = Command::new(program);
         cmd.args(args).env_clear().envs(env.iter().cloned());
         for (k, v) in [("TERM", "xterm-256color"), ("LANG", "C.UTF-8")] {
@@ -82,7 +100,6 @@ impl Terminal {
         // the reader sees the end of output once the child is gone.
         drop(cmd);
 
-        let master = File::from(master);
         let out = Arc::new(Mutex::new(Vec::new()));
         let mut reader = master.try_clone()?;
         let sink = Arc::clone(&out);
@@ -134,6 +151,12 @@ impl Terminal {
         let seen = &out[from.min(out.len())..];
         let seen = &seen[seen.len().saturating_sub(n)..];
         format!("{:?}", String::from_utf8_lossy(seen))
+    }
+
+    /// Everything the program wrote since it started, mark or not: what a terminal emulator
+    /// replays to know what the screen shows.
+    pub fn output(&self) -> Vec<u8> {
+        lock(&self.out).clone()
     }
 
     /// The pty's path: what tmux calls this client.

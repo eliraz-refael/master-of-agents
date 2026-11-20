@@ -234,6 +234,28 @@ fn q_quits_only_the_picture() {
     assert!(t.screen().footer.text.ends_with('q'));
 }
 
+/// L14: `q` leaves a picture moa manages where it is and says why, as Ctrl-c does; a
+/// managed panel that quit would leave a hole in the layout. A picture you started quits.
+#[test]
+fn q_in_a_managed_picture_stays_and_says_so() {
+    let mut t = T::new(View::Picture);
+    t.panel.set_managed(true);
+    assert!(!t.panel.quits(Key::Char('q')));
+    assert_eq!(t.key(Key::Char('q')), []);
+    assert_eq!(
+        t.screen().footer.text,
+        "this panel is part of moa's layout; Ctrl-a r repairs the layout"
+    );
+    // On every tab.
+    t.key(Key::Char('3'));
+    assert_eq!(t.key(Key::Char('q')), []);
+    assert!(t.screen().footer.text.starts_with("this panel is part"));
+
+    let mut t = T::new(View::Picture);
+    assert!(t.panel.quits(Key::Char('q')));
+    assert_eq!(t.key(Key::Char('q')), [Out::Quit]);
+}
+
 #[test]
 fn the_strip_flashes_rows_under_4_seconds() {
     let (data, ctx) = lantern();

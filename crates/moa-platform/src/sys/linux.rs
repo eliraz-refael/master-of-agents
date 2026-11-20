@@ -41,6 +41,28 @@ pub fn alarm_create() -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
+/// Blocks until the terminal on `fd` hangs up (its other end closed). A `poll` that asks
+/// for nothing still hears a hang-up, an error or a closed descriptor, and only those, so
+/// input never wakes it and it never spins.
+pub fn wait_hangup(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    let mut p = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: 0,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one live `pollfd` for the whole call; no timeout.
+        match check(unsafe { libc::poll(&mut p, 1, -1) }) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+            Ok(_) if p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 => {
+                return Ok(());
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
 fn settime(fd: &OwnedFd, value: Duration, flags: libc::c_int) -> io::Result<()> {
     let spec = libc::itimerspec {
         it_interval: libc::timespec {
