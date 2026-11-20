@@ -52,7 +52,8 @@ pub enum Action {
     No,
 }
 
-/// Keys that move through a list, the same in every view; Ctrl-c quits any panel (V15).
+/// Keys that move through a list, the same in every view; Ctrl-c quits (V15), though
+/// [`Panel::interrupt`](crate::panel::Panel::interrupt) takes it first (L14).
 fn moving(key: Key) -> &'static [Action] {
     match key {
         Key::Char('j') | Key::Down => &[Action::Down],

@@ -607,3 +607,59 @@ fn a_panel_moa_placed_never_starts_moa() {
     assert!(held.is_some(), "a panel started by hand didn't start moa");
     r.shows(&placed, &[TREE_HINT]);
 }
+
+/// L14: a panel told to stop by a signal (`kill`, or tmux's hang-up when it kills the tab)
+/// gives its terminal back first: the tab it leaves is off the alternate screen with the
+/// mouse off, and `panel.log` names the signal. The tab stays after the exit
+/// (`remain-on-exit`), so tmux can still be asked.
+#[test]
+fn sigterm_and_sighup_give_the_terminal_back() {
+    let r = rig();
+    let log = r.tb.paths().log_dir().join("panel.log");
+    for signal in ["TERM", "HUP"] {
+        let cmd = format!("exec '{MOA}' panel tree");
+        let pane = tmux(
+            &r.tb,
+            &[
+                "new-window",
+                "-d",
+                "-t",
+                "=moa:",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                &cmd,
+            ],
+        );
+        tmux(
+            &r.tb,
+            &["set-option", "-p", "-t", &pane, "remain-on-exit", "on"],
+        );
+        r.shows(&pane, &["▤ sessions", TREE_HINT]);
+        let field = |f: &str| tmux(&r.tb, &["display-message", "-p", "-t", &pane, f]);
+        assert_eq!(field("#{alternate_on} #{mouse_any_flag}"), "1 1");
+
+        let pid = field("#{pane_pid}");
+        let killed = std::process::Command::new("kill")
+            .args([&format!("-{signal}"), &pid])
+            .status()
+            .unwrap();
+        assert!(killed.success(), "kill -{signal} {pid}");
+        let dead = wait_for(SHOWS, || (field("#{pane_dead}") == "1").then_some(()));
+        assert!(dead.is_some(), "{}", tab_shows(&r.tb, &pane));
+
+        assert_eq!(
+            field("#{alternate_on} #{mouse_any_flag} #{pane_dead_status}"),
+            "0 0 0",
+            "SIG{signal}\n{}",
+            tab_shows(&r.tb, &pane)
+        );
+        let written = fs::read_to_string(&log).unwrap_or_default();
+        let line = format!("panel tree in {pane}: stopped by SIG{signal}");
+        assert!(written.contains(&line), "{line:?} not in:\n{written}");
+        assert!(
+            written.contains(&format!("panel tree in {pane}: started")),
+            "{written}"
+        );
+    }
+}

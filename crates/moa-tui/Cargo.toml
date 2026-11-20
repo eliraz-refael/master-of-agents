@@ -17,7 +17,7 @@ jiff.workspace = true
 unicode-segmentation.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "signal", "time"] }
 
 [dev-dependencies]
 insta.workspace = true

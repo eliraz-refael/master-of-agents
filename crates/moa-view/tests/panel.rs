@@ -543,13 +543,56 @@ fn here_is_the_selected_rows_folder() {
     assert_eq!(t.panel.here(&t.data), None);
 }
 
+/// L14: a panel you started quits on Ctrl-c; `q` doesn't quit the tree.
 #[test]
-fn ctrl_c_quits_and_q_doesnt_in_the_tree() {
+fn ctrl_c_quits_a_panel_you_started() {
     let mut t = T::new();
+    assert!(!t.panel.managed());
     assert!(t.char('q').is_empty());
     assert_eq!(t.key(Key::Ctrl('c')), vec![Out::Quit]);
-    t.char('n');
-    assert_eq!(t.key(Key::Ctrl('c')), vec![Out::Quit], "even in a prompt");
+    assert_eq!(t.panel.interrupt(), Some(Out::Quit));
+}
+
+/// L14: Ctrl-c cancels an open prompt or y/N first, in a panel moa manages or not; the next
+/// one quits only a panel you started.
+#[test]
+fn ctrl_c_cancels_a_prompt_first() {
+    for managed in [false, true] {
+        let mut t = T::on(on(FIX_LOGIN));
+        t.panel.follow(&panels_row("c7", View::Tree, managed), "c7");
+        t.char('n');
+        assert!(t.panel.typing(), "a prompt is open");
+        assert!(t.key(Key::Ctrl('c')).is_empty(), "managed {managed}");
+        assert!(!t.panel.typing());
+        assert_eq!(t.footer(), "cancelled");
+
+        t.char('x');
+        assert!(t.panel.typing(), "a y/N is open");
+        assert_eq!(t.panel.interrupt(), None, "managed {managed}");
+        assert!(!t.panel.typing());
+        assert_eq!(t.footer(), "cancelled");
+
+        let quits = (!managed).then_some(Out::Quit);
+        assert_eq!(t.panel.interrupt(), quits, "managed {managed}");
+    }
+}
+
+/// L14: with nothing open, Ctrl-c leaves a panel moa manages where it is and says why: a
+/// managed panel that quit would leave a dead spot in the layout.
+#[test]
+fn ctrl_c_on_a_bare_managed_panel_stays_and_says_so() {
+    let mut t = T::new();
+    t.panel.follow(&panels_row("c7", View::Tree, true), "c7");
+    assert!(t.panel.managed());
+    assert!(t.key(Key::Ctrl('c')).is_empty());
+    assert_eq!(
+        t.footer(),
+        "this panel is part of moa's layout; Ctrl-a r repairs the layout"
+    );
+    assert_eq!(t.panel.interrupt(), None);
+    // The line goes with the next key, as any message does.
+    t.char('j');
+    assert_eq!(t.footer(), t.hint());
 }
 
 #[test]

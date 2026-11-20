@@ -8,10 +8,12 @@
 use std::collections::BTreeSet;
 use std::future::{Future, pending};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -35,6 +37,7 @@ use moa_view::panel::{Mouse, Out, Panel, Screen};
 use moa_view::text;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, CrosstermBackend};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep, interval_at, sleep, sleep_until};
 
 use crate::draw::draw;
@@ -52,6 +55,110 @@ pub struct PanelOptions {
     pub pane: Option<PaneId>,
     pub home: PathBuf,
     pub tz: TimeZone,
+    /// `panel.log`, where the panel writes a line per start, give-up, signal and panic
+    /// (L14); `None` writes nothing.
+    pub log: Option<PathBuf>,
+}
+
+/// A `panel.log` line (L14), without its time: the brain, the view (`-` while none is
+/// known), the pane (`-` outside the brain's terminal), then what happened, on one line.
+pub fn log_line(brain: &str, view: Option<View>, pane: Option<PaneId>, what: &str) -> String {
+    let view = view.map_or_else(|| "-".to_string(), |v| v.to_string());
+    let pane = pane.map_or_else(|| "-".to_string(), |p| p.to_string());
+    let what = what.replace(['\n', '\r'], " ");
+    format!("[{brain}] panel {view} in {pane}: {what}")
+}
+
+/// Where a panel writes its lines, and what they name. Every write is best-effort: a log
+/// that can't be written never stops the panel, and never panics (the panic hook writes
+/// too).
+#[derive(Clone, Debug)]
+struct Logbook {
+    path: PathBuf,
+    brain: String,
+    pane: Option<PaneId>,
+    /// The view the panel shows, once one is known; shared with the panic hook.
+    view: Arc<Mutex<Option<View>>>,
+}
+
+impl Logbook {
+    /// The panel's logbook, when `opts` names a log.
+    fn new(opts: &PanelOptions) -> Option<Logbook> {
+        Some(Logbook {
+            path: opts.log.clone()?,
+            brain: opts.client.brain.as_str().to_string(),
+            pane: opts.pane,
+            view: Arc::new(Mutex::new(opts.view)),
+        })
+    }
+
+    /// Appends `what` as a line, after the time. The folder isn't made: one that is gone
+    /// stays gone (L15).
+    fn write(&self, what: &str) {
+        // `try_lock`: the panic may have struck while the view was being set.
+        let view = self.view.try_lock().ok().and_then(|v| *v);
+        let line = log_line(&self.brain, view, self.pane, what);
+        // No `Timestamp::now`, which panics on a clock out of its range.
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+            .map_or_else(|| "-".to_string(), |t| t.to_string());
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(&self.path);
+        if let Ok(mut file) = file {
+            let _ = file.write_all(format!("{at} {line}\n").as_bytes());
+        }
+    }
+
+    /// The view the next lines name.
+    fn shows(&self, view: Option<View>) {
+        if let Ok(mut shown) = self.view.lock() {
+            *shown = view;
+        }
+    }
+}
+
+/// A panic's message, or a stand-in when it carries none.
+fn panic_message<'a>(info: &'a std::panic::PanicHookInfo<'_>) -> &'a str {
+    let payload = info.payload();
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
+/// The signals that stop a panel (L14): `kill`'s SIGTERM, the SIGHUP tmux sends a tab it
+/// kills, and SIGINT. Each ends the loop as Ctrl-c does, so the terminal is given back.
+struct Signals {
+    term: Signal,
+    hup: Signal,
+    int: Signal,
+}
+
+impl Signals {
+    fn new() -> io::Result<Signals> {
+        Ok(Signals {
+            term: signal(SignalKind::terminate())?,
+            hup: signal(SignalKind::hangup())?,
+            int: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    /// The next signal's name.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            Some(()) = self.term.recv() => "SIGTERM",
+            Some(()) = self.hup.recv() => "SIGHUP",
+            Some(()) = self.int.recv() => "SIGINT",
+            else => pending().await,
+        }
+    }
 }
 
 /// Taking the terminal: the alternate screen, the cursor hidden, every mouse event (motion
@@ -105,9 +212,10 @@ pub fn claim_pane(
 /// What a key does while moa is down and the panel waits for a key to try again.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DownKey {
-    /// Ctrl-c, or `q` in the picture.
+    /// `q` in the picture.
     Quit,
-    /// A prompt or a question is open: the key is typed there, as usual.
+    /// The panel takes the key, as usual: a prompt or a question is open, or it is Ctrl-c,
+    /// which the panel decides on everywhere (L14).
     Panel,
     /// Any other key tries again.
     Retry,
@@ -115,9 +223,7 @@ pub enum DownKey {
 
 /// How `panel` takes `key` while the connection is down.
 pub fn down_key(panel: &Panel, key: Key) -> DownKey {
-    if key == Key::Ctrl('c') {
-        DownKey::Quit
-    } else if panel.typing() {
+    if key == Key::Ctrl('c') || panel.typing() {
         DownKey::Panel
     } else if panel.quits(key) {
         DownKey::Quit
@@ -250,13 +356,13 @@ fn restore() {
 }
 
 /// The terminal, taken for as long as this lives: given back when it drops (a quit, Ctrl-c,
-/// an error) and, through the panic hook, before a panic's message is printed. Any panic
-/// ends the panel, even one in a task the runtime would survive (the connection's): a
-/// panel never goes on drawing into a terminal it gave back.
+/// a signal, an error) and, through the panic hook, before a panic is logged and its
+/// message printed. Any panic ends the panel, even one in a task the runtime would survive
+/// (the connection's): a panel never goes on drawing into a terminal it gave back.
 struct Taken;
 
 impl Taken {
-    fn take() -> io::Result<Taken> {
+    fn take(log: Option<Logbook>) -> io::Result<Taken> {
         crossterm::terminal::enable_raw_mode()?;
         TAKEN.store(true, Ordering::SeqCst);
         // From here every way out gives the terminal back.
@@ -264,6 +370,9 @@ impl Taken {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             restore();
+            if let Some(log) = &log {
+                log.write(&format!("panicked: {}", panic_message(info)));
+            }
             previous(info);
             std::process::exit(101);
         }));
@@ -370,6 +479,8 @@ enum Wake {
     Retry,
     Tick,
     Deadline,
+    /// A signal that stops the panel, by name.
+    Signal(&'static str),
 }
 
 /// What the connection has for the loop; never ready while it has nothing to say.
@@ -385,13 +496,14 @@ async fn link_wake(link: &mut Link) -> Wake {
     }
 }
 
-/// The next wake: input, the connection, the tick (only while it exists) and the deadline
-/// (only while there is one), in no fixed order.
+/// The next wake: input, the connection, the tick (only while it exists), the deadline
+/// (only while there is one) and a signal, in no fixed order.
 async fn next_wake(
     events: &mut EventStream,
     link: &mut Link,
     tick: Option<&mut Interval>,
     deadline: Option<&mut Pin<Box<Sleep>>>,
+    signals: &mut Signals,
 ) -> Wake {
     let tick = async {
         match tick {
@@ -412,6 +524,7 @@ async fn next_wake(
         w = link_wake(link) => w,
         () = tick => Wake::Tick,
         () = deadline => Wake::Deadline,
+        name = signals.recv() => Wake::Signal(name),
     }
 }
 
@@ -448,6 +561,10 @@ struct Loop {
     told_here: Option<String>,
     /// A connect has worked: from now on connects don't start a daemon.
     linked_once: bool,
+    /// The first connect has ended, either way.
+    first_ended: bool,
+    /// `panel.log`, shared with the panic hook.
+    log: Option<Logbook>,
     size: Size,
     started: std::time::Instant,
     /// Exists only while the screen animates.
@@ -458,7 +575,10 @@ struct Loop {
 
 impl Loop {
     fn new(opts: PanelOptions, theme: Theme, size: Size) -> Loop {
-        let panel = Panel::new(opts.view.unwrap_or(View::Picture));
+        let mut panel = Panel::new(opts.view.unwrap_or(View::Picture));
+        // moa tags a panel it places as it starts it (L7), so a placed panel is moa's
+        // before its row says so; a panel started by hand isn't.
+        panel.set_managed(opts.client.autostart.is_none());
         Loop {
             opts,
             theme,
@@ -469,6 +589,8 @@ impl Loop {
             asked: BTreeSet::new(),
             told_here: None,
             linked_once: false,
+            first_ended: false,
+            log: None,
             size,
             started: std::time::Instant::now(),
             tick: None,
@@ -507,6 +629,27 @@ impl Loop {
             waited,
             here,
         };
+    }
+
+    /// Writes `what` to `panel.log`, naming the view the panel shows now.
+    fn log(&self, what: &str) {
+        if let Some(log) = &self.log {
+            log.shows(self.known_view());
+            log.write(what);
+        }
+    }
+
+    /// The view the panel is known to show: with no view asked, none until the first
+    /// connect ends.
+    fn known_view(&self) -> Option<View> {
+        (self.opts.view.is_some() || self.first_ended).then(|| self.panel.view())
+    }
+
+    /// Keeps the panic hook's view up to date.
+    fn note_view(&self) {
+        if let Some(log) = &self.log {
+            log.shows(self.known_view());
+        }
     }
 
     /// The footer's line for a connection that isn't up, if any.
@@ -566,6 +709,10 @@ impl Loop {
                 self.deadline = None;
                 true
             }
+            Wake::Signal(name) => {
+                self.log(&format!("stopped by {name}"));
+                return Ok(Turn::Quit);
+            }
         };
         Ok(Turn::Go(redraw))
     }
@@ -577,6 +724,14 @@ impl Loop {
                 let Some(key) = key_of(k) else {
                     return Turn::Go(false);
                 };
+                // Ctrl-c is the panel's however the connection is (L14), and what it says
+                // isn't covered by the connection's line.
+                if key == Key::Ctrl('c') {
+                    return match self.panel.interrupt() {
+                        Some(Out::Quit) => Turn::Quit,
+                        _ => Turn::Go(true),
+                    };
+                }
                 if matches!(self.link, Link::Down(_)) {
                     match down_key(&self.panel, key) {
                         DownKey::Quit => return Turn::Quit,
@@ -587,8 +742,6 @@ impl Loop {
                         }
                         DownKey::Panel => {}
                     }
-                } else if key == Key::Ctrl('c') {
-                    return Turn::Quit;
                 }
                 let outs = self.panel.key(key, &self.data, &ctx, self.size);
                 if self.act(outs) {
@@ -624,7 +777,9 @@ impl Loop {
                 true
             }
             Event::FocusLost => self.panel.blur(),
-            Event::FocusGained => false,
+            // The redraw measures the deadline again (M7): it may have lapsed while the
+            // panel was out of sight (a laptop that slept, say).
+            Event::FocusGained => true,
         };
         Turn::Go(redraw)
     }
@@ -682,6 +837,7 @@ impl Loop {
             None => {
                 self.link = Link::Down(None);
                 self.panel.note(&down_line(None, self.placed()));
+                self.log("gave up reaching moa");
             }
         }
     }
@@ -701,6 +857,7 @@ impl Loop {
             Link::Connecting { waited, here, .. } => (*waited, here.take()),
             _ => (0, None),
         };
+        self.first_ended = true;
         match result {
             Ok(linked) => {
                 self.data = Data::default();
@@ -769,7 +926,12 @@ impl Loop {
     }
 
     /// Draws the panel once, then sets the tick and the deadline from what it showed.
-    fn draw(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
+    fn draw<B: Backend>(&mut self, term: &mut Terminal<B>) -> Result<(), String> {
+        // With no view asked, nothing is drawn until the first connect ends: moa may give
+        // the panel another view than the picture it starts with, which would flash (L14).
+        if self.known_view().is_none() {
+            return Ok(());
+        }
         let ctx = self.ctx();
         let mut shown = None;
         term.draw(|f| {
@@ -811,15 +973,17 @@ impl Loop {
     }
 }
 
-/// Runs a panel until it quits: Ctrl-c, `q` in the picture, or the terminal's end. The
-/// terminal is given back on every way out.
+/// Runs a panel until it quits: Ctrl-c in a panel you started, `q` in the picture, a
+/// signal, or the terminal's end. The terminal is given back on every way out.
 pub async fn run(opts: PanelOptions) -> Result<(), String> {
     let in_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
     let colorterm = std::env::var("COLORTERM").ok();
     let theme = Theme {
         mode: theme::detect(in_tmux, colorterm.as_deref()),
     };
-    let _taken = Taken::take().map_err(|e| format!("can't use this terminal: {e}"))?;
+    let mut signals = Signals::new().map_err(|e| format!("can't watch for signals: {e}"))?;
+    let log = Logbook::new(&opts);
+    let _taken = Taken::take(log.clone()).map_err(|e| format!("can't use this terminal: {e}"))?;
     let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))
         .map_err(|e| format!("can't use this terminal: {e}"))?;
     // Not `Terminal::clear`, which asks the terminal where its cursor is.
@@ -835,6 +999,8 @@ pub async fn run(opts: PanelOptions) -> Result<(), String> {
     };
     let mut events = EventStream::new();
     let mut lp = Loop::new(opts, theme, size);
+    lp.log = log;
+    lp.log("started");
     lp.connect(0);
     lp.draw(&mut term)?;
     loop {
@@ -843,6 +1009,7 @@ pub async fn run(opts: PanelOptions) -> Result<(), String> {
             &mut lp.link,
             lp.tick.as_mut(),
             lp.deadline.as_mut(),
+            &mut signals,
         )
         .await;
         let mut redraw = match lp.turn(wake)? {
@@ -854,5 +1021,145 @@ pub async fn run(opts: PanelOptions) -> Result<(), String> {
             lp.draw(&mut term)?;
         }
         lp.tell_here();
+        lp.note_view();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use moa_client::{ClientOptions, OnMismatch};
+    use moa_core::config::BrainName;
+    use moa_core::panel::View;
+    use moa_core::state::CallerInfo;
+    use moa_platform::Paths;
+    use moa_view::geometry::Size;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::{Failed, Loop, PanelOptions, Turn, Wake, now};
+    use crate::theme::{ColorMode, Theme};
+
+    const SIZE: Size = Size { w: 60, h: 12 };
+
+    /// A panel's loop that asked for `view`; `placed` when moa placed it (no autostart).
+    /// Nothing here connects: the tests hand the loop what a connect would.
+    fn looped(view: Option<View>, placed: bool) -> Loop {
+        let paths =
+            Paths::from_vars(Some("/nonexistent/moa".into()), None, None, 501, false).unwrap();
+        let client = ClientOptions {
+            paths,
+            brain: BrainName::default_brain(),
+            client: "panel",
+            caller: CallerInfo::default(),
+            autostart: (!placed).then(|| "/nonexistent/moa/bin/moa".into()),
+            on_mismatch: OnMismatch::Accept,
+            build: "test".into(),
+        };
+        let opts = PanelOptions {
+            client,
+            view,
+            pane: None,
+            home: "/nonexistent".into(),
+            tz: jiff::tz::TimeZone::UTC,
+            log: None,
+        };
+        let theme = Theme {
+            mode: ColorMode::True,
+        };
+        Loop::new(opts, theme, SIZE)
+    }
+
+    fn terminal() -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(SIZE.w, SIZE.h)).unwrap()
+    }
+
+    /// What the terminal shows, row by row.
+    fn shown(term: &Terminal<TestBackend>) -> String {
+        let buffer = term.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn input(lp: &mut Loop, event: Event) -> Turn {
+        lp.turn(Wake::Input(Some(Ok(event)))).unwrap()
+    }
+
+    fn ctrl_c() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+    }
+
+    /// M7: focus coming back redraws, and the draw sets the deadline again from what shows,
+    /// so a deadline that lapsed while the panel was out of sight (a sleeping laptop) is
+    /// measured again.
+    #[tokio::test]
+    async fn focus_gained_redraws() {
+        let mut lp = looped(Some(View::Tree), false);
+        let mut term = terminal();
+        lp.panel.event("moa restarted", now());
+        lp.draw(&mut term).unwrap();
+        assert!(lp.deadline.is_some(), "the event's end is a deadline");
+
+        lp.deadline = None;
+        assert!(matches!(input(&mut lp, Event::FocusGained), Turn::Go(true)));
+        lp.draw(&mut term).unwrap();
+        assert!(lp.deadline.is_some(), "the redraw re-armed it");
+    }
+
+    /// L14: a panel with no view asked shows nothing until its first connect ends: moa may
+    /// give it another view than the picture it starts with. One that asked draws at once.
+    #[tokio::test]
+    async fn nothing_is_drawn_before_the_first_link_when_no_view_was_asked() {
+        let mut lp = looped(None, false);
+        let mut term = terminal();
+        lp.draw(&mut term).unwrap();
+        assert!(shown(&term).trim().is_empty(), "{}", shown(&term));
+        assert!(matches!(
+            input(&mut lp, Event::Resize(SIZE.w, SIZE.h)),
+            Turn::Go(true)
+        ));
+        lp.draw(&mut term).unwrap();
+        assert!(shown(&term).trim().is_empty(), "{}", shown(&term));
+
+        // The first connect failed: the panel says so, in the view it has.
+        lp.linked(Err(Failed::Down("moa couldn't start: no such file".into())));
+        lp.draw(&mut term).unwrap();
+        assert!(
+            shown(&term).contains("moa couldn't start"),
+            "{}",
+            shown(&term)
+        );
+
+        let mut asked = looped(Some(View::Tree), false);
+        let mut term = terminal();
+        asked.draw(&mut term).unwrap();
+        assert!(shown(&term).contains("sessions"), "{}", shown(&term));
+    }
+
+    /// L14: moa tags every panel it places as it starts it (L7), so a placed panel is
+    /// managed before any row says so, and Ctrl-c leaves it in the layout. One started by
+    /// hand quits.
+    #[tokio::test]
+    async fn a_placed_panel_is_managed_from_the_start() {
+        let mut placed = looped(Some(View::Tree), true);
+        assert!(placed.panel.managed());
+        assert!(matches!(input(&mut placed, ctrl_c()), Turn::Go(true)));
+        let mut term = terminal();
+        placed.draw(&mut term).unwrap();
+        assert!(
+            shown(&term).contains("part of moa's layout"),
+            "{}",
+            shown(&term)
+        );
+
+        let mut by_hand = looped(Some(View::Tree), false);
+        assert!(!by_hand.panel.managed());
+        assert!(matches!(input(&mut by_hand, ctrl_c()), Turn::Quit));
     }
 }
