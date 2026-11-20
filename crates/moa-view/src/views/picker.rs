@@ -13,13 +13,19 @@ use crate::ctx::Ctx;
 use crate::data::{Data, SessionRow};
 use crate::line::{Item, Line, Span, Tone};
 use crate::text::{self, clean, cut, fit, fit_right};
-use crate::views::{ViewUi, animates, label, live, newest_first, state_glyph, status, tree};
+use crate::views::{
+    ViewUi, animates, folder, label, live, newest_first, state_glyph, status, tree,
+};
 
 /// The most rows listed after the terminals (the spike's `LIMIT 300`).
 pub const OLD_ROWS: usize = 300;
 
 /// What the list says when no row matches the query.
 pub const NO_MATCH: &str = "no session matches";
+
+/// The longest query, in characters: more typed or pasted is dropped, so a stray paste
+/// can't make every match slow.
+pub const MAX_QUERY: usize = 200;
 
 /// What a row is: a live session in its display state, a terminal, or one of the rest.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -115,12 +121,7 @@ fn session_row(row: &SessionRow, kind: Kind, since: Option<UtcMs>, why: String) 
         .or_else(|| row.project.clone())
         .map(|g| clean(&g))
         .unwrap_or_default();
-    let folder = s
-        .cwd
-        .as_deref()
-        .and_then(|c| c.rsplit('/').find(|p| !p.is_empty()))
-        .map(clean)
-        .unwrap_or_default();
+    let folder = folder(row).map(clean).unwrap_or_default();
     let id: String = s.id.to_string().chars().take(8).collect();
     let handle = clean(&row.handle);
     let hay = [
@@ -151,8 +152,9 @@ fn is_live(row: &SessionRow) -> bool {
 
 /// Every row the picker lists, in its order: the live sessions at home by display state in
 /// the status view's order, the most recent activity first within one; then the terminals,
-/// in the `terms` topic's order; then at most [`OLD_ROWS`] of the rest (asleep, ended,
-/// elsewhere), the most recently seen first. An archived session is never listed.
+/// by their tab number (tmux's order: `%9` before `%10`); then at most [`OLD_ROWS`] of the
+/// rest (asleep, ended, elsewhere), the most recently seen first. An archived session is never
+/// listed.
 pub fn rows(data: &Data) -> Vec<PickRow> {
     let mut live: Vec<&SessionRow> = data.sessions.values().filter(|r| is_live(r)).collect();
     live.sort_by_key(|r| (sort_key(&r.session, r.display_state), r.session.id));
@@ -163,7 +165,9 @@ pub fn rows(data: &Data) -> Vec<PickRow> {
             session_row(r, Kind::Live(r.display_state), r.session.activity_at, why)
         })
         .collect();
-    out.extend(data.terms.iter().map(|(pane, t)| {
+    let mut terms: Vec<(&String, &TermRow)> = data.terms.iter().collect();
+    terms.sort_by_key(|(pane, _)| (tab_number(pane), *pane));
+    out.extend(terms.into_iter().map(|(pane, t)| {
         let title = term_title(pane, t);
         let hay = [title.as_str(), Kind::Term.word(), pane.as_str()]
             .join(" ")
@@ -195,6 +199,11 @@ pub fn rows(data: &Data) -> Vec<PickRow> {
     out
 }
 
+/// A tab id's number (`%12` is 12); one that isn't a number sorts last.
+fn tab_number(pane: &str) -> u64 {
+    pane.trim_start_matches('%').parse().unwrap_or(u64::MAX)
+}
+
 /// Whether `term`'s characters appear in `hay` in order.
 fn subsequence(term: &str, hay: &str) -> bool {
     let mut rest = hay;
@@ -220,9 +229,14 @@ fn terms(query: &str) -> Vec<String> {
 /// term of the query is a subsequence of it; else the number of terms that aren't
 /// contiguous substrings, so lower is better.
 pub fn rank(query: &str, hay: &str) -> Option<usize> {
+    rank_terms(&terms(query), hay)
+}
+
+/// [`rank`] for a query already split into its lowercase terms.
+fn rank_terms(terms: &[String], hay: &str) -> Option<usize> {
     let mut rank = 0;
-    for term in terms(query) {
-        if !subsequence(&term, hay) {
+    for term in terms {
+        if !subsequence(term, hay) {
             return None;
         }
         if !hay.contains(term.as_str()) {
@@ -244,8 +258,9 @@ pub struct Matched {
     pub live: usize,
 }
 
-/// The rows of `data` that `query` matches.
+/// The rows of `data` that `query` matches. The query is split once, not per row.
 pub fn matched(data: &Data, query: &str) -> Matched {
+    let terms = terms(query);
     let all = rows(data);
     let (rows, live) = (
         all.len(),
@@ -255,7 +270,7 @@ pub fn matched(data: &Data, query: &str) -> Matched {
     );
     let mut ranked: Vec<(usize, PickRow)> = all
         .into_iter()
-        .filter_map(|r| rank(query, &r.hay).map(|n| (n, r)))
+        .filter_map(|r| rank_terms(&terms, &r.hay).map(|n| (n, r)))
         .collect();
     // Stable: rows of one rank keep their order.
     ranked.sort_by_key(|(n, _)| *n);
@@ -269,13 +284,18 @@ pub fn matched(data: &Data, query: &str) -> Matched {
 /// The picker's list, `width` cells wide: a line per row the query keeps, else
 /// [`NO_MATCH`].
 pub fn build(data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec<Line> {
+    lines(&matched(data, &ui.query), &ui.query, ctx, width)
+}
+
+/// [`build`] from the matches already worked out for `query` (a panel keeps them until the
+/// data or the query changes).
+pub fn lines(m: &Matched, query: &str, ctx: &Ctx, width: u16) -> Vec<Line> {
     let width = usize::from(width);
-    let terms = terms(&ui.query);
-    let shown = matched(data, &ui.query).shown;
-    if shown.is_empty() {
+    if m.shown.is_empty() {
         return vec![Line::plain(cut(&format!("  {NO_MATCH}"), width), Tone::Dim)];
     }
-    shown
+    let terms = terms(query);
+    m.shown
         .iter()
         .map(|row| row_line(row, &terms, ctx, width))
         .collect()
@@ -291,11 +311,10 @@ pub struct Head {
     pub cursor: usize,
 }
 
-/// The head, `width` cells wide. The count shows when it leaves the query a cell and the
-/// cursor's; a query longer than its room shows its tail.
-pub fn head(data: &Data, ui: &ViewUi, width: u16) -> Head {
+/// The head for `query` and its matches, `width` cells wide. The count shows when it
+/// leaves the query a cell and the cursor's; a query longer than its room shows its tail.
+pub fn head(m: &Matched, query: &str, width: u16) -> Head {
     let width = usize::from(width);
-    let m = matched(data, &ui.query);
     let count = format!("{}/{} · {} live", m.shown.len(), m.rows, m.live);
     // The prompt, then the query; a cell between the query and the count.
     let beside = width.saturating_sub(2 + text::width(&count) + 1);
@@ -305,7 +324,7 @@ pub fn head(data: &Data, ui: &ViewUi, width: u16) -> Head {
         (width.saturating_sub(2), None)
     };
     // The last cell of its room is the cursor's.
-    let query = text::tail(&clean(&ui.query), room.saturating_sub(1));
+    let query = text::tail(&clean(query), room.saturating_sub(1));
     let cursor = (2 + text::width(&query)).min(width.saturating_sub(1));
     let mut line = Line::new(vec![
         Span::bold(cut("› ", width), Tone::Head),

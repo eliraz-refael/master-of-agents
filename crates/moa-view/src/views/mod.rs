@@ -74,16 +74,20 @@ pub fn not_yet(view: View) -> Option<&'static str> {
 /// name, else its folder's last part, else its handle; cleaned.
 pub fn label(row: &SessionRow) -> String {
     let s = &row.session;
-    let folder = s
-        .cwd
-        .as_deref()
-        .and_then(|c| c.rsplit('/').find(|p| !p.is_empty()));
-    let name = [s.title.as_deref(), row.project.as_deref(), folder]
+    let name = [s.title.as_deref(), row.project.as_deref(), folder(row)]
         .into_iter()
         .flatten()
         .find(|n| !n.is_empty())
         .unwrap_or(&row.handle);
     clean(name)
+}
+
+/// The last part of a session's folder, as typed (not cleaned); `None` without one.
+pub fn folder(row: &SessionRow) -> Option<&str> {
+    row.session
+        .cwd
+        .as_deref()
+        .and_then(|c| c.rsplit('/').find(|p| !p.is_empty()))
 }
 
 /// The sessions `keep` keeps, the most recently seen first.

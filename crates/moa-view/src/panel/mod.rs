@@ -181,8 +181,34 @@ pub struct Panel {
     pointer: Option<(u16, u16)>,
     /// moa gave this panel its view (its `panels` row says `managed`, L8).
     managed: bool,
-    /// The picker sent a pick and waits for its reply: an `Ok` closes it.
-    picking: bool,
+    /// The title of the pick the picker sent and waits on: its `Ok` closes the picker.
+    /// Another Enter waits for it.
+    picking: Option<String>,
+    /// The picker's matches, kept while the data's revision and the query stay.
+    picks: Option<Picks>,
+}
+
+/// The picker's matches for one revision of the data and one query.
+#[derive(Clone, Debug)]
+struct Picks {
+    revision: u64,
+    query: String,
+    matched: picker::Matched,
+}
+
+/// The picker's matches for `data` and `query`: those in `cache` while they still hold.
+fn picks<'c>(cache: &'c mut Option<Picks>, data: &Data, query: &str) -> &'c picker::Matched {
+    let stale = cache
+        .as_ref()
+        .is_none_or(|p| p.revision != data.revision() || p.query != query);
+    if stale {
+        *cache = Some(Picks {
+            revision: data.revision(),
+            query: query.to_string(),
+            matched: picker::matched(data, query),
+        });
+    }
+    &cache.as_ref().expect("just filled").matched
 }
 
 const CANCELLED: &str = "cancelled";
@@ -214,7 +240,8 @@ impl Panel {
             hover: None,
             pointer: None,
             managed: false,
-            picking: false,
+            picking: None,
+            picks: None,
         }
     }
 
@@ -277,7 +304,12 @@ impl Panel {
         self.list = ListState::default();
         self.hover = None;
         self.message = None;
-        self.picking = false;
+        self.picking = None;
+    }
+
+    /// The connection ended: the pick's reply won't come, so another Enter may pick.
+    pub fn forget_pick(&mut self) {
+        self.picking = None;
     }
 
     /// Quits a panel you started, and leaves one moa manages where it is, saying why
@@ -324,7 +356,13 @@ impl Panel {
     fn refresh(&mut self, data: &Data, ctx: &Ctx, size: Size) -> Geometry {
         let g = geometry(self.view, self.view.framed(), size);
         let was = self.selected().cloned();
-        self.lines = views::build(self.view, data, ctx, &self.ui, build_width(&g));
+        let width = build_width(&g);
+        self.lines = if self.view == View::Picker {
+            let m = picks(&mut self.picks, data, &self.ui.query);
+            picker::lines(m, &self.ui.query, ctx, width)
+        } else {
+            views::build(self.view, data, ctx, &self.ui, width)
+        };
         self.list.reselect(was.as_ref(), &self.lines);
         self.list.follow(&self.lines, usize::from(g.body.h));
         if let Some(hover) = &self.hover {
@@ -497,7 +535,7 @@ impl Panel {
             .map(str::trim)
             .find(|l| !l.is_empty())
             .map(Message::sticky);
-        (std::mem::take(&mut self.picking) && ok).then_some(Out::Close)
+        (self.picking.take().is_some() && ok).then_some(Out::Close)
     }
 
     /// A line for the footer from the panel's loop (the connection, say, or an error event),
@@ -540,7 +578,8 @@ impl Panel {
         let mut head = Vec::new();
         let mut cursor = None;
         if let Some(r) = g.head.filter(|r| r.h > 0 && r.w > 0) {
-            let built = picker::head(data, &self.ui, build_width(&g));
+            let m = picks(&mut self.picks, data, &self.ui.query);
+            let built = picker::head(m, &self.ui.query, build_width(&g));
             head = built.lines.into_iter().take(usize::from(r.h)).collect();
             let x = u16::try_from(built.cursor).unwrap_or(u16::MAX).min(r.w - 1);
             cursor = Some((r.x + x, r.y));

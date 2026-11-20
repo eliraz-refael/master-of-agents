@@ -751,7 +751,9 @@ impl Loop {
                 self.closing |= self.act(out.into_iter().collect());
             }
             LiveMsg::Closed => {
+                // No reply still owed will come: a pick waiting on one is forgotten.
                 self.asked.clear();
+                self.panel.forget_pick();
                 self.wait(0);
             }
         }

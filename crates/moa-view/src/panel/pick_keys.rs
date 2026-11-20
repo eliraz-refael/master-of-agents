@@ -38,11 +38,15 @@ impl Panel {
         Vec::new()
     }
 
-    /// Edits the picker's query as the footer's editor edits its text, and selects the
-    /// first row again: the next build lists the new matches from the top.
+    /// Edits the picker's query as the footer's editor edits its text, keeping its first
+    /// [`picker::MAX_QUERY`] characters, and selects the first row again: the next build
+    /// lists the new matches from the top.
     pub(super) fn edit_query(&mut self, edit: impl FnOnce(&mut Editor)) {
         let mut editor = Editor::new("", std::mem::take(&mut self.ui.query));
         edit(&mut editor);
+        if let Some((end, _)) = editor.text.char_indices().nth(picker::MAX_QUERY) {
+            editor.text.truncate(end);
+        }
         self.ui.query = editor.text;
         self.list = ListState::default();
         self.hover = None;
@@ -50,8 +54,14 @@ impl Panel {
 
     /// Enter or a click in the picker: the selected session is focused, a terminal shown,
     /// and the footer says what is opening; its reply decides whether the picker closes.
-    /// With no row listed, the picker closes, as the spike's did.
+    /// While a pick waits for its reply, another does nothing but say so again: two in
+    /// flight could close the picker on the wrong one's answer. With no row listed, the
+    /// picker closes, as the spike's did.
     pub(super) fn pick(&mut self, data: &Data) -> Vec<Out> {
+        if let Some(title) = &self.picking {
+            let line = opening(title);
+            return self.say(&line);
+        }
         let Some(item) = self.selected().cloned() else {
             return vec![Out::Close];
         };
@@ -63,8 +73,13 @@ impl Panel {
             }
         };
         let title = picker::title(data, &item).unwrap_or_default();
-        self.say(&format!("opening {title}…"));
-        self.picking = true;
+        self.say(&opening(&title));
+        self.picking = Some(title);
         vec![Out::Send(op)]
     }
+}
+
+/// What the footer says while a pick waits.
+fn opening(title: &str) -> String {
+    format!("opening {title}…")
 }

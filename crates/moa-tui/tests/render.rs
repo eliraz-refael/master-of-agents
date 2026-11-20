@@ -370,7 +370,7 @@ fn hits_are_yellow_bold_and_underlined() {
 #[test]
 fn the_picker_head_stays_as_the_list_scrolls() {
     let mut t = T::picker();
-    t.key(Key::End, 80, HEIGHT);
+    // Down to the last of the 12 rows (the picker has no End: it is typed nowhere).
     for _ in 0..11 {
         t.key(Key::Down, 80, HEIGHT);
     }

@@ -2,6 +2,7 @@
 //! snapshot and patches it after; rows it can't read are left out and counted (V18).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use moa_core::live::DisplayState;
 use moa_core::model::{
@@ -59,7 +60,12 @@ pub struct Data {
     pub terms: BTreeMap<String, TermRow>,
     /// The keys of rows that didn't decode, by topic.
     unreadable: BTreeSet<(Topic, String)>,
+    /// See [`Data::revision`].
+    revision: u64,
 }
+
+/// The last revision handed out, by any `Data`: two different contents never share one.
+static REVISION: AtomicU64 = AtomicU64::new(0);
 
 /// A row's `key` field; a row without one is kept under the empty key.
 fn key_of(row: &Value) -> String {
@@ -98,11 +104,25 @@ fn drop_key<K: Ord, T>(map: &mut BTreeMap<K, T>, key: Option<K>) {
 }
 
 impl Data {
+    /// A number that changes with every [`replace`](Data::replace),
+    /// [`upsert`](Data::upsert) and [`delete`](Data::delete), and is never the same for two
+    /// different contents: what a view keeps worked out from the data is good while it
+    /// stays. A direct edit of a map calls [`touch`](Data::touch).
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The data changed (an edit made directly to a map): a new revision.
+    pub fn touch(&mut self) {
+        self.revision = REVISION.fetch_add(1, Ordering::Relaxed) + 1;
+    }
+
     /// Takes a topic's snapshot: its rows become exactly these.
     pub fn replace(&mut self, topic: Topic, rows: Vec<Value>) {
         if !TOPICS.contains(&topic) {
             return;
         }
+        self.touch();
         match topic {
             Topic::Sessions => self.sessions.clear(),
             Topic::Groups => self.groups.clear(),
@@ -124,6 +144,7 @@ impl Data {
         if !TOPICS.contains(&topic) {
             return;
         }
+        self.touch();
         for row in rows {
             let key = key_of(&row);
             if self.put(topic, &key, row) {
@@ -157,6 +178,7 @@ impl Data {
         if !TOPICS.contains(&topic) {
             return;
         }
+        self.touch();
         for key in keys {
             match topic {
                 Topic::Sessions => drop_key(&mut self.sessions, key.parse().ok()),

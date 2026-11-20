@@ -47,6 +47,14 @@ fn on(n: u8) -> Item {
     Item::Session(session(n))
 }
 
+/// Pushes session `n` again, as the daemon would, after `f` changes its row.
+fn push_session(data: &mut Data, n: u8, f: impl FnOnce(&mut serde_json::Value)) {
+    let mut row = serde_json::to_value(&data.sessions[&session(n)]).expect("a row");
+    row["key"] = json!(session(n).to_string());
+    f(&mut row);
+    data.upsert(Topic::Sessions, vec![row]);
+}
+
 fn done(text: &str) -> Done {
     Done {
         text: text.to_string(),
@@ -606,6 +614,121 @@ fn esc_ctrl_c_and_ctrl_g_close() {
     assert!(!t.panel.quits(Key::Char('q')));
 }
 
+/// Review M1: while a pick waits, another Enter sends nothing and says what is opening, so
+/// two picks are never in flight. A refused pick lets the next one go.
+#[test]
+fn a_second_pick_waits_for_the_first() {
+    let mut t = T::new();
+    assert_eq!(t.key(Key::Enter).len(), 1);
+    t.key(Key::Down);
+    assert_eq!(t.key(Key::Enter), []);
+    assert_eq!(t.footer(), "opening Fix login…");
+    assert_eq!(t.panel.replied(Err("its folder ~/x is gone".into())), None);
+    // Release notes is still selected: it is picked now, and its `Ok` closes.
+    assert_eq!(
+        t.key(Key::Enter),
+        [Out::Send(Op::SessionFocus {
+            q: session(3).to_string()
+        })]
+    );
+    assert_eq!(t.footer(), "opening Release notes…");
+    assert_eq!(
+        t.panel.replied(Ok(done("went to Release notes"))),
+        Some(Out::Close)
+    );
+    // A connection that ended takes the wait with it.
+    t.key(Key::Enter);
+    assert_eq!(t.key(Key::Enter), []);
+    t.panel.forget_pick();
+    assert_eq!(t.key(Key::Enter).len(), 1);
+}
+
+/// Review M2: the query keeps its first 200 characters, whatever is typed or pasted.
+#[test]
+fn a_huge_paste_is_capped() {
+    let mut t = T::new();
+    t.panel.paste(&"k".repeat(10_000));
+    let started = std::time::Instant::now();
+    let screen = t.screen();
+    let shown = screen.head[0].text();
+    assert!(shown.ends_with('k'), "{shown}");
+    t.key(Key::Char('x'));
+    t.panel.paste("yz");
+    t.key(Key::Backspace);
+    // 200 `k`s less one: what was typed past the cap went, then Backspace took a `k`.
+    t.key(Key::Char('i'));
+    let screen = t.screen();
+    let query = screen.head[0].spans[1].text.clone();
+    assert!(query.ends_with("kki"), "{query}");
+    assert_eq!(screen.head[0].chip.as_ref().unwrap().text, "0/12 · 8 live");
+    t.key(Key::Ctrl('u'));
+    t.panel.paste(&"x".repeat(picker::MAX_QUERY + 1));
+    t.typed("kite");
+    assert!(!t.query_line().contains("kite"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Review M3: terminals list by their tab number, as tmux lists them: `%9` before `%10`.
+#[test]
+fn terminals_list_by_tab_number() {
+    let mut data = Data::default();
+    data.upsert(
+        Topic::Terms,
+        vec![
+            json!({"key": "%10", "name": "ten"}),
+            json!({"key": "%9", "name": "nine"}),
+            json!({"key": "%100", "name": "hundred"}),
+        ],
+    );
+    let titles: Vec<String> = rows(&data).into_iter().map(|r| r.title).collect();
+    assert_eq!(titles, ["nine", "ten", "hundred"]);
+}
+
+/// V8: a push that reorders the rows keeps the selection on its item, and Enter picks that
+/// item; a selected row that goes leaves the selection on the row now nearest.
+#[test]
+fn the_selection_follows_its_item_across_a_push() {
+    let mut t = T::new();
+    t.key(Key::Down);
+    t.key(Key::Down);
+    assert_eq!(t.selected(), Some(on(6)));
+    // Fix login ends: it moves to the old rows, and Migrate DB moves up a row.
+    push_session(&mut t.data, 1, |row| {
+        row["lifecycle"] = json!("ended");
+        row["display_state"] = json!("ended");
+    });
+    let screen = t.screen();
+    assert_eq!(screen.body[1].0.item, Some(on(6)));
+    assert_eq!(screen.body[1].1, moa_view::panel::Mark::Selected);
+    assert_eq!(
+        t.key(Key::Enter),
+        [Out::Send(Op::SessionFocus {
+            q: session(6).to_string()
+        })]
+    );
+    t.panel.replied(Err("no".into()));
+    // Migrate DB goes: the selection falls to the row now in its place, Done's 設計レビュー.
+    t.data.delete(Topic::Sessions, &[session(6).to_string()]);
+    assert_eq!(t.selected(), Some(on(4)));
+    assert_eq!(
+        t.key(Key::Enter),
+        [Out::Send(Op::SessionFocus {
+            q: session(4).to_string()
+        })]
+    );
+    // Rows arriving while the pick waits don't stop its `Ok` from closing the picker.
+    push_session(&mut t.data, 2, |row| {
+        row["activity"] = json!("needs_permission");
+        row["display_state"] = json!("waiting");
+    });
+    t.screen();
+    assert_eq!(t.panel.replied(Ok(done(""))), Some(Out::Close));
+}
+
 #[test]
 fn reset_pick_clears_the_query_and_selects_the_first_row() {
     let mut t = T::new();
@@ -678,7 +801,8 @@ proptest! {
         for line in views::build(View::Picker, &data, &ctx, &ui, width) {
             prop_assert!(text::width(&line.text()) <= max, "{:?}", line.text());
         }
-        for line in picker::head(&data, &ui, width).lines {
+        let m = picker::matched(&data, &query);
+        for line in picker::head(&m, &query, width).lines {
             let w = text::width(&line.text())
                 + line.chip.as_ref().map_or(0, |c| text::width(&c.text) + 1);
             prop_assert!(w <= max, "{:?}", line);
