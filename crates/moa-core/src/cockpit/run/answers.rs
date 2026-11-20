@@ -130,10 +130,14 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         return Vec::new();
     }
     if !state.tmux.scene_listed(&answers) {
-        let why = answers
-            .iter()
-            .find_map(|a| a.as_ref().err())
-            .map_or("tmux's answer didn't parse", |e| first_line(e));
+        // tmux's own words, only when tmux returned an error; else moa couldn't parse it.
+        let raw = log(
+            LogLevel::Warn,
+            match answers.iter().find_map(|a| a.as_ref().err()) {
+                Some(e) => format!("tmux couldn't list the terminal: {}", first_line(e)),
+                None => "moa couldn't read tmux's listing: it didn't parse".to_string(),
+            },
+        );
         // A vacate can't plan with no listing, but its commit is saved: its agent is killed
         // plainly, as 4b did (a pane id names one pane on its server), unless moa last knew
         // the pane as a panel (its chain already ran).
@@ -141,10 +145,7 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
             let pane = *pane;
             if !known_panel(state, pane) {
                 let mut fx = vec![
-                    log(
-                        LogLevel::Warn,
-                        format!("tmux couldn't list the terminal: {why}"),
-                    ),
+                    raw,
                     log(
                         LogLevel::Warn,
                         format!(
@@ -172,10 +173,7 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         let text = "moa couldn't read the terminal's state; try again".to_string();
         // tmux's words go to the log only. Logged either way; an operation nobody asked for
         // has the log line only (and a vacate's ends as not done).
-        let mut fx = vec![log(
-            LogLevel::Warn,
-            format!("tmux couldn't list the terminal: {why}"),
-        )];
+        let mut fx = vec![raw];
         let said = match &state.cockpit.in_flight {
             Some((_, op)) if !tells_of(op).is_empty() => {
                 fx.push(log(LogLevel::Warn, text.clone()));

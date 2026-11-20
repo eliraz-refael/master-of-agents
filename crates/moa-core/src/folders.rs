@@ -4,7 +4,7 @@ use std::path::Path;
 
 /// `path` with the folder `home` written `~`. Whole folders only: `/h` and `/h/x` are under
 /// `/h`, `/hx` isn't. The rest of the path is kept exactly, a trailing `/` included. An
-/// empty `home` changes nothing.
+/// empty `home` changes nothing, and so does `/` (no home).
 pub fn tilde(path: &str, home: &Path) -> String {
     let home = home.to_string_lossy();
     let home = home.trim_end_matches('/');
@@ -35,5 +35,6 @@ mod tests {
         }
         assert_eq!(tilde("/h/x", Path::new("")), "/h/x");
         assert_eq!(tilde("/h/x", Path::new("/h/")), "~/x");
+        assert_eq!(tilde("/x", Path::new("/")), "/x");
     }
 }

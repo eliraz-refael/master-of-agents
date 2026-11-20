@@ -614,5 +614,19 @@ fn a_vacate_with_an_unreadable_listing_still_kills_its_agent() {
     let n = the_listing(&vacate_of(&mut st, 9, 1));
     let fx = feed(&mut st, answer(n, vec![Err("server exited".into())]));
     assert!(queries(&fx).is_empty(), "{fx:?}");
+    let logged: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(l.message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [
+            "tmux couldn't list the terminal: server exited",
+            "moa couldn't read the terminal's state; try again"
+        ]
+    );
     assert!(st.cockpit.in_flight.is_none());
 }

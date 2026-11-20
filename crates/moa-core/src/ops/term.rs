@@ -144,7 +144,10 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
     let named = title
         .filter(|t| !t.trim().is_empty())
         .map(str::to_string)
-        .or_else(|| (with_tilde(&folder, &deps.home, deps.canonical) == "~").then(|| "~".into()))
+        .or_else(|| {
+            (with_tilde(&folder, &deps.home, deps.canonical).trim_end_matches('/') == "~")
+                .then(|| "~".into())
+        })
         .or_else(|| path.file_name().map(|f| f.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "~".to_string());
     // Cut before `literal_format`, as a launch's name is.
@@ -257,5 +260,7 @@ mod tests {
         assert_eq!(with_tilde("/private/h/x", h, canonical), "~/x");
         assert_eq!(with_tilde("/h/x", h, canonical), "~/x");
         assert_eq!(with_tilde("/other", h, canonical), "/other");
+        // A home with a trailing `/` is still home.
+        assert_eq!(with_tilde("/h/", Path::new("/h/"), canonical), "~/");
     }
 }
