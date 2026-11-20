@@ -62,17 +62,17 @@ fn plain(key: &'static str, label: &'static str, help: &'static str, does: Does)
 /// The picker's two keys: `/` opens the form `form` names, `s` the other (S8). The popup
 /// is a binding of its own; the full tab is the daemon's `find`.
 fn find_keys(form: Form) -> [Binding; 2] {
-    let does = |popup: bool| match popup {
-        true => Does::Popup(View::Picker),
-        false => Does::Moa(KeyAction::Find),
-    };
-    let popup = form == Form::Popup;
-    let (other, other_help) = match popup {
-        true => (
+    let (popup, tab) = (Does::Popup(View::Picker), Does::Moa(KeyAction::Find));
+    let (main, other, label, help) = match form {
+        Form::Popup => (
+            popup,
+            tab,
             "Find a session, full tab…",
             "find a session in a full tab: type part of its name, Enter jumps",
         ),
-        false => (
+        Form::Tab => (
+            tab,
+            popup,
             "Find a session, popup…",
             "find a session in a popup: type part of its name, Enter jumps",
         ),
@@ -82,9 +82,9 @@ fn find_keys(form: Form) -> [Binding; 2] {
             "/",
             "Find a session…",
             "find a session: type part of its name, Enter jumps",
-            does(popup),
+            main,
         ),
-        plain("s", other, other_help, does(!popup)),
+        plain("s", label, help, other),
     ]
 }
 

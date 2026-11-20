@@ -20,6 +20,7 @@ use crate::state::State;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Link, TmuxState};
 use crate::tmux::topology::Topology;
+use crate::tmux::version;
 
 /// What a panel shows.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -316,20 +317,16 @@ pub(crate) fn gone(state: &mut State, conn: ConnId) -> Vec<Effect> {
     let mut fx: Vec<Effect> = publish_panels(state).into_iter().collect();
     if let Link::Up { conn, version, .. } = &state.tmux.link
         && reg.once
-        && may_lose_exits(version)
+        && version::is(version, LOSE_EXITS)
     {
         fx.push(reap_nudge(*conn));
     }
     fx
 }
 
-/// tmux 3.4 and 3.5 (and their pre-releases): Linux builds with utempter can lose a child's
-/// exit until tmux reaps another.
-fn may_lose_exits(version: &str) -> bool {
-    ["3.4", "3.5", "next-3.4", "next-3.5"]
-        .iter()
-        .any(|v| version.starts_with(v))
-}
+/// The tmux releases whose Linux builds with utempter can lose a child's exit until tmux
+/// reaps another.
+const LOSE_EXITS: &[&str] = &["3.4", "3.5"];
 
 /// `panels`, when its rows changed.
 pub(crate) fn publish_panels(state: &mut State) -> Option<Effect> {

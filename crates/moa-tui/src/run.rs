@@ -80,6 +80,8 @@ pub const RESTORE: &str = "\x1b[?2004l\x1b[?1004l\x1b[?1006l\x1b[?1003l\x1b[?25h
 
 /// The footer while the daemon is another build (V13).
 const MISMATCH: &str = "this panel is from another build of moa; close it and run moa panel again";
+/// The same in a popup, which nobody started by hand: any key closes it.
+const ONCE_MISMATCH: &str = "this popup is from another build of moa; press any key to close";
 /// The footer while reconnecting.
 const TRYING: &str = "moa isn't running; trying again…";
 /// The footer once reconnecting has given up.
@@ -619,6 +621,14 @@ impl Loop {
         }
     }
 
+    /// The footer while moa is another build. A popup's key closes it.
+    fn mismatch_note(&self) -> &'static str {
+        match self.opts.once {
+            true => ONCE_MISMATCH,
+            false => MISMATCH,
+        }
+    }
+
     /// Writes `what` to `panel.log`, naming the view the panel shows now.
     fn log(&self, what: &str) {
         self.note_view();
@@ -646,7 +656,7 @@ impl Loop {
             Link::Up { .. } | Link::Connecting { .. } => None,
             Link::Waiting { .. } => Some(TRYING.to_string()),
             Link::Down(why) => Some(self.down_note(why.as_deref())),
-            Link::Mismatch => Some(MISMATCH.to_string()),
+            Link::Mismatch => Some(self.mismatch_note().to_string()),
         }
     }
 
@@ -846,11 +856,12 @@ impl Loop {
 
     /// Sleeps the `waited`th delay before trying again, or gives up when there are no more.
     /// A popup doesn't wait: it is open only while you look at it, so it says moa is down
-    /// at once, and a key closes it.
+    /// at once (giving up, as `panel.log` says), and a key closes it.
     fn wait(&mut self, waited: usize) {
         if self.opts.once {
             self.link = Link::Down(None);
             self.panel.note(ONCE_DOWN);
+            self.log("gave up reaching moa");
             return;
         }
         match self.delays.get(waited) {
@@ -911,7 +922,7 @@ impl Loop {
             }
             Err(Failed::Mismatch) => {
                 self.link = Link::Mismatch;
-                self.panel.note(MISMATCH);
+                self.panel.note(self.mismatch_note());
             }
             Err(Failed::Down(line))
                 if !self.linked_once && self.opts.client.autostart.is_some() =>
@@ -1223,8 +1234,8 @@ mod tests {
     use moa_view::panel::Out;
 
     use super::{
-        Failed, Fault, Link, Logbook, Loop, MISMATCH, ONCE_DOWN, PanelOptions, TRYING, Turn, Wake,
-        now,
+        Failed, Fault, Link, Logbook, Loop, MISMATCH, ONCE_DOWN, ONCE_MISMATCH, PanelOptions,
+        TRYING, Turn, Wake, now,
     };
     use crate::theme::{ColorMode, Theme};
 
@@ -1512,10 +1523,21 @@ mod tests {
     #[tokio::test]
     async fn a_popup_with_moa_down_closes_on_any_key() {
         let key = || Event::Key(KeyEvent::from(KeyCode::Char('k')));
+        let dir = tempfile::tempdir().unwrap();
         let mut lp = popup(true);
+        lp.log = Logbook::new(&PanelOptions {
+            log: Some(dir.path().join("panel.log")),
+            ..lp.opts.clone()
+        });
         lp.linked(Err(Failed::Down("moa isn't running".to_string())));
         assert!(matches!(lp.link, Link::Down(None)), "it doesn't try again");
         assert_eq!(lp.link_line().as_deref(), Some(ONCE_DOWN));
+        // It gives up, and says so as every panel does.
+        let written = std::fs::read_to_string(dir.path().join("panel.log")).unwrap();
+        assert!(
+            written.ends_with("[default] panel picker (popup) in -: gave up reaching moa\n"),
+            "{written}"
+        );
         let mut term = terminal();
         lp.draw(&mut term).unwrap();
         assert!(
@@ -1536,6 +1558,7 @@ mod tests {
 
         let mut lp = popup(true);
         lp.link = Link::Mismatch;
+        assert_eq!(lp.link_line().as_deref(), Some(ONCE_MISMATCH));
         assert!(matches!(input(&mut lp, key()), Turn::Quit));
         assert_eq!(lp.here(), None);
     }

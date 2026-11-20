@@ -212,7 +212,7 @@ fn the_picker_key_is_a_popup_by_default() {
     let text = conf();
     assert_eq!(
         bind_line(&text, "/"),
-        "if -F '#{@moa_ctl}' { display-popup -E -w 80% -h 70% -d /r \
+        "if -F '#{@moa_ctl}' { display-popup -EE -w 80% -h 70% -d /r \
          -T \"#[fg=#88c0d0 bold] ⌕ find a session \" -e MOA_BRAIN=default \
          -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel picker --once \
          --brain default } { display-message -d 4000 \"moa isn't running: run moa\" }"
@@ -225,7 +225,7 @@ fn picker_tab_swaps_the_keys() {
     let text = conf_with("default", &ui(Form::Tab));
     assert_eq!(bind_line(&text, "/"), FIND_KEY);
     let s = bind_line(&text, "s");
-    assert!(s.contains("display-popup -E -w 80% -h 70%"), "{s}");
+    assert!(s.contains("display-popup -EE -w 80% -h 70%"), "{s}");
     assert!(s.contains("panel picker --once --brain default"), "{s}");
     assert_eq!(s, bind_line(&conf(), "/"));
 }
@@ -251,7 +251,7 @@ fn the_menu_offers_both_forms() {
     let text = conf();
     let popup = menu_item(&text, "Find a session…");
     assert!(popup.starts_with("/ 'if -F "), "{popup}");
-    assert!(popup.contains("display-popup -E -w 80% -h 70%"), "{popup}");
+    assert!(popup.contains("display-popup -EE -w 80% -h 70%"), "{popup}");
     assert!(popup.contains("panel picker --once"), "{popup}");
     assert_eq!(menu_item(&text, "Find a session, full tab…"), find("s"));
 
@@ -386,6 +386,66 @@ fn a_path_with_spaces_quotes_and_hashes_survives() {
     open_menu(&term, b"\x01 ");
     term.press(b"/");
     odd.ran_as_told(&sb, &term);
+}
+
+/// S8: a popup whose moa fails (a broken `moa.toml`, a brain that isn't there) stays open
+/// once it has ended, so what it said is seen: `-EE` closes the popup only on success.
+#[test]
+fn a_popup_whose_moa_fails_stays_open() {
+    let sb = Sandbox::start().unwrap();
+    let dir = sb.home().join("bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("moa");
+    // Its pid is written aside, then moved: `pid` is never seen half written.
+    std::fs::write(
+        &exe,
+        "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$$\" > \"$d/pid.part\"\nmv \"$d/pid.part\" \"$d/pid\"\n\
+         echo 'moa: no brain called kite'\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let launch = PanelLaunch {
+        exe,
+        env: Vec::new(),
+    };
+    load_text(
+        &sb,
+        &moa_tmux("default", &UiConfig::default(), &launch, sb.home()),
+    );
+    sb.tmux(&["set-option", "-g", "@moa_ctl", "not-a-client"])
+        .unwrap();
+    let term = attach(&sb);
+    let said = "no brain called kite";
+    term.press(b"\x01/");
+    assert!(
+        term.wait_for_text(said, Duration::from_secs(10)),
+        "the popup never ran moa; the terminal showed: {}",
+        term.tail(600)
+    );
+    let pid = wait_for(Duration::from_secs(10), || {
+        std::fs::read_to_string(dir.join("pid"))
+            .ok()?
+            .trim()
+            .parse::<u32>()
+            .ok()
+    })
+    .expect("no pid");
+    let reaped = wait_for(Duration::from_secs(10), || {
+        // tmux 3.4 and 3.5 built with utempter can lose the exit until tmux reaps a child
+        // of its own (`every_hook_reaches_the_mailbox`).
+        let _ = sb.tmux(&["run-shell", "true"]);
+        (!moa_platform::pid_alive(pid)).then_some(())
+    });
+    assert!(reaped.is_some(), "tmux never reaped the popup's moa");
+    // Ended and reaped, it is still drawn: a redraw of the terminal draws it again.
+    term.mark();
+    sb.tmux(&["refresh-client", "-t", &term.tty()]).unwrap();
+    assert!(
+        term.wait_for_text(said, Duration::from_secs(10)),
+        "the popup closed; the terminal showed: {}",
+        term.tail(600)
+    );
 }
 
 /// Each key the status line's hint names (`/ find · c console · …`, the arrows among them)

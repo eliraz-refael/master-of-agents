@@ -58,7 +58,9 @@ struct Popups<'a> {
 
 impl Popups<'_> {
     /// `display-popup` running `moa panel <view> --once` (S8), at home and with the
-    /// panels' environment (`panel_env_of`). The program and its arguments go as separate
+    /// panels' environment (`panel_env_of`). `-EE` closes it when moa ends well; one that
+    /// fails (a broken `moa.toml`, a brain that isn't there) stays open, so what it said is
+    /// seen, until a key closes it. The program and its arguments go as separate
     /// arguments, which tmux neither expands nor hands a shell; it expands `-d`, so the
     /// folder is kept literal. `menu`: for a menu item, whose command tmux expands once
     /// before it runs, every `#` in the folder, the environment and the program doubled
@@ -74,7 +76,7 @@ impl Popups<'_> {
             other => unreachable!("no popup is written for the {other} view"),
         };
         let mut words = vec![
-            "display-popup -E -w 80% -h 70% -d".to_string(),
+            "display-popup -EE -w 80% -h 70% -d".to_string(),
             quote(&lit(&literal_format(&self.home.to_string_lossy()))),
             format!("-T \"#[fg=#88c0d0 bold] {title} \""),
         ];
