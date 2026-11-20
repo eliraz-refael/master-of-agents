@@ -32,7 +32,8 @@ pub(super) enum Step {
 pub(super) struct Then {
     /// The `@moa_view`s it sets (`None`: unsets), recorded at once (L17).
     pub(super) tags: Vec<(PaneId, Option<&'static str>)>,
-    /// The panes it takes `@moa_session` off, recorded at once too.
+    /// The panes it takes `@moa_session` off, and the terminal mark (`@moa_term`) with it
+    /// (a vacate's respawn), recorded at once too.
     pub(super) untagged: Vec<PaneId>,
     /// A swap into the spot: where it puts the panes, recorded at once too.
     pub(super) moved: Option<Moved>,

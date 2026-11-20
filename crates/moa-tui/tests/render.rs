@@ -3,6 +3,7 @@
 //! sizes too small for anything (nothing drawn outside the pane).
 
 use moa_core::panel::View;
+use moa_core::publish::TermRow;
 use moa_tui::draw::draw;
 use moa_tui::theme::{ColorMode, Theme};
 use moa_view::ctx::Ctx;
@@ -37,6 +38,7 @@ const SURFACE: Color = Color::Rgb(0x3b, 0x42, 0x52);
 const SEL: Color = Color::Rgb(0x5e, 0x81, 0xac);
 const DARK: Color = Color::Rgb(0x2e, 0x34, 0x40);
 const YELLOW: Color = Color::Rgb(0xeb, 0xcb, 0x8b);
+const DIM: Color = Color::Rgb(0x8c, 0x9a, 0xb3);
 const RED: Color = Color::Rgb(0xd5, 0x77, 0x80);
 
 fn theme() -> Theme {
@@ -59,6 +61,18 @@ impl T {
             data,
             ctx,
         }
+    }
+
+    /// The picker on the fixture with two terminals, `⌨ kite` and `⌨ harbor`.
+    fn picker() -> T {
+        let mut t = T::new(View::Picker);
+        for (pane, name) in [("%5", "kite"), ("%7", "harbor")] {
+            let row = TermRow {
+                name: name.to_string(),
+            };
+            t.data.terms.insert(pane.to_string(), row);
+        }
+        t
     }
 
     fn screen(&mut self, w: u16, h: u16) -> Screen {
@@ -150,6 +164,20 @@ fn every_view_at_every_width() {
             let buf = T::new(view).drawn(width, HEIGHT);
             insta::assert_snapshot!(format!("{name}@{width}"), screen_text(&buf));
         }
+    }
+}
+
+/// The picker, framed, with its query and rule fixed above the list: empty, then with
+/// `kite` typed.
+#[test]
+fn the_picker_at_every_width() {
+    for width in WIDTHS {
+        let mut t = T::picker();
+        let buf = t.drawn(width, HEIGHT);
+        insta::assert_snapshot!(format!("picker@{width}"), screen_text(&buf));
+        t.panel.paste("kite");
+        let buf = t.drawn(width, HEIGHT);
+        insta::assert_snapshot!(format!("picker-kite@{width}"), screen_text(&buf));
     }
 }
 
@@ -303,6 +331,62 @@ fn wide_glyphs_take_two_cells() {
     assert!(row(&buf, y).ends_with("8h│"), "{:?}", row(&buf, y));
 }
 
+/// The query's hits are yellow, bold and underlined (`Tone::Hit`); on the selection bar
+/// they keep the bar's colours, bold and underlined, as the spike's did.
+#[test]
+fn hits_are_yellow_bold_and_underlined() {
+    let mut t = T::picker();
+    t.panel.paste("kite");
+    let buf = t.drawn(80, HEIGHT);
+    // The terminal's title is a whole hit; Release notes, selected, hits in its group.
+    let (x, y) = find(&buf, "⌨ kite");
+    for x in x + 2..x + 6 {
+        let cell = &buf[(x, y)];
+        assert_eq!(cell.fg, YELLOW, "({x}, {y})");
+        assert!(
+            cell.modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED),
+            "({x}, {y})"
+        );
+    }
+    // The word after it isn't a hit.
+    let (x, y) = find(&buf, "terminal");
+    assert!(!buf[(x, y)].modifier.contains(Modifier::UNDERLINED));
+    let (x, y) = find(&buf, "Private/Kit");
+    assert!(row(&buf, y).contains("Release notes"));
+    for x in x + 8..x + 11 {
+        let cell = &buf[(x, y)];
+        assert_eq!((cell.fg, cell.bg), (BRIGHT, SEL), "({x}, {y})");
+        assert!(
+            cell.modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED),
+            "({x}, {y})"
+        );
+    }
+    assert!(!buf[(x, y)].modifier.contains(Modifier::UNDERLINED));
+}
+
+/// The head stays above the list as it scrolls: the query line, the dim rule, then rows.
+#[test]
+fn the_picker_head_stays_as_the_list_scrolls() {
+    let mut t = T::picker();
+    // Down to the last of the 12 rows (the picker has no End: it is typed nowhere).
+    for _ in 0..11 {
+        t.key(Key::Down, 80, HEIGHT);
+    }
+    let buf = t.drawn(80, HEIGHT);
+    assert!(row(&buf, 1).starts_with("│ › "), "{}", screen_text(&buf));
+    assert!(row(&buf, 1).contains("12/12 · 8 live"));
+    assert!(row(&buf, 2).starts_with("│ ───"));
+    assert_eq!(buf[(2, 2)].fg, DIM);
+    assert!(
+        row(&buf, 12).contains("Closed thing"),
+        "{}",
+        screen_text(&buf)
+    );
+    assert!(!screen_text(&buf).contains("Fix login"));
+}
+
 // ---------- sizes (Review Focus 3) ----------
 
 #[test]
@@ -310,7 +394,8 @@ fn tiny_sizes_draw_without_panicking() {
     let outside = Style::new().fg(Color::Indexed(9)).bg(Color::Indexed(4));
     let mut filled = Cell::new("#");
     filled.set_style(outside);
-    for (name, view) in VIEWS.into_iter().chain([("empty-slot", View::EmptySlot)]) {
+    let more = [("empty-slot", View::EmptySlot), ("picker", View::Picker)];
+    for (name, view) in VIEWS.into_iter().chain(more) {
         for w in 0..=12 {
             for h in 0..=4 {
                 let screen = T::new(view).screen(w, h);

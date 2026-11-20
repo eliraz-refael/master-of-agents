@@ -577,6 +577,31 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Brings terminal `pane` (`%N`), a tab `term.open` or `Ctrl-a $` opened, to the screen.",
+            "properties": {
+              "method": {
+                "const": "term.show",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "pane": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "pane"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "method": {
                 "const": "task.ls",
@@ -1274,7 +1299,8 @@ expression: all
           "status",
           "brain",
           "panels",
-          "layouts"
+          "layouts",
+          "terms"
         ],
         "type": "string"
       },
@@ -1521,6 +1547,12 @@ expression: all
               "type": "string"
             },
             "type": "array"
+          },
+          "terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -1574,6 +1606,10 @@ expression: all
             "type": "array"
           },
           "tasks": {
+            "items": true,
+            "type": "array"
+          },
+          "terms": {
             "items": true,
             "type": "array"
           }
@@ -1642,6 +1678,10 @@ expression: all
             "type": "array"
           },
           "tasks": {
+            "items": true,
+            "type": "array"
+          },
+          "terms": {
             "items": true,
             "type": "array"
           }

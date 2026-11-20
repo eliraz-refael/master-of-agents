@@ -434,7 +434,12 @@ fn topology_shows(r: &mut Rig, panes: &[&str]) {
         TmuxIn::Replies {
             conn: 1,
             token: TmuxToken::Refresh,
-            results: vec![Ok(vec!["S $1 work".into()]), Ok(lines), Ok(Vec::new())],
+            results: vec![
+                Ok(vec!["S $1 work".into()]),
+                Ok(lines),
+                Ok(Vec::new()),
+                Ok(Vec::new()),
+            ],
         },
     );
 }

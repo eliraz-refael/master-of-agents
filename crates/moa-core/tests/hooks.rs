@@ -880,6 +880,7 @@ fn link_up(st: &mut State) {
             lines(&["S $0 moa", "S $1 _moa"]),
             lines(&["P %5 @1 $0 1 1 0 0 "]),
             lines(&["C 0 $0 /dev/ttys1"]),
+            Ok(Vec::new()),
         ],
     };
     handle_checked(st, Input::Tmux(lists), now());

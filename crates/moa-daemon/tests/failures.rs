@@ -520,6 +520,7 @@ fn lists_with_a_user() -> TmuxIn {
             Ok(vec!["S $0 moa".into()]),
             Ok(vec![]),
             Ok(vec!["C 0 $0 /dev/ttys1".into()]),
+            Ok(Vec::new()),
         ],
     }
 }

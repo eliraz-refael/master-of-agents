@@ -14,6 +14,7 @@ use crate::text::{self, SPIN, clean, cut, short_account};
 
 pub mod activity;
 pub mod empty_slot;
+pub mod picker;
 pub mod picture;
 pub mod plan;
 pub mod projects;
@@ -22,11 +23,13 @@ pub mod today;
 pub mod tree;
 
 /// What a view keeps in the panel rather than in the brain: the projects opened in the
-/// projects view, and the tab the picture shows (an index into [`picture::TABS`]).
+/// projects view, the tab the picture shows (an index into [`picture::TABS`]), and the
+/// picker's query, as typed.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ViewUi {
     pub expanded: BTreeSet<ProjectId>,
     pub tab: usize,
+    pub query: String,
 }
 
 /// The lines of `view`, `width` cells wide.
@@ -39,8 +42,9 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Projects => projects::build(data, ctx, ui, width),
         View::Activity => activity::build(data, ctx, ui, width),
         View::Picture => picture::build(data, ctx, ui, width),
+        View::Picker => picker::build(data, ctx, ui, width),
         View::EmptySlot => empty_slot::build(width),
-        View::Console | View::Picker | View::Help | View::Setup => {
+        View::Console | View::Help | View::Setup => {
             let words = not_yet(view).unwrap_or_default();
             vec![Line::plain(cut(words, usize::from(width)), Tone::Dim)]
         }
@@ -52,7 +56,6 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
 pub fn not_yet(view: View) -> Option<&'static str> {
     match view {
         View::Console => Some("the console isn't in this build yet"),
-        View::Picker => Some("finding a session isn't in this build yet"),
         View::Help => Some("help isn't in this build yet"),
         View::Setup => Some("setup isn't in this build yet"),
         View::EmptySlot
@@ -62,7 +65,8 @@ pub fn not_yet(view: View) -> Option<&'static str> {
         | View::Today
         | View::Activity
         | View::Projects
-        | View::Picture => None,
+        | View::Picture
+        | View::Picker => None,
     }
 }
 
@@ -70,16 +74,20 @@ pub fn not_yet(view: View) -> Option<&'static str> {
 /// name, else its folder's last part, else its handle; cleaned.
 pub fn label(row: &SessionRow) -> String {
     let s = &row.session;
-    let folder = s
-        .cwd
-        .as_deref()
-        .and_then(|c| c.rsplit('/').find(|p| !p.is_empty()));
-    let name = [s.title.as_deref(), row.project.as_deref(), folder]
+    let name = [s.title.as_deref(), row.project.as_deref(), folder(row)]
         .into_iter()
         .flatten()
         .find(|n| !n.is_empty())
         .unwrap_or(&row.handle);
     clean(name)
+}
+
+/// The last part of a session's folder, as typed (not cleaned); `None` without one.
+pub fn folder(row: &SessionRow) -> Option<&str> {
+    row.session
+        .cwd
+        .as_deref()
+        .and_then(|c| c.rsplit('/').find(|p| !p.is_empty()))
 }
 
 /// The sessions `keep` keeps, the most recently seen first.

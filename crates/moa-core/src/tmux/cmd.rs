@@ -470,6 +470,12 @@ pub fn literal_format(s: &str) -> String {
     s.replace('#', "##")
 }
 
+/// `s` on one line, every control character a space: a tag tmux prints in a list (a
+/// `@moa_label`, last on its line) then never prints a line of its own.
+pub fn one_line(s: &str) -> String {
+    s.replace(char::is_control, " ")
+}
+
 fn is_bare(c: char) -> bool {
     c.is_ascii_alphanumeric() || "_@%:=.,/+-".contains(c)
 }

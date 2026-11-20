@@ -335,7 +335,6 @@ fn unknown_views_say_not_yet() {
     let (data, ctx) = lantern();
     let cases = [
         (View::Console, "the console isn't in this build yet"),
-        (View::Picker, "finding a session isn't in this build yet"),
         (View::Help, "help isn't in this build yet"),
         (View::Setup, "setup isn't in this build yet"),
     ];
@@ -345,7 +344,9 @@ fn unknown_views_say_not_yet() {
         let narrow = views::build(view, &data, &ctx, &ViewUi::default(), 10);
         assert_eq!(narrow[0].text(), words[..10], "{view:?}");
     }
-    assert_eq!(views::not_yet(View::EmptySlot), None);
+    for view in [View::EmptySlot, View::Picker] {
+        assert_eq!(views::not_yet(view), None, "{view:?}");
+    }
 }
 
 /// The agent spot with no agent in it says how to fill it (the spike's `EMPTY_SLOT`): dim,

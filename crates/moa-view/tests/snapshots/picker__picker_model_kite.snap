@@ -1,0 +1,13 @@
+---
+source: crates/moa-view/tests/picker.rs
+expression: "debug_screen(&panel.screen(&data, &ctx, size))"
+---
+head: [head*]› [text*]kite ⟨[dim]6/12 · 8 live⟩
+head: [dim]─────────────────────────────────────────────────────────────────────────────
+> [ask*] ? [ask*]Release notes      Private/[hit*]Kit[ask*] [ask*]asks you    2h  Ship it today?  ‹session›
+  [ok*] ✓ [ok*]設計レビュー       Private/[hit*]Kit[ok*] [ok*]done        3h  ‹session›
+  [text] ⌨ [hit*]kite[text]                           [text]terminal        ‹term›
+  [dim] ○ [dim]Closed thing 👨    Private/[hit*]Kit[dim] [dim]ended       9h  ‹session›
+  [work] ⠸ [work]Rust scaffold      Private/Lan [work]working     2m  ‹session›
+  [dim] 💤[dim]Old spi[hit*]k[dim]e                      [dim]asleep      8h  ‹session›
+footer: [dim]↵ jump · ↑↓ move · esc close

@@ -15,7 +15,7 @@ use crate::views::{ViewUi, animates, label, live, state_glyph, tree};
 pub const EMPTY: &str = "no live sessions: Ctrl-a / finds one to resume";
 
 /// A live state's group heading (V16).
-fn word(state: DisplayState) -> &'static str {
+pub fn word(state: DisplayState) -> &'static str {
     match state {
         DisplayState::Waiting => "needs you",
         DisplayState::Question => "asks you",
@@ -29,7 +29,7 @@ fn word(state: DisplayState) -> &'static str {
 
 /// A group's tone, and whether it is bold: the states that want you stand out. Quiet is cyan
 /// here only (V16).
-fn look(state: DisplayState) -> (Tone, bool) {
+pub fn look(state: DisplayState) -> (Tone, bool) {
     match state {
         DisplayState::Waiting => (Tone::Warn, true),
         DisplayState::Question => (Tone::Ask, true),

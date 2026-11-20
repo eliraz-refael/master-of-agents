@@ -43,6 +43,13 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     fold_in(&mut fx, released);
     // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
     sleep::run(state, &now, sleep_fired, &mut fx);
+    // The terminals are the topology's: a listing's, a terminal's own tag, a session's tag
+    // (a terminal running an agent is its session). The views hear of them when they changed.
+    fx.extend(
+        state
+            .publish_changed(Topic::Terms)
+            .map(|m| Effect::Publish(Publish::Model(m))),
+    );
     // Last, so the status line shows what this input saved, after its `Persist`.
     status::run(state, &now, &mut fx);
     fx
@@ -483,6 +490,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::TermOpen { path, title },
             ..
         } => ops::term::term(state, Tell::Reply(conn, req), &path, title.as_deref()),
+        // Answered at once, from the topology: nothing is saved.
+        Input::Client {
+            conn,
+            req,
+            op: Op::TermShow { pane },
+            ..
+        } => ops::term::show(state, conn, req, &pane),
         // Answered at once, or after one pane query and the new tab (C11).
         Input::Client {
             conn,

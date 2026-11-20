@@ -13,13 +13,20 @@ pub const LIST_SESSIONS: &str = "S #{session_id} #{session_name}";
 /// the pane is dead, and its `@moa_view` tag last, since it is free text.
 pub const LIST_PANES: &str = "P #{pane_id} #{window_id} #{session_id} #{pane_active} #{window_active} #{window_zoomed_flag} #{&&:#{==:#{session_name},moa},#{==:#{window_name},moa}} #{@moa_session} #{pane_dead} #{@moa_view}";
 pub const LIST_CLIENTS: &str = "C #{client_control_mode} #{session_id} #{client_name}";
+/// The terminals moa opened (`@moa_term`), each with its `@moa_label`: a list of their own,
+/// since `LIST_PANES` already ends in free text.
+pub const LIST_TERMS: &str = "T #{pane_id} #{@moa_label}";
 
-/// The three queries that rebuild a `Topology`, in the order `from_lists` takes them.
+/// The four queries that rebuild a `Topology`: the three `from_lists` takes, in its order,
+/// then the terminals' for `terms_listed`.
 pub fn refresh_cmds() -> Vec<Cmd> {
     vec![
         Cmd::new("list-sessions").arg("-F").arg(LIST_SESSIONS),
         Cmd::new("list-panes").arg("-a").arg("-F").arg(LIST_PANES),
         Cmd::new("list-clients").arg("-F").arg(LIST_CLIENTS),
+        Cmd::new("list-panes")
+            .args(["-a", "-f", "#{@moa_term}", "-F"])
+            .arg(LIST_TERMS),
     ]
 }
 
@@ -53,10 +60,32 @@ pub struct Topology {
     views: BTreeMap<PaneId, String>,
     /// The panes whose program has exited and that tmux keeps (`remain-on-exit`).
     dead: BTreeSet<PaneId>,
+    /// The terminals moa opened (`@moa_term`), each with its `@moa_label` as moa meant it
+    /// (tmux keeps it with every `#` doubled).
+    terms: BTreeMap<PaneId, String>,
 }
 
 /// The name of the session that holds the cockpit, and of the cockpit window in it.
 const COCKPIT: &str = "moa";
+
+/// What a terminal with no label is called: an agent that ran in it, in the spot, took its
+/// label (`● <title>`) and left with it. The cockpit names a shell it sends home the same
+/// (`⌨ shell`).
+const UNNAMED: &str = "shell";
+
+/// What the label of the agent in the spot starts with: `● <title>`.
+pub const AGENT_MARK: &str = "● ";
+
+/// A terminal's name: its label without the `⌨ ` moa puts first, or [`UNNAMED`] when that
+/// leaves nothing. A label set by hand is the name as it is.
+fn term_name(label: &str) -> &str {
+    let name = label.strip_prefix("⌨ ").unwrap_or(label);
+    if name.trim().is_empty() {
+        UNNAMED
+    } else {
+        name
+    }
+}
 
 /// Replace a value, saying whether it differed.
 fn put<K: Ord, V: PartialEq>(map: &mut BTreeMap<K, V>, k: K, v: V) -> Applied {
@@ -92,6 +121,29 @@ impl Topology {
             }
         }
         t
+    }
+
+    /// The terminals' list (`LIST_TERMS`) replaces the terminals known; it is read after the
+    /// panes' list. Lines that don't parse are skipped; an unset label prints as an empty
+    /// one. A label holding a newline could print a line of its own, so only a pane the
+    /// panes' list holds counts, and a pane listed twice doesn't.
+    pub fn terms_listed(&mut self, lines: &[String]) {
+        self.terms.clear();
+        let mut twice = BTreeSet::new();
+        for line in lines {
+            let mut f = line.splitn(3, ' ');
+            if let (Some("T"), Some(pane)) = (f.next(), f.next())
+                && let Ok(pane) = pane.parse()
+                && self.has_pane(pane)
+            {
+                // Set through `literal_format`, which doubles every `#`.
+                let label = f.next().unwrap_or_default().replace("##", "#");
+                if self.terms.insert(pane, label).is_some() {
+                    twice.insert(pane);
+                }
+            }
+        }
+        self.terms.retain(|p, _| !twice.contains(p));
     }
 
     fn add_pane(&mut self, line: &str) {
@@ -309,6 +361,46 @@ impl Topology {
         self.dead.contains(&p)
     }
 
+    /// The label (`@moa_label`) of `p`, when it carries the terminal mark (`@moa_term`),
+    /// whatever runs in it.
+    pub fn term_label(&self, p: PaneId) -> Option<&str> {
+        self.terms.get(&p).map(String::as_str)
+    }
+
+    /// Terminal `p`'s name: its label without the `⌨ ` moa puts first. None when `p` isn't
+    /// a terminal, runs a session's agent (it is tagged with the session: it is that session
+    /// then, and its label is the agent's), or is dead (its shell exited; tmux kept it).
+    pub fn term_name(&self, p: PaneId) -> Option<&str> {
+        if !self.is_live_term(p) {
+            return None;
+        }
+        self.term_label(p).map(term_name)
+    }
+
+    /// Every terminal, by pane, with its name; none that runs a session's agent or is dead.
+    pub fn terms(&self) -> impl Iterator<Item = (PaneId, &str)> + '_ {
+        self.terms
+            .iter()
+            .filter(|(p, _)| self.is_live_term(**p))
+            .map(|(p, label)| (*p, term_name(label)))
+    }
+
+    /// Whether `p` may be listed as a terminal: no session's agent runs in it, and its
+    /// program hasn't exited.
+    fn is_live_term(&self, p: PaneId) -> bool {
+        !self.moa_sessions.contains_key(&p) && !self.dead.contains(&p)
+    }
+
+    /// Records that `p` is a terminal labelled `label`, as moa just tagged it.
+    pub fn set_term(&mut self, p: PaneId, label: &str) {
+        self.terms.insert(p, label.to_string());
+    }
+
+    /// Records that `p` has no terminal mark any more, as moa just unset it.
+    pub fn unset_term(&mut self, p: PaneId) {
+        self.terms.remove(&p);
+    }
+
     /// Records that `p` is tagged with session `id`, as moa just set it.
     pub fn tag(&mut self, p: PaneId, id: SessionId) {
         self.moa_sessions.insert(p, id);
@@ -407,8 +499,10 @@ mod tests {
             sessions in prop::collection::vec(line(), 0..8),
             panes in prop::collection::vec(line(), 0..8),
             clients in prop::collection::vec(line(), 0..8),
+            terms in prop::collection::vec(line(), 0..8),
         ) {
-            let t = Topology::from_lists(&sessions, &panes, &clients);
+            let mut t = Topology::from_lists(&sessions, &panes, &clients);
+            t.terms_listed(&terms);
             let _ = t.visible();
         }
     }
@@ -444,5 +538,25 @@ mod tests {
         t.lifted(PaneId(9));
         assert_eq!(t.cockpit(), Some(WindowId(1)), "the cockpit keeps the tree");
         assert_eq!(t.panes_in(WindowId(1)).collect::<Vec<_>>(), [PaneId(1)]);
+    }
+
+    /// A terminal whose shell exited, kept by tmux, is listed as no terminal: there is
+    /// nothing in it to bring to the screen.
+    #[test]
+    fn a_dead_terminal_is_no_terminal() {
+        let s = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let mut t = Topology::from_lists(
+            &s(&["S $0 moa"]),
+            &s(&["P %3 @3 $0 1 0 0 0  0 ", "P %4 @4 $0 1 0 0 0  1 "]),
+            &s(&[]),
+        );
+        t.terms_listed(&s(&["T %3 ⌨ api", "T %4 ⌨ web"]));
+        assert_eq!(t.terms().collect::<Vec<_>>(), [(PaneId(3), "api")]);
+        assert_eq!(t.term_name(PaneId(4)), None);
+        assert_eq!(
+            t.term_label(PaneId(4)),
+            Some("⌨ web"),
+            "its mark stays known"
+        );
     }
 }

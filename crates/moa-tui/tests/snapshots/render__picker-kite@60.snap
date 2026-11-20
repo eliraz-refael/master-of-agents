@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ picker ─────────────────────────────────────────────────╮
+│ › kite                                      6/12 · 8 live│
+│ ─────────────────────────────────────────────────────────│
+│  ? Release notes asks you    2h  Ship it today?          │
+│  ✓ 設計レビュー  done        3h                          │
+│  ⌨ kite          terminal                                │
+│  ○ Closed thing  ended       9h                          │
+│  ⠸ Rust scaffold working     2m                          │
+│  💤Old spike     asleep      8h                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│ ↵ jump · ↑↓ move · esc close                             │
+╰──────────────────────────────────────────────────────────╯

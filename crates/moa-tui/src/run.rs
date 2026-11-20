@@ -238,10 +238,14 @@ pub fn mouse_of(ev: MouseEvent) -> Option<Mouse> {
 }
 
 /// Where the terminal's cursor stands: while a prompt is answered, in the cell after the
-/// editor's text (which [`Screen`] leaves free), else nowhere (hidden).
+/// editor's text (which [`Screen`] leaves free); else where the screen puts it (after the
+/// picker's query); else nowhere (hidden).
 pub fn cursor(screen: &Screen, prompting: bool) -> Option<(u16, u16)> {
     let f = screen.geometry.footer;
-    if !prompting || f.w == 0 || f.h == 0 {
+    if !prompting {
+        return screen.cursor;
+    }
+    if f.w == 0 || f.h == 0 {
         return None;
     }
     let used = u16::try_from(text::width(&screen.footer.text)).unwrap_or(u16::MAX);
@@ -470,6 +474,8 @@ struct Loop {
     linked_once: bool,
     /// The first connect has ended, either way.
     first_ended: bool,
+    /// The picker's pick went through: the panel closes once this turn is done.
+    closing: bool,
     /// `panel.log`, shared with the panic hook.
     log: Option<Logbook>,
     size: Size,
@@ -494,6 +500,7 @@ impl Loop {
             told_here: None,
             linked_once: false,
             first_ended: false,
+            closing: false,
             log: None,
             size,
             started: std::time::Instant::now(),
@@ -570,9 +577,9 @@ impl Loop {
         }
     }
 
-    /// Clears the footer's message.
+    /// Clears the footer's message. It answers no pick, so it never closes the picker.
     fn hush(&mut self) {
-        self.panel.replied(Ok(Done {
+        let _ = self.panel.replied(Ok(Done {
             text: String::new(),
             data: Default::default(),
         }));
@@ -583,12 +590,18 @@ impl Loop {
         for out in outs {
             match out {
                 Out::Quit => return true,
+                // A picker you started quits, as Ctrl-c quits any panel you started; one moa
+                // placed stays where it is.
+                Out::Close if !self.panel.managed() => return true,
+                Out::Close => {}
                 Out::Send(op) => match &mut self.link {
                     Link::Up { live, .. } => {
                         self.asked.insert(live.send(op));
                     }
-                    // Nothing is sent to another build; elsewhere the footer says why.
+                    // Nothing is sent to another build; elsewhere the footer says why. A
+                    // pick that wasn't sent waits for no reply.
                     _ => {
+                        self.panel.forget_pick();
                         let line = self.link_line();
                         self.panel.note(line.as_deref().unwrap_or(CONNECTING));
                     }
@@ -650,7 +663,8 @@ impl Loop {
                 // line answers the key, so it stays.
                 if key == Key::Ctrl('c') {
                     let cancels = self.panel.typing();
-                    if let Some(Out::Quit) = self.panel.interrupt() {
+                    let out = self.panel.interrupt();
+                    if self.act(out.into_iter().collect()) {
                         return Turn::Quit;
                     }
                     if let Some(line) = self.link_line().filter(|_| cancels) {
@@ -735,10 +749,13 @@ impl Loop {
                 if !self.asked.remove(&tag) {
                     return false;
                 }
-                self.panel.replied(result);
+                let out = self.panel.replied(result);
+                self.closing |= self.act(out.into_iter().collect());
             }
             LiveMsg::Closed => {
+                // No reply still owed will come: a pick waiting on one is forgotten.
                 self.asked.clear();
+                self.panel.forget_pick();
                 self.wait(0);
             }
         }
@@ -801,7 +818,9 @@ impl Loop {
                 self.asked.clear();
                 self.told_here = here;
                 match linked.refused {
-                    Some(why) => self.panel.replied(Err(why)),
+                    Some(why) => {
+                        let _ = self.panel.replied(Err(why));
+                    }
                     None => self.hush(),
                 }
                 self.follow_row();
@@ -918,6 +937,10 @@ impl Loop {
             Turn::Go(redraw) => redraw,
         };
         redraw |= self.drain();
+        if self.closing {
+            self.log("stopped: closed");
+            return Ok(true);
+        }
         if redraw {
             self.draw(term)?;
         }
@@ -1108,7 +1131,13 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::{Failed, Fault, Logbook, Loop, PanelOptions, Turn, Wake, now};
+    use moa_client::LiveMsg;
+    use moa_core::op::Done;
+    use moa_view::panel::Out;
+
+    use super::{
+        Failed, Fault, Link, Logbook, Loop, MISMATCH, PanelOptions, TRYING, Turn, Wake, now,
+    };
     use crate::theme::{ColorMode, Theme};
 
     const SIZE: Size = Size { w: 60, h: 12 };
@@ -1278,6 +1307,89 @@ mod tests {
         let mut by_hand = looped(Some(View::Tree), false);
         assert!(!by_hand.panel.managed());
         assert!(matches!(input(&mut by_hand, ctrl_c()), Turn::Quit));
+    }
+
+    /// A pick made while the link isn't up is dropped, and forgotten: the footer keeps the
+    /// link's line, and the next Enter offers the pick again (sent once the link is back)
+    /// rather than waiting on a reply that will never come.
+    #[tokio::test]
+    async fn a_pick_that_couldnt_be_sent_is_forgotten() {
+        let (data, ctx) = moa_view::fixture::lantern();
+        let enter = || Event::Key(KeyEvent::from(KeyCode::Enter));
+        let links = [
+            (
+                Link::Waiting {
+                    waited: 0,
+                    sleep: Box::pin(tokio::time::sleep(std::time::Duration::from_secs(60))),
+                },
+                TRYING,
+            ),
+            (Link::Mismatch, MISMATCH),
+        ];
+        for (link, line) in links {
+            let mut lp = looped(Some(View::Picker), false);
+            lp.data = data.clone();
+            lp.link = link;
+            for _ in 0..2 {
+                assert!(matches!(input(&mut lp, enter()), Turn::Go(true)));
+                assert!(lp.asked.is_empty(), "nothing was sent");
+                let screen = lp.panel.screen(&lp.data, &ctx, SIZE);
+                let fits = moa_view::text::ellipsize(line, usize::from(screen.geometry.footer.w));
+                assert_eq!(screen.footer.text, fits);
+            }
+            // What Enter gives the loop now: the pick itself, which a link that is up sends.
+            let outs = lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
+            assert!(matches!(outs[..], [Out::Send(_)]), "{outs:?}");
+        }
+    }
+
+    /// S7: Esc, Ctrl-c and Ctrl-g close a picker you started; one moa placed stays where it
+    /// is. A pick closes the picker once its reply says it went through, with an end line in
+    /// `panel.log`; a refused one leaves it open.
+    #[tokio::test]
+    async fn the_picker_closes_itself() {
+        let esc = Event::Key(KeyEvent::from(KeyCode::Esc));
+        let ctrl_g = Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        for key in [esc, ctrl_c(), ctrl_g] {
+            let mut by_hand = looped(Some(View::Picker), false);
+            assert!(matches!(input(&mut by_hand, key), Turn::Quit));
+        }
+        let mut placed = looped(Some(View::Picker), true);
+        assert!(matches!(input(&mut placed, ctrl_c()), Turn::Go(true)));
+        assert_eq!(placed.panel.view(), View::Picker);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (data, ctx) = moa_view::fixture::lantern();
+        let mut lp = looped(Some(View::Picker), false);
+        lp.log = Logbook::new(&PanelOptions {
+            log: Some(dir.path().join("panel.log")),
+            ..lp.opts.clone()
+        });
+        lp.data = data;
+        let reply = |tag, result| LiveMsg::Reply { tag, result };
+        let outs = lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
+        assert!(matches!(outs[..], [Out::Send(_)]), "{outs:?}");
+        lp.asked.insert(1);
+        lp.take(reply(1, Err("its folder ~/x is gone".to_string())));
+        assert!(!lp.closing);
+        let mut term = terminal();
+        assert!(!lp.step(Wake::Tick, &mut term).unwrap());
+        assert!(shown(&term).contains("its folder ~/x is gone"));
+
+        lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
+        lp.asked.insert(2);
+        let done = Done {
+            text: "went to Fix login".to_string(),
+            data: Default::default(),
+        };
+        assert!(lp.take(reply(2, Ok(done))));
+        assert!(lp.closing);
+        assert!(lp.step(Wake::Tick, &mut term).unwrap());
+        let written = std::fs::read_to_string(dir.path().join("panel.log")).unwrap();
+        assert!(
+            written.lines().last().unwrap().ends_with("stopped: closed"),
+            "{written}"
+        );
     }
 
     /// Ctrl-c cancelling a prompt while moa is down gives the footer back to the down line,

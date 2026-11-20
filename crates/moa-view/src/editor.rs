@@ -68,16 +68,6 @@ impl Editor {
     /// `<label> <text>` in at most `width` cells, cleaned for drawing; when too long, its end
     /// is kept, where the typing is.
     pub fn shown(&self, width: usize) -> String {
-        let line = clean(&format!("{} {}", self.label, self.text));
-        let mut used = 0;
-        let mut start = line.len();
-        for (i, g) in line.grapheme_indices(true).rev() {
-            used += text::width(g);
-            if used > width {
-                break;
-            }
-            start = i;
-        }
-        line[start..].to_string()
+        text::tail(&clean(&format!("{} {}", self.label, self.text)), width)
     }
 }

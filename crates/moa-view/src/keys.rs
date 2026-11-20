@@ -154,7 +154,8 @@ pub fn hint(view: View, adopted_selected: bool) -> &'static str {
         View::Picture => {
             "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q"
         }
-        View::Console | View::Picker | View::EmptySlot | View::Help | View::Setup => "",
+        View::Picker => "↵ jump · ↑↓ move · esc close",
+        View::Console | View::EmptySlot | View::Help | View::Setup => "",
     }
 }
 

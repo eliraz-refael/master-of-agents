@@ -894,6 +894,7 @@ fn a_pane_exit_for_an_older_generations_binding_is_ignored() {
                 lines(&["S $0 moa"]),
                 lines(&["P %7 @1 $0 1 1 0 0 "]),
                 lines(&["C 0 $0 /dev/ttys1"]),
+                Ok(Vec::new()),
             ],
         },
     );
@@ -946,6 +947,7 @@ fn with_a_cockpit_an_open_is_shown_through_the_queue() {
                 Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
                 Ok(vec!["P %5 @1 $0 1 1 0 1  0 empty-slot".into()]),
                 Ok(vec!["C 1 $1 client-9".into()]),
+                Ok(Vec::new()),
             ],
         },
     );

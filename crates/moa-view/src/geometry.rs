@@ -44,6 +44,8 @@ pub struct Geometry {
     pub framed: bool,
     /// The picture's tab row.
     pub tabs: Option<Rect>,
+    /// The picker's head, fixed above its list: the query line and a rule.
+    pub head: Option<Rect>,
     /// The list.
     pub body: Rect,
     /// The picture's activity strip; the rule above it is the line just above the rect.
@@ -62,8 +64,24 @@ pub const STRIP: u16 = 7;
 /// The picture has no frame: its tabs on line 0, the body, a rule, the 7-line strip, and the
 /// footer on the last line; a screen too short for the strip leaves it out. Anything else
 /// without a frame is laid out like the empty slot: the spike's margins, the body at x 2,
-/// y 1, and the footer on the last line. Parts too small to have cells are empty.
+/// y 1, and the footer on the last line. The picker's head takes the first [`HEAD`] lines of
+/// its body, framed or not. Parts too small to have cells are empty.
 pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
+    let mut g = layout(view, framed, size);
+    if view == View::Picker {
+        let b = g.body;
+        let head = b.h.min(HEAD);
+        g.head = Some(Rect::new(b.x, b.y, b.w, head));
+        g.body = Rect::new(b.x, b.y + head, b.w, b.h - head);
+    }
+    g
+}
+
+/// The picker's head: its query line and the rule under it.
+pub const HEAD: u16 = 2;
+
+/// Every part but the picker's head.
+fn layout(view: View, framed: bool, size: Size) -> Geometry {
     let Size { w, h } = size;
     if view == View::Picture {
         let tabs = Rect::new(0, 0, w, h.min(1));
@@ -81,6 +99,7 @@ pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
         return Geometry {
             framed: false,
             tabs: Some(tabs),
+            head: None,
             body: Rect::new(0, 1, w, body_h),
             strip,
             footer,
@@ -95,6 +114,7 @@ pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
         return Geometry {
             framed: false,
             tabs: None,
+            head: None,
             body: Rect::new(2, 1, w.saturating_sub(2), h.saturating_sub(2)),
             strip: None,
             footer,
@@ -110,6 +130,7 @@ pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
     Geometry {
         framed: true,
         tabs: None,
+        head: None,
         body: Rect::new(2, 1, inner_w, inner.saturating_sub(2)),
         strip: None,
         footer,

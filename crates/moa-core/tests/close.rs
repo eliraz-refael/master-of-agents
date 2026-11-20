@@ -5,7 +5,9 @@
 mod common;
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use moa_core::UtcMs;
 use moa_core::change::Change;
@@ -19,6 +21,7 @@ use moa_core::model::{
     Location, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
+use moa_core::publish::Topic;
 use moa_core::state::{Deps, LoadNote, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::link::NOT_READY;
@@ -747,6 +750,74 @@ fn a_terms_name_is_literal_and_cut() {
     let fx = send(&b, &mut st, 3, term_op(b.home.clone(), Some(long)));
     let name: String = format!("⌨ {long}").chars().take(24).collect();
     assert_eq!(the_query(&fx).1, [new_window(&name, &shown(&b.home))]);
+}
+
+/// S's agent was typed into a terminal moa opened, `%9`: while S is tagged there, the tab is
+/// S's session, not a terminal. Its agent left, a `close` (a client's input, not tmux's)
+/// takes the session tag off, and the `terms` topic has the terminal at once.
+#[test]
+fn a_terminal_whose_agent_left_is_published_by_the_close() {
+    let (r, fx) = closed_in_a_terminal("⌨ lantern");
+    // Its own label stays: only the session's tags come off.
+    assert_eq!(unsets(&fx), untagged("%9").iter().collect::<Vec<_>>());
+    let want = json!({ "%9": { "key": "%9", "name": "lantern" } });
+    assert_eq!(last_terms(&fx), Some(want.clone()), "{fx:?}");
+    assert_eq!(serde_json::to_value(&*terms(&r.st)).unwrap(), want);
+}
+
+/// The same terminal, its agent shown in the spot first: the label is still the agent's
+/// (`● boards`). It comes off with the session's tags, so the terminal is listed as `shell`,
+/// not under the ended session's title.
+#[test]
+fn a_terminal_whose_spot_agent_left_drops_the_agents_label() {
+    let (r, fx) = closed_in_a_terminal("● boards");
+    let mut want = untagged("%9");
+    want.push(unset("%9", "@moa_label"));
+    assert_eq!(unsets(&fx), want.iter().collect::<Vec<_>>());
+    let want = json!({ "%9": { "key": "%9", "name": "shell" } });
+    assert_eq!(last_terms(&fx), Some(want.clone()), "{fx:?}");
+    assert_eq!(serde_json::to_value(&*terms(&r.st)).unwrap(), want);
+}
+
+/// S adopted in `%9`, a terminal moa opened labelled `label`, listed by the link: while S
+/// is tagged there it is S's session, not a terminal. Then S's agent leaves and S is closed.
+fn closed_in_a_terminal(label: &str) -> (Rig, Vec<Effect>) {
+    AGENT_RUNS.with(|c| c.set(true));
+    let mut r = World::adopted().reconciled();
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: vec![
+                Ok(vec!["S $0 moa".into()]),
+                Ok(vec![format!("P %9 @9 $0 1 1 0 0 {S} 0 ")]),
+                Ok(Vec::new()),
+                Ok(vec![format!("T %9 {label}")]),
+            ],
+        },
+    );
+    assert!(terms(&r.st).is_empty(), "S's, not a terminal");
+    AGENT_RUNS.with(|c| c.set(false));
+    let fx = r.close(1);
+    (r, fx)
+}
+
+fn terms(st: &State) -> Arc<BTreeMap<String, serde_json::Value>> {
+    st.model().topics[&Topic::Terms].clone()
+}
+
+/// The `terms` rows of the last model `fx` published. Each model carries every topic: a
+/// commit's own may still have the old ones.
+fn last_terms(fx: &[Effect]) -> Option<serde_json::Value> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Publish(Publish::Model(m)) => m.topics.get(&Topic::Terms),
+            _ => None,
+        })
+        .map(|t| serde_json::to_value(&**t).unwrap())
+        .next_back()
 }
 
 /// A home that ends in `/` is still home: the tab is `⌨ ~`, by the op and by the key.

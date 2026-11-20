@@ -979,8 +979,15 @@ fn a_panel_follows_its_row() {
 fn unframed_views_share_the_empty_slots_layout() {
     let size = Size { w: 80, h: 24 };
     let picker = geometry(View::Picker, false, size);
-    assert_eq!(picker, geometry(View::EmptySlot, false, size));
+    let slot = geometry(View::EmptySlot, false, size);
     assert!(!picker.framed);
+    assert_eq!(picker.footer, slot.footer);
+    // The picker's head is the first two lines of the slot's body; its list, the rest.
+    let head = picker.head.expect("the picker has a head");
+    assert_eq!((head.x, head.y, head.w, head.h), (2, 1, 78, 2));
+    assert_eq!(picker.body.y, slot.body.y + 2);
+    assert_eq!(picker.body.h, slot.body.h - 2);
+    assert_eq!(slot.head, None);
 }
 
 #[test]

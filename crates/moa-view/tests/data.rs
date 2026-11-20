@@ -139,6 +139,14 @@ fn the_other_topics_decode_and_a_missing_adopted_reads_false() {
     );
     assert_eq!(data.panels["c7"].pane.as_deref(), Some("%3"));
 
+    data.upsert(
+        Topic::Terms,
+        vec![json!({"key": "%5", "name": "kite work"})],
+    );
+    assert_eq!(data.terms["%5"].name, "kite work");
+    data.delete(Topic::Terms, &["%5".into()]);
+    assert!(data.terms.is_empty());
+
     // Topics the views don't follow are ignored, not counted.
     data.upsert(Topic::Status, vec![json!({"key": "counts", "idle": 1})]);
     assert_eq!(data.unreadable(), 0);

@@ -280,6 +280,33 @@ fn the_cursor_follows_the_prompt() {
     assert!(!panel.prompting());
 }
 
+/// In the picker the cursor stands after the query, with no prompt open; a long query keeps
+/// its tail and a cell for the cursor before the count.
+#[test]
+fn the_cursor_stands_after_the_picker_query() {
+    let (data, ctx) = lantern();
+    let size = Size { w: 80, h: 16 };
+    let mut panel = Panel::new(View::Picker);
+    let screen = panel.screen(&data, &ctx, size);
+    let head = screen.geometry.head.unwrap();
+    // `› ` and nothing typed.
+    assert_eq!(
+        cursor(&screen, panel.prompting()),
+        Some((head.x + 2, head.y))
+    );
+    panel.paste("kite");
+    let screen = panel.screen(&data, &ctx, size);
+    assert_eq!(cursor(&screen, false), Some((head.x + 6, head.y)));
+    panel.paste(&"x".repeat(200));
+    let screen = panel.screen(&data, &ctx, size);
+    let (x, y) = cursor(&screen, false).unwrap();
+    assert_eq!(y, head.y);
+    let count = screen.head[0].chip.as_ref().unwrap();
+    // A cell between the cursor and the count.
+    let count_x = head.x + head.w - u16::try_from(count.text.chars().count()).unwrap();
+    assert_eq!(x + 2, count_x);
+}
+
 /// While moa is down and the panel waits for a key: what types into the footer still types,
 /// `q` in the picture quits, Ctrl-c is the panel's own (L14), and any other key tries again.
 #[test]
@@ -306,6 +333,14 @@ fn a_key_while_down_types_quits_or_tries_again() {
         assert_eq!(down_key(&tree, k), DownKey::Panel, "{k:?}");
     }
     assert_eq!(down_key(&tree, Key::Ctrl('c')), DownKey::Panel);
+
+    // The picker's closing keys quit a picker you started; the rest try again.
+    let picker = Panel::new(View::Picker);
+    for k in [Key::Esc, Key::Ctrl('g')] {
+        assert_eq!(down_key(&picker, k), DownKey::Quit, "{k:?}");
+    }
+    assert_eq!(down_key(&picker, Key::Char('q')), DownKey::Retry);
+    assert_eq!(down_key(&picker, Key::Ctrl('c')), DownKey::Panel);
 }
 
 /// After a first connect that failed, the footer says why and that a key tries again; once

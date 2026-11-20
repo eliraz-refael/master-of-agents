@@ -353,6 +353,7 @@ fn a_listing_from_before_the_tags_keeps_the_view() {
             Ok(vec!["S $1 _moa".into()]),
             Ok(panes.iter().map(|p| p.to_string()).collect()),
             Ok(Vec::new()),
+            Ok(Vec::new()),
         ],
     };
     // Only %12 is listed, untagged; %13 isn't there.

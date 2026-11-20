@@ -27,6 +27,8 @@ pub enum Tone {
     Late,
     Today,
     Soon,
+    /// Where the picker's query hits a title or a group: yellow, bold and underlined.
+    Hit,
 }
 
 impl Tone {
@@ -50,6 +52,7 @@ impl Tone {
             Tone::Late => "late",
             Tone::Today => "today",
             Tone::Soon => "soon",
+            Tone::Hit => "hit",
         }
     }
 }
@@ -94,6 +97,10 @@ pub enum Item {
     Task(TaskId),
     Project(ProjectId),
     Suggestion(SuggestionId),
+    /// A terminal moa opened, by its tab id (`%N`).
+    Term {
+        pane: String,
+    },
 }
 
 impl Item {
@@ -105,6 +112,7 @@ impl Item {
             Item::Task(_) => "task",
             Item::Project(_) => "project",
             Item::Suggestion(_) => "suggestion",
+            Item::Term { .. } => "term",
         }
     }
 }

@@ -12,6 +12,7 @@ use moa_core::cockpit::{spawn_cmds, spawn_tags};
 use moa_core::config::{BrainName, Config};
 use moa_core::panel::View;
 use moa_core::state::{Deps, PanelLaunch, State};
+use moa_core::tmux::cmd::literal_format;
 use moa_core::tmux::ids::{PaneId, WindowId};
 use moa_core::tmux::panes::{PANE_INFO, PANE_START, Tag, parse_panes};
 use moa_core::tmux::topology::{self, Topology};
@@ -474,6 +475,52 @@ fn the_cockpit_flag_names_the_moa_window() {
             "{w} ({other} is another tab): {panes:?}"
         );
     }
+}
+
+/// The refresh's queries on a real server: only the tab tagged `@moa_term` is a terminal,
+/// with its label read as moa set it, a run of `#`s halved and not collapsed (S6b).
+#[test]
+fn the_terminals_query_lists_only_terminals() {
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    tmux(&["new-session", "-d", "-s", "moa", "/bin/sh"]);
+    let shell = tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "=moa:",
+        "/bin/sh",
+    ]);
+    tmux(&["set-option", "-p", "-t", &shell, "@moa_term", "1"]);
+    let label = literal_format("⌨ kite ##x #[fg=red]");
+    tmux(&["set-option", "-p", "-t", &shell, "@moa_label", &label]);
+    // Each of the refresh's queries, as the link sends them.
+    let lists: Vec<Vec<String>> = topology::refresh_cmds()
+        .iter()
+        .map(|query| {
+            let args: Vec<&str> = std::iter::once(query.name())
+                .chain(query.argv().iter().map(String::as_str))
+                .collect();
+            tmux(&args).lines().map(str::to_string).collect()
+        })
+        .collect();
+    let [sessions, panes, clients, terms] = &lists[..] else {
+        panic!("four lists: {lists:?}");
+    };
+    let mut t = Topology::from_lists(sessions, panes, clients);
+    t.terms_listed(terms);
+    let shell: PaneId = shell.parse().expect("a pane id");
+    assert_eq!(
+        t.terms().collect::<Vec<_>>(),
+        [(shell, "kite ##x #[fg=red]")],
+        "{lists:?}"
+    );
 }
 
 /// L7 on a real server: a panel starts parked in `_moa`, in a window named by its view, in

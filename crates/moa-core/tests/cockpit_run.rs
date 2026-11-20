@@ -96,8 +96,8 @@ fn parked(id: u32, view: &str) -> String {
     pane(id, 100 + id, 1, false, view, false)
 }
 
-/// The listing's three answers: sessions `moa` (`$0`) and `_moa` (`$1`), `panes`, and moa's
-/// control client, plus a user's terminal on `moa` when `user`.
+/// The listing's four answers: sessions `moa` (`$0`) and `_moa` (`$1`), `panes`, moa's control
+/// client, plus a user's terminal on `moa` when `user`, and no terminals.
 fn lists(panes: &[String], user: bool) -> Vec<Result<Vec<String>, String>> {
     let sessions = if panes.iter().any(|p| p.contains(" $0 ")) {
         vec!["S $0 moa".to_string(), "S $1 _moa".to_string()]
@@ -108,7 +108,12 @@ fn lists(panes: &[String], user: bool) -> Vec<Result<Vec<String>, String>> {
     if user {
         clients.push(format!("C 0 $0 {TTY}"));
     }
-    vec![Ok(sessions), Ok(panes.to_vec()), Ok(clients)]
+    vec![
+        Ok(sessions),
+        Ok(panes.to_vec()),
+        Ok(clients),
+        Ok(Vec::new()),
+    ]
 }
 
 fn refresh(results: Vec<Result<Vec<String>, String>>) -> TmuxIn {
@@ -1690,6 +1695,30 @@ fn sleeping_the_spots_agent_with_no_spare_respawns_the_spot() {
     assert_eq!(panel_starts(&st), starts + 1);
     let lantern = st.session(sid(L)).unwrap();
     assert!(lantern.asleep_at.is_some(), "{lantern:?}");
+}
+
+/// An agent typed into a terminal moa opened, in the spot: its tab carries the terminal mark
+/// too, but it is Lantern's session, so it is no terminal. Slept with no spare, the respawn
+/// takes the mark off with the session's: on the chain's `Ok` the empty slot is no terminal
+/// either, before any listing.
+#[test]
+fn a_vacate_drops_the_terminal_mark_at_once() {
+    let mut st = lantern_off_screen(false);
+    let fx = handle_checked(&mut st, Input::Timer(TimerKey::Sleep), hours_later());
+    let n = committed_then_listed(&fx);
+    let mut listing = lists(&lantern_in_the_spot(false), false);
+    listing[3] = Ok(vec!["T %9 ● lantern".into()]);
+    let fx = feed(&mut st, answer(n, listing));
+    let terms = |st: &State| st.model().topics[&Topic::Terms].clone();
+    assert!(terms(&st).is_empty(), "the session's, not a terminal");
+    let (n, chain) = the_chain(&fx);
+    assert!(
+        chain.contains(&"set-option -p -u -t %9 @moa_term".to_string()),
+        "{chain:?}"
+    );
+    feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert!(st.tmux().topology.term_label(PaneId(9)).is_none());
+    assert!(terms(&st).is_empty(), "{:?}", terms(&st));
 }
 
 /// `x` on the tree's row (`session.close`) of the spot's agent: closed at once, then the

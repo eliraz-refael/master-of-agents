@@ -461,6 +461,7 @@ fn op_methods_match_the_variants() {
             path: "/x".into(),
             title: Some("t".into()),
         },
+        Op::TermShow { pane: "%5".into() },
         Op::Brief(NoParams),
         Op::Attention(NoParams),
         Op::Suggest {

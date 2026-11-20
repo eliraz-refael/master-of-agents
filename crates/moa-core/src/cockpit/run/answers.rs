@@ -129,7 +129,7 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
     if !awaits(state, seq, |s| matches!(s, Step::Listing)) {
         return Vec::new();
     }
-    if !state.tmux.scene_listed(&answers) {
+    let Some(logs) = state.tmux.scene_listed(&answers) else {
         // tmux's own words, only when tmux returned an error; else moa couldn't parse it.
         let raw = log(
             LogLevel::Warn,
@@ -183,8 +183,9 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         };
         fx.extend(finish(state, said));
         return fx;
-    }
-    let mut fx: Vec<Effect> = stopped_listed(state).into_iter().collect();
+    };
+    let mut fx = logs;
+    fx.extend(stopped_listed(state));
     // The operation's own listing: a panel healed now is tagged before its chain goes out.
     fx.extend(crate::panel::listed(state, true));
     let scene = Scene::read(&state.tmux.topology, |p| bound_session(state, p));
@@ -267,6 +268,7 @@ pub(crate) fn chain_answered(
                     fx.extend(crate::panel::resolve_panels(state));
                     for pane in &then.untagged {
                         state.tmux.untag_sent(*pane);
+                        state.tmux.term_unset(*pane);
                     }
                     // Straight into the topology: any listing answered after this `Ok` was
                     // run after the chain, so it shows the panes where the chain put them.

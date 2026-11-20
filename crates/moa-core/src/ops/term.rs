@@ -11,15 +11,16 @@ use crate::effect::{Effect, LogLevel};
 use crate::folders::tilde;
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::state::State;
-use crate::tmux::cmd::{Cmd, literal_format};
+use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
 use crate::tmux::link::{
-    Answer, Asked, Link, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, set_pane_option,
+    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, set_pane_option,
 };
 
 const TERM_NOT_FULL: &str = "term needs a full path";
 const NO_SHELL: &str = "couldn't open a terminal; see moa's log";
+const TERM_GONE: &str = "that terminal is gone";
 
 /// Whom a terminal's tab is told about: the `term` op's caller, by its reply, or the client
 /// whose `Ctrl-a $` asked for it, by a notice.
@@ -151,6 +152,8 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
         .or_else(|| path.file_name().map(|f| f.to_string_lossy().into_owned()))
         // A folder with no name, like `/`, is named as it is written.
         .unwrap_or_else(|| folder.clone());
+    // On one line: a newline in the label would print as a line of the terminals' list.
+    let named = one_line(&named);
     // Cut before `literal_format`, as a launch's name is.
     let name = cut(&format!("⌨ {named}"), WINDOW_NAME_CUT);
     let cmd = Cmd::new("new-window")
@@ -175,13 +178,13 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
 }
 
 /// tmux answered a terminal's new window: its tab is tagged as a terminal with its label
-/// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen.
-/// Nothing is saved, so the commands go out on their own, before the reply or notice. A
-/// caller that went has nobody to tell, and the tab is still tagged. `replied` is whether
-/// tmux answered: otherwise the link went before it did, and the answer says so as a
-/// launch's does.
+/// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen; the
+/// topology has the terminal at once, so the `terms` topic does. Nothing is saved, so the
+/// commands go out on their own, before the reply or notice. A caller that went has nobody
+/// to tell, and the tab is still tagged. `replied` is whether tmux answered: otherwise the
+/// link went before it did, and the answer says so as a launch's does.
 pub(crate) fn term_opened(
-    state: &State,
+    state: &mut State,
     tell: Option<Tell>,
     name: &str,
     path: &str,
@@ -205,18 +208,19 @@ pub(crate) fn term_opened(
         _ => None,
     });
     let mut fx = Vec::new();
-    let result = match (pane, &state.tmux().link) {
-        (Some((pane, _)), Link::Up { conn, .. }) => {
+    let result = match (pane, state.tmux().conn()) {
+        (Some((pane, _)), Some(conn)) => {
             let mut cmds = vec![
                 set_pane_option(pane, "@moa_term", "1"),
                 set_pane_option(pane, "@moa_label", &literal_format(name)),
             ];
             cmds.extend(focus_cmds(pane));
             fx.push(Effect::Tmux {
-                conn: *conn,
+                conn,
                 cmds,
                 token: None,
             });
+            state.tmux.term_sent(pane, name);
             let deps = state.deps();
             Ok(Done {
                 text: format!(
@@ -237,6 +241,36 @@ pub(crate) fn term_opened(
     };
     fx.extend(told(state, tell, result));
     fx
+}
+
+/// `term.show` (the picker's pick of a terminal): brings terminal `pane` to the screen, as
+/// `term` did when it opened. Nothing is saved, so the select goes out on its own, before
+/// the reply. A pane that isn't a terminal in the topology is gone, as is one running a
+/// session's agent: it is that session, shown by `session.focus`.
+pub(crate) fn show(state: &State, conn: ConnId, req: ReqId, pane: &str) -> Vec<Effect> {
+    let reply = |result| Effect::Reply { conn, req, result };
+    let Some(link) = state.tmux().conn() else {
+        return vec![reply(Err(OpError(NO_TERMINAL.into())))];
+    };
+    let topology = &state.tmux().topology;
+    let shown = pane
+        .parse::<PaneId>()
+        .ok()
+        .and_then(|p| Some((p, topology.term_name(p)?)));
+    let Some((pane, name)) = shown else {
+        return vec![reply(Err(OpError(TERM_GONE.into())))];
+    };
+    vec![
+        Effect::Tmux {
+            conn: link,
+            cmds: focus_cmds(pane).to_vec(),
+            token: None,
+        },
+        reply(Ok(Done {
+            text: format!("went to {name}"),
+            data: json!({ "pane": pane.to_string(), "name": name }),
+        })),
+    ]
 }
 
 /// `path` with `home` (as given, or `canonical`) written `~`.

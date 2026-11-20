@@ -119,13 +119,15 @@ fn lists(panes: &[String]) -> TmuxIn {
     }
 }
 
-/// A listing's three answers: sessions `moa` and `_moa`, `panes`, and [`CLIENTS`].
+/// A listing's four answers: sessions `moa` and `_moa`, `panes`, [`CLIENTS`], and no
+/// terminals.
 fn listing_of(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
     let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
     vec![
         lines(&["S $0 moa", "S $1 _moa"]),
         Ok(panes.to_vec()),
         lines(CLIENTS),
+        Ok(Vec::new()),
     ]
 }
 

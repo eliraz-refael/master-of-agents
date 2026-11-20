@@ -1,6 +1,6 @@
 //! A [`Screen`] drawn into a ratatui [`Buffer`]: the rounded frame and its title, the
-//! picture's tabs, brand, rule and strip, the body's lines with the selection bar and the
-//! hover mark, the chips, and the footer.
+//! picture's tabs, brand, rule and strip, the picker's head, the body's lines with the
+//! selection bar and the hover mark, the chips, and the footer.
 //!
 //! Every string is placed by `moa_view::text`'s display width, so a wide glyph (💤, CJK) takes
 //! two cells and is never split: the cell it covers is left as ratatui leaves it, empty, and a
@@ -30,6 +30,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, screen: &Screen, theme: &Theme) {
     if let Some(row) = g.tabs {
         draw_tabs(&mut canvas, row, screen, theme);
     }
+    if let Some(head) = g.head {
+        for (line, y) in screen.head.iter().zip(head.y..head.y + head.h) {
+            draw_line(&mut canvas, head, y, line, Mark::Plain, theme);
+        }
+    }
     draw_body(&mut canvas, g.body, &screen.body, theme);
     if let Some(strip) = g.strip {
         // The rule is the line just above the strip.
@@ -58,18 +63,21 @@ fn plain(theme: &Theme, span: &Span) -> Style {
 }
 
 /// A body span's style under its line's mark: on the selection bar, the bar's colours with
-/// the span's bold; on a hovered line, its own colours on the hover background.
+/// the span's bold (and a hit's underline, as the spike's); on a hovered line, its own
+/// colours on the hover background.
 fn marked(theme: &Theme, mark: Mark, span: &Span) -> Style {
     match mark {
         Mark::Plain => plain(theme, span),
         Mark::Hovered => theme.hovered().patch(plain(theme, span)),
         Mark::Selected => {
-            let style = theme.selected();
+            let mut style = theme.selected();
             if span.bold {
-                style.add_modifier(Modifier::BOLD)
-            } else {
-                style
+                style = style.add_modifier(Modifier::BOLD);
             }
+            if span.tone == Tone::Hit {
+                style = style.add_modifier(Modifier::UNDERLINED);
+            }
+            style
         }
     }
 }
@@ -118,21 +126,25 @@ fn draw_tabs(canvas: &mut Canvas<'_>, row: Part, screen: &Screen, theme: &Theme)
 /// with a cell to spare.
 fn draw_body(canvas: &mut Canvas<'_>, body: Part, lines: &[(Line, Mark)], theme: &Theme) {
     for ((line, mark), y) in lines.iter().zip(body.y..body.y + body.h) {
-        let mark = *mark;
-        match mark {
-            Mark::Plain => {}
-            Mark::Hovered => canvas.fill(body.x, y, body.w, theme.hovered()),
-            Mark::Selected => canvas.fill(body.x, y, body.w, theme.selected()),
-        }
-        canvas.spans(body.x, y, body.w, &line.spans, |s| marked(theme, mark, s));
-        if let Some(chip) = &line.chip {
-            let chip_w = text::width(&chip.text);
-            let text_w = text::width(line.text().trim_end());
-            let fits = usize::from(body.w) > text_w + chip_w;
-            if let (true, Ok(chip_w)) = (fits, u16::try_from(chip_w)) {
-                let x = body.x + body.w - chip_w;
-                canvas.put(x, y, chip_w, &chip.text, chip_style(theme, mark, chip));
-            }
+        draw_line(canvas, body, y, line, *mark, theme);
+    }
+}
+
+/// One line of `part` on row `y`, under `mark`.
+fn draw_line(canvas: &mut Canvas<'_>, part: Part, y: u16, line: &Line, mark: Mark, theme: &Theme) {
+    match mark {
+        Mark::Plain => {}
+        Mark::Hovered => canvas.fill(part.x, y, part.w, theme.hovered()),
+        Mark::Selected => canvas.fill(part.x, y, part.w, theme.selected()),
+    }
+    canvas.spans(part.x, y, part.w, &line.spans, |s| marked(theme, mark, s));
+    if let Some(chip) = &line.chip {
+        let chip_w = text::width(&chip.text);
+        let text_w = text::width(line.text().trim_end());
+        let fits = usize::from(part.w) > text_w + chip_w;
+        if let (true, Ok(chip_w)) = (fits, u16::try_from(chip_w)) {
+            let x = part.x + part.w - chip_w;
+            canvas.put(x, y, chip_w, &chip.text, chip_style(theme, mark, chip));
         }
     }
 }

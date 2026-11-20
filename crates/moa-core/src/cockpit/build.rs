@@ -11,9 +11,10 @@ use crate::model::SessionId;
 use crate::panel::View;
 use crate::reconcile::untag_cmds;
 use crate::sleep::kill_pane;
-use crate::tmux::cmd::{Cmd, literal_format};
+use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{set_pane_option, unset_pane_option};
+use crate::tmux::topology::AGENT_MARK;
 
 /// The spike's cut for a title on a tab or a frame.
 const TITLE_CHARS: usize = 24;
@@ -111,11 +112,16 @@ pub(crate) fn panel_tags(pane: PaneId, view: View) -> Vec<Cmd> {
     cmds
 }
 
-/// The tags of the agent in the spot (L10): `agent`, `● <title>`, and no frame.
+/// The tags of the agent in the spot (L10): `agent`, `● <title>` (on one line: the tab may
+/// be a terminal, whose label the terminals' list prints), and no frame.
 fn agent_tags(pane: PaneId, title: &str) -> Vec<Cmd> {
     let mut cmds = vec![
         set_pane_option(pane, "@moa_view", AGENT),
-        set_pane_option(pane, "@moa_label", &format!("● {}", literal_format(title))),
+        set_pane_option(
+            pane,
+            "@moa_label",
+            &format!("{AGENT_MARK}{}", literal_format(&one_line(title))),
+        ),
     ];
     cmds.extend(frame(pane, false));
     cmds
