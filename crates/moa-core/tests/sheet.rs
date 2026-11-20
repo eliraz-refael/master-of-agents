@@ -883,6 +883,33 @@ fn with_picker_behind(linked: &[u32]) -> Vec<String> {
     panes
 }
 
+/// Final review re-review: sessions in a group (`tmux new -t moa`) share their tabs, so the
+/// picker linked into `moa` is in `work` too, where `work` stays on a tab of its own. While
+/// `moa` shows it, it stays open: a listing asks nothing.
+#[test]
+fn a_sheet_one_session_shows_stays_open() {
+    let mut st = open_picker();
+    // `_moa`, then `moa` showing it (its line last in `$0`), then `work` on its own tab.
+    let mut panes = with_picker(false, &[0]);
+    panes.push(format!("P %{PICKER} @{PICKER_TAB} $2 1 0 0 0  0 picker"));
+    panes.push("P %8 @8 $2 1 1 0 0  0 ".to_string());
+    let users: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 2)];
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&panes, users),
+        },
+    );
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        st.tmux().topology.current_of(TmuxSessionId(2)),
+        Some(WindowId(8))
+    );
+    assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL));
+}
+
 /// Final review M2: a tab left while its own open was still in flight (that news is
 /// dropped then) is closed by the next listing, which shows its session on another tab.
 #[test]

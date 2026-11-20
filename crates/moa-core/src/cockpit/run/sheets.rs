@@ -168,8 +168,8 @@ fn busy(state: &State) -> BTreeSet<View> {
 /// session that nobody looks at, and closes them:
 /// - with no open recorded: a daemon that restarted forgot them, or a lost link dropped
 ///   their close;
-/// - open, but some session it is linked into shows another of its tabs: it was left while
-///   its own open was under way (that news is dropped then), or while the link was lost.
+/// - open, but no session it is linked into shows it: it was left while its own open was
+///   under way (that news is dropped then), or while the link was lost.
 ///
 /// Not while an open or close of that sheet is under way: its open isn't recorded until tmux
 /// answers its link, and the tab it selects isn't current until then.
@@ -187,8 +187,11 @@ pub(super) fn stale_sheets(state: &mut State) -> Vec<Effect> {
                 return false;
             };
             let linked = linked_out(topology, w);
-            let left = linked.iter().any(|s| topology.current_of(*s) != Some(w));
-            !linked.is_empty() && (!state.sheets.contains_key(p) || left)
+            // Sessions in a group share their tabs: a link into one is in every one of them,
+            // and the others stay on their own tab. So an open is left only once no session
+            // it is linked into shows it.
+            let shown = linked.iter().any(|s| topology.current_of(*s) == Some(w));
+            !linked.is_empty() && (!state.sheets.contains_key(p) || !shown)
         })
         .collect();
     let mut fx = Vec::new();
