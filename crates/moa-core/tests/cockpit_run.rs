@@ -1013,6 +1013,28 @@ fn a_listing_tmux_refused_is_said_plainly() {
     assert!(queries(&fx).is_empty());
 }
 
+/// A listing that came back `Ok` but isn't the three lists moa asked for isn't tmux
+/// refusing: the log says moa couldn't read it, and the reply is the same plain refusal.
+#[test]
+fn a_listing_that_does_not_parse_is_not_blamed_on_tmux() {
+    let mut st = up();
+    let n = the_listing(&apply(&mut st, 1, "focus"));
+    let fx = feed(&mut st, answer(n, vec![Ok(vec!["S $0 moa".into()])]));
+    let said = "moa couldn't read the terminal's state; try again";
+    assert_eq!(reply_text(&fx), Err(said.into()));
+    assert_eq!(
+        logs(&fx),
+        [
+            (
+                LogLevel::Warn,
+                "moa couldn't read tmux's listing: it didn't parse".to_string()
+            ),
+            (LogLevel::Warn, said.to_string())
+        ]
+    );
+    assert!(queries(&fx).is_empty());
+}
+
 /// L12: every listing that shows a stopped panel running again forgets it, so its next
 /// death is logged too.
 #[test]
