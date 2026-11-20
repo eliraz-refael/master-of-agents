@@ -164,6 +164,7 @@ fn cockpit_lists(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
         Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
         Ok(panes.to_vec()),
         Ok(vec!["C 1 $1 client-9".into(), "C 0 $0 /dev/ttys1".into()]),
+        Ok(Vec::new()),
     ]
 }
 

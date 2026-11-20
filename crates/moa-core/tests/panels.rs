@@ -902,6 +902,7 @@ fn lists(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
         Ok(vec!["S $0 moa".to_string(), "S $1 _moa".to_string()]),
         Ok(panes.to_vec()),
         Ok(vec!["C 1 $1 client-9".to_string()]),
+        Ok(Vec::new()),
     ]
 }
 

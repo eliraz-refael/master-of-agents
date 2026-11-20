@@ -267,6 +267,7 @@ pub(crate) fn chain_answered(
                     fx.extend(crate::panel::resolve_panels(state));
                     for pane in &then.untagged {
                         state.tmux.untag_sent(*pane);
+                        state.tmux.term_unset(*pane);
                     }
                     // Straight into the topology: any listing answered after this `Ok` was
                     // run after the chain, so it shows the panes where the chain put them.

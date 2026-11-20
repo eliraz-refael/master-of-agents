@@ -71,6 +71,7 @@ fn up() -> State {
                 Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
                 Ok(vec!["P %3 @1 $0 1 1 0 1  0 console".into()]),
                 Ok(vec!["C 0 $0 /dev/ttys1".into()]),
+                Ok(Vec::new()),
             ],
         },
     );

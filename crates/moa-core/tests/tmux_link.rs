@@ -91,6 +91,7 @@ fn lists(sessions: &[&str]) -> Vec<Result<Vec<String>, String>> {
         lines(sessions),
         lines(&["P %1 @1 $0 1 1 0 0 "]),
         lines(&["C 0 $0 /dev/ttys1"]),
+        Ok(Vec::new()),
     ]
 }
 

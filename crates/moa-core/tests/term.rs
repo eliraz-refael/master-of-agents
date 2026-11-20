@@ -121,6 +121,71 @@ fn a_terminals_label_is_read_as_moa_set_it() {
     );
 }
 
+/// A label holding a newline prints a line of its own: a `T` line for a pane the panes'
+/// list doesn't hold counts for nothing, nor does a pane listed twice.
+#[test]
+fn a_forged_terminal_line_counts_for_nothing() {
+    let (_b, st) = listed_with(&["T %5 ⌨ kite", "T %9 forged", "T %6 a", "T %6 b"]);
+    assert_eq!(terms(&st), BTreeMap::from([row("%5", "kite")]));
+}
+
+/// A title holding a newline names its tab on one line.
+#[test]
+fn a_terminals_name_is_one_line() {
+    let (b, mut st) = listed_with(&[]);
+    let fx = send(
+        &b,
+        &mut st,
+        1,
+        Op::TermOpen {
+            path: b.home.join("work"),
+            title: Some("a\nT %6 b".into()),
+        },
+    );
+    let [(_, cmds)] = &queries(&fx)[..] else {
+        panic!("one query: {fx:?}");
+    };
+    let argv = cmds[0].argv();
+    let at = argv.iter().position(|a| a == "-n").expect("a name");
+    assert_eq!(argv[at + 1], "⌨ a T %6 b");
+}
+
+const SESSION: &str = "00000000-0000-4000-8000-0000000000c1";
+
+/// An agent typed into a terminal moa opened: its tab keeps the terminal mark, but it runs
+/// a session's agent (it is tagged with the session), so it is that session and no
+/// terminal. In the spot its label is the agent's (`● fix`); back in a tab of its own it
+/// has none. Once the agent is gone and the tag with it, it is a terminal again.
+#[test]
+fn a_terminal_running_an_agent_is_its_session() {
+    let (b, mut st) = loaded(TOML);
+    link_up(&b, &mut st);
+    let in_spot = format!("P %5 @2 $0 1 1 0 1 {SESSION} 0 agent");
+    refreshed(&b, &mut st, &[&in_spot, BOTH[1]], &["T %5 ● fix"]);
+    assert!(terms(&st).is_empty(), "{:?}", terms(&st));
+    assert_eq!(
+        replies(&show(&b, &mut st, "%5")),
+        [(ReqId(1), Err(OpError("that terminal is gone".into())))]
+    );
+
+    let in_a_tab = format!("P %5 @4 $0 1 1 0 0 {SESSION} 0 ");
+    let notified = TmuxIn::Notification(Notification::WindowClose {
+        window: WindowId(2),
+    });
+    feed(&b, &mut st, notified.clone());
+    refreshed(&b, &mut st, &[&in_a_tab, BOTH[1]], &["T %5 "]);
+    assert!(terms(&st).is_empty(), "{:?}", terms(&st));
+    assert_eq!(
+        replies(&show(&b, &mut st, "%5")),
+        [(ReqId(1), Err(OpError("that terminal is gone".into())))]
+    );
+
+    feed(&b, &mut st, notified);
+    let fx = refreshed(&b, &mut st, BOTH, &["T %5 ⌨ kite"]);
+    let want = BTreeMap::from([row("%5", "kite")]);
+    assert_eq!(published_terms(&fx), std::slice::from_ref(&want));
+}
+
 /// A listing that changes no terminal publishes none.
 #[test]
 fn the_same_terminals_again_publish_nothing() {

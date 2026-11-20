@@ -908,8 +908,8 @@ fn focus_resumes_a_sleeping_session() {
     assert_eq!(selects(&fx), select("%7").iter().collect::<Vec<_>>());
 }
 
-/// The three lists of a cockpit listing: sessions `moa` and `_moa`, `panes`, and moa's
-/// control client with a user's terminal.
+/// The four lists of a cockpit listing: sessions `moa` and `_moa`, `panes`, moa's control
+/// client with a user's terminal, and no terminals.
 fn cockpit_lists(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
     vec![
         Ok(vec!["S $0 moa".to_string(), "S $1 _moa".to_string()]),
@@ -918,6 +918,7 @@ fn cockpit_lists(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
             "C 1 $1 client-9".to_string(),
             "C 0 $0 /dev/ttys1".to_string(),
         ]),
+        Ok(Vec::new()),
     ]
 }
 

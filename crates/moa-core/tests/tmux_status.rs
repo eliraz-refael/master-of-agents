@@ -141,6 +141,7 @@ fn lists(panes: &[&str], clients: &[&str]) -> TmuxIn {
             lines(&["S $0 moa", "S $1 _moa"]),
             lines(panes),
             lines(clients),
+            Ok(Vec::new()),
         ],
     }
 }

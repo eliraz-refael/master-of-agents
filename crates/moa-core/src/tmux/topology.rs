@@ -110,20 +110,27 @@ impl Topology {
         t
     }
 
-    /// The terminals' list (`LIST_TERMS`) replaces the terminals known. Lines that don't
-    /// parse are skipped; an unset label prints as an empty one.
+    /// The terminals' list (`LIST_TERMS`) replaces the terminals known; it is read after the
+    /// panes' list. Lines that don't parse are skipped; an unset label prints as an empty
+    /// one. A label holding a newline could print a line of its own, so only a pane the
+    /// panes' list holds counts, and a pane listed twice doesn't.
     pub fn terms_listed(&mut self, lines: &[String]) {
         self.terms.clear();
+        let mut twice = BTreeSet::new();
         for line in lines {
             let mut f = line.splitn(3, ' ');
             if let (Some("T"), Some(pane)) = (f.next(), f.next())
                 && let Ok(pane) = pane.parse()
+                && self.has_pane(pane)
             {
                 // Set through `literal_format`, which doubles every `#`.
                 let label = f.next().unwrap_or_default().replace("##", "#");
-                self.terms.insert(pane, label);
+                if self.terms.insert(pane, label).is_some() {
+                    twice.insert(pane);
+                }
             }
         }
+        self.terms.retain(|p, _| !twice.contains(p));
     }
 
     fn add_pane(&mut self, line: &str) {
@@ -341,24 +348,38 @@ impl Topology {
         self.dead.contains(&p)
     }
 
-    /// Terminal `p`'s label (`@moa_label`); none for a pane that isn't a terminal.
+    /// The label (`@moa_label`) of `p`, when it carries the terminal mark (`@moa_term`),
+    /// whatever runs in it.
     pub fn term_label(&self, p: PaneId) -> Option<&str> {
         self.terms.get(&p).map(String::as_str)
     }
 
-    /// Terminal `p`'s name: its label without the `⌨ ` moa puts first.
+    /// Terminal `p`'s name: its label without the `⌨ ` moa puts first. None when `p` isn't
+    /// a terminal, or runs a session's agent (it is tagged with the session): it is that
+    /// session then, and its label is the agent's.
     pub fn term_name(&self, p: PaneId) -> Option<&str> {
+        if self.moa_sessions.contains_key(&p) {
+            return None;
+        }
         self.term_label(p).map(term_name)
     }
 
-    /// Every terminal, by pane, with its name.
+    /// Every terminal, by pane, with its name; none that runs a session's agent.
     pub fn terms(&self) -> impl Iterator<Item = (PaneId, &str)> + '_ {
-        self.terms.iter().map(|(p, label)| (*p, term_name(label)))
+        self.terms
+            .iter()
+            .filter(|(p, _)| !self.moa_sessions.contains_key(p))
+            .map(|(p, label)| (*p, term_name(label)))
     }
 
     /// Records that `p` is a terminal labelled `label`, as moa just tagged it.
     pub fn set_term(&mut self, p: PaneId, label: &str) {
         self.terms.insert(p, label.to_string());
+    }
+
+    /// Records that `p` has no terminal mark any more, as moa just unset it.
+    pub fn unset_term(&mut self, p: PaneId) {
+        self.terms.remove(&p);
     }
 
     /// Records that `p` is tagged with session `id`, as moa just set it.

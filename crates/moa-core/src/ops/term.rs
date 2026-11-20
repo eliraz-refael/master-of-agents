@@ -152,6 +152,8 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
         .or_else(|| path.file_name().map(|f| f.to_string_lossy().into_owned()))
         // A folder with no name, like `/`, is named as it is written.
         .unwrap_or_else(|| folder.clone());
+    // On one line: a newline in the label would print as a line of the terminals' list.
+    let named = named.replace(char::is_control, " ");
     // Cut before `literal_format`, as a launch's name is.
     let name = cut(&format!("⌨ {named}"), WINDOW_NAME_CUT);
     let cmd = Cmd::new("new-window")
@@ -243,8 +245,9 @@ pub(crate) fn term_opened(
 
 /// `term.show` (the picker's pick of a terminal): brings terminal `pane` to the screen, as
 /// `term` did when it opened. Nothing is saved, so the select goes out on its own, before
-/// the reply. A pane that isn't a terminal in the topology is gone.
-pub(crate) fn show(state: &mut State, conn: ConnId, req: ReqId, pane: &str) -> Vec<Effect> {
+/// the reply. A pane that isn't a terminal in the topology is gone, as is one running a
+/// session's agent: it is that session, shown by `session.focus`.
+pub(crate) fn show(state: &State, conn: ConnId, req: ReqId, pane: &str) -> Vec<Effect> {
     let reply = |result| Effect::Reply { conn, req, result };
     let Some(link) = state.tmux().conn() else {
         return vec![reply(Err(OpError(NO_TERMINAL.into())))];

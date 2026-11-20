@@ -137,19 +137,52 @@ pub struct TmuxState {
     pub(crate) unfinished_reconciles: u32,
     /// This connection's reconciles were given up on, and the log said so.
     pub(crate) reconcile_given_up: bool,
-    /// The `@moa_session` tags moa sent after a saved commit that no listing has shown yet,
-    /// by pane. The daemon sends a listing at once but holds the tag until the commit is
-    /// released, so a listing can predate the tag: these stay in the topology until one
-    /// shows it (R18 reads the tag).
-    sent_tags: BTreeMap<PaneId, SessionId>,
-    /// The `@moa_view` tags moa set on panels it just started that no listing has shown
-    /// yet, by pane: a listing the new window's own notification asked for can predate them
-    /// (L7). Kept as `sent_tags` are.
-    sent_views: BTreeMap<PaneId, &'static str>,
-    /// The terminals moa tagged (`@moa_term`, with their `@moa_label`) that no listing has
-    /// shown yet, by pane: the listing the new window's notification asked for can predate
-    /// the tags. Kept as `sent_tags` are.
-    sent_terms: BTreeMap<PaneId, String>,
+    /// Moa's tags that no listing has shown yet.
+    sent: Sent,
+}
+
+/// Moa's tags that no listing has shown yet, by pane: each stays in the topology until a
+/// listing shows it ([`keep_until_listed`]).
+#[derive(Default, Debug)]
+struct Sent {
+    /// The `@moa_session` tags moa sent after a saved commit. The daemon sends a listing at
+    /// once but holds the tag until the commit is released, so a listing can predate the
+    /// tag (R18 reads the tag).
+    tags: BTreeMap<PaneId, SessionId>,
+    /// The `@moa_view` tags moa set on panels it just started: a listing the new window's
+    /// own notification asked for can predate them (L7).
+    views: BTreeMap<PaneId, &'static str>,
+    /// The terminals moa tagged (`@moa_term`, with their `@moa_label`): the listing the new
+    /// window's notification asked for can predate the tags.
+    terms: BTreeMap<PaneId, String>,
+}
+
+impl Sent {
+    fn clear(&mut self) {
+        *self = Sent::default();
+    }
+
+    /// A listing rebuilt `topology`: the tags it doesn't show yet go back in.
+    fn keep(&mut self, topology: &mut Topology) {
+        keep_until_listed(
+            &mut self.tags,
+            topology,
+            |t, p| t.moa_session(p).is_some(),
+            |t, p, id| t.tag(p, *id),
+        );
+        keep_until_listed(
+            &mut self.views,
+            topology,
+            |t, p| t.view_of(p).is_some(),
+            |t, p, view| t.set_view(p, view),
+        );
+        keep_until_listed(
+            &mut self.terms,
+            topology,
+            |t, p| t.term_label(p).is_some(),
+            |t, p, label| t.set_term(p, label),
+        );
+    }
 }
 
 /// What a pane query was asked for: who reads its answer.
@@ -298,9 +331,7 @@ impl Default for TmuxState {
             reconciled: false,
             unfinished_reconciles: 0,
             reconcile_given_up: false,
-            sent_tags: BTreeMap::new(),
-            sent_views: BTreeMap::new(),
-            sent_terms: BTreeMap::new(),
+            sent: Sent::default(),
         }
     }
 }
@@ -531,9 +562,7 @@ impl TmuxState {
     pub(crate) fn reload(&mut self) -> Vec<Effect> {
         self.refresh = Refresh::Idle;
         // A failed commit's held tags were never sent; the refresh below shows the rest.
-        self.sent_tags.clear();
-        self.sent_views.clear();
-        self.sent_terms.clear();
+        self.sent.clear();
         self.written.reset();
         self.reconciled = false;
         // The ping out may have been lost with the handling that sent it: its callers wait
@@ -835,21 +864,21 @@ impl TmuxState {
     /// Moa tagged `pane` with session `id`, after a saved commit: the topology knows it at
     /// once, and keeps it through listings that don't show it yet.
     pub(crate) fn tag_sent(&mut self, pane: PaneId, id: SessionId) {
-        self.sent_tags.insert(pane, id);
+        self.sent.tags.insert(pane, id);
         self.topology.tag(pane, id);
     }
 
     /// Moa tagged the panel it just started in `pane` with `view` (L7): the topology knows
     /// it at once, and keeps it through listings that don't show it yet.
     pub(crate) fn view_sent(&mut self, pane: PaneId, view: &'static str) {
-        self.sent_views.insert(pane, view);
+        self.sent.views.insert(pane, view);
         self.topology.set_view(pane, view);
     }
 
     /// Moa tagged the terminal it just opened in `pane` (`@moa_term`), labelled `label`:
     /// the topology knows it at once, and keeps it through listings that don't show it yet.
     pub(crate) fn term_sent(&mut self, pane: PaneId, label: &str) {
-        self.sent_terms.insert(pane, label.to_string());
+        self.sent.terms.insert(pane, label.to_string());
         self.topology.set_term(pane, label);
     }
 
@@ -860,13 +889,13 @@ impl TmuxState {
         for (pane, view) in views {
             match view {
                 Some(view) => {
-                    if let Some(sent) = self.sent_views.get_mut(pane) {
+                    if let Some(sent) = self.sent.views.get_mut(pane) {
                         *sent = view;
                     }
                     self.topology.set_view(*pane, view);
                 }
                 None => {
-                    self.sent_views.remove(pane);
+                    self.sent.views.remove(pane);
                     self.topology.unset_view(*pane);
                 }
             }
@@ -882,8 +911,15 @@ impl TmuxState {
     /// Moa took the session tag off `pane`, after a saved commit: neither the topology nor
     /// the tags waiting for a listing keep it.
     pub(crate) fn untag_sent(&mut self, pane: PaneId) {
-        self.sent_tags.remove(&pane);
+        self.sent.tags.remove(&pane);
         self.topology.untag(pane);
+    }
+
+    /// A cockpit chain that tmux ran took the terminal mark (`@moa_term`) off `pane`: it is
+    /// no terminal any more, in the topology or among the tags waiting for a listing.
+    pub(crate) fn term_unset(&mut self, pane: PaneId) {
+        self.sent.terms.remove(&pane);
+        self.topology.unset_term(pane);
     }
 
     /// Reads the lists again, at most one in flight and one more after it.
@@ -923,9 +959,7 @@ impl TmuxState {
             self.refresh = Refresh::Idle;
             self.unping();
             self.reconciled = false;
-            self.sent_tags.clear();
-            self.sent_views.clear();
-            self.sent_terms.clear();
+            self.sent.clear();
             self.unfinished_reconciles = 0;
             self.reconcile_given_up = false;
         }
@@ -971,9 +1005,7 @@ impl TmuxState {
             _ => Link::Down,
         };
         self.topology = Topology::default();
-        self.sent_tags.clear();
-        self.sent_views.clear();
-        self.sent_terms.clear();
+        self.sent.clear();
         self.written.reset();
         self.refresh = Refresh::Idle;
         // Nobody is known to be attached any more: the status clock stops.
@@ -1055,41 +1087,20 @@ impl TmuxState {
         fx
     }
 
-    /// The topology from the lists `refresh_cmds` asks for, keeping the tags sent that they
-    /// don't show yet. `false`, with what was known kept, when they aren't those lists.
+    /// The topology from the four lists `refresh_cmds` asks for, keeping the tags sent that
+    /// they don't show yet. `false`, with what was known kept, when they aren't four lists.
     fn rebuild(&mut self, results: &[Result<Vec<String>, String>]) -> bool {
-        let (sessions, panes, clients, terms) = match results {
+        match results {
             [Ok(sessions), Ok(panes), Ok(clients), Ok(terms)] => {
-                (sessions, panes, clients, terms.as_slice())
+                self.topology = Topology::from_lists(sessions, panes, clients);
+                self.topology.terms_listed(terms);
+                // A tag the listing doesn't show yet may have been sent after it was asked.
+                self.sent.keep(&mut self.topology);
+                true
             }
-            // Three lists, as before terminals were listed: none is.
-            [Ok(sessions), Ok(panes), Ok(clients)] => (sessions, panes, clients, &[][..]),
             // No information: what was known stays.
-            _ => return false,
-        };
-        self.topology = Topology::from_lists(sessions, panes, clients);
-        self.topology.terms_listed(terms);
-        // A tag the listing doesn't show yet may have been sent after it was asked.
-        let topology = &mut self.topology;
-        keep_until_listed(
-            &mut self.sent_tags,
-            topology,
-            |t, p| t.moa_session(p).is_some(),
-            |t, p, id| t.tag(p, *id),
-        );
-        keep_until_listed(
-            &mut self.sent_views,
-            topology,
-            |t, p| t.view_of(p).is_some(),
-            |t, p, view| t.set_view(p, view),
-        );
-        keep_until_listed(
-            &mut self.sent_terms,
-            topology,
-            |t, p| t.term_label(p).is_some(),
-            |t, p, label| t.set_term(p, label),
-        );
-        true
+            _ => false,
+        }
     }
 
     /// Answers every waiter with `result`.

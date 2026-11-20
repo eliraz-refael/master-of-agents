@@ -477,8 +477,8 @@ fn the_cockpit_flag_names_the_moa_window() {
     }
 }
 
-/// The refresh's terminals' query on a real server: only the tab tagged `@moa_term` is
-/// listed, with its label read as moa set it (S6b).
+/// The refresh's queries on a real server: only the tab tagged `@moa_term` is a terminal,
+/// with its label read as moa set it, a run of `#`s halved and not collapsed (S6b).
 #[test]
 fn the_terminals_query_lists_only_terminals() {
     let tb = TempBrain::new(None);
@@ -498,22 +498,28 @@ fn the_terminals_query_lists_only_terminals() {
         "/bin/sh",
     ]);
     tmux(&["set-option", "-p", "-t", &shell, "@moa_term", "1"]);
-    let label = literal_format("⌨ kite #[fg=red]");
+    let label = literal_format("⌨ kite ##x #[fg=red]");
     tmux(&["set-option", "-p", "-t", &shell, "@moa_label", &label]);
-    let query = topology::refresh_cmds()
-        .pop()
-        .expect("the terminals' query");
-    let args: Vec<&str> = std::iter::once(query.name())
-        .chain(query.argv().iter().map(String::as_str))
+    // Each of the refresh's queries, as the link sends them.
+    let lists: Vec<Vec<String>> = topology::refresh_cmds()
+        .iter()
+        .map(|query| {
+            let args: Vec<&str> = std::iter::once(query.name())
+                .chain(query.argv().iter().map(String::as_str))
+                .collect();
+            tmux(&args).lines().map(str::to_string).collect()
+        })
         .collect();
-    let lines: Vec<String> = tmux(&args).lines().map(str::to_string).collect();
-    let mut t = Topology::default();
-    t.terms_listed(&lines);
+    let [sessions, panes, clients, terms] = &lists[..] else {
+        panic!("four lists: {lists:?}");
+    };
+    let mut t = Topology::from_lists(sessions, panes, clients);
+    t.terms_listed(terms);
     let shell: PaneId = shell.parse().expect("a pane id");
     assert_eq!(
         t.terms().collect::<Vec<_>>(),
-        [(shell, "kite #[fg=red]")],
-        "{lines:?}"
+        [(shell, "kite ##x #[fg=red]")],
+        "{lists:?}"
     );
 }
 

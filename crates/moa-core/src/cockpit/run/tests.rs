@@ -60,7 +60,12 @@ fn up() -> State {
         TmuxIn::Replies {
             conn: 1,
             token: TmuxToken::Refresh,
-            results: vec![Ok(vec!["S $1 _moa".into()]), Ok(Vec::new()), Ok(Vec::new())],
+            results: vec![
+                Ok(vec!["S $1 _moa".into()]),
+                Ok(Vec::new()),
+                Ok(Vec::new()),
+                Ok(Vec::new()),
+            ],
         },
     );
     st
@@ -84,6 +89,7 @@ fn lists(panes: Vec<String>) -> Vec<Result<Vec<String>, String>> {
         Ok(vec!["S $0 moa".into(), "S $1 _moa".into()]),
         Ok(panes),
         Ok(vec!["C 0 $0 /dev/ttys1".into()]),
+        Ok(Vec::new()),
     ]
 }
 

@@ -43,6 +43,13 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     fold_in(&mut fx, released);
     // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
     sleep::run(state, &now, sleep_fired, &mut fx);
+    // The terminals are the topology's: a listing's, a terminal's own tag, a session's tag
+    // (a terminal running an agent is its session). The views hear of them when they changed.
+    fx.extend(
+        state
+            .publish_changed(Topic::Terms)
+            .map(|m| Effect::Publish(Publish::Model(m))),
+    );
     // Last, so the status line shows what this input saved, after its `Persist`.
     status::run(state, &now, &mut fx);
     fx
@@ -324,13 +331,6 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fold_in(&mut fx, more);
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
-            // The terminals are the topology's (a listing's, or a terminal's own tag): the
-            // views hear of them when they changed.
-            fx.extend(
-                state
-                    .publish_changed(Topic::Terms)
-                    .map(|m| Effect::Publish(Publish::Model(m))),
-            );
             fx
         }
         Input::Hook { reply, envelope } => {

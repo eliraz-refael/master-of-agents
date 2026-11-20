@@ -95,7 +95,8 @@ pub struct LayoutRow {
 }
 
 /// A `terms` row (key: its tab id, `%N`): a terminal moa opened (`@moa_term`), named by its
-/// label without the `⌨ `. Read from the topology: nothing about it is saved.
+/// label without the `⌨ `. Read from the topology: nothing about it is saved. One running a
+/// session's agent is that session, and has no row.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TermRow {
     pub name: String,

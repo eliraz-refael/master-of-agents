@@ -528,6 +528,7 @@ fn cockpit_scene(old: bool) -> Vec<Result<Vec<String>, String>> {
         lines(&["S $0 moa".into(), "S $1 _moa".into()]),
         lines(&panes),
         lines(&["C 1 $1 client-9".into()]),
+        Ok(Vec::new()),
     ]
 }
 
