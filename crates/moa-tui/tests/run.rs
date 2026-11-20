@@ -12,14 +12,14 @@ use crossterm::event::{
 };
 use moa_core::op::Op;
 use moa_core::panel::View;
-use moa_core::publish::PanelRow;
+use moa_core::publish::{PanelRow, Topic};
 use moa_core::tmux::ids::PaneId;
 use moa_platform::TmuxSocket;
 use moa_tui::run::{
     DownKey, INIT, RESTORE, claim_pane, cursor, down_key, down_line, first_ops, key_of, log_line,
-    mouse_of, reconnect_delays, reconnect_ops,
+    mouse_of, once_ops, reconnect_delays, reconnect_ops, topics,
 };
-use moa_view::data::Data;
+use moa_view::data::{Data, TOPICS};
 use moa_view::fixture::lantern;
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
@@ -115,6 +115,7 @@ fn first_ops_register_and_restore_here() {
                 pane: Some("%3".into()),
                 view: Some(View::Plan),
                 placed: true,
+                once: false,
             },
             Op::UiHere {
                 folder: Some("/x".into()),
@@ -128,6 +129,7 @@ fn first_ops_register_and_restore_here() {
                 pane: None,
                 view: None,
                 placed: false,
+                once: false,
             },
             Op::UiHere { folder: None },
         ]
@@ -367,15 +369,60 @@ fn the_down_line_is_honest() {
 #[test]
 fn a_log_line_names_the_view_and_the_pane() {
     assert_eq!(
-        log_line("default", Some(View::Tree), Some(pane("%3")), "started"),
+        log_line(
+            "default",
+            Some(View::Tree),
+            false,
+            Some(pane("%3")),
+            "started"
+        ),
         "[default] panel tree in %3: started"
     );
     assert_eq!(
-        log_line("work", None, None, "stopped by SIGTERM"),
+        log_line("work", None, false, None, "stopped by SIGTERM"),
         "[work] panel - in -: stopped by SIGTERM"
     );
     assert_eq!(
-        log_line("default", Some(View::Plan), None, "panicked: one\ntwo"),
+        log_line(
+            "default",
+            Some(View::Plan),
+            false,
+            None,
+            "panicked: one\ntwo"
+        ),
         "[default] panel plan in -: panicked: one two"
     );
+    // A popup (S8) says so.
+    assert_eq!(
+        log_line("default", Some(View::Picker), true, None, "stopped: quit"),
+        "[default] panel picker (popup) in -: stopped: quit"
+    );
+}
+
+/// S8: a popup registers as one, with no tab and no folder to tell, and reads only what its
+/// view needs; every other panel reads every topic.
+#[test]
+fn a_popup_registers_as_one_and_reads_its_views_topics() {
+    assert_eq!(
+        once_ops(View::Picker),
+        vec![Op::UiPanel {
+            pane: None,
+            view: Some(View::Picker),
+            placed: false,
+            once: true,
+        }]
+    );
+    assert_eq!(
+        topics(View::Picker, true),
+        [
+            Topic::Sessions,
+            Topic::Groups,
+            Topic::Projects,
+            Topic::Terms,
+            Topic::Brain
+        ]
+    );
+    assert_eq!(topics(View::Help, true), [Topic::Brain, Topic::Layouts]);
+    assert_eq!(topics(View::Picker, false), TOPICS);
+    assert_eq!(topics(View::Tree, false), TOPICS);
 }

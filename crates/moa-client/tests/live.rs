@@ -157,6 +157,7 @@ async fn first_ops_are_answered_before_the_snapshot() {
             pane: Some("%1".into()),
             view: None,
             placed: false,
+            once: false,
         },
         Op::UiHere { folder: None },
     ];

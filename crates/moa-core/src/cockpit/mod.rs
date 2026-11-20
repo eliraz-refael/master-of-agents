@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 pub(crate) use scene::{AGENT, HIDDEN};
 pub use scene::{PaneAt, Place, Role, Scene};
-pub use spawn::{NO_AUTOSTART, spawn_cmds, spawn_tags};
+pub use spawn::{NO_AUTOSTART, panel_env_of, spawn_cmds, spawn_tags};
 
 use crate::layout::{Leaf, Node, leaves};
 use crate::model::SessionId;

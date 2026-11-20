@@ -899,7 +899,7 @@ expression: all
             "type": "object"
           },
           {
-            "description": "A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`\nit shows, and whether moa `placed` it (it runs with `MOA_NO_AUTOSTART`). The view moa\ntagged the tab with wins over the one asked for; without either it gets the one this\npane last had, else the picture. Answers `{key, view, managed}`: `managed` when the\nview is moa's.",
+            "description": "A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`\nit shows, and whether moa `placed` it (it runs with `MOA_NO_AUTOSTART`). The view moa\ntagged the tab with wins over the one asked for; without either it gets the one this\npane last had, else the picture. Answers `{key, view, managed}`: `managed` when the\nview is moa's. `once`: a popup (`moa panel … --once`), which tmux ends when its\nprogram does.",
             "properties": {
               "method": {
                 "const": "ui.panel",
@@ -907,6 +907,10 @@ expression: all
               },
               "params": {
                 "properties": {
+                  "once": {
+                    "default": false,
+                    "type": "boolean"
+                  },
                   "pane": {
                     "default": null,
                     "type": [

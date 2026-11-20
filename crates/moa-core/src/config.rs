@@ -98,6 +98,7 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "sql",
     "service",
     "panel",
+    "pick",
     "hook",
     "help",
     "ls",
@@ -201,12 +202,24 @@ pub struct UiConfig {
     /// moa's terminal turns the mouse on (V11). With `false` moa says nothing about the
     /// mouse, so the user's own setting stands.
     pub mouse: bool,
+    /// The form of the session picker `Ctrl-a /` opens; `s` opens the other one (S8).
+    pub picker: Form,
 }
 
 impl Default for UiConfig {
     fn default() -> UiConfig {
-        UiConfig { mouse: true }
+        UiConfig {
+            mouse: true,
+            picker: Form::Popup,
+        }
     }
+}
+
+/// A form the picker opens in: a popup over the tab you're on, or a full tab of its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Form {
+    Popup,
+    Tab,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -236,6 +249,8 @@ struct RawConfig {
 struct RawUi {
     /// Checked by hand, so any value gets the one plain line.
     mouse: Option<toml::Value>,
+    /// The same.
+    picker: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -474,6 +489,12 @@ impl Config {
             None => UiConfig::default().mouse,
             Some(toml::Value::Boolean(on)) => *on,
             Some(_) => return Err(problem("mouse in [ui] must be true or false")),
+        };
+        config.ui.picker = match &raw.ui.picker {
+            None => UiConfig::default().picker,
+            Some(toml::Value::String(s)) if s == "popup" => Form::Popup,
+            Some(toml::Value::String(s)) if s == "tab" => Form::Tab,
+            Some(_) => return Err(problem(r#"picker in [ui] must be "popup" or "tab""#)),
         };
         config.setup.skipped = raw
             .setup

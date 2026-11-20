@@ -874,6 +874,132 @@ fn a_closed_master_is_heard_as_the_terminal_going() {
     assert!(moa_platform::terminal_gone(slave.as_fd()));
 }
 
+// --- Popups (S8): `moa panel picker --once`, run here in a tab of its own ---
+
+/// The picker's footer hint: it shows once the picker draws.
+const PICKER_HINT: &str = "↵ jump";
+
+/// A new tab in `moa` running `cmd`, with `env` (`K=V`) as well; its pane, which stays
+/// when its program ends.
+fn tab_running(tb: &TempBrain, cmd: &str, env: &[&str]) -> String {
+    let mut args = vec!["new-window", "-d", "-t", "=moa:", "-P", "-F", "#{pane_id}"];
+    for e in env {
+        args.extend(["-e", e]);
+    }
+    args.push(cmd);
+    let pane = tmux(tb, &args);
+    tmux(
+        tb,
+        &["set-option", "-p", "-t", &pane, "remain-on-exit", "on"],
+    );
+    pane
+}
+
+/// Waits until `pane`'s program has ended, with status 0.
+#[track_caller]
+fn ended_well(tb: &TempBrain, pane: &str) {
+    let field = |f: &str| tmux(tb, &["display-message", "-p", "-t", pane, f]);
+    let dead = wait_for(SHOWS, || (field("#{pane_dead}") == "1").then_some(()));
+    assert!(
+        dead.is_some(),
+        "{pane} never ended\n{}",
+        tab_shows(tb, pane)
+    );
+    // tmux 3.4 and 3.5 built with utempter can lose the exit until tmux reaps a child (see
+    // `sigterm_and_sighup_give_the_terminal_back`); this tab is the test's, so the test
+    // nudges.
+    tmux(tb, &["run-shell", "true"]);
+    let status = wait_for(SHOWS, || {
+        let s = field("#{pane_dead_status}");
+        (!s.is_empty()).then_some(s)
+    });
+    assert_eq!(status.as_deref(), Some("0"), "{}", tab_shows(tb, pane));
+}
+
+/// S8: a popup's panel claims no tab, whatever `TMUX_PANE` says (tmux gives a popup none;
+/// here it runs in a tab, which has one): no `panels` row names its tab, and its own row
+/// has none. Esc closes it with status 0, and `panel.log` has its start line and its end
+/// line, naming it `picker (popup)`.
+#[test]
+fn a_once_panel_claims_no_pane_and_exits_on_esc() {
+    let r = rig();
+    r.session("a", "Kite", None);
+    let pane = tab_running(&r.tb, &format!("exec '{MOA}' panel picker --once"), &[]);
+    r.shows(&pane, &["Kite", PICKER_HINT]);
+    let rows = || {
+        let rows = panels(&r.tb);
+        let popups = rows
+            .iter()
+            .filter(|row| row["view"] == "picker" && row["pane"].is_null())
+            .count();
+        let named = rows.iter().any(|row| row["pane"] == pane.as_str());
+        (popups == 1 && !named).then_some(())
+    };
+    assert!(
+        wait_for(SHOWS, rows).is_some(),
+        "panels: {:?}",
+        panels(&r.tb)
+    );
+    // Drawn without a frame of its own: tmux frames the popup.
+    assert!(
+        !screen_of(&r.tb, &pane).contains('╭'),
+        "{}",
+        tab_shows(&r.tb, &pane)
+    );
+
+    tmux(&r.tb, &["send-keys", "-t", &pane, "Escape"]);
+    ended_well(&r.tb, &pane);
+    let log = fs::read_to_string(r.tb.paths().log_dir().join("panel.log")).unwrap_or_default();
+    let mine: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.split_once("panel picker (popup) in -: ").map(|(_, w)| w))
+        .collect();
+    assert_eq!(mine, ["started", "stopped: quit"], "{log}");
+}
+
+/// S8: a popup moa's own key started (`MOA_NO_AUTOSTART`) with moa down never starts moa:
+/// it says moa isn't running, and any key, Ctrl-c among them, closes it with status 0. It
+/// isn't moa's: it draws its view, and Ctrl-c never shows the managed line. `moa pick` is
+/// the same panel.
+#[test]
+fn a_once_panel_with_moa_down_says_so_and_exits() {
+    let r = rig();
+    shutdown(&r.tb);
+    let free = || {
+        fs::File::open(r.tb.paths().lock(B))
+            .is_ok_and(|f| f.try_lock().is_ok())
+            .then_some(())
+    };
+    assert!(wait_for(SHOWS, free).is_some(), "moa didn't stop");
+
+    let picks = [
+        (format!("exec '{MOA}' panel picker --once"), "x"),
+        (format!("exec '{MOA}' pick"), "C-c"),
+    ];
+    for (cmd, key) in picks {
+        let pane = tab_running(&r.tb, &cmd, &["MOA_NO_AUTOSTART=1"]);
+        r.shows(&pane, &["moa isn't running", "›"]);
+        tmux(&r.tb, &["send-keys", "-t", &pane, key]);
+        ended_well(&r.tb, &pane);
+        let shown = screen_of(&r.tb, &pane);
+        assert!(!shown.contains("moa's layout"), "{cmd}: {shown}");
+        assert!(free().is_some(), "{cmd} started moa");
+    }
+}
+
+/// S8: only the picker and help draw as a popup.
+#[test]
+fn once_refuses_other_views() {
+    let tb = TempBrain::new(None);
+    let o = run(&tb, &["panel", "tree", "--once"], &[]);
+    assert!(!o.status.success());
+    assert!(
+        err(&o).contains("--once works only for the picker and help"),
+        "{}",
+        err(&o)
+    );
+}
+
 /// `plain` drops every escape sequence `capture-pane -e` or a terminal may write, and only
 /// those: a CSI up to its final byte, an OSC, DCS, APC or PM up to BEL or ST, a charset
 /// designation with its one character, and any other two-character escape.

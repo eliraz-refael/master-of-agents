@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use moa_core::config::{AccountName, BrainName, Config, caller_store};
+use moa_core::config::{AccountName, BrainName, Config, Form, caller_store};
 use moa_core::model::AgentKind;
 
 const HOME: &str = "/h";
@@ -524,6 +524,22 @@ fn ui_mouse_parses() {
     let refused = "moa.toml: mouse in [ui] must be true or false";
     for bad in ["\"no\"", "0", "1", "\"false\"", "[true]"] {
         assert_eq!(err(&format!("[ui]\nmouse = {bad}\n")), refused, "{bad}");
+    }
+}
+
+/// S8: `Ctrl-a /` opens the picker as a popup unless `[ui] picker = "tab"`; anything else is
+/// refused.
+#[test]
+fn ui_picker_parses() {
+    let picker = |text: &str| Config::parse(text, home()).map(|c| c.ui.picker);
+    assert_eq!(picker("").unwrap(), Form::Popup, "absent is the popup");
+    assert_eq!(Config::default().ui.picker, Form::Popup);
+    assert_eq!(picker("[ui]\n").unwrap(), Form::Popup);
+    assert_eq!(picker("[ui]\npicker = \"popup\"\n").unwrap(), Form::Popup);
+    assert_eq!(picker("[ui]\npicker = \"tab\"\n").unwrap(), Form::Tab);
+    let refused = r#"moa.toml: picker in [ui] must be "popup" or "tab""#;
+    for bad in ["\"drawer\"", "\"Popup\"", "\"\"", "true", "1", "[\"tab\"]"] {
+        assert_eq!(err(&format!("[ui]\npicker = {bad}\n")), refused, "{bad}");
     }
 }
 

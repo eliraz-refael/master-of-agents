@@ -24,7 +24,7 @@ use moa_client::{Client, ClientOptions, Live, LiveMsg};
 use moa_core::UtcMs;
 use moa_core::op::{Done, Op};
 use moa_core::panel::View;
-use moa_core::publish::CoreEvent;
+use moa_core::publish::{CoreEvent, Topic};
 use moa_core::tmux::ids::PaneId;
 use moa_platform::{TmuxSocket, canonical};
 use moa_proto::SnapshotMsg;
@@ -65,6 +65,9 @@ pub struct PanelOptions {
     /// `panel.log`, where the panel writes a line per start, give-up, signal and panic
     /// (L14); `None` writes nothing.
     pub log: Option<PathBuf>,
+    /// A popup's panel (`--once`, S8): it claims no pane, is never moa's, draws no frame,
+    /// reads only what its view needs, and ends when it closes or when moa is down.
+    pub once: bool,
 }
 
 /// Taking the terminal: the alternate screen, the cursor hidden, every mouse event (motion
@@ -83,6 +86,8 @@ const TRYING: &str = "moa isn't running; trying again…";
 const GAVE_UP: &str = "moa isn't running: press any key to try again";
 /// A panel moa placed gave up: a key can't start moa for it (L15), so it says to run moa.
 const PLACED_GAVE_UP: &str = "moa isn't running: run moa, then press any key";
+/// A popup found moa down: it tries no more, and any key closes it.
+const ONCE_DOWN: &str = "moa isn't running: press any key to close";
 /// The footer for an op sent while the first connect is under way.
 const CONNECTING: &str = "not connected to moa yet; try again in a moment";
 
@@ -150,6 +155,21 @@ pub fn down_line(why: Option<&str>, placed: bool) -> String {
     }
 }
 
+/// What the panel subscribes to: every topic a view reads, or a popup's view's own (S8).
+pub fn topics(view: View, once: bool) -> &'static [Topic] {
+    match (once, view) {
+        (true, View::Picker) => &[
+            Topic::Sessions,
+            Topic::Groups,
+            Topic::Projects,
+            Topic::Terms,
+            Topic::Brain,
+        ],
+        (true, View::Help) => &[Topic::Brain, Topic::Layouts],
+        _ => TOPICS,
+    }
+}
+
 /// What every connect sends first (V13): which panel this is, whether moa `placed` it (L18),
 /// then its selection's folder.
 pub fn first_ops(
@@ -163,9 +183,21 @@ pub fn first_ops(
             pane: pane.map(|p| p.to_string()),
             view,
             placed,
+            once: false,
         },
         Op::UiHere { folder: here },
     ]
+}
+
+/// What a popup (`--once`, S8) sends first: that it is one, showing `view`. It has no tab of
+/// its own, so it claims none and has no folder to tell.
+pub fn once_ops(view: View) -> Vec<Op> {
+    vec![Op::UiPanel {
+        pane: None,
+        view: Some(view),
+        placed: false,
+        once: true,
+    }]
 }
 
 /// What a reconnect sends first: the view `panel` shows now, the one moa last gave it
@@ -324,13 +356,17 @@ type Connecting = Pin<Box<dyn Future<Output = Result<Linked, Failed>>>>;
 
 /// Connects (V13): hello, then on a matching build the first ops, the topics and their
 /// snapshot.
-async fn connect(opts: ClientOptions, first: Vec<Op>) -> Result<Linked, Failed> {
+async fn connect(
+    opts: ClientOptions,
+    first: Vec<Op>,
+    topics: &'static [Topic],
+) -> Result<Linked, Failed> {
     let down = |e: moa_client::ClientError| Failed::Down(e.to_string());
     let client = Client::connect(opts).await.map_err(down)?;
     if !client.hello().matched {
         return Err(Failed::Mismatch);
     }
-    let (live, replies, snapshot) = client.live(TOPICS, first).await.map_err(down)?;
+    let (live, replies, snapshot) = client.live(topics, first).await.map_err(down)?;
     let mut linked = Linked {
         live,
         key: None,
@@ -508,8 +544,10 @@ impl Loop {
             deadline: None,
         };
         // moa tags a panel it places as it starts it (L7), so a placed panel is moa's
-        // before its row says so; a panel started by hand isn't.
-        lp.panel.set_managed(lp.placed());
+        // before its row says so; a panel started by hand isn't, and a popup never is,
+        // whatever `MOA_NO_AUTOSTART` says: it has no pane for moa to manage (S8).
+        lp.panel.set_managed(lp.placed() && !lp.opts.once);
+        lp.panel.set_popup(lp.opts.once);
         lp
     }
 
@@ -528,9 +566,11 @@ impl Loop {
     /// Starts a connect, as the first ops say from the panel's view and folder now. Only
     /// the first connect may start the daemon.
     fn connect(&mut self, waited: usize) {
-        let here = self.panel.here(&self.data);
+        let here = self.here();
         let (pane, placed) = (self.opts.pane, self.placed());
-        let first = if self.linked_once {
+        let first = if self.opts.once {
+            once_ops(self.panel.view())
+        } else if self.linked_once {
             reconnect_ops(pane, &self.panel, here.clone(), placed)
         } else {
             first_ops(pane, self.opts.view, here.clone(), placed)
@@ -539,11 +579,31 @@ impl Loop {
         if self.linked_once {
             client.autostart = None;
         }
+        let topics = topics(self.panel.view(), self.opts.once);
         self.link = Link::Connecting {
-            connect: Box::pin(connect(client, first)),
+            connect: Box::pin(connect(client, first, topics)),
             waited,
             here,
         };
+    }
+
+    /// The folder the selection is in, which `Ctrl-a $` opens a terminal in. A popup has no
+    /// tab for that key to come from, so it has none to tell.
+    fn here(&self) -> Option<String> {
+        match self.opts.once {
+            true => None,
+            false => self.panel.here(&self.data),
+        }
+    }
+
+    /// The footer while moa is down and the panel waits for a key: why the first connect
+    /// failed, if it did. A popup's key closes it.
+    fn down_note(&self, why: Option<&str>) -> String {
+        match (self.opts.once, why) {
+            (true, Some(why)) => format!("{why}; press any key to close"),
+            (true, None) => ONCE_DOWN.to_string(),
+            (false, _) => down_line(why, self.placed()),
+        }
     }
 
     /// Writes `what` to `panel.log`, naming the view the panel shows now.
@@ -572,7 +632,7 @@ impl Loop {
         match &self.link {
             Link::Up { .. } | Link::Connecting { .. } => None,
             Link::Waiting { .. } => Some(TRYING.to_string()),
-            Link::Down(why) => Some(down_line(why.as_deref(), self.placed())),
+            Link::Down(why) => Some(self.down_note(why.as_deref())),
             Link::Mismatch => Some(MISMATCH.to_string()),
         }
     }
@@ -672,6 +732,10 @@ impl Loop {
                     }
                     return Turn::Go(true);
                 }
+                // A popup tries moa no more once it is down: any key closes it.
+                if self.opts.once && matches!(self.link, Link::Down(_) | Link::Mismatch) {
+                    return Turn::Quit;
+                }
                 if matches!(self.link, Link::Down(_)) {
                     match down_key(&self.panel, key) {
                         DownKey::Quit => return Turn::Quit,
@@ -768,7 +832,14 @@ impl Loop {
     }
 
     /// Sleeps the `waited`th delay before trying again, or gives up when there are no more.
+    /// A popup doesn't wait: it is open only while you look at it, so it says moa is down
+    /// at once, and a key closes it.
     fn wait(&mut self, waited: usize) {
+        if self.opts.once {
+            self.link = Link::Down(None);
+            self.panel.note(ONCE_DOWN);
+            return;
+        }
         match self.delays.get(waited) {
             Some(delay) => {
                 self.link = Link::Waiting {
@@ -835,7 +906,7 @@ impl Loop {
                 // The first connect, which could start the daemon, says why it couldn't and
                 // that a key tries again. One that couldn't (a panel moa placed) waits for the
                 // daemon as a reconnect does.
-                self.panel.note(&down_line(Some(&line), self.placed()));
+                self.panel.note(&self.down_note(Some(&line)));
                 self.link = Link::Down(Some(line));
             }
             Err(Failed::Down(_)) => self.wait(waited),
@@ -855,8 +926,11 @@ impl Loop {
         changed
     }
 
-    /// Tells the daemon the selection's folder when it changed (V3).
+    /// Tells the daemon the selection's folder when it changed (V3). A popup never does.
     fn tell_here(&mut self) {
+        if self.opts.once {
+            return;
+        }
         let Link::Up { live, .. } = &mut self.link else {
             return;
         };
@@ -1136,7 +1210,8 @@ mod tests {
     use moa_view::panel::Out;
 
     use super::{
-        Failed, Fault, Link, Logbook, Loop, MISMATCH, PanelOptions, TRYING, Turn, Wake, now,
+        Failed, Fault, Link, Logbook, Loop, MISMATCH, ONCE_DOWN, PanelOptions, TRYING, Turn, Wake,
+        now,
     };
     use crate::theme::{ColorMode, Theme};
 
@@ -1163,6 +1238,7 @@ mod tests {
             home: "/nonexistent".into(),
             tz: jiff::tz::TimeZone::UTC,
             log: None,
+            once: false,
         };
         let theme = Theme {
             mode: ColorMode::True,
@@ -1390,6 +1466,65 @@ mod tests {
             written.lines().last().unwrap().ends_with("stopped: closed"),
             "{written}"
         );
+    }
+
+    /// A popup's loop (`--once`), as `looped` makes one otherwise.
+    fn popup(placed: bool) -> Loop {
+        let mut lp = looped(Some(View::Picker), placed);
+        lp.opts.once = true;
+        let opts = lp.opts.clone();
+        let mut lp = Loop::new(opts, lp.theme, SIZE);
+        lp.data = moa_view::fixture::lantern().0;
+        lp
+    }
+
+    /// S8: a popup is never moa's, whatever `MOA_NO_AUTOSTART` says, so its Ctrl-c and Esc
+    /// close it, and it draws no frame of its own (tmux frames the popup).
+    #[tokio::test]
+    async fn a_popup_is_never_managed_and_draws_no_frame() {
+        let esc = Event::Key(KeyEvent::from(KeyCode::Esc));
+        for placed in [true, false] {
+            let mut lp = popup(placed);
+            assert!(!lp.panel.managed(), "placed: {placed}");
+            let mut term = terminal();
+            lp.draw(&mut term).unwrap();
+            assert!(!shown(&term).contains('╭'), "{}", shown(&term));
+            assert!(matches!(input(&mut lp, ctrl_c()), Turn::Quit));
+            assert!(matches!(input(&mut popup(placed), esc.clone()), Turn::Quit));
+        }
+    }
+
+    /// S8: a popup that finds moa down says so at once rather than trying again, and any
+    /// key closes it; so does one that met another build. It never tells moa a folder.
+    #[tokio::test]
+    async fn a_popup_with_moa_down_closes_on_any_key() {
+        let key = || Event::Key(KeyEvent::from(KeyCode::Char('k')));
+        let mut lp = popup(true);
+        lp.linked(Err(Failed::Down("moa isn't running".to_string())));
+        assert!(matches!(lp.link, Link::Down(None)), "it doesn't try again");
+        assert_eq!(lp.link_line().as_deref(), Some(ONCE_DOWN));
+        let mut term = terminal();
+        lp.draw(&mut term).unwrap();
+        assert!(
+            shown(&term).contains("moa isn't running"),
+            "{}",
+            shown(&term)
+        );
+        assert!(matches!(input(&mut lp, key()), Turn::Quit));
+
+        // One that could start moa and couldn't says why.
+        let mut lp = popup(false);
+        lp.linked(Err(Failed::Down("can't start moa".to_string())));
+        assert_eq!(
+            lp.link_line().as_deref(),
+            Some("can't start moa; press any key to close")
+        );
+        assert!(matches!(input(&mut lp, key()), Turn::Quit));
+
+        let mut lp = popup(true);
+        lp.link = Link::Mismatch;
+        assert!(matches!(input(&mut lp, key()), Turn::Quit));
+        assert_eq!(lp.here(), None);
     }
 
     /// Ctrl-c cancelling a prompt while moa is down gives the footer back to the down line,

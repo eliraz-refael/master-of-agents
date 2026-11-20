@@ -1106,6 +1106,7 @@ fn a_placed_panel_going_asks_a_listing() {
                 pane: Some("%4".into()),
                 view: Some(View::Plan),
                 placed,
+                once: false,
             },
         );
         let fx = handle_checked(&mut st, Input::ClientGone(ConnId(1)), now());
@@ -1194,6 +1195,7 @@ fn panels_publish_only_when_a_view_changed() {
             pane: Some("%2".into()),
             view: Some(View::Tree),
             placed: false,
+            once: false,
         },
     );
     // `focus` keeps the tree a tree: only the commit's model.
@@ -1415,6 +1417,7 @@ fn the_terminal_key_follows_the_swap_at_once() {
             pane: Some("%2".into()),
             view: Some(View::Tree),
             placed: false,
+            once: false,
         },
     );
     let n = the_listing(&focus(&mut st, 1, L));
@@ -1849,6 +1852,7 @@ fn an_empty_slot_registered_mid_vacate_is_managed_once_tagged() {
             pane: Some("%9".into()),
             view: Some(View::EmptySlot),
             placed: true,
+            once: false,
         },
     );
     let [(_, Ok(done))] = &replies(&fx)[..] else {

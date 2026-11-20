@@ -3,7 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use moa_core::cockpit::panel_env_of;
+use moa_core::config::{Form, UiConfig};
 use moa_core::keymap::{Does, ctrl_a};
+use moa_core::state::PanelLaunch;
+use moa_core::tmux::cmd::{literal_format, quote};
 use moa_core::tmux::ids::{ClientName, PaneId};
 use moa_core::tmux::mailbox::{HookMsg, KeyAction, Mailbox};
 use moa_testkit::{Sandbox, Terminal, tmux_path, wait_for};
@@ -11,10 +15,38 @@ use moa_tmux::Notification;
 use moa_tmux::client::{CONNECT_WAIT, ConnectOptions, ControlClient, Event, Events, ServerInfo};
 use moa_tmux::conf::{hooks, moa_tmux, tmux_conf, unhooks};
 
+/// The home the fixture's popups open at.
+const HOME: &str = "/r";
+
+/// The fixture's panels: moa's program, sandboxed under `/r`.
+fn launch() -> PanelLaunch {
+    PanelLaunch {
+        exe: "/opt/moa/bin/moa".into(),
+        env: vec![("MOA_ROOT".into(), HOME.into())],
+    }
+}
+
+fn ui(picker: Form) -> UiConfig {
+    UiConfig {
+        picker,
+        ..UiConfig::default()
+    }
+}
+
+/// `brain`'s file as the fixture's daemon writes it, with `ui`.
+fn conf_with(brain: &str, ui: &UiConfig) -> String {
+    moa_tmux(brain, ui, &launch(), Path::new(HOME))
+}
+
+/// The default brain's file, with the default `[ui]`.
+fn conf() -> String {
+    conf_with("default", &UiConfig::default())
+}
+
 #[test]
 fn the_generated_config_is_stable() {
-    insta::assert_snapshot!("moa_tmux_default", moa_tmux("default", true));
-    insta::assert_snapshot!("moa_tmux_work", moa_tmux("work", true));
+    insta::assert_snapshot!("moa_tmux_default", conf());
+    insta::assert_snapshot!("moa_tmux_work", conf_with("work", &UiConfig::default()));
     insta::assert_snapshot!(
         "tmux_conf",
         tmux_conf(Path::new("/r/.local/share/moa/default/moa.tmux"))
@@ -29,7 +61,7 @@ fn the_generated_config_is_stable() {
 #[test]
 fn the_current_window_pill_shows_failed() {
     assert!(
-        moa_tmux("default", true).contains("#{?#{==:#{@moa_state},failed},#[fg=#d57780]✗ ,"),
+        conf().contains("#{?#{==:#{@moa_state},failed},#[fg=#d57780]✗ ,"),
         "the pill has no branch for failed"
     );
     // And tmux reads the branch as meant: the pill renders the cross.
@@ -47,11 +79,17 @@ fn the_current_window_pill_shows_failed() {
 /// with `[ui] mouse = false` it says nothing about the mouse, leaving the user's own setting.
 #[test]
 fn moa_tmux_turns_the_mouse_on_unless_told_not_to() {
-    let on = moa_tmux("default", true);
+    let on = conf();
     let lines: Vec<&str> = on.lines().filter(|l| l.contains("mouse")).collect();
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].starts_with("set -g  mouse on"), "{lines:?}");
-    let off = moa_tmux("default", false);
+    let off = conf_with(
+        "default",
+        &UiConfig {
+            mouse: false,
+            ..UiConfig::default()
+        },
+    );
     assert!(
         !off.lines().any(|l| l.contains("mouse")),
         "no mouse line at all"
@@ -98,16 +136,22 @@ fn tmux_conf_loads_the_users_files_as_tmux_would_then_moas() {
     assert_eq!(order_with_xdg(Some(".config")).trim(), "home dotconfig moa");
 }
 
-fn write_conf(sb: &Sandbox) -> PathBuf {
+/// Writes `text` as the sandbox's `moa.tmux`.
+fn write_conf(sb: &Sandbox, text: &str) -> PathBuf {
     let path = sb.home().join("moa.tmux");
-    std::fs::write(&path, moa_tmux("default", true)).unwrap();
+    std::fs::write(&path, text).unwrap();
     path
 }
 
-fn load(sb: &Sandbox) {
-    let path = write_conf(sb);
+/// Sources `text` on the sandbox's server, which takes it without a word.
+fn load_text(sb: &Sandbox, text: &str) {
+    let path = write_conf(sb, text);
     let out = sb.tmux(&["source-file", &path.to_string_lossy()]).unwrap();
     assert_eq!(out, "");
+}
+
+fn load(sb: &Sandbox) {
+    load_text(sb, &conf());
 }
 
 /// The keys bound in the `moa` table, from tmux's own listing: the word after `-T moa`, with
@@ -128,22 +172,208 @@ fn moa_keys(sb: &Sandbox) -> Vec<String> {
 /// listing, not the file's text: the template spells `[` bare, `quote` gives `'['`.
 #[test]
 fn every_table_key_is_bound() {
-    let sb = Sandbox::start().unwrap();
-    load(&sb);
-    let bound = moa_keys(&sb);
-    let table: Vec<&str> = ctrl_a()
-        .into_iter()
-        .flatten()
-        .filter(|b| b.does != Does::Move)
-        .map(|b| b.key)
-        .collect();
-    assert!(!table.is_empty());
-    for k in table {
-        assert!(
-            bound.iter().any(|b| b == k),
-            "{k} isn't bound in: {bound:?}"
-        );
+    for form in [Form::Popup, Form::Tab] {
+        let sb = Sandbox::start().unwrap();
+        load_text(&sb, &conf_with("default", &ui(form)));
+        let bound = moa_keys(&sb);
+        let table: Vec<&str> = ctrl_a(form)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.does != Does::Move)
+            .map(|b| b.key)
+            .collect();
+        assert!(!table.is_empty());
+        for k in table {
+            assert!(
+                bound.iter().any(|b| b == k),
+                "{form:?}: {k} isn't bound in: {bound:?}"
+            );
+        }
     }
+}
+
+/// The line binding `key` in the `moa` table, as the file writes it.
+fn bind_line(text: &str, key: &str) -> String {
+    let head = format!("bind -T moa {:<7} ", quote(key));
+    text.lines()
+        .find_map(|l| l.strip_prefix(&head))
+        .unwrap_or_else(|| panic!("no binding for {key}"))
+        .to_string()
+}
+
+/// The daemon key `find`, from a key.
+const FIND_KEY: &str = "if -F '#{@moa_ctl}' { run -C \"display-message -c '#{@moa_ctl}' 'moa:key find ##{pane_id} ##{session_id} ##{client_name}'\" } { display-message -d 4000 \"moa isn't running: run moa\" }";
+
+/// S8: `/` opens the picker in a popup that tmux runs itself, guarded as the daemon keys
+/// are, with the panels' environment and moa's program; `s` is the daemon key `find`,
+/// which opens the full tab.
+#[test]
+fn the_picker_key_is_a_popup_by_default() {
+    let text = conf();
+    assert_eq!(
+        bind_line(&text, "/"),
+        "if -F '#{@moa_ctl}' { display-popup -E -w 80% -h 70% -d /r \
+         -T \"#[fg=#88c0d0 bold] ⌕ find a session \" -e MOA_BRAIN=default \
+         -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel picker --once \
+         --brain default } { display-message -d 4000 \"moa isn't running: run moa\" }"
+    );
+    assert_eq!(bind_line(&text, "s"), FIND_KEY);
+}
+
+#[test]
+fn picker_tab_swaps_the_keys() {
+    let text = conf_with("default", &ui(Form::Tab));
+    assert_eq!(bind_line(&text, "/"), FIND_KEY);
+    let s = bind_line(&text, "s");
+    assert!(s.contains("display-popup -E -w 80% -h 70%"), "{s}");
+    assert!(s.contains("panel picker --once --brain default"), "{s}");
+    assert_eq!(s, bind_line(&conf(), "/"));
+}
+
+/// The menu's items for the picker, by key: the text after the label, its key and its
+/// command (quoted), from the tall menu.
+fn menu_item(text: &str, label: &str) -> String {
+    let head = format!("\"{label}\" ");
+    let items: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix(&head))
+        .collect();
+    // Each item is in the short menu and the tall one, in each of the three bindings.
+    assert_eq!(items.len(), 6, "{label}: {items:?}");
+    items[0].trim_end_matches(" \\").to_string()
+}
+
+/// S8: the menu offers both forms. `/` opens the one `[ui] picker` names, as the key does;
+/// `s` the other.
+#[test]
+fn the_menu_offers_both_forms() {
+    let find = |key: &str| format!("{key} {}", quote(&FIND_KEY.replace("##{pane_id}", "-")));
+    let text = conf();
+    let popup = menu_item(&text, "Find a session…");
+    assert!(popup.starts_with("/ 'if -F "), "{popup}");
+    assert!(popup.contains("display-popup -E -w 80% -h 70%"), "{popup}");
+    assert!(popup.contains("panel picker --once"), "{popup}");
+    assert_eq!(menu_item(&text, "Find a session, full tab…"), find("s"));
+
+    let text = conf_with("default", &ui(Form::Tab));
+    assert_eq!(menu_item(&text, "Find a session…"), find("/"));
+    let s = menu_item(&text, "Find a session, popup…");
+    assert_eq!(s.strip_prefix("s "), popup.strip_prefix("/ "));
+}
+
+/// The popup's `-e` flags are the panels' environment (`panel_env_of`), which `spawn_cmds`
+/// gives every panel moa starts: one source (lesson 5).
+#[test]
+fn the_popup_env_is_the_panels_env() {
+    let text = conf();
+    let line = bind_line(&text, "/");
+    let words: Vec<&str> = line.split(' ').collect();
+    let flags: Vec<String> = words
+        .windows(2)
+        .filter(|w| w[0] == "-e")
+        .flat_map(|w| ["-e".to_string(), w[1].to_string()])
+        .collect();
+    assert_eq!(flags, panel_env_of("default", &launch()));
+}
+
+/// A popup's command line as the sandbox's tmux runs it: the fake `moa` at a path with a
+/// space, a quote and a `#`, at a home with a `#`, writes its folder, its environment and
+/// its arguments next to itself, then ends, and tmux closes the popup.
+struct OddPaths {
+    exe: PathBuf,
+    home: PathBuf,
+    ran: PathBuf,
+}
+
+impl OddPaths {
+    fn new(sb: &Sandbox) -> OddPaths {
+        let dir = sb.home().join("a b/it's/#1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("moa");
+        std::fs::write(
+            &exe,
+            "#!/bin/sh\nprintf '%s\\n' \"$(pwd -P)\" \"$MOA_BRAIN\" \"$MOA_NO_AUTOSTART\" \
+             \"$MOA_ROOT\" \"$@\" > \"$(dirname \"$0\")/ran\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = sb.home().join("h#2");
+        std::fs::create_dir_all(&home).unwrap();
+        OddPaths {
+            ran: dir.join("ran"),
+            exe,
+            home,
+        }
+    }
+
+    fn launch(&self) -> PanelLaunch {
+        PanelLaunch {
+            exe: self.exe.clone(),
+            env: vec![("MOA_ROOT".into(), self.home.to_string_lossy().into_owned())],
+        }
+    }
+
+    /// Waits for the fake `moa`'s run and checks what it was given; ready for another.
+    #[track_caller]
+    fn ran_as_told(&self, term: &Terminal) {
+        let got = wait_for(Duration::from_secs(10), || {
+            std::fs::read_to_string(&self.ran).ok()
+        });
+        let got = got.unwrap_or_else(|| {
+            panic!(
+                "the popup never ran moa; the terminal showed: {}",
+                term.tail(600)
+            )
+        });
+        let home = std::fs::canonicalize(&self.home).unwrap();
+        let want = format!(
+            "{}\ndefault\n1\n{}\npanel\npicker\n--once\n--brain\ndefault\n",
+            home.display(),
+            self.home.display()
+        );
+        assert_eq!(got, want);
+        std::fs::remove_file(&self.ran).unwrap();
+    }
+}
+
+/// S8's quoting, on this tmux: the program and its arguments, the environment and the
+/// folder reach the popup's program as they are, from the key and from the menu (whose
+/// command tmux expands once more, so the menu's copy doubles every `#` again).
+#[test]
+fn a_path_with_spaces_quotes_and_hashes_survives() {
+    let sb = Sandbox::start().unwrap();
+    let odd = OddPaths::new(&sb);
+    let text = moa_tmux("default", &UiConfig::default(), &odd.launch(), &odd.home);
+    // The key's `-d` is kept literal (`literal_format`), and the menu's copy doubles every
+    // `#` once more: in the folder, the environment and the program.
+    let key = bind_line(&text, "/");
+    let item = menu_item(&text, "Find a session…");
+    let home = odd.home.to_string_lossy();
+    assert!(key.contains(&format!("-d {}", quote(&literal_format(&home)))));
+    assert!(key.contains("=default -e MOA_NO_AUTOSTART=1"), "{key}");
+    assert_eq!(key.matches("h#2").count(), 1, "{key}");
+    assert_eq!(key.matches("h##2").count(), 1, "the folder: {key}");
+    assert!(key.contains("/#1/moa"), "{key}");
+    assert_eq!(item.matches("h####2").count(), 1, "the folder: {item}");
+    assert_eq!(item.matches("h##2").count(), 1, "the environment: {item}");
+    assert!(
+        item.contains("/##1/moa") && !item.contains("####1"),
+        "{item}"
+    );
+    load_text(&sb, &text);
+    let listed = sb.tmux(&["list-keys", "-T", "moa", "/"]).unwrap();
+    assert!(listed.contains("#1/moa"), "{listed}");
+    assert!(!listed.contains("##1/moa"), "{listed}");
+
+    sb.tmux(&["set-option", "-g", "@moa_ctl", "not-a-client"])
+        .unwrap();
+    let term = attach(&sb);
+    term.press(b"\x01/");
+    odd.ran_as_told(&term);
+    open_menu(&term, b"\x01 ");
+    term.press(b"/");
+    odd.ran_as_told(&term);
 }
 
 /// Each key the status line's hint names (`/ find · c console · …`, the arrows among them)
@@ -167,7 +397,11 @@ fn the_status_hint_names_only_table_keys() {
         .map(|item| item.split_whitespace().next().unwrap_or(""))
         .collect();
     assert!(named.len() >= 9, "{named:?}");
-    let table: Vec<&str> = ctrl_a().into_iter().flatten().map(|b| b.key).collect();
+    let table: Vec<&str> = ctrl_a(Form::Popup)
+        .into_iter()
+        .flatten()
+        .map(|b| b.key)
+        .collect();
     for k in named {
         assert!(
             k == "Space" || table.contains(&k),
@@ -323,6 +557,18 @@ async fn with_ctl(sb: &Sandbox) -> (ControlClient, Events, ServerInfo) {
     (client, events, info)
 }
 
+/// The table's daemon keys, with what each tells the daemon, as the default `[ui]` has them.
+fn daemon_keys() -> Vec<(&'static str, KeyAction)> {
+    ctrl_a(UiConfig::default().picker)
+        .into_iter()
+        .flatten()
+        .filter_map(|b| match b.does {
+            Does::Moa(a) => Some((b.key, a)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn every_daemon_key_reaches_the_mailbox() {
     let sb = Sandbox::start().unwrap();
@@ -331,9 +577,9 @@ async fn every_daemon_key_reaches_the_mailbox() {
     let term = attach(&sb);
     let pane = active_pane(&sb);
     let tty = ClientName(term.tty());
-    for action in KeyAction::ALL {
+    for (key, action) in daemon_keys() {
         term.press(b"\x01");
-        term.press(action.key().as_bytes());
+        term.press(key.as_bytes());
         match next_mailbox(&mut events).await {
             Mailbox::Key {
                 action: got,
@@ -418,12 +664,12 @@ async fn the_menu_and_its_items_reach_the_mailbox() {
         }
     }
     // Every other daemon item, `s` (find, full tab) among them.
-    for action in KeyAction::ALL
+    for (key, action) in daemon_keys()
         .into_iter()
-        .filter(|a| *a != KeyAction::Console)
+        .filter(|(_, a)| *a != KeyAction::Console)
     {
         open_menu(&term, b"\x01 ");
-        term.press(action.key().as_bytes());
+        term.press(key.as_bytes());
         match next_mailbox(&mut events).await {
             Mailbox::Key {
                 action: got, pane, ..
@@ -437,18 +683,21 @@ async fn the_menu_and_its_items_reach_the_mailbox() {
     client.close().await;
 }
 
+/// A daemon key and the popup's both say so; the popup opens nothing.
 #[test]
 fn keys_say_moa_isnt_running_without_a_ctl() {
-    let sb = Sandbox::start().unwrap();
-    load(&sb);
-    let term = attach(&sb);
-    term.mark();
-    term.press(b"\x01c");
-    assert!(
-        term.wait_for_text("moa isn't running: run moa", Duration::from_secs(5)),
-        "no notice; the terminal showed: {}",
-        term.tail(600)
-    );
+    for keys in [&b"\x01c"[..], &b"\x01/"[..]] {
+        let sb = Sandbox::start().unwrap();
+        load(&sb);
+        let term = attach(&sb);
+        term.mark();
+        term.press(keys);
+        assert!(
+            term.wait_for_text("moa isn't running: run moa", Duration::from_secs(5)),
+            "{keys:?}: no notice; the terminal showed: {}",
+            term.tail(600)
+        );
+    }
 }
 
 fn ctl_option(sb: &Sandbox) -> String {
@@ -575,17 +824,20 @@ async fn every_hook_reaches_the_mailbox() {
 
 #[test]
 fn menu_items_say_moa_isnt_running_without_a_ctl() {
-    let sb = Sandbox::start().unwrap();
-    load(&sb);
-    let term = attach(&sb);
-    open_menu(&term, b"\x01 ");
-    term.mark();
-    term.press(b"c");
-    assert!(
-        term.wait_for_text("moa isn't running: run moa", Duration::from_secs(5)),
-        "no notice; the terminal showed: {}",
-        term.tail(600)
-    );
+    // A daemon item and the popup's.
+    for key in [b"c", b"/"] {
+        let sb = Sandbox::start().unwrap();
+        load(&sb);
+        let term = attach(&sb);
+        open_menu(&term, b"\x01 ");
+        term.mark();
+        term.press(key);
+        assert!(
+            term.wait_for_text("moa isn't running: run moa", Duration::from_secs(5)),
+            "{key:?}: no notice; the terminal showed: {}",
+            term.tail(600)
+        );
+    }
 }
 
 #[test]

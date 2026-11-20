@@ -39,6 +39,8 @@ enum Command {
     Status(ctl::StatusArgs),
     /// Show a live view of the brain in this terminal: its sessions, plan, status and more.
     Panel(panel::PanelArgs),
+    /// Find a session and jump to it: the picker, as Ctrl-a / opens it.
+    Pick(panel::PickArgs),
     /// Stop the brain's moa.
     Shutdown(ctl::BrainArgs),
     /// A read-only SQL shell on a brain: one statement, or one per line on stdin.
@@ -83,6 +85,7 @@ fn main() -> ExitCode {
         Some(Command::Status(args)) => return ctl::status(&args),
         Some(Command::Shutdown(args)) => return ctl::shutdown(&args),
         Some(Command::Panel(args)) => panel::panel(&args),
+        Some(Command::Pick(args)) => panel::pick(&args),
         Some(Command::Sql(args)) => sql::sql(&args),
         Some(Command::Service(args)) => service::service(&args),
         None => {

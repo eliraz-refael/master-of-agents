@@ -126,6 +126,29 @@ fn logs(fx: &[Effect]) -> Vec<(LogLevel, String)> {
         .collect()
 }
 
+/// Lesson 5: every panel moa starts gets `panel_env_of`'s environment, the one moa's tmux
+/// file gives its popups.
+#[test]
+fn a_panels_env_is_panel_env_of() {
+    let st = linked(&[("MOA_ROOT", "/r")]);
+    let env = panel_env_of("default", &st.deps().panel);
+    assert_eq!(
+        env,
+        [
+            "-e",
+            "MOA_BRAIN=default",
+            "-e",
+            "MOA_NO_AUTOSTART=1",
+            "-e",
+            "MOA_ROOT=/r"
+        ]
+    );
+    let line = spawn_cmds(&st, &[View::Tree])[0].line();
+    assert!(line.contains(&env.join(" ")), "{line}");
+    let tail = respawn_tail(&st, View::Tree);
+    assert!(tail.windows(env.len()).any(|w| w == env), "{tail:?}");
+}
+
 #[test]
 fn spawning_runs_moa_panel_with_its_view_and_brain() {
     let mut st = linked(&[("MOA_ROOT", "/r")]);

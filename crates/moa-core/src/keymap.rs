@@ -1,6 +1,8 @@
 //! The one table of moa's `Ctrl-a` keys. moa's tmux file writes its menu and its daemon keys
 //! from it, and the help view reads it, so help can't drift from what the keys do.
 
+use crate::config::Form;
+use crate::panel::View;
 use crate::tmux::mailbox::KeyAction;
 
 /// What a key does.
@@ -8,6 +10,9 @@ use crate::tmux::mailbox::KeyAction;
 pub enum Does {
     /// Tells moa, through the mailbox.
     Moa(KeyAction),
+    /// Opens the view in a popup over the tab you're on: a `moa panel <view> --once` that
+    /// tmux starts itself (S8).
+    Popup(View),
     /// A shell beside the split you're on.
     SplitBeside,
     /// A shell below the split you're on.
@@ -54,8 +59,39 @@ fn plain(key: &'static str, label: &'static str, help: &'static str, does: Does)
     }
 }
 
-/// moa's `Ctrl-a` keys, in the menu's groups and order; a separator goes between groups.
-pub fn ctrl_a() -> Vec<Vec<Binding>> {
+/// The picker's two keys: `/` opens the form `form` names, `s` the other (S8). The popup
+/// is a binding of its own; the full tab is the daemon's `find`.
+fn find_keys(form: Form) -> [Binding; 2] {
+    let does = |popup: bool| match popup {
+        true => Does::Popup(View::Picker),
+        false => Does::Moa(KeyAction::Find),
+    };
+    let popup = form == Form::Popup;
+    let (other, other_help) = match popup {
+        true => (
+            "Find a session, full tab…",
+            "find a session in a full tab: type part of its name, Enter jumps",
+        ),
+        false => (
+            "Find a session, popup…",
+            "find a session in a popup: type part of its name, Enter jumps",
+        ),
+    };
+    [
+        plain(
+            "/",
+            "Find a session…",
+            "find a session: type part of its name, Enter jumps",
+            does(popup),
+        ),
+        plain("s", other, other_help, does(!popup)),
+    ]
+}
+
+/// moa's `Ctrl-a` keys, in the menu's groups and order, with the picker's keys as `form`
+/// has them; a separator goes between groups.
+pub fn ctrl_a(form: Form) -> Vec<Vec<Binding>> {
+    let [find, find_other] = find_keys(form);
     vec![
         vec![
             moa(KeyAction::Console, "go to the console panel"),
@@ -71,14 +107,8 @@ pub fn ctrl_a() -> Vec<Vec<Binding>> {
                 KeyAction::Agent,
                 "the agent spot: the session open in the cockpit",
             ),
-            moa(
-                KeyAction::Find,
-                "find a session: type part of its name, Enter jumps",
-            ),
-            moa(
-                KeyAction::FindOther,
-                "find a session in a full tab: type part of its name, Enter jumps",
-            ),
+            find,
+            find_other,
             moa(KeyAction::New, "start a new session"),
             moa(
                 KeyAction::Terminal,
@@ -158,13 +188,39 @@ mod tests {
         })
     }
 
+    const FORMS: [Form; 2] = [Form::Popup, Form::Tab];
+
     #[test]
     fn every_binding_has_help() {
-        for b in ctrl_a().into_iter().flatten() {
+        for b in FORMS.into_iter().flat_map(ctrl_a).flatten() {
             assert!(!b.help.trim().is_empty(), "{b:?} has no help");
             assert!(!says_tmux_words(b.help), "{b:?}: its help");
             assert!(!says_tmux_words(b.label), "{b:?}: its label");
         }
+    }
+
+    fn binding(form: Form, key: &str) -> Binding {
+        ctrl_a(form)
+            .into_iter()
+            .flatten()
+            .find(|b| b.key == key)
+            .unwrap_or_else(|| panic!("{key} isn't in the table"))
+    }
+
+    /// S8: `/` opens the form `[ui] picker` names and `s` the other; the full tab is the
+    /// daemon's `find`.
+    #[test]
+    fn the_picker_form_picks_the_keys() {
+        let popup = Does::Popup(View::Picker);
+        let tab = Does::Moa(KeyAction::Find);
+        assert_eq!(binding(Form::Popup, "/").does, popup);
+        assert_eq!(binding(Form::Popup, "s").does, tab);
+        assert_eq!(binding(Form::Tab, "/").does, tab);
+        assert_eq!(binding(Form::Tab, "s").does, popup);
+        assert_eq!(binding(Form::Popup, "/").label, "Find a session…");
+        assert_eq!(binding(Form::Tab, "/").label, "Find a session…");
+        assert_eq!(binding(Form::Popup, "s").label, "Find a session, full tab…");
+        assert_eq!(binding(Form::Tab, "s").label, "Find a session, popup…");
     }
 
     #[test]
@@ -174,25 +230,31 @@ mod tests {
         assert!(!says_tmux_words("restart moa's panels"));
     }
 
-    /// The daemon's keys are written from the table, so every action must be in it, once.
+    /// The daemon's keys are written from the table, so every action must be in it, once,
+    /// in either form. `FindOther` is no key's since `s` became the daemon's `find` (S8).
     #[test]
     fn every_key_action_is_in_the_table_once() {
-        let table = ctrl_a();
-        for a in KeyAction::ALL {
-            let n = table
-                .iter()
-                .flatten()
-                .filter(|b| b.does == Does::Moa(a))
-                .count();
-            assert_eq!(n, 1, "{a:?}");
+        for form in FORMS {
+            let table = ctrl_a(form);
+            for a in KeyAction::ALL {
+                let n = table
+                    .iter()
+                    .flatten()
+                    .filter(|b| b.does == Does::Moa(a))
+                    .count();
+                let want = usize::from(a != KeyAction::FindOther);
+                assert_eq!(n, want, "{form:?}: {a:?}");
+            }
         }
     }
 
     #[test]
     fn no_key_is_in_the_table_twice() {
-        let keys: Vec<&str> = ctrl_a().into_iter().flatten().map(|b| b.key).collect();
-        for k in &keys {
-            assert_eq!(keys.iter().filter(|x| *x == k).count(), 1, "{k}");
+        for form in FORMS {
+            let keys: Vec<&str> = ctrl_a(form).into_iter().flatten().map(|b| b.key).collect();
+            for k in &keys {
+                assert_eq!(keys.iter().filter(|x| *x == k).count(), 1, "{form:?}: {k}");
+            }
         }
     }
 }
