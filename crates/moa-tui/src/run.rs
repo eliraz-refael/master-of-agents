@@ -523,14 +523,14 @@ struct Loop {
 }
 
 impl Drop for Loop {
-    /// A popup's connection outlives its loop: its program exits with the connection still
-    /// open (`moa panel --once`), so moa hears the popup go only once tmux can reap it, and
-    /// the reap nudge moa sends then on tmux 3.4 and 3.5 comes after the exit (S8).
+    /// A popup's connection outlives its loop, in whatever state the link is (up, or a
+    /// connect under way that moa may have heard `ui.panel` on): its program exits with the
+    /// connection still open (`moa panel --once`), so moa hears the popup go only once tmux
+    /// can reap it, and the reap nudge moa sends then on tmux 3.4 and 3.5 comes after the
+    /// exit (S8).
     fn drop(&mut self) {
-        if self.opts.once
-            && let Link::Up { live, .. } = std::mem::replace(&mut self.link, Link::Down(None))
-        {
-            std::mem::forget(live);
+        if self.opts.once {
+            std::mem::forget(std::mem::replace(&mut self.link, Link::Down(None)));
         }
     }
 }
@@ -1540,13 +1540,16 @@ mod tests {
         assert_eq!(lp.here(), None);
     }
 
+    /// What a scripted daemon tells its test: a `subscribe` came, and the connection closed.
+    struct Heard {
+        subscribed: tokio::sync::oneshot::Receiver<()>,
+        closed: tokio::sync::oneshot::Receiver<()>,
+    }
+
     /// The daemon's side of one connection, in a fresh `/tmp` folder: it says hello and
-    /// answers every request, then says when the connection closes.
-    fn scripted_daemon() -> (
-        tempfile::TempDir,
-        ClientOptions,
-        tokio::sync::oneshot::Receiver<()>,
-    ) {
+    /// answers every request, the `subscribe` too unless `hold`, which leaves a connect
+    /// waiting on it; it says when the `subscribe` comes and when the connection closes.
+    fn scripted_daemon(hold: bool) -> (tempfile::TempDir, ClientOptions, Heard) {
         use moa_proto::{Call, HelloOk, Incoming, SnapshotMsg, decode_incoming, encode_result};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -1558,6 +1561,8 @@ mod tests {
         moa_platform::ensure_private_dir(&paths.run_dir()).unwrap();
         let listener = tokio::net::UnixListener::bind(paths.socket("default").unwrap()).unwrap();
         let (closed_tx, closed) = tokio::sync::oneshot::channel();
+        let (subscribed_tx, subscribed) = tokio::sync::oneshot::channel();
+        let mut subscribed_tx = Some(subscribed_tx);
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
@@ -1577,13 +1582,21 @@ mod tests {
                             pid: std::process::id(),
                         },
                     ),
-                    Call::Subscribe(_) => encode_result(
-                        &id,
-                        &SnapshotMsg {
-                            rev: 0,
-                            topics: Default::default(),
-                        },
-                    ),
+                    Call::Subscribe(_) => {
+                        if let Some(tx) = subscribed_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        if hold {
+                            continue;
+                        }
+                        encode_result(
+                            &id,
+                            &SnapshotMsg {
+                                rev: 0,
+                                topics: Default::default(),
+                            },
+                        )
+                    }
                     _ => encode_result(
                         &id,
                         &Done {
@@ -1608,7 +1621,20 @@ mod tests {
             on_mismatch: OnMismatch::Accept,
             build: "b".into(),
         };
-        (dir, client, closed)
+        (dir, client, Heard { subscribed, closed })
+    }
+
+    /// Whether `closed` says the connection closed within 50 turns of the runtime: time
+    /// enough for a connection's task to see its loop go and close it, as the tests' other
+    /// legs show.
+    async fn closes_soon(closed: &mut tokio::sync::oneshot::Receiver<()>) -> bool {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            if closed.try_recv().is_ok() {
+                return true;
+            }
+        }
+        false
     }
 
     /// S8: a popup's loop leaves its connection open when it goes, so the program exits
@@ -1617,7 +1643,7 @@ mod tests {
     #[tokio::test]
     async fn a_popups_connection_outlives_its_loop() {
         for once in [false, true] {
-            let (_dir, client, mut closed) = scripted_daemon();
+            let (_dir, client, mut heard) = scripted_daemon(false);
             let mut lp = looped(Some(View::Picker), true);
             lp.opts.once = once;
             let topics = super::topics(View::Picker, once);
@@ -1630,21 +1656,39 @@ mod tests {
                 key: linked.key,
             };
             drop(lp);
-            if once {
-                // Time enough for the connection's task to see its loop go and close.
-                for _ in 0..50 {
-                    tokio::task::yield_now().await;
-                }
-                assert_eq!(
-                    closed.try_recv(),
-                    Err(tokio::sync::oneshot::error::TryRecvError::Empty),
-                    "the popup's connection closed with its loop"
-                );
-            } else {
-                let heard =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), &mut closed).await;
-                assert!(heard.is_ok(), "the panel's connection outlived its loop");
+            assert_eq!(closes_soon(&mut heard.closed).await, !once, "once: {once}");
+        }
+    }
+
+    /// The same for a popup that goes while it is still connecting (Esc as it opens), once
+    /// moa has heard which panel it is: the connect it was making stays open too.
+    #[tokio::test]
+    async fn a_popups_connect_outlives_its_loop() {
+        for once in [false, true] {
+            let (_dir, client, mut heard) = scripted_daemon(true);
+            let mut lp = looped(Some(View::Picker), true);
+            lp.opts.once = once;
+            let topics = super::topics(View::Picker, once);
+            let mut connect: super::Connecting = Box::pin(super::connect(
+                client,
+                super::once_ops(View::Picker),
+                topics,
+            ));
+            // `ui.panel` is answered, and the connect waits on its `subscribe`.
+            tokio::select! {
+                _ = connect.as_mut() => panic!("the connect ended"),
+                asked = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    &mut heard.subscribed,
+                ) => assert!(asked.is_ok(), "no subscribe came"),
             }
+            lp.link = Link::Connecting {
+                connect,
+                waited: 0,
+                here: None,
+            };
+            drop(lp);
+            assert_eq!(closes_soon(&mut heard.closed).await, !once, "once: {once}");
         }
     }
 
