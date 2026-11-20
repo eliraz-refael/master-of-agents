@@ -113,9 +113,9 @@ impl Popups<'_> {
     }
 }
 
-/// Where `|` and `-` don't split, as the template's own bindings say: the cockpit (its
-/// panes are the layout's), and the picker's or help's full tab, which waits parked for its
-/// next open (a shell split into it would come back with it).
+/// Where `|` and `-` don't split, in the menu and the template's own bindings alike: the
+/// cockpit (its panes are the layout's), and the picker's or help's full tab, which waits
+/// parked for its next open (a shell split into it would come back with it).
 const SPLIT_REFUSED: &str =
     "#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}";
 /// Why, in the refusal: the cockpit's, or a sheet's.
@@ -240,6 +240,8 @@ pub fn moa_tmux(brain: &str, ui: &UiConfig, launch: &PanelLaunch, home: &Path) -
         .replace("{{DAEMON_KEYS}}", keys.trim_end())
         .replace("{{MENU}}", &menu)
         .replace("{{REPAIR}}", &guarded(KeyAction::Repair, "-"))
+        .replace("{{SPLIT_REFUSED}}", SPLIT_REFUSED)
+        .replace("{{SPLIT_WHY}}", SPLIT_WHY)
 }
 
 /// The `-f` file: the user's own config first, then moa's. `-f` replaces tmux's own search,

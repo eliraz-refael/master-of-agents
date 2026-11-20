@@ -120,7 +120,8 @@ pub(crate) fn sheet_news(state: &State, t: &TmuxIn) -> Option<SheetNews> {
 
 /// What `news` means for the sheets open, once the topology took it in: one whose tab a
 /// user's session left for another of its tabs, or whose session the last user's terminal
-/// detached from, is closed, so nobody comes back to a stale sheet. Not while an open or
+/// detached from, is closed, so nobody comes back to a stale sheet, unless another session
+/// it is linked into (one grouped with it) still shows it. Not while an open or
 /// close of that sheet is under way: a close queued now would replace an open you asked for
 /// since, or unlink one just made.
 pub(crate) fn sheets_notified(state: &mut State, news: SheetNews) -> Vec<Effect> {
@@ -142,8 +143,13 @@ pub(crate) fn sheets_notified(state: &mut State, news: SheetNews) -> Vec<Effect>
                 SheetNews::Shows { session, window: w } => (session, w != window),
                 SheetNews::Detached { session } => (session, !topology.attached(session)),
             };
-            left && topology.sessions_of(window).contains(&session)
-                && topology.session_name(session) != Some(HIDDEN)
+            // Sessions in a group share their tabs: another one still showing the sheet
+            // keeps it open, as a listing keeps it (`stale_sheets`).
+            let linked = linked_out(topology, window);
+            let shown_elsewhere = linked
+                .iter()
+                .any(|s| *s != session && topology.current_of(*s) == Some(window));
+            left && linked.contains(&session) && !shown_elsewhere
         })
         .collect();
     let mut fx = Vec::new();

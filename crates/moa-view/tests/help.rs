@@ -195,6 +195,23 @@ fn a_long_word_wraps_whole() {
     }
 }
 
+/// A lead too wide to leave room beside it (the picker's, at 20 columns) goes on a line of
+/// its own: the words after it are all shown, none cut off at the edge.
+#[test]
+fn a_wide_lead_keeps_every_word() {
+    let (data, ctx) = lantern();
+    let lines = texts(&data, &ctx, 20);
+    let at = lines
+        .iter()
+        .position(|l| l.contains("find a session"))
+        .unwrap();
+    let words: Vec<&str> = lines[at + 1..at + 4].iter().map(|l| l.trim()).collect();
+    assert_eq!(
+        words.join(" ").split(" · ").next(),
+        Some("type part of a name")
+    );
+}
+
 /// `layouts.json` that doesn't parse: the file's row (key `""`) says why under the heading,
 /// and isn't counted as a row that couldn't be read.
 #[test]

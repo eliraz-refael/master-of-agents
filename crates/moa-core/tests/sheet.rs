@@ -910,6 +910,37 @@ fn a_sheet_one_session_shows_stays_open() {
     assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL));
 }
 
+/// Sessions in a group share their tabs: `work` moving to another of its tabs, or its last
+/// terminal detaching, leaves the picker `moa` still shows open.
+#[test]
+fn a_grouped_session_leaving_keeps_the_sheet_another_shows() {
+    let mut st = open_picker();
+    let mut panes = with_picker(false, &[0]);
+    panes.push(format!("P %{PICKER} @{PICKER_TAB} $2 1 0 0 0  0 picker"));
+    panes.push("P %8 @8 $2 1 1 0 0  0 ".to_string());
+    panes.push("P %9 @9 $2 1 0 0 0  0 ".to_string());
+    let users: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 2)];
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&panes, users),
+        },
+    );
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    let fx = notify(&mut st, window_changed(2, 9));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    let fx = notify(
+        &mut st,
+        Notification::ClientDetached {
+            client: ClientName("/dev/ttys2".into()),
+        },
+    );
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL));
+}
+
 /// Final review M2: a tab left while its own open was still in flight (that news is
 /// dropped then) is closed by the next listing, which shows its session on another tab.
 #[test]

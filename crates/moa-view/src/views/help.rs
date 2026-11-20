@@ -144,8 +144,21 @@ fn entry(lead: Span, words: &str, tone: Tone, width: usize) -> Vec<Line> {
     let lead_w = text::width(&lead.text);
     let hang = if width >= lead_w + 20 { lead_w } else { 4 };
     let room = width.saturating_sub(hang).max(10);
-    let first_room = width.saturating_sub(lead_w).max(10);
     let words = words.trim_start();
+    // A lead that leaves too little room beside it goes on a line of its own, so no word is
+    // cut off at the edge.
+    if width < lead_w + 10 {
+        let mut lines = vec![fitted(vec![lead], width)];
+        let hung = wrap(words, room).into_iter().filter(|r| !r.is_empty());
+        lines.extend(hung.map(|row| {
+            fitted(
+                vec![Span::new(" ".repeat(hang), tone), Span::new(row, tone)],
+                width,
+            )
+        }));
+        return lines;
+    }
+    let first_room = width - lead_w;
     let mut rows = wrap(words, first_room);
     let first = rows.remove(0);
     // What the first line left, wrapped as it is, so a word broken across lines is never

@@ -118,8 +118,8 @@ bind -n C-a switch-client -T moa
 # | and -: split the pane you're on (a shell beside or below an agent, in its folder);
 # its border says it's a shell; `exit` closes it. Not in the cockpit, where panes belong to the layout,
 # nor in the picker's or help's full tab, which waits parked for its next open.
-bind -T moa '|'     if -F "#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}" "display 'split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}'" "split-window -h -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
-bind -T moa -       if -F "#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}" "display 'split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}'" "split-window -v -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
+bind -T moa '|'     if -F "{{SPLIT_REFUSED}}" "display 'split an agent or terminal tab; {{SPLIT_WHY}}'" "split-window -h -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
+bind -T moa -       if -F "{{SPLIT_REFUSED}}" "display 'split an agent or terminal tab; {{SPLIT_WHY}}'" "split-window -v -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
 bind -T moa m       select-window -t moa:moa
 bind -T moa z       resize-pane -Z
 bind -T moa [       previous-window
