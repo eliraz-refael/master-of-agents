@@ -2,7 +2,8 @@ use serde_json::json;
 
 use super::decide::{Next, Said, Sheeted, Step, Then, act, decide};
 use super::{
-    CockpitOp, awaits, finish, listing, queue, refused, stale_sheets, stopped_listed, tells_of,
+    CockpitOp, awaits, finish, listing, queue, refused, sheet_name, stale_sheets, stopped_listed,
+    tells_of,
 };
 use crate::Now;
 use crate::change::Change;
@@ -112,7 +113,7 @@ fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
             format!("the panel in {pane} couldn't show {view}: {why}")
         }
         CockpitOp::Show { .. } => format!("moa couldn't bring it to the screen: {why}"),
-        CockpitOp::Sheet { view, .. } => format!("the {view} couldn't open: {why}"),
+        CockpitOp::Sheet { view, .. } => format!("{} couldn't open: {why}", sheet_name(*view)),
         CockpitOp::Unsheet { pane } => {
             format!("the tab of the panel in {pane} couldn't close: {why}")
         }

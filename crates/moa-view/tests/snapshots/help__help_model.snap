@@ -36,11 +36,13 @@ expression: "debug_lines(&help::build(&data, &ctx, 80))"
 [text]  [text]Space menu · m back to moa · C repair
 [dim]
 [head*]In every panel
-[text]  [text]j/k ↑↓ move · g/G top/bottom · PgUp/PgDn · ⏎ or a click acts · the wheel
-[text]  [text]scrolls · Ctrl-c cancels a prompt
+[text]  [text]↑↓ move · PgUp/PgDn · ⏎ or a click acts · the wheel scrolls · Ctrl-c cancels a
+[text]  [text]prompt
+[text]  [text]j/k move and g/G go to the top or bottom too, but in the picker letters type
 [text]  [text]hold Shift to select text
 [dim]
 [head*]Each panel's own keys
+[head]  find a session: [text]type part of a name · ↵ jump · ↑↓ move · esc close
 [head]  ▤ sessions: [text]⏎/click open · n new · + group · m move · r rename · D del group ·
 [text]              [text]a archive · x close
 [head]  ◷ big picture: [text]⏎/click jump · d done · x drop · a archive · n/N new

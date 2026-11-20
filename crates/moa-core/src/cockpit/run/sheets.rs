@@ -19,6 +19,14 @@ use crate::tmux::topology::{HIDDEN, Topology};
 /// `ui.close` from a panel that isn't a sheet moa placed.
 const ONLY_SHEETS: &str = "only the picker and help close this way";
 
+/// A sheet's name in what moa says: "the picker", "help".
+pub(super) fn sheet_name(view: View) -> &'static str {
+    match view {
+        View::Help => "help",
+        _ => "the picker",
+    }
+}
+
 /// The sheet `op` opens or closes, by its view (a sheet has one panel): a newer open or close
 /// of it replaces a waiting one.
 pub(super) fn sheet_of(state: &State, op: &CockpitOp) -> Option<View> {
@@ -156,10 +164,15 @@ fn busy(state: &State) -> BTreeSet<View> {
         .collect()
 }
 
-/// What a listing (an operation's, or the link's) shows of sheets left open with nothing
-/// recording their open: a daemon that restarted forgot them, or a lost link dropped their
-/// close, and they are closed. Not while an open or close of that sheet is under way: its
-/// open isn't recorded until tmux answers its link.
+/// What a listing (an operation's, or the link's) shows of sheets left linked into a user's
+/// session that nobody looks at, and closes them:
+/// - with no open recorded: a daemon that restarted forgot them, or a lost link dropped
+///   their close;
+/// - open, but some session it is linked into shows another of its tabs: it was left while
+///   its own open was under way (that news is dropped then), or while the link was lost.
+///
+/// Not while an open or close of that sheet is under way: its open isn't recorded until tmux
+/// answers its link, and the tab it selects isn't current until then.
 pub(super) fn stale_sheets(state: &mut State) -> Vec<Effect> {
     let busy = busy(state);
     let topology = &state.tmux.topology;
@@ -167,11 +180,15 @@ pub(super) fn stale_sheets(state: &mut State) -> Vec<Effect> {
         .panes()
         .filter(|p| {
             let view = topology.view_of(*p).and_then(|v| v.parse::<View>().ok());
-            view.is_some_and(|v| v.is_sheet() && !busy.contains(&v))
-                && !state.sheets.contains_key(p)
-                && topology
-                    .window_of(*p)
-                    .is_some_and(|w| !linked_out(topology, w).is_empty())
+            if !view.is_some_and(|v| v.is_sheet() && !busy.contains(&v)) {
+                return false;
+            }
+            let Some(w) = topology.window_of(*p) else {
+                return false;
+            };
+            let linked = linked_out(topology, w);
+            let left = linked.iter().any(|s| topology.current_of(*s) != Some(w));
+            !linked.is_empty() && (!state.sheets.contains_key(p) || left)
         })
         .collect();
     let mut fx = Vec::new();

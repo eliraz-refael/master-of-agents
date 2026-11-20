@@ -265,6 +265,34 @@ fn help_lists_each_views_hints() {
     }
 }
 
+/// Final review M4: in the picker, letters type (S7): help says so where it says j/k move,
+/// and lists the picker's own keys, from its hint.
+#[test]
+fn help_says_letters_type_in_the_picker() {
+    let (data, ctx) = lantern();
+    let lines = texts(&data, &ctx, 200);
+    let picker = format!(
+        "  find a session: type part of a name · {}",
+        keys::hint(View::Picker, false)
+    );
+    assert!(lines.contains(&picker), "{lines:#?}");
+    // The panel-wide line that names j/k says where they type.
+    let at = lines
+        .iter()
+        .position(|l| l == "In every panel")
+        .expect("its heading");
+    let every: Vec<_> = lines[at..]
+        .iter()
+        .take_while(|l| !l.is_empty())
+        .filter(|l| l.contains("j/k"))
+        .collect();
+    assert_eq!(every.len(), 1, "{every:?}");
+    assert!(
+        every[0].ends_with("but in the picker letters type"),
+        "{every:?}"
+    );
+}
+
 /// The agent states, with the status view's glyph, word and look.
 #[test]
 fn help_shows_the_agent_states_as_the_status_view_does() {

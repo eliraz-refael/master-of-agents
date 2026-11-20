@@ -134,6 +134,53 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
     assert_eq!(launches(&tb), before, "a key launched something");
 }
 
+/// Final review M1: `|` and `-`, from a key or the menu, never split the picker's full tab: a
+/// shell split into it would be parked with it and come back at every open.
+#[test]
+fn a_sheet_is_never_split() {
+    const WHOLE: &str = "the picker and help stay whole";
+    let tb = typical();
+    let term = open(&tb, &[], &[]);
+    came_up(&tb, &term);
+    ctrl_a(&tb, &term);
+    term.press(b"s");
+    let sheet = wait_for(SHOWS, || {
+        let pane = client_field(&tb, &term, "#{pane_id}")?;
+        screen_of(&tb, &pane).contains(PICKER_SHOWS).then_some(pane)
+    });
+    let Some(sheet) = sheet else {
+        panic!("the picker never showed\n{}", what_happened(&tb, &term))
+    };
+    // Final review M7: the status line names its tab as its frame does.
+    assert_eq!(
+        client_field(&tb, &term, "#{window_name}").as_deref(),
+        Some("find a session")
+    );
+    moa_key(&tb, &term, "|", WHOLE);
+    moa_key(&tb, &term, "-", WHOLE);
+    ctrl_a(&tb, &term);
+    term.press(b" ");
+    assert!(
+        term.wait_for_text(KeyAction::Plan.label(), QUICK),
+        "the menu never showed"
+    );
+    term.mark();
+    term.press(b"|");
+    assert!(
+        term.wait_for_text(WHOLE, QUICK),
+        "the menu's split never refused"
+    );
+    let panes = tmux(&tb, &["list-panes", "-t", &sheet, "-F", "#{pane_id}"]);
+    assert_eq!(panes.lines().collect::<Vec<_>>(), [sheet.as_str()]);
+
+    term.press(CTRL_C);
+    let closed = wait_for(SHOWS, || {
+        let shows = client_field(&tb, &term, "#{pane_id}")?;
+        (shows != sheet).then_some(())
+    });
+    assert!(closed.is_some(), "{}", what_happened(&tb, &term));
+}
+
 #[test]
 fn the_status_line_follows_the_brain() {
     let tb = typical();

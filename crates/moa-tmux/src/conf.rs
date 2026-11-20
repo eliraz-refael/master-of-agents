@@ -113,11 +113,20 @@ impl Popups<'_> {
     }
 }
 
+/// Where `|` and `-` don't split, as the template's own bindings say: the cockpit (its
+/// panes are the layout's), and the picker's or help's full tab, which waits parked for its
+/// next open (a shell split into it would come back with it).
+const SPLIT_REFUSED: &str =
+    "#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}";
+/// Why, in the refusal: the cockpit's, or a sheet's.
+const SPLIT_WHY: &str =
+    "#{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}";
+
 /// The menu command for what a key does.
 fn menu_command(does: Does, popups: Popups) -> String {
     let split = |flag: &str| {
         format!(
-            "if -F '#{{==:#{{window_name}},moa}}' 'display \"split an agent or terminal tab; the cockpit is a layout\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
+            "if -F '{SPLIT_REFUSED}' 'display \"split an agent or terminal tab; {SPLIT_WHY}\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
         )
     };
     match does {

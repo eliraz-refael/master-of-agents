@@ -20,7 +20,8 @@ use crate::views::{animates, live, state_glyph, status};
 pub const PREFIX: &str = "tmux's prefix (Ctrl-b unless you changed it)";
 
 /// The views whose own keys help lists, by their key hints, in this order.
-const VIEWS: [View; 7] = [
+const VIEWS: [View; 8] = [
+    View::Picker,
     View::Tree,
     View::Plan,
     View::Status,
@@ -57,8 +58,13 @@ pub fn build(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
     out.push(blank());
     out.push(heading("In every panel", width));
     out.extend(said(
-        "j/k ↑↓ move · g/G top/bottom · PgUp/PgDn · ⏎ or a click acts · the wheel scrolls \
-         · Ctrl-c cancels a prompt",
+        "↑↓ move · PgUp/PgDn · ⏎ or a click acts · the wheel scrolls · Ctrl-c cancels a \
+         prompt",
+        width,
+    ));
+    // The picker's letters go into its query (S7), j, k, g and G with them.
+    out.extend(said(
+        "j/k move and g/G go to the top or bottom too, but in the picker letters type",
         width,
     ));
     out.extend(said("hold Shift to select text", width));
@@ -67,7 +73,12 @@ pub fn build(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
     out.push(heading("Each panel's own keys", width));
     for view in VIEWS {
         let lead = Span::new(format!("  {}: ", view.label()), Tone::Head);
-        out.extend(entry(lead, keys::hint(view, false), Tone::Text, width));
+        let hint = keys::hint(view, false);
+        let words = match view {
+            View::Picker => format!("type part of a name · {hint}"),
+            _ => hint.to_string(),
+        };
+        out.extend(entry(lead, &words, Tone::Text, width));
     }
 
     out.push(blank());
