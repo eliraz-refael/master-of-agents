@@ -910,6 +910,59 @@ fn a_sheet_one_session_shows_stays_open() {
     assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL));
 }
 
+/// The picker open, linked into `moa` and `work`, each showing it, with a terminal on each.
+fn open_in_both() -> State {
+    let mut st = open_picker();
+    let both: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 2)];
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&with_picker(false, &[0, 2]), both),
+        },
+    );
+    assert!(queries(&fx).is_empty(), "shown in both: {fx:?}");
+    st
+}
+
+/// A session nobody is attached to keeps its current tab, but nobody sees it: once `work`
+/// detached, `moa` detaching closes the picker, rather than leave it open for the next attach.
+#[test]
+fn a_detached_session_doesnt_keep_a_sheet_open() {
+    let detached = |tty: &str| Notification::ClientDetached {
+        client: ClientName(tty.into()),
+    };
+    let mut st = open_in_both();
+    let fx = notify(&mut st, detached("/dev/ttys2"));
+    assert!(queries(&fx).is_empty(), "moa still shows it: {fx:?}");
+    let n = the_listing(&notify(&mut st, detached(TTY)));
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0, 2]), &[])));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(
+        chain,
+        [
+            format!("unlink-window -t $0:@{PICKER_TAB}"),
+            format!("unlink-window -t $2:@{PICKER_TAB}"),
+        ]
+    );
+
+    // The same from a listing, when the detaches' news never came (a lost link, say).
+    let mut st = open_in_both();
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&with_picker(false, &[0, 2]), &[]),
+        },
+    );
+    let n = the_listing(&fx);
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0, 2]), &[])));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(chain.len(), 2, "{chain:?}");
+}
+
 /// Sessions in a group share their tabs: `work` moving to another of its tabs, or its last
 /// terminal detaching, leaves the picker `moa` still shows open.
 #[test]

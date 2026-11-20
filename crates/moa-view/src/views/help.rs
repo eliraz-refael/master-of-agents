@@ -139,16 +139,25 @@ fn said(words: &str, width: usize) -> Vec<Line> {
 }
 
 /// `lead` then `words` in `tone`, wrapped under the words' first column; at a width too
-/// narrow for that, under a fixed indent, and every line cut to `width`.
+/// narrow for that, under a smaller indent (none at 10 columns), so every row of words keeps
+/// at least 10 columns and fits whole. Only a lead wider than `width` is cut.
 fn entry(lead: Span, words: &str, tone: Tone, width: usize) -> Vec<Line> {
     let lead_w = text::width(&lead.text);
-    let hang = if width >= lead_w + 20 { lead_w } else { 4 };
-    let room = width.saturating_sub(hang).max(10);
+    let hang = if width >= lead_w + 20 {
+        lead_w
+    } else {
+        width.saturating_sub(10).min(4)
+    };
+    let room = width.saturating_sub(hang);
     let words = words.trim_start();
     // A lead that leaves too little room beside it goes on a line of its own, so no word is
-    // cut off at the edge.
+    // cut off at the edge; a blank one (plain words under a heading) is just the indent.
     if width < lead_w + 10 {
-        let mut lines = vec![fitted(vec![lead], width)];
+        let blank = lead.text.trim().is_empty();
+        let mut lines: Vec<Line> = (!blank)
+            .then(|| fitted(vec![lead], width))
+            .into_iter()
+            .collect();
         let hung = wrap(words, room).into_iter().filter(|r| !r.is_empty());
         lines.extend(hung.map(|row| {
             fitted(

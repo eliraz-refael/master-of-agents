@@ -13,6 +13,7 @@ use moa_view::geometry::Size;
 use moa_view::keys::{self, Key};
 use moa_view::line::{Line, debug_lines};
 use moa_view::panel::{Out, Panel, debug_screen};
+use moa_view::text;
 use moa_view::views::{help, status};
 use serde_json::json;
 
@@ -210,6 +211,36 @@ fn a_wide_lead_keeps_every_word() {
         words.join(" ").split(" · ").next(),
         Some("type part of a name")
     );
+}
+
+/// At the narrowest widths a panel draws (10 to 13 columns) help still keeps every word of
+/// its plain lines, each row whole within the width, with no blank line before them.
+#[test]
+fn narrow_help_keeps_every_word_with_no_blank_line() {
+    let (data, ctx) = lantern();
+    for width in 10..=13 {
+        let lines = texts(&data, &ctx, width);
+        for l in &lines {
+            assert!(text::width(l) <= usize::from(width), "{width}: {l:?}");
+            assert!(
+                l.is_empty() || !l.trim().is_empty(),
+                "{width}: a blank line of spaces in {lines:#?}"
+            );
+        }
+        let all = lines
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for said in [
+            "↑↓ move · PgUp/PgDn · ⏎ or a click acts · the wheel scrolls · Ctrl-c cancels a prompt",
+            "hold Shift to select text",
+            "see one: moa layout show NAME",
+        ] {
+            assert!(all.contains(said), "{width}: {said:?} in {all}");
+        }
+    }
 }
 
 /// `layouts.json` that doesn't parse: the file's row (key `""`) says why under the heading,
