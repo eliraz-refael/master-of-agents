@@ -653,10 +653,16 @@ fn a_panel_tmux_kills_logs_one_plain_end_line() {
     let ends: Vec<&str> = written
         .lines()
         .filter_map(|l| l.split_once(&mine).map(|(_, what)| what))
-        .filter(|what| *what != "started")
+        .filter(|what| is_end(what))
         .collect();
     assert_eq!(ends.len(), 1, "{ends:?}\n{written}");
     assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
+}
+
+/// Whether a `panel.log` line's text says how a panel ended: `stopped…`, or `panicked…`
+/// (which a test must see to fail on it). A note such as `can't watch the terminal…` isn't.
+fn is_end(what: &str) -> bool {
+    what.starts_with("stopped") || what.starts_with("panicked")
 }
 
 /// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
@@ -740,16 +746,64 @@ fn a_panel_whose_terminal_goes_ends_by_itself() {
     let ends: Vec<&str> = written
         .lines()
         .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
-        .filter(|what| *what != "started")
+        .filter(|what| is_end(what))
         .collect();
     assert_eq!(ends, ["stopped: the terminal closed"], "{written}");
 }
 
+/// A panel with no terminal at all (stdin `/dev/null`, no controlling terminal, as from a
+/// script or a service) refuses with one line and fails: it never takes "no terminal" for
+/// a terminal that went.
+#[test]
+fn a_panel_with_no_terminal_refuses() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let tb = TempBrain::new(None);
+    let log = tb.paths().log_dir().join("panel.log");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let mut cmd = Command::new(MOA);
+    cmd.args(["panel", "tree"])
+        .env_clear()
+        .envs(tb.env())
+        .env("MOA_NO_AUTOSTART", "1")
+        .current_dir(tb.root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    moa_testkit::without_terminal(&mut cmd);
+    let mut child = Reaped(cmd.spawn().unwrap());
+    let status = wait_for(SHOWS, || child.0.try_wait().ok().flatten());
+    let status = status.expect("the panel with no terminal never ended");
+    let mut err = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert!(!status.success(), "it succeeded; stderr: {err}");
+    assert!(err.starts_with("can't use this terminal: "), "{err:?}");
+    assert_eq!(err.lines().count(), 1, "{err:?}");
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
+        .filter(|what| is_end(what))
+        .collect();
+    assert_eq!(ends.len(), 1, "{written}");
+    assert!(
+        ends[0].starts_with("stopped: can't use this terminal: "),
+        "{written}"
+    );
+}
+
 /// L14: a terminal that goes while the panel is still taking it or drawing its first
-/// frame ends the panel the same way: nobody reads the pty, so the panel's first writes
-/// fill it and wait, and the master end closes under them. Whichever part notices first
-/// (that write, the first draw, the hang-up watch), the one end line is `stopped: the
-/// terminal closed`.
+/// frame ends the panel the same way. Nobody reads the pty: on macOS, whose pty buffer is
+/// small, the panel's first writes fill it and wait, and the master end closes under them;
+/// on Linux they fit, and the hang-up watch ends it. Whichever part notices first (a
+/// write, the first draw, the watch), the one end line is `stopped: the terminal closed`.
 #[test]
 fn a_panel_whose_terminal_goes_before_its_first_frame_says_so() {
     use std::process::{Command, Stdio};
@@ -785,7 +839,7 @@ fn a_panel_whose_terminal_goes_before_its_first_frame_says_so() {
     let ends: Vec<&str> = written
         .lines()
         .filter_map(|l| l.split_once("panel tree in -: ").map(|(_, what)| what))
-        .filter(|what| *what != "started")
+        .filter(|what| is_end(what))
         .collect();
     assert_eq!(ends, ["stopped: the terminal closed"], "{written}");
 }

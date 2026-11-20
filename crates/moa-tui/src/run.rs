@@ -7,8 +7,9 @@
 
 use std::collections::BTreeSet;
 use std::future::{Future, pending};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::mem::ManuallyDrop;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -930,11 +931,16 @@ impl Loop {
 /// terminal's end. The terminal is given back on every way out, and `panel.log` gets one
 /// line when the panel starts and one when it ends, unless it panics (L14).
 pub async fn run(opts: PanelOptions) -> Result<(), String> {
+    // Asked first, before anything can close it: a terminal that hung up no longer counts
+    // as one.
+    let stdout = Stdout {
+        terminal: io::stdout().is_terminal(),
+    };
     let log = Logbook::new(&opts);
     if let Some(log) = &log {
         log.write("started");
     }
-    let ended = run_logged(opts, log.clone()).await;
+    let ended = run_logged(opts, log.clone(), stdout).await;
     if let (Err(e), Some(log)) = (&ended, &log) {
         log.write(&format!("stopped: {e}"));
     }
@@ -952,7 +958,7 @@ enum Fault {
 }
 
 impl Fault {
-    /// `e`, met using the terminal while doing `what`.
+    /// `e`, met using the terminal that has worked (it took a write) while doing `what`.
     fn terminal(what: &str, e: &io::Error) -> Fault {
         if moa_platform::terminal_gone_error(e) {
             Fault::Gone
@@ -962,20 +968,58 @@ impl Fault {
     }
 }
 
+/// Where the panel draws: stdout.
+#[derive(Clone, Copy)]
+struct Stdout {
+    /// It was a terminal when the panel started.
+    terminal: bool,
+}
+
+impl Stdout {
+    /// Whether it was a terminal and has hung up since.
+    fn went(self) -> bool {
+        self.terminal && moa_platform::terminal_gone(io::stdout().as_fd())
+    }
+
+    /// `e`, met while taking or asking the terminal before it has taken a write: it may
+    /// not be a terminal at all (no controlling terminal gives ENXIO, as a gone one does),
+    /// so only a terminal seen to hang up makes it `Gone`; anything else refuses.
+    fn refused(self, e: &io::Error) -> Fault {
+        if self.went() {
+            Fault::Gone
+        } else {
+            Fault::Line(format!("can't use this terminal: {e}"))
+        }
+    }
+
+    /// `e`, met using the terminal once it has taken a write.
+    fn failed(self, what: &str, e: &io::Error) -> Fault {
+        if self.went() {
+            Fault::Gone
+        } else {
+            Fault::terminal(what, e)
+        }
+    }
+}
+
 /// [`run`], which logs how it ended when it ends with an error. A run that fails while a
 /// signal came, or while its terminal went, ends for that reason, however it found out:
 /// a failed draw (the first one included), a write, or a question to the terminal.
-async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), String> {
+async fn run_logged(
+    opts: PanelOptions,
+    log: Option<Logbook>,
+    stdout: Stdout,
+) -> Result<(), String> {
     let mut signals = Signals::new().map_err(|e| format!("can't watch for signals: {e}"))?;
     let mut input = None;
-    let fault = match drive(opts, log.clone(), &mut input, &mut signals).await {
+    let fault = match drive(opts, log.clone(), stdout, &mut input, &mut signals).await {
         Ok(()) => return Ok(()),
         Err(fault) => fault,
     };
     let end = match (signals.pending().await, fault) {
         (Some(name), _) => format!("stopped by {name}"),
         (None, Fault::Gone) => "stopped: the terminal closed".to_string(),
-        (None, Fault::Line(_)) if input.as_ref().is_some_and(Input::gone) => {
+        (None, Fault::Line(_)) if stdout.went() || input.as_ref().is_some_and(Input::gone) => {
             "stopped: the terminal closed".to_string()
         }
         (None, Fault::Line(line)) => return Err(line),
@@ -992,6 +1036,7 @@ async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), Stri
 async fn drive(
     opts: PanelOptions,
     log: Option<Logbook>,
+    stdout: Stdout,
     input: &mut Option<Input>,
     signals: &mut Signals,
 ) -> Result<(), Fault> {
@@ -1000,8 +1045,9 @@ async fn drive(
     let theme = Theme {
         mode: theme::detect(in_tmux, colorterm.as_deref()),
     };
-    let unusable = |e: io::Error| Fault::terminal("can't use this terminal", &e);
-    let _taken = Taken::take(log.clone()).map_err(unusable)?;
+    // Taking it is its first write.
+    let _taken = Taken::take(log.clone()).map_err(|e| stdout.refused(&e))?;
+    let unusable = |e: io::Error| stdout.failed("can't use this terminal", &e);
     // Never dropped: ratatui's `Terminal` shows the cursor again as it drops, and prints a
     // failure with `eprintln!`, which panics on a terminal that is gone (tmux killed the
     // tab). `restore` shows the cursor anyway.
@@ -1011,6 +1057,8 @@ async fn drive(
     term.backend_mut()
         .clear_region(ClearType::All)
         .map_err(unusable)?;
+    // crossterm asks `tput` when the terminal won't say its size, so a gone terminal can
+    // fail here with any error.
     let area = term.size().map_err(unusable)?;
     let size = Size {
         w: area.width,

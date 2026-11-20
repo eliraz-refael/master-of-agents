@@ -28,6 +28,17 @@ pub struct Terminal {
     mark: Mutex<usize>,
 }
 
+/// Makes `cmd`'s child start a session of its own, so it has no controlling terminal, as a
+/// program a service or a script started may not: `/dev/tty` can't be opened there.
+/// Tests only.
+#[allow(unsafe_code)]
+pub fn without_terminal(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook runs in the child between fork and exec, and only calls `setsid`,
+    // which is async-signal-safe and touches no memory of the parent's.
+    unsafe { cmd.pre_exec(|| rustix::process::setsid().map(drop).map_err(io::Error::from)) }
+}
+
 /// A pseudo-terminal of `cols` × `rows`: its master, its slave and the slave's name. Both
 /// ends are close-on-exec. The slave is never anyone's controlling terminal (`NOCTTY`), so
 /// closing the master sends a program on it no SIGHUP: its terminal just goes. Tests only.

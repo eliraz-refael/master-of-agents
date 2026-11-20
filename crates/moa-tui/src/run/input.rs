@@ -84,8 +84,13 @@ fn read_terminal() -> io::Result<OwnedFd> {
     }
 }
 
-/// The one line saying the terminal isn't watched, and why.
+/// The one line saying the terminal isn't watched, and why. Nothing is said when the
+/// terminal (the panel's stdout) has already gone: that is why it can't be watched, and the
+/// panel's end line says so.
 fn note(log: Option<&Logbook>, e: &io::Error) {
+    if moa_platform::terminal_gone(io::stdout().as_fd()) {
+        return;
+    }
     if let Some(log) = log {
         log.write(&format!("can't watch the terminal for its end: {e}"));
     }
