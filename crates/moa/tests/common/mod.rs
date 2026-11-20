@@ -545,43 +545,54 @@ pub fn colours(tb: &TempBrain, pane: &str) -> Vec<String> {
     shown.lines().map(str::to_string).collect()
 }
 
+/// The selection bar in `rows` (`capture-pane -e`'s): its row, and that row as text.
+fn bar_of(rows: &[String]) -> Option<(usize, String)> {
+    let at = rows.iter().position(|l| l.contains(SEL_BG))?;
+    Some((at, plain(&rows[at])))
+}
+
 /// Presses `j` or `k` in `pane` until the selection bar is on the row showing `text`.
+///
+/// The bar is judged by what its row shows, never by the row's number alone: rows can
+/// change places under it (the tree lists sessions newest first, so a session whose agent
+/// starts moves up), and the selection follows its item there (V8). A key has landed once
+/// the bar's row or what it shows changed.
 #[track_caller]
 pub fn select_row(tb: &TempBrain, pane: &str, text: &str) {
     for _ in 0..20 {
         // Where the bar is, and the row showing `text`.
         let found = wait_for(SHOWS, || {
             let rows = colours(tb, pane);
-            let bar = rows.iter().position(|l| l.contains(SEL_BG))?;
+            let bar = bar_of(&rows)?;
             let want = rows.iter().position(|l| plain(l).contains(text))?;
             Some((bar, want))
         });
-        let Some((bar, want)) = found else {
+        let Some(((bar, on), want)) = found else {
             panic!(
                 "{pane} draws no bar, or no {text:?}\n{}",
                 tab_shows(tb, pane)
             );
         };
-        if bar == want {
+        if on.contains(text) {
             return;
         }
         let key = if want > bar { "j" } else { "k" };
         tmux(tb, &["send-keys", "-t", pane, key]);
-        // The key has landed once the bar is on another row.
         // For a failure: each screen the panel showed meanwhile, as `<ms> <bar row>: <rows>`.
         let started = std::time::Instant::now();
         let mut seen: Vec<(String, String)> = Vec::new();
         let moved = wait_for(SHOWS, || {
             let rows = colours(tb, pane);
-            let now = rows.iter().position(|l| l.contains(SEL_BG));
+            let now = bar_of(&rows);
             let shown = format!(
-                "{now:?}: {:?}",
+                "{:?}: {:?}",
+                now.as_ref().map(|(at, _)| at),
                 rows.iter().map(|l| plain(l)).collect::<Vec<_>>()
             );
             if seen.last().is_none_or(|(_, s)| *s != shown) {
                 seen.push((format!("{}ms", started.elapsed().as_millis()), shown));
             }
-            now.filter(|now| *now != bar)
+            now.filter(|now| *now != (bar, on.clone()))
         });
         if moved.is_none() {
             let pid = tmux(tb, &["display-message", "-p", "-t", pane, "#{pane_pid}"]);
