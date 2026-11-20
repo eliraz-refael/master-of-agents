@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use super::ids::ClientName;
+
 /// The commands moa sends, by canonical name (an alias like `set` is refused).
 pub const ALLOWED: &[&str] = &[
     "display-message",
@@ -35,6 +37,7 @@ pub struct Refused(pub &'static str);
 
 const NOT_ALLOWED: &str = "that isn't a command moa sends";
 const NEEDS_B: &str = "command-prompt needs -b";
+const PROMPT: &str = "command-prompt only sends moa:prompt back to moa";
 const OWN_CONFIG: &str = "moa only sources its own config";
 const NEEDS_D_P: &str = "new-window needs -d and -P";
 const NEW_WINDOW_TARGET: &str = "new-window needs -t and =moa: or =_moa:";
@@ -91,6 +94,27 @@ impl Cmd {
             args: Vec::new(),
             parts: Some(parts),
         }
+    }
+
+    /// The one `command-prompt` moa sends (S5): `label` in `client`'s status line, prefilled
+    /// with `prefill`, whose answer comes back to the control client `ctl` as
+    /// `moa:prompt TOKEN TEXT`. `-b` keeps the control client from waiting for the answer.
+    /// tmux expands `label` and `prefill` as formats, and splits `-I` on `,`: the caller
+    /// passes neither `#` nor `,` in them. The template is in double quotes, because `%%%`
+    /// escapes the answer for those (a `'` in it would be lost in single ones).
+    pub fn prompt(
+        client: &ClientName,
+        label: &str,
+        prefill: &str,
+        ctl: &ClientName,
+        token: u64,
+    ) -> Cmd {
+        Cmd::new("command-prompt")
+            .args(["-b", "-t", client.0.as_str(), "-p", label, "-I", prefill])
+            .arg(format!(
+                "display-message -c {} -l \"moa:prompt {token} %%%\"",
+                ctl.0
+            ))
     }
 
     /// A chain's commands; a plain command is its own one part.
@@ -157,7 +181,7 @@ impl Cmd {
             return Err(Refused(NOT_ALLOWED));
         }
         match self.name {
-            "command-prompt" if !self.args.iter().any(|a| a == "-b") => Err(Refused(NEEDS_B)),
+            "command-prompt" => check_prompt(&self.args),
             "source-file" => {
                 let mut paths = self.args.iter().filter(|a| !a.starts_with('-')).peekable();
                 if paths.peek().is_some() && paths.all(|p| is_own_config(p)) {
@@ -373,6 +397,57 @@ fn check_new_window(args: &[String]) -> Result<(), Refused> {
         return Err(Refused(NEW_WINDOW_TARGET));
     }
     Ok(())
+}
+
+/// `command-prompt` only as [`Cmd::prompt`] builds it: `-b`, and `-t`, `-p` and `-I` each
+/// with its value, each once, then one template that sends the answer back to a control
+/// client as `moa:prompt`. A `-b` that is another flag's value doesn't count: a prompt
+/// without one would freeze the control client until it is answered.
+fn check_prompt(args: &[String]) -> Result<(), Refused> {
+    let (mut detached, mut once) = (false, true);
+    let mut flags: Vec<&str> = Vec::new();
+    let mut rest = args;
+    loop {
+        match rest {
+            [b, tail @ ..] if b == "-b" => {
+                once &= !detached;
+                detached = true;
+                rest = tail;
+            }
+            [f, _, tail @ ..] if matches!(f.as_str(), "-t" | "-p" | "-I") => {
+                once &= !flags.contains(&f.as_str());
+                flags.push(f.as_str());
+                rest = tail;
+            }
+            _ => break,
+        }
+    }
+    if !detached {
+        return Err(Refused(NEEDS_B));
+    }
+    flags.sort_unstable();
+    match rest {
+        [template] if once && flags == ["-I", "-p", "-t"] && is_answer_template(template) => Ok(()),
+        _ => Err(Refused(PROMPT)),
+    }
+}
+
+/// `display-message -c NAME -l "moa:prompt DIGITS %%%"`, with a client name tmux's parser
+/// reads as one bare word.
+fn is_answer_template(t: &str) -> bool {
+    let Some((name, rest)) = t
+        .strip_prefix("display-message -c ")
+        .and_then(|t| t.split_once(" -l \"moa:prompt "))
+    else {
+        return false;
+    };
+    let Some(token) = rest.strip_suffix(" %%%\"") else {
+        return false;
+    };
+    !name.is_empty()
+        && name.chars().all(is_bare)
+        && !token.is_empty()
+        && token.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// A pane id as tmux prints it: `%` and digits.

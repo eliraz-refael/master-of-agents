@@ -108,12 +108,12 @@ impl KeyAction {
             KeyAction::Find | KeyAction::FindOther => {
                 Some("finding a session isn't in this build yet")
             }
-            KeyAction::New => Some("new sessions aren't in this build yet"),
             KeyAction::Help => Some("help isn't in this build yet"),
             KeyAction::Console
             | KeyAction::Tree
             | KeyAction::Plan
             | KeyAction::Agent
+            | KeyAction::New
             | KeyAction::Terminal
             | KeyAction::Layout(_)
             | KeyAction::Repair => None,
@@ -201,10 +201,11 @@ impl Mailbox {
                 if !token.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(MailboxError::Bad);
                 }
+                // As tmux sent it: only 3.4 writes a typed `$` as `\$`, so the core, which
+                // knows the version, takes it back (`prompt::typed`).
                 Ok(Mailbox::Prompt {
                     token: id(token)?,
-                    // tmux 3.4 stores a `$` before a letter as `\$`.
-                    text: text.replace(r"\$", "$"),
+                    text: text.to_string(),
                 })
             }
             _ => Err(MailboxError::Bad),

@@ -121,12 +121,7 @@ fn expected(client: &str, a: KeyAction) -> Vec<String> {
 #[test]
 fn every_key_gets_its_notice() {
     let mut s = up();
-    for a in [
-        KeyAction::Find,
-        KeyAction::FindOther,
-        KeyAction::New,
-        KeyAction::Help,
-    ] {
+    for a in [KeyAction::Find, KeyAction::FindOther, KeyAction::Help] {
         let fx = message(&mut s, &format!("moa:key {} %3 $0 /dev/ttys1", a.word()));
         assert_eq!(the_notice(&fx), expected("/dev/ttys1", a), "{a:?}");
         assert!(logs(&fx).is_empty(), "{a:?}");

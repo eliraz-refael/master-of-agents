@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use moa_core::folders::typed_folder;
 use moa_core::model::Project;
 use moa_core::op::Op;
 
@@ -40,29 +41,6 @@ pub(super) enum Ask {
     RenameGroup {
         old: String,
     },
-}
-
-/// The folder a typed answer names, checked as `n` checks it (V7): it starts with `~` or `/`,
-/// and it is a folder. Which brain it belongs to is the core's to judge.
-pub(super) fn folder(typed: &str, ctx: &Ctx) -> Result<PathBuf, String> {
-    let missing = || format!("no folder {typed}");
-    let path = if typed.starts_with('/') {
-        PathBuf::from(typed)
-    } else if typed == "~" {
-        ctx.home.clone()
-    } else if let Some(rest) = typed.strip_prefix("~/") {
-        ctx.home.join(rest)
-    } else if typed.starts_with('~') {
-        // Another user's home: not one moa can name.
-        return Err(missing());
-    } else {
-        return Err("a folder starts with ~ or /".to_string());
-    };
-    if (ctx.is_dir)(&path) {
-        Ok(path)
-    } else {
-        Err(missing())
-    }
 }
 
 /// The account prompt's label: the brain's accounts to choose from.
@@ -104,7 +82,7 @@ impl Panel {
         let Some(path) = &project.path else {
             return self.say(&format!("no folder for {}", clean(&project.name)));
         };
-        let path = match folder(&tilde(path, &ctx.home), ctx) {
+        let path = match typed_folder(&tilde(path, &ctx.home), &ctx.home, ctx.is_dir) {
             Ok(path) => path,
             Err(e) => return self.say(&e),
         };
@@ -135,7 +113,8 @@ impl Panel {
                 if text.is_empty() {
                     return self.say(CANCELLED);
                 }
-                match folder(&text, ctx) {
+                // V7's checks, the same `Ctrl-a n` makes in the core.
+                match typed_folder(&text, &ctx.home, ctx.is_dir) {
                     Ok(path) => self.ask(
                         "title:".to_string(),
                         String::new(),

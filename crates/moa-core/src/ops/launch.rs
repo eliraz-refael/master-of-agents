@@ -13,7 +13,7 @@ use crate::change::Change;
 use crate::cockpit::build::tab_name;
 use crate::cockpit::run::{CockpitOp, Held, queue, through_queue};
 use crate::config::{AccountConfig, AccountName};
-use crate::core::{Tx, post_commit};
+use crate::core::{Tx, finish_op, post_commit};
 use crate::effect::{Effect, LogLevel, TmuxToken};
 use crate::hooks::{asleep, lost_agent};
 use crate::model::{
@@ -293,6 +293,39 @@ pub(crate) fn open(
         prompt: a.prompt,
     };
     Ok((id, new_window(state, conn, &spec)))
+}
+
+/// [`open`], told to `tell` once tmux says how its tab turned out ([`opened`]), or at once
+/// when it is refused. `focus` brings the tab to the screen once it is bound. Every tab
+/// opens detached (`-d`).
+pub(crate) fn open_told(
+    state: &mut State,
+    now: &Now,
+    a: &OpenArgs,
+    tell: Tell,
+    focus: bool,
+) -> Vec<Effect> {
+    let mut tx = Tx::new(now);
+    match open(state, &mut tx, now, a) {
+        Ok((id, new_window)) => {
+            let launching = Launching {
+                reply: Some(tell),
+                kind: LaunchKind::Open,
+                focus,
+                waiters: Vec::new(),
+                launched_at: tx.wall,
+            };
+            state.tmux.wait_open(id, launching);
+            let mut fx = post_commit(state, tx);
+            fx.push(new_window);
+            fx
+        }
+        // Nothing queued is said: the refusal is all there is.
+        Err(e) => match tell {
+            Tell::Reply(conn, req) => finish_op(state, tx, conn, req, Err(e)),
+            Tell::Notice(_) => told(state, Some(tell), Err(e)).into_iter().collect(),
+        },
+    }
 }
 
 /// The launcher of a Claude account (rule 6), or why it has none.
@@ -820,7 +853,7 @@ pub(crate) fn resumed(
     let (answer, waiters) = if via_focus {
         (None, vec![(conn, req)])
     } else {
-        (Some((conn, req)), Vec::new())
+        (Some(Tell::Reply(conn, req)), Vec::new())
     };
     state.tmux.wait_open(
         id,
@@ -887,20 +920,26 @@ pub(crate) fn released(state: &mut State, now: &Now) -> Vec<Effect> {
         end_launch(state, &mut tx, id, launching.kind, false, &mut logs);
         fx.extend(logs);
         fx.extend(post_commit(state, tx));
-        let no = Err(OpError(OLD_TAB_STAYED.into()));
-        fx.extend(
-            launching
-                .reply
-                .into_iter()
-                .chain(launching.waiters)
-                .map(|(conn, req)| Effect::Reply {
-                    conn,
-                    req,
-                    result: no.clone(),
-                }),
-        );
+        fx.extend(all_told(
+            state,
+            launching,
+            Err(OpError(OLD_TAB_STAYED.into())),
+        ));
     }
     fx
+}
+
+/// What tells a launch's caller and its focus waiters, who all hear `result`.
+fn all_told(state: &State, l: Launching, result: Result<Done, OpError>) -> Vec<Effect> {
+    let waiters = l
+        .waiters
+        .into_iter()
+        .map(|(conn, req)| Tell::Reply(conn, req));
+    l.reply
+        .into_iter()
+        .chain(waiters)
+        .filter_map(|tell| told(state, Some(tell), result.clone()))
+        .collect()
 }
 
 pub(super) fn warn(message: String) -> Effect {
@@ -945,14 +984,9 @@ pub(crate) fn opened(state: &mut State, now: &Now, settled: Vec<Settled>) -> Vec
                 (Err(OpError(WENT_AWAY.into())), None)
             }
         };
-        // A caller that went has nobody to tell; its tab was still bound or ended above.
-        if let Some((conn, req)) = launching.reply {
-            after.push(Effect::Reply {
-                conn,
-                req,
-                result: result.clone(),
-            });
-        }
+        // A caller that went has nobody to tell; its tab was still bound or ended above. A
+        // key's client is told by notice.
+        after.extend(told(state, launching.reply, result.clone()));
         // A focus waiter hears where it went, or else what the launch heard.
         let went = went.map(Ok).unwrap_or(result);
         after.extend(
@@ -994,16 +1028,7 @@ pub(crate) fn lost_opens(state: &mut State) -> Vec<Effect> {
         let Some(l) = state.tmux.forget_open(id) else {
             continue;
         };
-        fx.extend(
-            l.reply
-                .into_iter()
-                .chain(l.waiters)
-                .map(|(conn, req)| Effect::Reply {
-                    conn,
-                    req,
-                    result: Err(OpError(NOT_SAVED.into())),
-                }),
-        );
+        fx.extend(all_told(state, l, Err(OpError(NOT_SAVED.into()))));
     }
     fx
 }

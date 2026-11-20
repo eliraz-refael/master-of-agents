@@ -14,6 +14,7 @@ use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::ops::term::Tell;
 use crate::panel;
+use crate::prompt;
 use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
 use crate::sleep;
@@ -22,7 +23,7 @@ use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
+use crate::tmux::link::{self, Asked, Link};
 use crate::tmux::mailbox::{HookMsg, Mailbox};
 use crate::tmux::notify::Notification;
 use crate::tmux::panes::parse_panes;
@@ -129,6 +130,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             {
                 return fx;
             }
+            // So does every answer to a prompt that waits for one (S5); the link logs the
+            // rest.
+            if let Some(Mailbox::Prompt { token, text }) = &mailbox
+                && state.prompts.contains_key(token)
+            {
+                return prompt::answered(state, now, *token, text);
+            }
             // The spot's agent ending by itself leaves the spot empty: the layout is built
             // again (L11). Its tag is read before `pane_gone` deletes the binding.
             let refill = matches!(&mailbox, Some(Mailbox::Hook(HookMsg::PaneExited(pane)))
@@ -173,6 +181,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // Another server's pane ids name other tabs: the views the old tabs had go, and
             // no panel has its tab any more (L8).
             let another_server = state.tmux.another_server(&t);
+            // A prompt's template names the old control client: no answer to it can come.
+            if fresh {
+                state.prompts.clear();
+            }
             let mut unpaned = None;
             if another_server {
                 state.pane_views.clear();
@@ -447,7 +459,6 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 },
             ..
         } => {
-            let mut tx = Tx::new(now);
             let asked = ops::launch::OpenArgs {
                 path: &path,
                 account: account.as_deref(),
@@ -455,23 +466,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 group: group.as_deref(),
                 prompt: prompt.as_deref(),
             };
-            match ops::launch::open(state, &mut tx, now, &asked) {
-                Ok((id, new_window)) => {
-                    let launching = Launching {
-                        reply: Some((conn, req)),
-                        kind: LaunchKind::Open,
-                        focus: !bg,
-                        waiters: Vec::new(),
-                        launched_at: tx.wall,
-                    };
-                    state.tmux.wait_open(id, launching);
-                    let mut fx = post_commit(state, tx);
-                    fx.push(new_window);
-                    fx
-                }
-                // Nothing queued is said: the refusal is all there is.
-                Err(e) => finish_op(state, tx, conn, req, Err(e)),
-            }
+            ops::launch::open_told(state, now, &asked, Tell::Reply(conn, req), !bg)
         }
         // Answered now, or once the tab it waits for is bound.
         Input::Client {

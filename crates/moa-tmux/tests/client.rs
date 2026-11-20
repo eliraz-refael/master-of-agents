@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use moa_core::prompt::typed as typed_text;
+use moa_core::tmux::ids::ClientName;
 use moa_core::tmux::mailbox::Mailbox;
 use moa_testkit::{Sandbox, Terminal, tmux_path, wait_for};
 use moa_tmux::client::{
@@ -228,8 +230,10 @@ fn quote_round_trips_through_tmux() {
     rt.block_on(client.close());
 }
 
+/// `Cmd::prompt` against a real client: what is typed (or left in the prefill) comes back in
+/// `moa:prompt`, whatever it holds, once moa takes back tmux 3.4's `\$` (`prompt::typed`).
 #[tokio::test(flavor = "multi_thread")]
-async fn prompt_text_round_trips() {
+async fn prompt_answers_round_trip() {
     let sb = Sandbox::start().unwrap();
     let (client, mut events, info) = connect(&sb).await;
     let tmux = tmux_path().unwrap_or_else(|e| panic!("{e}"));
@@ -237,44 +241,56 @@ async fn prompt_text_round_trips() {
     args.extend(sb.socket_args());
     args.extend(["attach".into(), "-t".into(), "=sandbox".into()]);
     let term = Terminal::spawn(&tmux, &args, &sb.env(), 100, 30).unwrap();
-    let tty = term.tty();
-    let seen = wait_for(Duration::from_secs(5), || {
+    let tty = ClientName(term.tty());
+    let seen = wait_for(Duration::from_secs(10), || {
         let list = sb.tmux(&["list-clients", "-F", "#{client_name}"]).ok()?;
-        list.lines().any(|l| l == tty).then_some(())
+        list.lines().any(|l| l == tty.0).then_some(())
     });
     assert!(seen.is_some(), "the terminal never attached");
 
-    // Double quotes, because `%%%` escapes for them and `'` would be lost (T8).
-    let template = format!(
-        "display-message -c {} -l \"moa:prompt 7 %%%\"",
-        info.client.0
-    );
-    let prompt = Cmd::new("command-prompt").args(["-b", "-t", &tty, "-p", "x", &template]);
-    client.run(&prompt).await.unwrap();
-    let typed = "it's \"a\" #{x} ; b \\ ✓ $HOME";
-    term.press(typed.as_bytes());
-    term.press(b"\r");
-
-    let message = tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(ev) = events.recv().await {
-            if let Event::Notification(Notification::Message(m)) = ev
-                && m.starts_with("moa:prompt")
-            {
-                return Some(m);
+    let cases = [
+        ("", r#"it's "a" $HOME"#, r#"it's "a" $HOME"#),
+        ("", "a;b", "a;b"),
+        ("", "100%", "100%"),
+        ("", "#{pane_id}", "#{pane_id}"),
+        ("", "ü 😀", "ü 😀"),
+        // The prefill is the answer when nothing is typed.
+        ("~/x/", "", "~/x/"),
+        ("~/x/", "y", "~/x/y"),
+    ];
+    for (token, (prefill, typed, want)) in (1u64..).zip(cases) {
+        let prompt = Cmd::prompt(&tty, "x", prefill, &info.client, token);
+        client.run(&prompt).await.unwrap();
+        term.press(typed.as_bytes());
+        term.press(b"\r");
+        let message = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(ev) = events.recv().await {
+                if let Event::Notification(Notification::Message(m)) = ev
+                    && m.starts_with("moa:prompt")
+                {
+                    return Some(m);
+                }
             }
-        }
-        None
-    })
-    .await
-    .expect("no message within 5 s")
-    .expect("the events ended");
-    assert_eq!(
-        Mailbox::parse(&message),
-        Ok(Mailbox::Prompt {
-            token: 7,
-            text: typed.to_string()
+            None
         })
-    );
+        .await
+        .unwrap_or_else(|_| panic!("no answer to {typed:?} within 10 s"))
+        .expect("the events ended");
+        let Ok(Mailbox::Prompt { token: got, text }) = Mailbox::parse(&message) else {
+            panic!("{message:?}")
+        };
+        assert_eq!(got, token, "{typed:?}");
+        // The quirk itself: 3.4 sends a typed `$HOME` as `\$HOME`, later ones as typed.
+        if typed.contains("$HOME") {
+            assert_eq!(
+                text.contains(r"\$HOME"),
+                info.version.starts_with("3.4"),
+                "{} sent {message:?}",
+                info.version
+            );
+        }
+        assert_eq!(typed_text(&info.version, &text), want, "{message:?}");
+    }
     client.close().await;
 }
 

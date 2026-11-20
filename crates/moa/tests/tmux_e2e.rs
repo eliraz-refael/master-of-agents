@@ -96,14 +96,13 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
 
     // `$` opens a tab now (slice 5a's Task 14 tests it end to end), and the cockpit's keys
     // act (cockpit_run.rs in moa-core): the rest still say they're coming.
-    for a in [
-        KeyAction::Find,
-        KeyAction::FindOther,
-        KeyAction::New,
-        KeyAction::Help,
-    ] {
+    for a in [KeyAction::Find, KeyAction::FindOther, KeyAction::Help] {
         moa_key(&tb, &term, a.key(), &notice(a));
     }
+    // `n` asks for a folder in the status line; Ctrl-c puts it away and answers nothing.
+    // (Esc would too, but tmux reads an Esc then the next Ctrl-a as one key.)
+    moa_key(&tb, &term, KeyAction::New.key(), "new session · folder:");
+    term.press(b"\x03");
 
     // The menu, then an item in it.
     ctrl_a(&tb, &term);

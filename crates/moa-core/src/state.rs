@@ -20,6 +20,7 @@ use crate::layout::{self, Layouts};
 use crate::model::*;
 use crate::op::{ConnId, Op};
 use crate::panel::{PanelReg, View};
+use crate::prompt::Asking;
 use crate::publish::{ACTIVITY_SHOWN, Model};
 use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Link, TmuxState};
@@ -326,6 +327,11 @@ pub struct State {
     /// The cockpit's operations, one at a time (L17). Kept in memory: a reload starts the
     /// queue over.
     pub(crate) cockpit: CockpitRun,
+    /// The prompts waiting for their answer, by token, oldest first, at most
+    /// [`crate::prompt::WAITING`] (S5). A new connection clears them. Kept in memory.
+    pub(crate) prompts: BTreeMap<u64, Asking>,
+    /// The last prompt's token: tokens never repeat while this daemon runs.
+    pub(crate) last_prompt: u64,
 }
 
 impl State {
@@ -366,6 +372,8 @@ impl State {
             layouts: layout::presets(),
             panel_starts: 0,
             cockpit: CockpitRun::default(),
+            prompts: BTreeMap::new(),
+            last_prompt: 0,
         }
     }
 

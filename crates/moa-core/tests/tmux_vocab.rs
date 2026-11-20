@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use moa_core::model::SessionId;
-use moa_core::tmux::cmd::{ALLOWED, Cmd, quote};
+use moa_core::tmux::cmd::{ALLOWED, Cmd, Refused, quote};
 use moa_core::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::mailbox::{HookMsg, KeyAction, Mailbox, MailboxError};
 use moa_core::tmux::notify::Notification;
@@ -115,12 +115,10 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             .check()
             .is_ok()
     );
-    let prompt = Cmd::new("command-prompt");
     assert_eq!(
-        prompt.clone().arg("x").check().unwrap_err().0,
+        Cmd::new("command-prompt").arg("x").check().unwrap_err().0,
         "command-prompt needs -b"
     );
-    assert!(prompt.arg("-b").arg("x").check().is_ok());
     let source = |p: &str| Cmd::new("source-file").arg(p).check();
     assert_eq!(
         source("/x/tmux.conf").unwrap_err().0,
@@ -129,6 +127,136 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
     assert!(source("/x/notmoa.tmux").is_err());
     assert!(Cmd::new("source-file").check().is_err());
     assert!(source("/x/moa.tmux").is_ok());
+}
+
+/// `Cmd::prompt` builds the one `command-prompt` moa sends, and the check takes no other: one
+/// without `-b` would freeze the control client, and any other template could run anything.
+#[test]
+fn only_moas_prompt_shape_is_allowed() {
+    let (client, ctl) = (
+        ClientName("/dev/pts/3".into()),
+        ClientName("client-9".into()),
+    );
+    let prompt = Cmd::prompt(&client, "title:", "~/x/", &ctl, 12);
+    assert_eq!(prompt.check(), Ok(()));
+    assert_eq!(
+        prompt.line(),
+        r#"command-prompt -b -t /dev/pts/3 -p title: -I '~/x/' 'display-message -c client-9 -l "moa:prompt 12 %%%"'"#
+    );
+    let template = r#"display-message -c client-9 -l "moa:prompt 12 %%%""#;
+    let check = |args: &[&str]| {
+        Cmd::new("command-prompt")
+            .args(args.iter().copied())
+            .check()
+    };
+    // No `-b`, or a `-b` that is another flag's value.
+    assert_eq!(
+        check(&["-t", "c", "-p", "x", "-I", "", template]),
+        Err(Refused("command-prompt needs -b"))
+    );
+    assert_eq!(
+        check(&["-p", "-b", "-t", "c", "-I", "", template]),
+        Err(Refused("command-prompt needs -b"))
+    );
+    assert_eq!(
+        check(&["-p", "x", "display-message …"]),
+        Err(Refused("command-prompt needs -b"))
+    );
+    let shape = Err(Refused("command-prompt only sends moa:prompt back to moa"));
+    for bad in [
+        // Two templates.
+        &["-b", "-t", "c", "-p", "x", "-I", "", template, template][..],
+        // No template.
+        &["-b", "-t", "c", "-p", "x", "-I", ""],
+        // A flag missing, given twice, or one moa doesn't use.
+        &["-b", "-p", "x", "-I", "", template],
+        &["-b", "-b", "-t", "c", "-p", "x", "-I", "", template],
+        &["-b", "-N", "-t", "c", "-p", "x", "-I", "", template],
+        // Another template.
+        &["-b", "-t", "c", "-p", "x", "-I", "", "kill-server"],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c client-9 -l "moa:prompt 12 %%%" ; kill-server"#,
+        ],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c client-9 -l "moa:prompt x %%%""#,
+        ],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c client-9 -l "moa:prompt  %%%""#,
+        ],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c client-9 -l "moa:key 12 %%%""#,
+        ],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c 'a b' -l "moa:prompt 12 %%%""#,
+        ],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c  -l "moa:prompt 12 %%%""#,
+        ],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c x;y -l "moa:prompt 12 %%%""#,
+        ],
+        &[
+            "-b",
+            "-t",
+            "c",
+            "-p",
+            "x",
+            "-I",
+            "",
+            r#"display-message -c client-9 -l "moa:prompt 12 %%" "#,
+        ],
+    ] {
+        assert_eq!(check(bad), shape, "{bad:?}");
+    }
 }
 
 #[test]
@@ -223,7 +351,8 @@ fn mailbox_lines_parse() {
         Mailbox::parse(r#"moa:prompt 7 it's "a" \$HOME"#),
         Ok(Mailbox::Prompt {
             token: 7,
-            text: r#"it's "a" $HOME"#.into()
+            // As tmux sent it: only the core knows which tmux unescapes (`prompt::typed`).
+            text: r#"it's "a" \$HOME"#.into()
         })
     );
     assert_eq!(
@@ -283,12 +412,7 @@ fn every_action_has_a_word_key_label_and_notice() {
         .collect();
     assert_eq!(
         coming,
-        [
-            KeyAction::Find,
-            KeyAction::FindOther,
-            KeyAction::New,
-            KeyAction::Help
-        ]
+        [KeyAction::Find, KeyAction::FindOther, KeyAction::Help]
     );
 }
 

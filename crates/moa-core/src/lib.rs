@@ -20,6 +20,7 @@ pub mod op;
 mod ops;
 pub mod panel;
 mod peers;
+pub mod prompt;
 pub mod publish;
 mod reconcile;
 pub mod route;
