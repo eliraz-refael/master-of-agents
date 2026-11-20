@@ -9,8 +9,8 @@ use std::process::Output;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use moa_testkit::{TempBrain, Terminal, fake_claude, wait_for};
-use serde_json::Value;
+use moa_testkit::{FakeStep, TempBrain, Terminal, fake_claude, wait_for, write_script};
+use serde_json::{Map, Value};
 
 pub mod screen;
 
@@ -560,4 +560,85 @@ pub fn select_row(tb: &TempBrain, pane: &str, text: &str) {
         );
     }
     panic!("the bar never reached {text:?}");
+}
+
+/// `moactl args…` for brain `default`, which must succeed; its stdout. A failure shows what
+/// `term` and the daemon say.
+#[track_caller]
+pub fn moactl_ok(tb: &TempBrain, term: &Terminal, args: &[&str]) -> String {
+    let o = run_exe(tb, &moactl(tb), args, &[("MOA_BRAIN", B)]);
+    assert!(
+        o.status.success(),
+        "moactl {args:?}: {}{}\n{}",
+        out(&o),
+        err(&o),
+        what_happened(tb, term)
+    );
+    out(&o)
+}
+
+/// A session `moactl open` started, and where.
+pub struct Opened {
+    pub id: String,
+    pub dir: PathBuf,
+}
+
+/// `moactl open --bg <root>/work/<name> --title <title>` (and `--group` when given), with
+/// fake-claude starting and hanging there.
+#[track_caller]
+pub fn open_session(
+    tb: &TempBrain,
+    term: &Terminal,
+    name: &str,
+    title: &str,
+    group: Option<&str>,
+) -> Opened {
+    let dir = tb.root().join("work").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let start = FakeStep::Hook {
+        event: "SessionStart".into(),
+        fields: Map::from_iter([("source".to_string(), Value::String("startup".into()))]),
+    };
+    write_script(&dir, &[start, FakeStep::Hang]);
+    let path = dir.display().to_string();
+    let mut args = vec!["--json", "open", "--bg", &path, "--title", title];
+    if let Some(group) = group {
+        args.extend(["--group", group]);
+    }
+    let data: Value = serde_json::from_str(&moactl_ok(tb, term, &args)).unwrap();
+    let id = data["id"].as_str().unwrap_or_else(|| panic!("{data}"));
+    Opened {
+        id: id.to_string(),
+        dir: moa_platform::canonical(&dir),
+    }
+}
+
+/// The pane of the tab running session `id`, once there is one.
+#[track_caller]
+pub fn session_pane(tb: &TempBrain, term: &Terminal, id: &str) -> String {
+    let found = wait_for(SHOWS, || {
+        let list = tmux(
+            tb,
+            &["list-panes", "-a", "-F", "#{pane_id} #{@moa_session}"],
+        );
+        list.lines().find_map(|l| {
+            let (pane, session) = l.split_once(' ')?;
+            (session == id).then(|| pane.to_string())
+        })
+    });
+    found.unwrap_or_else(|| panic!("no tab runs {id}\n{}", what_happened(tb, term)))
+}
+
+/// Waits until `pane` shows every one of `texts`.
+#[track_caller]
+pub fn shows(tb: &TempBrain, pane: &str, texts: &[&str]) {
+    let seen = wait_for(SHOWS, || {
+        let screen = screen_of(tb, pane);
+        texts.iter().all(|t| screen.contains(t)).then_some(())
+    });
+    assert!(
+        seen.is_some(),
+        "{pane} never showed {texts:?}\n{}",
+        tab_shows(tb, pane)
+    );
 }

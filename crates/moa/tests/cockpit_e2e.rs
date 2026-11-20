@@ -12,8 +12,7 @@ use std::process::Command;
 
 use moa_core::layout::{Axis, Leaf, Node, parse, presets};
 use moa_platform::pid_alive;
-use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
-use serde_json::{Map, Value};
+use moa_testkit::{TempBrain, Terminal, wait_for};
 
 use common::screen::{Cell, Fg, Screen};
 use common::*;
@@ -104,7 +103,9 @@ fn preset(name: &str) -> Node {
     parse(&presets().entries[name]).unwrap()
 }
 
-/// Whether the cockpit holds `layout` and nothing else, filling its tab's width.
+/// Whether the cockpit holds `layout` and nothing else, filling its tab: every column, and
+/// every row below the first, where tmux draws the line above the panes
+/// (`pane-border-status top`).
 fn holds(tb: &TempBrain, layout: &str) -> Result<(), String> {
     let node = preset(layout);
     let panes = cockpit_panes(tb);
@@ -112,17 +113,21 @@ fn holds(tb: &TempBrain, layout: &str) -> Result<(), String> {
     if panes.len() != count {
         return Err(format!("{} panes for {count} leaves", panes.len()));
     }
-    let (left, _, width, _) = place(&node, &panes)?;
-    let window: u32 = tmux(
+    let spans = place(&node, &panes)?;
+    let size = tmux(
         tb,
-        &["display-message", "-p", "-t", "=moa:moa", "#{window_width}"],
-    )
-    .parse()
-    .unwrap();
-    if (left, width) != (0, window) {
-        return Err(format!(
-            "the layout spans {left}+{width} of {window} columns"
-        ));
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            "=moa:moa",
+            "#{window_width} #{window_height}",
+        ],
+    );
+    let (w, h) = size.split_once(' ').unwrap();
+    let (w, h): (u32, u32) = (w.parse().unwrap(), h.parse().unwrap());
+    if spans != (0, 1, w, h - 1) {
+        return Err(format!("the layout spans {spans:?} of a {w}x{h} tab"));
     }
     Ok(())
 }
@@ -131,51 +136,19 @@ impl Rig {
     /// `moactl args…`, which must succeed; its stdout.
     #[track_caller]
     fn ok(&self, args: &[&str]) -> String {
-        let o = run_exe(&self.tb, &moactl(&self.tb), args, &[("MOA_BRAIN", B)]);
-        assert!(
-            o.status.success(),
-            "moactl {args:?}: {}{}\n{}",
-            out(&o),
-            err(&o),
-            what_happened(&self.tb, &self.term)
-        );
-        out(&o)
+        moactl_ok(&self.tb, &self.term, args)
     }
 
-    /// `moactl open --bg <root>/work/<name> --title <title>`, with fake-claude starting and
-    /// hanging there; the session's id.
+    /// A session `moactl open --bg` started in `<root>/work/<name>`, titled `title`; its id.
     #[track_caller]
     fn session(&self, name: &str, title: &str) -> String {
-        let dir = self.tb.root().join("work").join(name);
-        fs::create_dir_all(&dir).unwrap();
-        let start = FakeStep::Hook {
-            event: "SessionStart".into(),
-            fields: Map::from_iter([("source".to_string(), Value::String("startup".into()))]),
-        };
-        write_script(&dir, &[start, FakeStep::Hang]);
-        let path = dir.display().to_string();
-        let opened = self.ok(&["--json", "open", "--bg", &path, "--title", title]);
-        let data: Value = serde_json::from_str(&opened).unwrap();
-        data["id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{data}"))
-            .to_string()
+        open_session(&self.tb, &self.term, name, title, None).id
     }
 
     /// The pane running session `id`.
     #[track_caller]
     fn session_pane(&self, id: &str) -> String {
-        let found = wait_for(SHOWS, || {
-            let list = tmux(
-                &self.tb,
-                &["list-panes", "-a", "-F", "#{pane_id} #{@moa_session}"],
-            );
-            list.lines().find_map(|l| {
-                let (pane, session) = l.split_once(' ')?;
-                (session == id).then(|| pane.to_string())
-            })
-        });
-        found.unwrap_or_else(|| panic!("no tab runs {id}\n{}", what_happened(&self.tb, &self.term)))
+        session_pane(&self.tb, &self.term, id)
     }
 
     /// The cockpit's pane tagged `tag`.
@@ -190,15 +163,7 @@ impl Rig {
     /// Waits until `pane` shows every one of `texts`.
     #[track_caller]
     fn shows(&self, pane: &str, texts: &[&str]) {
-        let seen = wait_for(SHOWS, || {
-            let screen = screen_of(&self.tb, pane);
-            texts.iter().all(|t| screen.contains(t)).then_some(())
-        });
-        assert!(
-            seen.is_some(),
-            "{pane} never showed {texts:?}\n{}",
-            tab_shows(&self.tb, pane)
-        );
+        shows(&self.tb, pane, texts);
     }
 
     /// Ctrl-a `key` on the terminal.
@@ -379,6 +344,7 @@ fn focus_swaps_and_the_old_agent_goes_home() {
     let pids = (pid_of(&lantern_pane), pid_of(&kite_pane));
     let tree = r.cockpit_pane("tree");
     r.shows(&tree.id, &["Lantern", "Kite"]);
+    let counts = r.counts();
 
     let in_spot = |pane: &str| {
         let seen = wait_for(SHOWS, || {
@@ -415,6 +381,7 @@ fn focus_swaps_and_the_old_agent_goes_home() {
         panes_of(&r.tb, "=moa")
     );
     assert_eq!((pid_of(&lantern_pane), pid_of(&kite_pane)), pids);
+    assert_eq!(r.counts(), counts, "a focus started something");
 }
 
 #[test]
@@ -570,12 +537,18 @@ fn goto_keys_select_their_panels() {
     let plan = r.cockpit_pane("plan");
     tmux(&r.tb, &["select-pane", "-t", &r.cockpit_pane("tree").id]);
     r.active_becomes(&r.cockpit_pane("tree").id);
+    let counts = r.counts();
     r.key("p");
     r.active_becomes(&plan.id);
+    assert_eq!(r.counts(), counts, "Ctrl-a p started something");
 
+    // A layout key selects the console, so the spot isn't active before Ctrl-a g.
     r.apply("2", "focus");
+    r.active_becomes(&r.cockpit_pane("console").id);
     let spot = r.cockpit_pane("empty-slot");
-    assert!(!spot.active, "the spot was active before Ctrl-a g");
+    assert!(!spot.active, "{spot:?}");
+    let counts = r.counts();
     r.key("g");
     r.active_becomes(&spot.id);
+    assert_eq!(r.counts(), counts, "Ctrl-a g started something");
 }

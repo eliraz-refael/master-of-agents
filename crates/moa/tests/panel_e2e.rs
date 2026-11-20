@@ -10,8 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use moa_platform::{canonical, pid_alive};
-use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
-use serde_json::{Map, Value};
+use moa_testkit::{TempBrain, Terminal, wait_for};
 
 use common::*;
 
@@ -35,54 +34,17 @@ fn rig() -> Rig {
     Rig { term, tb }
 }
 
-/// A session `moactl open` started, and where.
-struct Opened {
-    id: String,
-    dir: PathBuf,
-}
-
 impl Rig {
-    /// `moactl args…` to the end.
-    fn moactl(&self, args: &[&str]) -> std::process::Output {
-        run_exe(&self.tb, &moactl(&self.tb), args, &[("MOA_BRAIN", B)])
-    }
-
     /// `moactl args…`, which must succeed; its stdout.
     #[track_caller]
     fn ok(&self, args: &[&str]) -> String {
-        let o = self.moactl(args);
-        assert!(
-            o.status.success(),
-            "moactl {args:?}: {}{}\n{}",
-            out(&o),
-            err(&o),
-            what_happened(&self.tb, &self.term)
-        );
-        out(&o)
+        moactl_ok(&self.tb, &self.term, args)
     }
 
-    /// `moactl open --bg <root>/work/<name> --title <title>` (and `--group` when given),
-    /// with fake-claude starting and hanging there.
+    /// A session `moactl open --bg` started in `<root>/work/<name>`, titled `title`.
     #[track_caller]
     fn session(&self, name: &str, title: &str, group: Option<&str>) -> Opened {
-        let dir = self.tb.root().join("work").join(name);
-        fs::create_dir_all(&dir).unwrap();
-        let start = FakeStep::Hook {
-            event: "SessionStart".into(),
-            fields: Map::from_iter([("source".to_string(), Value::String("startup".into()))]),
-        };
-        write_script(&dir, &[start, FakeStep::Hang]);
-        let path = dir.display().to_string();
-        let mut args = vec!["--json", "open", "--bg", &path, "--title", title];
-        if let Some(group) = group {
-            args.extend(["--group", group]);
-        }
-        let data: Value = serde_json::from_str(&self.ok(&args)).unwrap();
-        let id = data["id"].as_str().unwrap_or_else(|| panic!("{data}"));
-        Opened {
-            id: id.to_string(),
-            dir: canonical(&dir),
-        }
+        open_session(&self.tb, &self.term, name, title, group)
     }
 
     /// A tree panel's tab, once it shows its frame and `texts`; its pane.
@@ -98,15 +60,7 @@ impl Rig {
     /// Waits until `pane` shows every one of `texts`.
     #[track_caller]
     fn shows(&self, pane: &str, texts: &[&str]) {
-        let seen = wait_for(SHOWS, || {
-            let screen = screen_of(&self.tb, pane);
-            texts.iter().all(|t| screen.contains(t)).then_some(())
-        });
-        assert!(
-            seen.is_some(),
-            "{pane} never showed {texts:?}\n{}",
-            tab_shows(&self.tb, pane)
-        );
+        shows(&self.tb, pane, texts);
     }
 
     /// The text of `pane`'s row drawn on background `bg`, if one is.
@@ -140,17 +94,7 @@ impl Rig {
     /// The pane of the tab running session `id`.
     #[track_caller]
     fn session_pane(&self, id: &str) -> String {
-        let found = wait_for(SHOWS, || {
-            let list = tmux(
-                &self.tb,
-                &["list-panes", "-a", "-F", "#{pane_id} #{@moa_session}"],
-            );
-            list.lines().find_map(|l| {
-                let (pane, session) = l.split_once(' ')?;
-                (session == id).then(|| pane.to_string())
-            })
-        });
-        found.unwrap_or_else(|| panic!("no tab runs {id}\n{}", what_happened(&self.tb, &self.term)))
+        session_pane(&self.tb, &self.term, id)
     }
 
     /// Waits until the attached client shows the tab of `pane`.
