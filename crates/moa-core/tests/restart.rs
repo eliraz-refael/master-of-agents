@@ -608,7 +608,8 @@ fn restarting_the_spots_agent_leaves_the_empty_slot() {
             &["-k".to_string(), "-t".into(), "%5".into()][..]
         )
     );
-    assert_eq!(chain[0].parts().len(), 1, "the respawn alone: {chain:?}");
+    // The respawn, and the session's marks off its pane: no more, until it is answered.
+    assert_eq!(chain[0].parts().len(), 4, "{chain:?}");
     assert!(!opens(&fx), "{fx:?}");
 
     // The old agent is gone; the empty slot's tags follow, then the new tab opens.
@@ -648,7 +649,7 @@ fn a_restart_whose_old_agent_went_resumes_though_a_tag_failed() {
     let fx = answer_on(&mut r, 1, *n, vec![Err("invalid option: @moa_view".into())]);
     assert_eq!(the_open(&fx).0, s_id());
     let said = "the agent in %5 was taken down, but the empty slot there couldn't be set up: \
-                invalid option: @moa_view";
+                the terminal refused the change";
     assert!(
         fx.iter()
             .any(|e| matches!(e, Effect::Log(l) if l.message == said)),
@@ -668,8 +669,44 @@ fn a_restart_whose_old_tab_is_gone_resumes() {
     assert_eq!(replies(&r.bound("%7")), [(ReqId(1), restarted())]);
 }
 
-/// tmux refuses the vacate's chain: the old agent may still run, so nothing is resumed. The
-/// restart is answered plainly and logged, and S is asleep, no longer opening.
+/// The old tab left between the vacate's listing and its chain: nothing runs there, so the
+/// restart goes ahead (M4).
+#[test]
+fn a_restart_whose_old_tab_left_meanwhile_resumes() {
+    let mut r = World::new().reconciled();
+    let n = restart_with_a_cockpit(&mut r);
+    let fx = answer_on(&mut r, 1, n, cockpit_scene(true));
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("one chain: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Err("can't find pane: %5".into())]);
+    assert_eq!(the_open(&fx).0, s_id());
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+}
+
+/// The vacate's respawn is refused: the old agent is killed plainly instead, and once that
+/// goes, the restart goes ahead (M3).
+#[test]
+fn a_restart_whose_respawn_is_refused_kills_plainly_then_resumes() {
+    let mut r = World::new().reconciled();
+    let n = restart_with_a_cockpit(&mut r);
+    let fx = answer_on(&mut r, 1, n, cockpit_scene(true));
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("one chain: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Err("create pane failed".into())]);
+    assert!(!opens(&fx), "{fx:?}");
+    let [(n, cmds)] = &queries(&fx)[..] else {
+        panic!("the plain kill: {fx:?}");
+    };
+    assert_eq!(cmds[0].parts(), [kill("%5")]);
+    let fx = answer_on(&mut r, 1, *n, vec![Ok(Vec::new())]);
+    assert_eq!(the_open(&fx).0, s_id());
+}
+
+/// tmux refuses the vacate's chain, and its plain kill too: the old agent may still run, so
+/// nothing is resumed. The restart is answered plainly and logged, and S is asleep, no
+/// longer opening.
 #[test]
 fn a_restart_whose_old_agent_stays_isnt_resumed() {
     let mut r = World::new().reconciled();
@@ -678,8 +715,19 @@ fn a_restart_whose_old_agent_stays_isnt_resumed() {
     let [(n, _)] = &queries(&fx)[..] else {
         panic!("one chain: {fx:?}");
     };
-    let fx = answer_on(&mut r, 1, *n, vec![Err("can't find pane: %5".into())]);
+    let fx = answer_on(&mut r, 1, *n, vec![Err("create pane failed".into())]);
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("the plain kill: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Err("create pane failed".into())]);
     assert!(!opens(&fx), "{fx:?}");
+    let may = "the agent in %5 couldn't be taken down: the terminal refused the change; \
+               it may still be running";
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Log(l) if l.message == may)),
+        "{fx:?}"
+    );
     assert_eq!(
         refusal(&fx),
         "its old tab couldn't be closed, so it wasn't restarted; see moa's log"

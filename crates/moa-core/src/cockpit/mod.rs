@@ -105,6 +105,9 @@ pub struct Vacated {
     /// The spot is respawned in place as the empty slot (a panel start, and no longer a
     /// session's tab); else a spare slot is swapped in and the agent killed.
     pub respawned: bool,
+    /// How many of the chain's first commands take the agent down: the swap and the kill,
+    /// or the respawn with the session's marks taken off its pane. The rest tag the slot.
+    pub taken_down: usize,
 }
 
 /// L11: the spot's agent in `spot` taken out, leaving the empty slot: a spare one parked is

@@ -125,6 +125,10 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
     // The panes a binding held: none of them is bound again below, even when step 2 lets
     // its binding go (its agent was just found gone).
     let held: BTreeSet<PaneId> = holding.keys().copied().collect();
+    // The tabs a sleep, close or restart is still taking down (a vacate queued or running,
+    // L17): saved as gone, their tags still there until the vacate's chain lands, so never
+    // bound again (a reconnect's reconcile can be answered first).
+    let vacating: BTreeSet<PaneId> = crate::cockpit::run::vacating(state).collect();
     let mut kept: BTreeSet<SessionId> = BTreeSet::new();
     // The tabs an adopted agent left: their tags come off once the commit is saved.
     let mut to_untag: Vec<PaneId> = Vec::new();
@@ -177,7 +181,7 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
             && !waiting.contains(&id)
     };
     for info in panes {
-        if info.dead || held.contains(&info.pane) {
+        if info.dead || held.contains(&info.pane) || vacating.contains(&info.pane) {
             continue;
         }
         match match_tab(state, now.wall, info, &socket, |id| free(id, &bound)) {

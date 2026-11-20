@@ -404,9 +404,21 @@ fn a_failed_build_says_so_and_the_next_apply_mends_it() {
     let n = the_listing(&apply(&mut st, 1, "focus"));
     let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&shell_and_parked(), true))));
     let fx = feed(&mut st, answer(n, vec![Err("can't find pane: %4".into())]));
+    // A plain reason for the user; tmux's own words in the log.
     assert_eq!(
         reply_text(&fx),
-        Err("layout focus couldn't be applied: can't find pane: %4; Ctrl-a r tries again".into())
+        Err(
+            "layout focus couldn't be applied: something moa was moving closed meanwhile; \
+             Ctrl-a r tries again"
+                .into()
+        )
+    );
+    assert_eq!(
+        logs(&fx),
+        [(
+            LogLevel::Warn,
+            "tmux refused a cockpit change: can't find pane: %4".to_string()
+        )]
     );
     assert!(!fx.iter().any(|e| matches!(e, Effect::Persist(_))));
     assert_eq!(st.meta(CURRENT_KEY), None);
@@ -1374,7 +1386,16 @@ fn a_swap_tmux_refuses_says_why() {
     let fx = feed(&mut st, answer(n, vec![Err("can't find pane: %9".into())]));
     assert_eq!(
         reply_text(&fx),
-        Err("moa couldn't bring it to the screen: can't find pane: %9".into())
+        Err(
+            "moa couldn't bring it to the screen: something moa was moving closed meanwhile".into()
+        )
+    );
+    assert!(
+        logs(&fx).contains(&(
+            LogLevel::Warn,
+            "tmux refused a cockpit change: can't find pane: %9".to_string()
+        )),
+        "{fx:?}"
     );
     assert_eq!(st.tmux().topology.view_of(PaneId(9)), None);
 }
@@ -1490,16 +1511,19 @@ fn sleeping_the_spots_agent_with_no_spare_respawns_the_spot() {
         &mut st,
         answer(n, lists(&lantern_in_the_spot(false), false)),
     );
-    // The respawn takes the agent down; the slot's tags go once it is answered.
+    // The respawn takes the agent down, its session's marks off with it; the slot's tags go
+    // once it is answered.
     let (n, chain) = the_chain(&fx);
     assert_eq!(
         chain,
         [
-            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
+            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default",
+            "set-option -p -u -t %9 @moa_session",
+            "set-option -p -u -t %9 @moa_adopted",
+            "set-option -p -u -t %9 @moa_term",
         ]
     );
     let (n, chain) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
-    assert_eq!(chain[0], "set-option -p -u -t %9 @moa_session");
     assert!(chain.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
     // Kept on exit, with its stopped line: a crashed slot stays for Repair (L11).
     let kept = chain
@@ -1630,6 +1654,39 @@ fn a_sleep_takes_down_its_agent_whose_tag_never_landed() {
             "{untagged:?}: {chain:?}"
         );
     }
+}
+
+/// M5: the respawned empty slot registers between the vacate's two chains, while its tab
+/// still reads `agent`: unmanaged then. Once the slot's tags land, moa manages it, at once.
+#[test]
+fn an_empty_slot_registered_mid_vacate_is_managed_once_tagged() {
+    let mut st = with_agents(&lantern_in_the_spot(false));
+    let n = committed_then_listed(&sleep(&mut st, 1, L));
+    let fx = feed(&mut st, answer(n, lists(&lantern_in_the_spot(false), true)));
+    let (n, _) = the_chain(&fx);
+    let (n, _) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    let fx = send(
+        &mut st,
+        2,
+        Op::UiPanel {
+            pane: Some("%9".into()),
+            view: Some(View::EmptySlot),
+            placed: true,
+        },
+    );
+    let [(_, Ok(done))] = &replies(&fx)[..] else {
+        panic!("{fx:?}");
+    };
+    assert_eq!(done.data["managed"], false);
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    let Some(Effect::Publish(Publish::Model(m))) = fx
+        .iter()
+        .rfind(|e| matches!(e, Effect::Publish(Publish::Model(_))))
+    else {
+        panic!("{fx:?}")
+    };
+    assert_eq!(m.topics[&Topic::Panels]["c1"]["managed"], true);
+    assert_eq!(m.topics[&Topic::Panels]["c1"]["view"], "empty-slot");
 }
 
 /// L17: a vacate waits behind a build already running. When that build sent the agent home,

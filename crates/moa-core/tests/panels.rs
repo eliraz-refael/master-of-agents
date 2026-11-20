@@ -1144,7 +1144,7 @@ fn a_select_view_tmux_refuses_says_why() {
     assert_eq!(
         the_reply(&fx),
         Err(OpError(
-            "the panel in %9 couldn't show plan: can't find pane: %9".into()
+            "the panel in %9 couldn't show plan: something moa was moving closed meanwhile".into()
         ))
     );
     assert!(models(&fx).is_empty(), "{fx:?}");

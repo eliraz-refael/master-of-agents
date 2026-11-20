@@ -365,6 +365,7 @@ pub(crate) fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Vacated
         return Vacated {
             chain: Cmd::chain(vec![swap(slot.pane, spot), kill_pane(spot)]),
             respawned: false,
+            taken_down: 2,
         };
     }
     let mut cmds = vec![
@@ -373,14 +374,18 @@ pub(crate) fn vacate(scene: &Scene, spot: PaneId, respawn: &[String]) -> Vacated
             .args(respawn.iter().cloned()),
     ];
     // No longer a session's tab: the session tag and the adopted mark go (as reconcile takes
-    // them off), and a terminal's mark, so the slot never lists as an untracked tab.
+    // them off), and a terminal's mark, so the slot never lists as an untracked tab. With
+    // the respawn, as one step: no listing between finds the slot still tagged as the
+    // session's (an unset on a pane that is there doesn't fail).
     cmds.extend(untag_cmds(spot));
     cmds.push(unset_pane_option(spot, "@moa_term"));
+    let taken_down = cmds.len();
     cmds.extend(panel_tags(spot, View::EmptySlot));
     cmds.extend(keep_on_exit(spot));
     Vacated {
         chain: Cmd::chain(cmds),
         respawned: true,
+        taken_down,
     }
 }
 

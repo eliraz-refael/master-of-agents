@@ -294,23 +294,27 @@ fn a_vacate_leaves_the_spot_whole() {
     let mut st = up();
     let n = the_listing(&vacate_of(&mut st, 9, 1));
     let (n, lines) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
-    // The respawn takes the agent down on its own; the slot's tags follow once it is `Ok`.
+    // The respawn takes the agent down with the session's marks off its pane, as one step;
+    // the slot's tags follow once it is `Ok`.
     assert_eq!(
         lines,
         [
-            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
+            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default",
+            "set-option -p -u -t %9 @moa_session",
+            "set-option -p -u -t %9 @moa_adopted",
+            "set-option -p -u -t %9 @moa_term",
         ]
     );
     assert_eq!(st.panel_starts, 0);
+    assert_eq!(st.tmux.topology.moa_session(PaneId(9)), Some(sid(1)));
     let (n, lines) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
     assert_eq!(st.panel_starts, 1);
+    // No longer a session's tab, at once: the first chain took its session tag off.
+    assert_eq!(st.tmux.topology.moa_session(PaneId(9)), None);
     assert!(lines.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
-    assert_eq!(st.tmux.topology.moa_session(PaneId(9)), Some(sid(1)));
     feed(&mut st, answer(n, vec![Ok(Vec::new())]));
     assert!(st.cockpit.in_flight.is_none());
     assert_eq!(st.tmux.topology.view_of(PaneId(9)), Some("empty-slot"));
-    // No longer a session's tab, at once: the chain took its session tag off.
-    assert_eq!(st.tmux.topology.moa_session(PaneId(9)), None);
 
     let mut st = up();
     let n = the_listing(&vacate_of(&mut st, 9, 1));
@@ -382,30 +386,97 @@ fn a_failed_vacate_says_whose_it_was() {
     let mut st = up();
     let n = the_listing(&vacate_of(&mut st, 9, 1));
     let (n, _) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(true)))));
-    let fx = feed(
-        &mut st,
-        answer(
-            n,
-            vec![Err("size or position no space for a new pane".into())],
-        ),
+    let refused = vec![Err("size or position no space for a new pane".into())];
+    let fx = feed(&mut st, answer(n, refused.clone()));
+    // tmux's words go to the log only. The agent is killed plainly (M3): an agent running
+    // while the brain says it's gone is worse than an empty spot, which a refill builds.
+    assert_eq!(
+        logged(&fx),
+        [
+            "tmux refused a cockpit change: size or position no space for a new pane",
+            "the agent in %9 is closed plainly; the cockpit is built again after",
+        ]
     );
-    let logged: Vec<_> = fx
-        .iter()
+    let (n, lines) = the_chain(&fx);
+    assert_eq!(lines, ["kill-pane -t %9"]);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.cockpit.waiting, [CockpitOp::Refill]);
+
+    // That refused too: said plainly, with what it may mean; then the refill runs.
+    let fx = feed(&mut st, answer(n, refused));
+    assert_eq!(
+        logged(&fx),
+        [
+            "tmux refused a cockpit change: size or position no space for a new pane",
+            "the agent in %9 couldn't be taken down: the terminal refused the change; it may still be running",
+        ]
+    );
+    the_listing(&fx);
+    assert_eq!(
+        st.cockpit.in_flight.as_ref().map(|(_, op)| op),
+        Some(&CockpitOp::Refill)
+    );
+}
+
+/// The warn lines in `fx`.
+fn logged(fx: &[Effect]) -> Vec<String> {
+    fx.iter()
         .filter_map(|e| match e {
-            Effect::Log(l) => Some((l.level, l.message.clone())),
+            Effect::Log(l) if l.level == LogLevel::Warn => Some(l.message.clone()),
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+/// M2: the slot's tags chain with no answer: the agent went already, so only the slot is
+/// said to be missing, never the agent.
+#[test]
+fn an_unanswered_tags_chain_says_only_the_slot_is_missing() {
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    let fx = feed(&mut st, answer(n, Vec::new()));
     assert_eq!(
-        logged,
-        [(
-            LogLevel::Warn,
-            "the agent in %9 couldn't be taken down: size or position no space for a new pane"
-                .to_string()
-        )]
+        logged(&fx),
+        [
+            "tmux didn't answer a cockpit change",
+            "the agent in %9 was taken down, but the empty slot there couldn't be set up: the terminal didn't answer",
+        ]
     );
-    assert!(replies(&fx).is_empty(), "{fx:?}");
-    assert!(st.cockpit.in_flight.is_none());
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+}
+
+/// M4: a vacate whose pane left between its listing and its chain is done: nothing runs
+/// there, so nothing is killed plainly and nothing more is said.
+#[test]
+fn a_vacate_whose_pane_left_meanwhile_is_done() {
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(false)))));
+    let fx = feed(&mut st, answer(n, vec![Err("can't find pane: %9".into())]));
+    assert_eq!(
+        logged(&fx),
+        ["tmux refused a cockpit change: can't find pane: %9"]
+    );
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert!(st.cockpit.in_flight.is_none() && st.cockpit.waiting.is_empty());
+}
+
+/// M3: the fallback never kills a pane moa last knew as a panel; it is said instead.
+#[test]
+fn a_refused_vacate_never_kills_a_panel_blind() {
+    let mut st = up();
+    let n = the_listing(&vacate_of(&mut st, 9, 1));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(lantern_in_the_spot(true)))));
+    // moa learned meanwhile that %9 shows the empty slot.
+    st.tmux.views_set(&[(PaneId(9), Some("empty-slot"))]);
+    let fx = feed(&mut st, answer(n, vec![Err("no current target".into())]));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        logged(&fx)[1],
+        "the agent in %9 couldn't be taken down: the terminal refused the change; it may still be running"
+    );
 }
 
 /// A refill builds the current layout, selecting nothing, and a newer build never takes
