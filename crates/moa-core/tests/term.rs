@@ -6,12 +6,12 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use moa_core::effect::{Effect, Publish, TmuxIn, TmuxToken};
+use moa_core::effect::{Effect, LogLevel, Publish, TmuxIn, TmuxToken};
 use moa_core::op::{Done, Op, OpError, ReqId};
 use moa_core::publish::Topic;
 use moa_core::state::State;
 use moa_core::tmux::cmd::Cmd;
-use moa_core::tmux::ids::WindowId;
+use moa_core::tmux::ids::{PaneId, WindowId};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_testkit::brain::TypicalBrain;
@@ -203,6 +203,48 @@ fn reply_text(fx: &[Effect]) -> Result<String, String> {
         [(_, Err(OpError(why)))] => Err(why.clone()),
         other => panic!("one reply: {other:?}"),
     }
+}
+
+/// Only the terminals' list failed: the other three still rebuild the topology, which has
+/// no terminals, and the log says why in one line.
+#[test]
+fn a_failed_terminals_list_keeps_the_rest_of_the_listing() {
+    let (b, mut st) = listed_with(&["T %5 ⌨ kite"]);
+    feed(
+        &b,
+        &mut st,
+        TmuxIn::Notification(Notification::WindowClose {
+            window: WindowId(3),
+        }),
+    );
+    let mut results = lists(&[BOTH[0], "P %7 @7 $0 1 0 0 0  0 "], &[]);
+    results[3] = Err("unknown filter\nmore".into());
+    let fx = feed(
+        &b,
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results,
+        },
+    );
+    let topology = &st.tmux().topology;
+    assert!(topology.has_pane(PaneId(7)) && !topology.has_pane(PaneId(6)));
+    assert!(terms(&st).is_empty());
+    let logged: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some((l.level, l.message.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [(
+            LogLevel::Warn,
+            "tmux couldn't list moa's terminals: unknown filter"
+        )]
+    );
 }
 
 /// A listing that changes no terminal publishes none.

@@ -292,7 +292,7 @@ impl Panel {
             self.say(CANCELLED);
             return None;
         }
-        if self.view == View::Picker {
+        if self.view == View::Picker && pick_keys::closes(Key::Ctrl('c')) {
             return Some(Out::Close);
         }
         self.quit()
@@ -499,13 +499,13 @@ impl Panel {
     }
 
     /// Whether `k` quits this panel when nothing is being typed: Ctrl-c, `q` in the picture,
-    /// and the picker's closing keys (Esc, Ctrl-c, Ctrl-g), in a panel moa doesn't manage
+    /// and the picker's closing keys ([`pick_keys::closes`]), in a panel moa doesn't manage
     /// (L14).
     pub fn quits(&self, k: Key) -> bool {
         if self.managed {
             false
         } else if self.view == View::Picker {
-            matches!(k, Key::Esc | Key::Ctrl('c' | 'g'))
+            pick_keys::closes(k)
         } else {
             keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
         }

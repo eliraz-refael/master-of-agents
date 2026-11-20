@@ -14,6 +14,7 @@ use crate::sleep::kill_pane;
 use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{set_pane_option, unset_pane_option};
+use crate::tmux::topology::AGENT_MARK;
 
 /// The spike's cut for a title on a tab or a frame.
 const TITLE_CHARS: usize = 24;
@@ -119,7 +120,7 @@ fn agent_tags(pane: PaneId, title: &str) -> Vec<Cmd> {
         set_pane_option(
             pane,
             "@moa_label",
-            &format!("● {}", literal_format(&one_line(title))),
+            &format!("{AGENT_MARK}{}", literal_format(&one_line(title))),
         ),
     ];
     cmds.extend(frame(pane, false));

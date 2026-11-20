@@ -11,7 +11,7 @@ use super::cmd::Cmd;
 use super::ids::{ClientName, Generation, PaneId, WindowId};
 use super::mailbox::{HookMsg, Mailbox, MailboxError};
 use super::notify::Notification;
-use super::topology::{Applied, Topology, refresh_cmds};
+use super::topology::{AGENT_MARK, Applied, Topology, refresh_cmds};
 use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::hook::HookEnvelope;
@@ -903,8 +903,12 @@ impl TmuxState {
     }
 
     /// A cockpit operation's own listing came back (L17): the topology is rebuilt from it
-    /// as from a refresh's. `false` when it couldn't be read; what was known stays.
-    pub(crate) fn scene_listed(&mut self, results: &[Result<Vec<String>, String>]) -> bool {
+    /// as from a refresh's, with what the log is told of it. `None` when it couldn't be
+    /// read; what was known stays.
+    pub(crate) fn scene_listed(
+        &mut self,
+        results: &[Result<Vec<String>, String>],
+    ) -> Option<Vec<Effect>> {
         self.rebuild(results)
     }
 
@@ -913,6 +917,22 @@ impl TmuxState {
     pub(crate) fn untag_sent(&mut self, pane: PaneId) {
         self.sent.tags.remove(&pane);
         self.topology.untag(pane);
+    }
+
+    /// Whether terminal `pane` still has the spot's agent's label (`● <title>`), which moa
+    /// takes off as it untags the agent: the topology then knows it with none, at once.
+    pub(crate) fn agent_label_off(&mut self, pane: PaneId) -> bool {
+        let agents = self
+            .topology
+            .term_label(pane)
+            .is_some_and(|l| l.starts_with(AGENT_MARK));
+        if agents {
+            self.topology.set_term(pane, "");
+            if let Some(label) = self.sent.terms.get_mut(&pane) {
+                label.clear();
+            }
+        }
+        agents
     }
 
     /// A cockpit chain that tmux ran took the terminal mark (`@moa_term`) off `pane`: it is
@@ -1074,13 +1094,12 @@ impl TmuxState {
     fn listed(&mut self, results: &[Result<Vec<String>, String>]) -> Vec<Effect> {
         let again = self.refresh == Refresh::Again;
         self.refresh = Refresh::Idle;
-        let mut fx = Vec::new();
-        if !self.rebuild(results) {
-            fx.push(log(
+        let mut fx = self.rebuild(results).unwrap_or_else(|| {
+            vec![log(
                 LogLevel::Warn,
                 "listing the terminal server failed".into(),
-            ));
-        }
+            )]
+        });
         if again {
             fx.extend(self.refresh());
         }
@@ -1088,19 +1107,33 @@ impl TmuxState {
     }
 
     /// The topology from the four lists `refresh_cmds` asks for, keeping the tags sent that
-    /// they don't show yet. `false`, with what was known kept, when they aren't four lists.
-    fn rebuild(&mut self, results: &[Result<Vec<String>, String>]) -> bool {
-        match results {
-            [Ok(sessions), Ok(panes), Ok(clients), Ok(terms)] => {
-                self.topology = Topology::from_lists(sessions, panes, clients);
-                self.topology.terms_listed(terms);
-                // A tag the listing doesn't show yet may have been sent after it was asked.
-                self.sent.keep(&mut self.topology);
-                true
-            }
+    /// they don't show yet, and what the log is told of it. The terminals' list failing alone
+    /// leaves the other three good: the topology has no terminals then (but those moa just
+    /// tagged), and the log says so. `None`, with what was known kept, when the other three
+    /// aren't there.
+    fn rebuild(&mut self, results: &[Result<Vec<String>, String>]) -> Option<Vec<Effect>> {
+        let [Ok(sessions), Ok(panes), Ok(clients), terms] = results else {
             // No information: what was known stays.
-            _ => false,
+            return None;
+        };
+        self.topology = Topology::from_lists(sessions, panes, clients);
+        let mut fx = Vec::new();
+        match terms {
+            Ok(terms) => self.topology.terms_listed(terms),
+            Err(e) => {
+                let why = e.lines().map(str::trim).find(|l| !l.is_empty());
+                fx.push(log(
+                    LogLevel::Warn,
+                    format!(
+                        "tmux couldn't list moa's terminals: {}",
+                        why.unwrap_or("tmux gave no reason")
+                    ),
+                ));
+            }
         }
+        // A tag the listing doesn't show yet may have been sent after it was asked.
+        self.sent.keep(&mut self.topology);
+        Some(fx)
     }
 
     /// Answers every waiter with `result`.

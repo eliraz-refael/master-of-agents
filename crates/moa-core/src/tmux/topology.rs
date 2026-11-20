@@ -73,6 +73,9 @@ const COCKPIT: &str = "moa";
 /// (`⌨ shell`).
 const UNNAMED: &str = "shell";
 
+/// What the label of the agent in the spot starts with: `● <title>`.
+pub const AGENT_MARK: &str = "● ";
+
 /// A terminal's name: its label without the `⌨ ` moa puts first, or [`UNNAMED`] when that
 /// leaves nothing. A label set by hand is the name as it is.
 fn term_name(label: &str) -> &str {
@@ -365,21 +368,27 @@ impl Topology {
     }
 
     /// Terminal `p`'s name: its label without the `⌨ ` moa puts first. None when `p` isn't
-    /// a terminal, or runs a session's agent (it is tagged with the session): it is that
-    /// session then, and its label is the agent's.
+    /// a terminal, runs a session's agent (it is tagged with the session: it is that session
+    /// then, and its label is the agent's), or is dead (its shell exited; tmux kept it).
     pub fn term_name(&self, p: PaneId) -> Option<&str> {
-        if self.moa_sessions.contains_key(&p) {
+        if !self.is_live_term(p) {
             return None;
         }
         self.term_label(p).map(term_name)
     }
 
-    /// Every terminal, by pane, with its name; none that runs a session's agent.
+    /// Every terminal, by pane, with its name; none that runs a session's agent or is dead.
     pub fn terms(&self) -> impl Iterator<Item = (PaneId, &str)> + '_ {
         self.terms
             .iter()
-            .filter(|(p, _)| !self.moa_sessions.contains_key(p))
+            .filter(|(p, _)| self.is_live_term(**p))
             .map(|(p, label)| (*p, term_name(label)))
+    }
+
+    /// Whether `p` may be listed as a terminal: no session's agent runs in it, and its
+    /// program hasn't exited.
+    fn is_live_term(&self, p: PaneId) -> bool {
+        !self.moa_sessions.contains_key(&p) && !self.dead.contains(&p)
     }
 
     /// Records that `p` is a terminal labelled `label`, as moa just tagged it.
@@ -529,5 +538,25 @@ mod tests {
         t.lifted(PaneId(9));
         assert_eq!(t.cockpit(), Some(WindowId(1)), "the cockpit keeps the tree");
         assert_eq!(t.panes_in(WindowId(1)).collect::<Vec<_>>(), [PaneId(1)]);
+    }
+
+    /// A terminal whose shell exited, kept by tmux, is listed as no terminal: there is
+    /// nothing in it to bring to the screen.
+    #[test]
+    fn a_dead_terminal_is_no_terminal() {
+        let s = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let mut t = Topology::from_lists(
+            &s(&["S $0 moa"]),
+            &s(&["P %3 @3 $0 1 0 0 0  0 ", "P %4 @4 $0 1 0 0 0  1 "]),
+            &s(&[]),
+        );
+        t.terms_listed(&s(&["T %3 ⌨ api", "T %4 ⌨ web"]));
+        assert_eq!(t.terms().collect::<Vec<_>>(), [(PaneId(3), "api")]);
+        assert_eq!(t.term_name(PaneId(4)), None);
+        assert_eq!(
+            t.term_label(PaneId(4)),
+            Some("⌨ web"),
+            "its mark stays known"
+        );
     }
 }

@@ -10,6 +10,12 @@ use crate::line::Item;
 use crate::list::ListState;
 use crate::views::picker;
 
+/// Whether `k` closes the picker: Esc, Ctrl-c or Ctrl-g (S7). Ctrl-c comes as an interrupt
+/// ([`Panel::interrupt`]), the others as keys.
+pub(super) fn closes(k: Key) -> bool {
+    matches!(k, Key::Esc | Key::Ctrl('c' | 'g'))
+}
+
 impl Panel {
     /// The picker's keys (S7). They come before every view's moving keys, so `j`, `k`, `q`
     /// and a space are typed into the query; every edit selects the first row again, and
@@ -17,7 +23,7 @@ impl Panel {
     pub(super) fn pick_key(&mut self, k: Key, data: &Data, body: usize) -> Vec<Out> {
         match k {
             Key::Enter => return self.pick(data),
-            Key::Esc | Key::Ctrl('g') => return vec![Out::Close],
+            k if closes(k) => return vec![Out::Close],
             Key::Up | Key::Ctrl('p') | Key::BackTab => self.list.step(&self.lines, false),
             Key::Down | Key::Ctrl('n') | Key::Tab => self.list.step(&self.lines, true),
             Key::PageUp | Key::PageDown => {

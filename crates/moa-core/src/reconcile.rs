@@ -290,8 +290,7 @@ fn reconcile(state: &mut State, now: &Now, panes: &[PaneInfo]) -> Vec<Effect> {
         cmds.extend(tag_cmds(pane, id, adopted));
     }
     for pane in stale_tags {
-        state.tmux.untag_sent(pane);
-        cmds.extend(untag_cmds(pane));
+        cmds.extend(untag_tab(state, pane));
     }
     if !cmds.is_empty()
         && let Link::Up { conn, .. } = state.tmux().link
@@ -503,10 +502,22 @@ fn tag_cmds(pane: PaneId, id: SessionId, adopted: bool) -> Vec<Cmd> {
 /// next shows as one moa doesn't track (R23). The session tag goes first, as [`tag_pane`]
 /// set it last.
 pub(crate) fn untag_pane(state: &mut State, tx: &mut Tx, pane: PaneId) {
-    for cmd in untag_cmds(pane) {
+    for cmd in untag_tab(state, pane) {
         tx.tmux(cmd);
     }
+}
+
+/// What takes moa's tags off `pane` ([`untag_cmds`]), the topology knowing at once. A
+/// terminal whose agent ended while in the spot still has the agent's label (`● <title>`):
+/// that goes too, so the terminal is listed as `shell`, not under the session's title. A
+/// terminal's own label (`⌨ <name>`) stays, and so does any other tab's.
+pub(crate) fn untag_tab(state: &mut State, pane: PaneId) -> Vec<Cmd> {
+    let mut cmds = untag_cmds(pane).to_vec();
     state.tmux.untag_sent(pane);
+    if state.tmux.agent_label_off(pane) {
+        cmds.push(unset_pane_option(pane, "@moa_label"));
+    }
+    cmds
 }
 
 /// What takes moa's tags off `pane`: the session tag, then the adopted mark.
