@@ -598,8 +598,10 @@ impl Loop {
                     Link::Up { live, .. } => {
                         self.asked.insert(live.send(op));
                     }
-                    // Nothing is sent to another build; elsewhere the footer says why.
+                    // Nothing is sent to another build; elsewhere the footer says why. A
+                    // pick that wasn't sent waits for no reply.
                     _ => {
+                        self.panel.forget_pick();
                         let line = self.link_line();
                         self.panel.note(line.as_deref().unwrap_or(CONNECTING));
                     }
@@ -1133,7 +1135,9 @@ mod tests {
     use moa_core::op::Done;
     use moa_view::panel::Out;
 
-    use super::{Failed, Fault, Logbook, Loop, PanelOptions, Turn, Wake, now};
+    use super::{
+        Failed, Fault, Link, Logbook, Loop, MISMATCH, PanelOptions, TRYING, Turn, Wake, now,
+    };
     use crate::theme::{ColorMode, Theme};
 
     const SIZE: Size = Size { w: 60, h: 12 };
@@ -1303,6 +1307,40 @@ mod tests {
         let mut by_hand = looped(Some(View::Tree), false);
         assert!(!by_hand.panel.managed());
         assert!(matches!(input(&mut by_hand, ctrl_c()), Turn::Quit));
+    }
+
+    /// A pick made while the link isn't up is dropped, and forgotten: the footer keeps the
+    /// link's line, and the next Enter offers the pick again (sent once the link is back)
+    /// rather than waiting on a reply that will never come.
+    #[tokio::test]
+    async fn a_pick_that_couldnt_be_sent_is_forgotten() {
+        let (data, ctx) = moa_view::fixture::lantern();
+        let enter = || Event::Key(KeyEvent::from(KeyCode::Enter));
+        let links = [
+            (
+                Link::Waiting {
+                    waited: 0,
+                    sleep: Box::pin(tokio::time::sleep(std::time::Duration::from_secs(60))),
+                },
+                TRYING,
+            ),
+            (Link::Mismatch, MISMATCH),
+        ];
+        for (link, line) in links {
+            let mut lp = looped(Some(View::Picker), false);
+            lp.data = data.clone();
+            lp.link = link;
+            for _ in 0..2 {
+                assert!(matches!(input(&mut lp, enter()), Turn::Go(true)));
+                assert!(lp.asked.is_empty(), "nothing was sent");
+                let screen = lp.panel.screen(&lp.data, &ctx, SIZE);
+                let fits = moa_view::text::ellipsize(line, usize::from(screen.geometry.footer.w));
+                assert_eq!(screen.footer.text, fits);
+            }
+            // What Enter gives the loop now: the pick itself, which a link that is up sends.
+            let outs = lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
+            assert!(matches!(outs[..], [Out::Send(_)]), "{outs:?}");
+        }
     }
 
     /// S7: Esc, Ctrl-c and Ctrl-g close a picker you started; one moa placed stays where it

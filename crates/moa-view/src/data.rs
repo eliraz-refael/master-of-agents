@@ -45,7 +45,10 @@ pub struct SessionRow {
     pub adopted: bool,
 }
 
-/// What the daemon published, by topic and key.
+/// What the daemon published, by topic and key. Change it through
+/// [`replace`](Data::replace), [`upsert`](Data::upsert) and [`delete`](Data::delete); a
+/// direct edit of a map (a test's, say) must call [`touch`](Data::touch) after it, since a
+/// view keeps what it worked out by [`revision`](Data::revision) (the picker's matches).
 #[derive(Clone, Debug, Default)]
 pub struct Data {
     pub sessions: BTreeMap<SessionId, SessionRow>,
