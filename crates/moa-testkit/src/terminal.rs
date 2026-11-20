@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::{FdFlags, fcntl_setfd};
+use rustix::process::{Pid, Signal, kill_process};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::termios::{Winsize, tcsetwinsize};
 
@@ -191,6 +192,19 @@ impl Terminal {
             .status()?;
         if !sent.success() {
             return Err(io::Error::other("SIGWINCH wasn't delivered"));
+        }
+        Ok(())
+    }
+
+    /// Sends the program SIGWINCH `times` times, back to back, its size unchanged: a burst
+    /// of resizes, as a window being dragged or a layout being applied sends.
+    pub fn winch(&self, times: usize) -> io::Result<()> {
+        let pid = i32::try_from(self.child.id())
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or_else(|| io::Error::other("no pid to signal"))?;
+        for _ in 0..times {
+            kill_process(pid, Signal::WINCH)?;
         }
         Ok(())
     }
