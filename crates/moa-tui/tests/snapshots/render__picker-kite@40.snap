@@ -2,7 +2,7 @@
 source: crates/moa-tui/tests/render.rs
 expression: screen_text(&buf)
 ---
-╭─ picker ─────────────────────────────╮
+╭─ find a session ─────────────────────╮
 │ › kite                  6/12 · 8 live│
 │ ─────────────────────────────────────│
 │  ? Release n asks you    2h  Ship it │

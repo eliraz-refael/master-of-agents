@@ -14,6 +14,7 @@ use crate::text::{self, SPIN, clean, cut, short_account};
 
 pub mod activity;
 pub mod empty_slot;
+pub mod help;
 pub mod picker;
 pub mod picture;
 pub mod plan;
@@ -44,7 +45,8 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Picture => picture::build(data, ctx, ui, width),
         View::Picker => picker::build(data, ctx, ui, width),
         View::EmptySlot => empty_slot::build(width),
-        View::Console | View::Help | View::Setup => {
+        View::Help => help::build(data, ctx, width),
+        View::Console | View::Setup => {
             let words = not_yet(view).unwrap_or_default();
             vec![Line::plain(cut(words, usize::from(width)), Tone::Dim)]
         }
@@ -56,7 +58,6 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
 pub fn not_yet(view: View) -> Option<&'static str> {
     match view {
         View::Console => Some("the console isn't in this build yet"),
-        View::Help => Some("help isn't in this build yet"),
         View::Setup => Some("setup isn't in this build yet"),
         View::EmptySlot
         | View::Tree
@@ -66,7 +67,8 @@ pub fn not_yet(view: View) -> Option<&'static str> {
         | View::Activity
         | View::Projects
         | View::Picture
-        | View::Picker => None,
+        | View::Picker
+        | View::Help => None,
     }
 }
 

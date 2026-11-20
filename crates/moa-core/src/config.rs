@@ -215,9 +215,12 @@ impl Default for UiConfig {
     }
 }
 
-/// A form the picker opens in: a popup over the tab you're on, or a full tab of its own.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A form the picker opens in: a popup over the tab you're on, or a full tab of its own. The
+/// `brain` row carries it as `"popup"` or `"tab"`, so help knows which key opens which.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Form {
+    #[default]
     Popup,
     Tab,
 }

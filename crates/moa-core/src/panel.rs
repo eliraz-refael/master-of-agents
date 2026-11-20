@@ -75,7 +75,8 @@ impl View {
         }
     }
 
-    /// The title on the panel's frame: the spike's `LABELS`, else the word.
+    /// The title on the panel's frame: the spike's `LABELS`, the picker's and help's (S10),
+    /// else the word.
     pub fn label(self) -> &'static str {
         match self {
             View::Console => "◆ moa",
@@ -87,7 +88,9 @@ impl View {
             View::Status => "◉ status",
             View::Picture => "◫ picture",
             View::EmptySlot => "○ agent spot",
-            View::Picker | View::Help | View::Setup => self.word(),
+            View::Picker => "find a session",
+            View::Help => "keys and help",
+            View::Setup => self.word(),
         }
     }
 

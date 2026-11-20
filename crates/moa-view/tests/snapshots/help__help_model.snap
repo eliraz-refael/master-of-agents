@@ -1,0 +1,64 @@
+---
+source: crates/moa-view/tests/help.rs
+expression: "debug_lines(&help::build(&data, &ctx, 80))"
+---
+[head*]Ctrl-a keys
+[head]  c     [text]go to the console panel
+[head]  t     [text]the sessions tree: every session, by group
+[head]  p     [text]the big picture: what every session is doing
+[head]  g     [text]the agent spot: the session open in the cockpit
+[head]  /     [text]find a session: type part of its name, Enter jumps
+[head]  s     [text]find a session in a full tab: type part of its name, Enter jumps
+[head]  n     [text]start a new session
+[head]  $     [text]a plain terminal in a new tab (for a dev server…), in the folder of the
+[text]        [text]agent or session you're on; `exit` closes it
+[head]  |     [text]split the agent or terminal tab you're on: a shell beside it, in the
+[text]        [text]same folder; `exit` closes it
+[head]  -     [text]split the agent or terminal tab you're on: a shell below it, in the same
+[text]        [text]folder; `exit` closes it
+[head]  m     [text]back to moa's cockpit, from an agent's own tab
+[head]  z     [text]zoom the panel or split you're on to the whole tab (again to unzoom)
+[head]  1     [text]switch to the cockpit layout
+[head]  2     [text]switch to the focus layout
+[head]  3     [text]switch to the classic layout
+[head]  4     [text]switch to the triage layout
+[head]  r     [text]restart any of moa's panels that stopped
+[head]  ←↑↓→  [text]move to the split that way (or h j k l); tap more arrows right after to
+[text]        [text]keep moving
+[head]  [     [text]the previous tab
+[head]  ]     [text]the next tab
+[head]  ?     [text]this help: every key moa has
+[head]  a     [text]a real Ctrl-a for the app (start of line)
+[dim]
+[head*]tmux's prefix (Ctrl-b unless you changed it)
+[text]  [text]Space menu · m back to moa · C repair
+[dim]
+[head*]In every panel
+[text]  [text]j/k ↑↓ move · g/G top/bottom · PgUp/PgDn · ⏎ or a click acts · the wheel
+[text]  [text]scrolls · Ctrl-c cancels a prompt
+[text]  [text]hold Shift to select text
+[head]  ▤ sessions: [text]⏎/click open · n new · + group · m move · r rename · D del group ·
+[text]              [text]a archive · x close
+[head]  ◷ big picture: [text]⏎/click jump · d done · x drop · a archive · n/N new
+[head]  ◉ status: [text]⏎/click jump · j/k · a archive · x close · n/N new · Ctrl-a / find
+[head]  ☀ today: [text]j/k · ⏎ open · y/n suggestion · a archive · x close · n/N new
+[head]  ▦ projects: [text]⏎ expand · a archive · x close · n new session · N choose account
+[head]  ≡ activity: [text]j/k scroll
+[head]  ◫ picture: [text]1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n
+[text]             [text]suggestion · q
+[dim]
+[head*]Layouts
+[head]  ▸ 1 cockpit: [text]tree · console · plan
+[head]    2 focus: [text]tree · plan · agent · console
+[head]    3 classic: [text]console · plan · tree
+[head]    4 triage: [text]status · console · plan
+[text]  [text]change one: moa layout set NAME JSON
+[dim]
+[head*]Agent states
+[warn*]  ! needs you
+[ask*]  ? asks you
+[fail*]  ✗ failed
+[ok*]  ✓ done
+[work]  ⠸ working
+[quiet]  ◌ quiet
+[dim]  ● idle

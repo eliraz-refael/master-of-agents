@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::config::Form;
 use crate::layout::{current_layout, leaves};
 use crate::live::{DisplayState, display_state};
 use crate::panel::{View, key_of};
@@ -60,8 +61,8 @@ pub fn folded(state: &State) -> Vec<String> {
 }
 
 /// The `brain` topic's one row (key `brain`): the brain's name, its folders as absolute
-/// paths, the listed accounts with a launcher, the account sessions open with, and the
-/// folded tree paths.
+/// paths, the listed accounts with a launcher, the account sessions open with, the folded
+/// tree paths, and the form `Ctrl-a /` opens the picker in (`[ui] picker`).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BrainRow {
     pub name: String,
@@ -69,6 +70,9 @@ pub struct BrainRow {
     pub accounts: Vec<String>,
     pub open_account: Option<String>,
     pub folded: Vec<String>,
+    /// Absent from an older daemon's rows: the popup, the default.
+    #[serde(default)]
+    pub picker: Form,
 }
 
 /// A `panels` row (key `c<conn>`): one connected panel, its tab and its view, and whether
@@ -231,6 +235,7 @@ impl State {
                 .collect(),
             open_account: brain.open_account.map(|a| a.as_str().to_string()),
             folded: folded(self),
+            picker: config.ui.picker,
         };
         BTreeMap::from([("brain".to_string(), keyed("brain", &row))])
     }

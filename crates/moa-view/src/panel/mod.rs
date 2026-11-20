@@ -33,7 +33,8 @@ pub enum Out {
     /// Send this op to the daemon; its reply comes back through [`Panel::replied`].
     Send(Op),
     Quit,
-    /// The picker is done: it picked, or Esc, Ctrl-c or Ctrl-g closed it (S7).
+    /// The picker is done: it picked, or Esc, Ctrl-c or Ctrl-g closed it (S7). Help is done:
+    /// `q`, Esc or Ctrl-c closed it (S10).
     Close,
 }
 
@@ -807,6 +808,8 @@ impl Panel {
                 self.list
                     .page(&self.lines, body, action == Action::PageDown);
             }
+            // Help's `q` and Esc close it, as Ctrl-c does (S10).
+            Action::Quit if self.view == View::Help => return Some(vec![Out::Close]),
             Action::Quit => return Some(self.quit().into_iter().collect()),
             Action::Activate if self.view == View::Picker => return Some(self.pick(data)),
             Action::Activate => {

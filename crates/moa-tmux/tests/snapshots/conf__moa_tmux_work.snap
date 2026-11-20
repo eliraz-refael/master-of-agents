@@ -131,7 +131,7 @@ bind -T moa 2       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl
 bind -T moa 3       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key layout-3 ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
 bind -T moa 4       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key layout-4 ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
 bind -T moa r       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key repair ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
-bind -T moa '?'     if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key help ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
+bind -T moa '?'     if -F '#{@moa_ctl}' { if -F '#{e|<:#{client_width},84}' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn't running: run moa" }
 # | and -: split the pane you're on (a shell beside or below an agent, in its folder);
 # its border says it's a shell; `exit` closes it. Not in the cockpit, where panes belong to the layout.
 bind -T moa '|'     if -F "#{==:#{window_name},moa}" "display 'split an agent or terminal tab; the cockpit is a layout'" "split-window -h -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
@@ -172,7 +172,7 @@ bind -T moa Space   if -F '#{e|<:#{client_height},28}' {
     "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Previous tab" '[' previous-window \
     "Next tab" ']' next-window \
-    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 } {
   display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
@@ -198,7 +198,7 @@ bind -T moa Space   if -F '#{e|<:#{client_height},28}' {
     "-Ctrl-a ←↑↓→  move between splits" '' '' \
     "Previous tab" '[' previous-window \
     "Next tab" ']' next-window \
-    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 }
 bind -T moa C-a     if -F '#{e|<:#{client_height},28}' {
@@ -222,7 +222,7 @@ bind -T moa C-a     if -F '#{e|<:#{client_height},28}' {
     "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Previous tab" '[' previous-window \
     "Next tab" ']' next-window \
-    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 } {
   display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
@@ -248,7 +248,7 @@ bind -T moa C-a     if -F '#{e|<:#{client_height},28}' {
     "-Ctrl-a ←↑↓→  move between splits" '' '' \
     "Previous tab" '[' previous-window \
     "Next tab" ']' next-window \
-    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 }
 bind Space if -F '#{e|<:#{client_height},28}' {
@@ -272,7 +272,7 @@ bind Space if -F '#{e|<:#{client_height},28}' {
     "Repair panels" r 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key repair - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Previous tab" '[' previous-window \
     "Next tab" ']' next-window \
-    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 } {
   display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
@@ -298,7 +298,7 @@ bind Space if -F '#{e|<:#{client_height},28}' {
     "-Ctrl-a ←↑↓→  move between splits" '' '' \
     "Previous tab" '[' previous-window \
     "Next tab" ']' next-window \
-    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key help - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 }
 bind m select-window -t moa:moa

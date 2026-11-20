@@ -352,8 +352,8 @@ fn activity(id: i64, ago: i64, who: &str, text: &str, of: Option<(&str, String)>
 }
 
 /// The fixture: three projects with folders and an idea, eleven sessions in every display
-/// state, eight tasks, two suggestions, an hour of activity and one brain, at Fri 13 Nov 2026
-/// 10:00 in New York time.
+/// state, eight tasks, two suggestions, an hour of activity, one brain and the four preset
+/// layouts, at Fri 13 Nov 2026 10:00 in New York time.
 pub fn lantern() -> (Data, Ctx) {
     let now = now();
     let mut data = Data::default();
@@ -488,6 +488,27 @@ pub fn lantern() -> (Data, Ctx) {
             "open_account": "acct-a",
             "folded": [],
         })],
+    );
+
+    // The presets, by name as the daemon keys them; the current one is the cockpit.
+    let layout = |name: &str, index: usize, leaves: &[&str]| {
+        json!({
+            "key": name,
+            "name": name,
+            "index": index,
+            "leaves": leaves,
+            "current": name == "cockpit",
+            "error": null,
+        })
+    };
+    data.upsert(
+        Topic::Layouts,
+        vec![
+            layout("classic", 2, &["console", "plan", "tree"]),
+            layout("cockpit", 0, &["tree", "console", "plan"]),
+            layout("focus", 1, &["tree", "plan", "agent", "console"]),
+            layout("triage", 3, &["status", "console", "plan"]),
+        ],
     );
 
     let ctx = Ctx::at(now, tz(), 3, PathBuf::from("/h"), |_| true);

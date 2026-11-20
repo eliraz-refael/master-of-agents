@@ -110,6 +110,8 @@ fn rows(view: View, key: Key) -> &'static [Action] {
         (View::Plan | View::Status | View::Projects | View::Today, Key::Char('N')) => {
             &[Action::ChooseAccount]
         }
+        // Help closes, as Ctrl-c closes it (S10).
+        (View::Help, Key::Char('q') | Key::Esc) => &[Action::Quit],
         _ => &[],
     }
 }
@@ -155,7 +157,8 @@ pub fn hint(view: View, adopted_selected: bool) -> &'static str {
             "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q"
         }
         View::Picker => "↵ jump · ↑↓ move · esc close",
-        View::Console | View::EmptySlot | View::Help | View::Setup => "",
+        View::Help => "j/k scroll · q close",
+        View::Console | View::EmptySlot | View::Setup => "",
     }
 }
 

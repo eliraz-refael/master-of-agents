@@ -335,7 +335,6 @@ fn unknown_views_say_not_yet() {
     let (data, ctx) = lantern();
     let cases = [
         (View::Console, "the console isn't in this build yet"),
-        (View::Help, "help isn't in this build yet"),
         (View::Setup, "setup isn't in this build yet"),
     ];
     for (view, words) in cases {
@@ -344,7 +343,7 @@ fn unknown_views_say_not_yet() {
         let narrow = views::build(view, &data, &ctx, &ViewUi::default(), 10);
         assert_eq!(narrow[0].text(), words[..10], "{view:?}");
     }
-    for view in [View::EmptySlot, View::Picker] {
+    for view in [View::EmptySlot, View::Picker, View::Help] {
         assert_eq!(views::not_yet(view), None, "{view:?}");
     }
 }

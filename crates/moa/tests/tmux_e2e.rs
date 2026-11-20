@@ -44,8 +44,10 @@ fn moa_key(tb: &TempBrain, term: &Terminal, key: &str, says: &str) {
     );
 }
 
-/// What help shows until it is a view of its own.
-const HELP_NOT_YET: &str = "help isn't in this build yet";
+/// What the picker's full tab shows: its footer hint.
+const PICKER_SHOWS: &str = "esc close";
+/// What help's popup shows: its first heading.
+const HELP_SHOWS: &str = "Ctrl-a keys";
 
 /// `press` opens a sheet (S9): the terminal's tab becomes one whose panel shows `says`, linked
 /// into session `moa` from `_moa`. Ctrl-c closes it: the terminal is back on the tab it
@@ -80,6 +82,38 @@ fn a_sheet_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl Fn(), s
         "the sheet {sheet} never closed\n{}",
         what_happened(tb, term)
     );
+}
+
+/// Whether a popup's help panel is connected to moa: a `panels` row showing help in no tab.
+fn help_popups(tb: &TempBrain) -> usize {
+    panels(tb)
+        .iter()
+        .filter(|row| row["view"] == "help" && row["pane"].is_null())
+        .count()
+}
+
+/// `press` opens help's popup (S10): it draws help over the tab, as a panel moa hears from.
+/// `q` closes it: the panel goes, and the terminal is still on the tab it was on.
+#[track_caller]
+fn the_help_popup_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl Fn()) {
+    let before = client_field(tb, term, "#{window_id}");
+    term.mark();
+    press();
+    assert!(
+        term.wait_for_text(HELP_SHOWS, SHOWS),
+        "help's popup never drew; the terminal showed: {}",
+        term.tail(600)
+    );
+    let up = wait_for(SHOWS, || (help_popups(tb) == 1).then_some(()));
+    assert!(up.is_some(), "panels: {:?}", panels(tb));
+    term.press(b"q");
+    let gone = wait_for(SHOWS, || (help_popups(tb) == 0).then_some(()));
+    assert!(
+        gone.is_some(),
+        "help's popup never closed\n{}",
+        what_happened(tb, term)
+    );
+    assert_eq!(client_field(tb, term, "#{window_id}"), before);
 }
 
 fn launches(tb: &TempBrain) -> u64 {
@@ -129,14 +163,17 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
 
     // `$` opens a tab now (slice 5a's Task 14 tests it end to end), and the cockpit's keys
     // act (cockpit_run.rs in moa-core). `/` opens the picker's popup (moa-tmux's conf.rs
-    // tests it), and the full tab is `s`, the daemon's `find`; `?` opens help's (S9).
-    for (key, says) in [("s", "esc close"), ("?", HELP_NOT_YET)] {
-        let press = || {
-            ctrl_a(&tb, &term);
+    // tests it), and the full tab is `s`, the daemon's `find` (S9); `?` opens help's popup
+    // (S10).
+    let press = |key: &'static str| {
+        let (tb, term) = (&tb, &term);
+        move || {
+            ctrl_a(tb, term);
             term.press(key.as_bytes());
-        };
-        a_sheet_opens_and_closes(&tb, &term, press, says);
-    }
+        }
+    };
+    a_sheet_opens_and_closes(&tb, &term, press("s"), PICKER_SHOWS);
+    the_help_popup_opens_and_closes(&tb, &term, press("?"));
     // `n` asks for a folder in the status line; Ctrl-c puts it away and answers nothing.
     // (Esc would too, but tmux reads an Esc then the next Ctrl-a as one key.)
     moa_key(&tb, &term, KeyAction::New.key(), "new session · folder:");
@@ -152,7 +189,7 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
         );
         term.press(KeyAction::Help.key().as_bytes());
     };
-    a_sheet_opens_and_closes(&tb, &term, menu_help, HELP_NOT_YET);
+    the_help_popup_opens_and_closes(&tb, &term, menu_help);
 
     // Pure keys: the next and previous tab, and no split in the cockpit.
     tmux(&tb, &["new-window", "-d", "-t", "=moa:"]);
@@ -248,11 +285,11 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
     // Back again, from a second terminal; the first one's keys work.
     let again = open(&tb, &[], &[]);
     came_up(&tb, &again);
-    let help = || {
+    let find = || {
         ctrl_a(&tb, &term);
-        term.press(b"?");
+        term.press(b"s");
     };
-    a_sheet_opens_and_closes(&tb, &term, help, HELP_NOT_YET);
+    a_sheet_opens_and_closes(&tb, &term, find, PICKER_SHOWS);
 
     // A crash.
     let pid = status_json(&tb)["pid"].to_string();
@@ -397,6 +434,23 @@ const MOA_HOOKS: [&str; 5] = [
     "client-detached",
 ];
 
+/// S10 with `[ui] picker = "tab"`: `?` is the daemon's `help`, which opens help as a full
+/// tab, its keys in that form (`s` opens the popup); Ctrl-c closes it.
+#[test]
+fn help_opens_as_a_full_tab_in_the_tab_form() {
+    let tb = typical();
+    let paths = tb.paths();
+    std::fs::create_dir_all(paths.config_dir()).unwrap();
+    std::fs::write(paths.config_file(), "[ui]\npicker = \"tab\"\n").unwrap();
+    let term = open(&tb, &[], &[]);
+    came_up(&tb, &term);
+    let help = || {
+        ctrl_a(&tb, &term);
+        term.press(b"?");
+    };
+    a_sheet_opens_and_closes(&tb, &term, help, "find a session in a popup");
+}
+
 /// The user's own file, with screen's prefix (Ctrl-a), a waiting command and a hook.
 #[test]
 fn a_user_tmux_conf_with_run_shell_and_hooks() {
@@ -411,11 +465,11 @@ fn a_user_tmux_conf_with_run_shell_and_hooks() {
     .unwrap();
     let term = open(&tb, &[], &[]);
     came_up(&tb, &term);
-    let help = || {
+    let find = || {
         ctrl_a(&tb, &term);
-        term.press(b"?");
+        term.press(b"s");
     };
-    a_sheet_opens_and_closes(&tb, &term, help, HELP_NOT_YET);
+    a_sheet_opens_and_closes(&tb, &term, find, PICKER_SHOWS);
 
     assert_eq!(option(&tb, "@user_opt"), "1");
     let set = hooks(&tb);

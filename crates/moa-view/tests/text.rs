@@ -70,9 +70,11 @@ fn the_chrome_glyph_set_has_one_width_each() {
     for s in DisplayState::ALL {
         assert!(s.glyph().is_empty() || known(s.glyph()), "{s:?}");
     }
+    // A label starts with its glyph, or is plain words (`find a session`, `keys and help`).
     for v in View::ALL {
         let first = v.label().split(' ').next().unwrap_or("");
-        assert!(first == v.word() || known(first), "{v:?}");
+        let word = first.chars().all(|c| c.is_ascii_alphabetic());
+        assert!(word || known(first), "{v:?}");
     }
 }
 
