@@ -585,7 +585,10 @@ impl Panel {
         let unreadable = data.unreadable();
         if unreadable > 0 {
             return Span::new(
-                format!("{unreadable} rows from moa couldn't be shown"),
+                text::ellipsize(
+                    &format!("{unreadable} rows from moa couldn't be shown"),
+                    usize::from(width),
+                ),
                 Tone::Warn,
             );
         }
@@ -777,7 +780,7 @@ impl Panel {
 /// `? y/N`, so what is being asked stays clear.
 fn fit_question(question: &str, w: usize) -> String {
     match question.strip_suffix(QUESTION_END) {
-        Some(head) if text::width(question) > w => {
+        Some(head) if text::width(question) > w && w > text::width(QUESTION_END) => {
             let room = w.saturating_sub(text::width(QUESTION_END));
             format!("{}{QUESTION_END}", text::ellipsize(head, room))
         }

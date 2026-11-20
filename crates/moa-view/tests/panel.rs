@@ -1054,3 +1054,30 @@ fn a_long_question_keeps_its_y_n() {
     assert!(footer.starts_with("close "), "{footer}");
     assert!(moa_view::text::width(&footer) <= 27, "{footer}");
 }
+
+#[test]
+fn a_question_in_a_footer_no_wider_than_its_y_n_is_cut_whole() {
+    for w in [3u16, 5] {
+        let size = Size { w: w + 3, h: 16 };
+        let (data, ctx) = lantern();
+        let id = *data.sessions.keys().next().unwrap();
+        let mut panel = Panel::new(View::Tree);
+        panel.screen(&data, &ctx, size);
+        assert!(panel.select(&Item::Session(id)));
+        panel.key(Key::Char('x'), &data, &ctx, size);
+        let footer = panel.screen(&data, &ctx, size).footer.text;
+        assert!(footer.ends_with('…'), "{w}: {footer}");
+        assert_eq!(moa_view::text::width(&footer), usize::from(w), "{w}");
+    }
+}
+
+#[test]
+fn the_unreadable_rows_message_fits_a_narrow_panel() {
+    let size = Size { w: 23, h: 16 };
+    let (mut data, ctx) = lantern();
+    data.upsert(Topic::Sessions, vec![serde_json::json!({"key": "nope"})]);
+    let mut panel = Panel::new(View::Tree);
+    let footer = panel.screen(&data, &ctx, size).footer.text;
+    assert!(footer.ends_with('…'), "{footer}");
+    assert!(moa_view::text::width(&footer) <= 20, "{footer}");
+}

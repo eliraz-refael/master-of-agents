@@ -140,7 +140,7 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
     }
     let folder = path.display().to_string();
     let deps = state.deps();
-    // The title, else `~` for home, else the folder's name.
+    // The title, else `~` for home, else the folder's name, else the folder.
     let named = title
         .filter(|t| !t.trim().is_empty())
         .map(str::to_string)
@@ -149,7 +149,8 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
                 .then(|| "~".into())
         })
         .or_else(|| path.file_name().map(|f| f.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "~".to_string());
+        // A folder with no name, like `/`, is named as it is written.
+        .unwrap_or_else(|| folder.clone());
     // Cut before `literal_format`, as a launch's name is.
     let name = cut(&format!("⌨ {named}"), WINDOW_NAME_CUT);
     let cmd = Cmd::new("new-window")

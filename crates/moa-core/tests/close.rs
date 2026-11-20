@@ -885,3 +885,17 @@ fn term_needs_the_terminal() {
         )]
     );
 }
+
+/// A folder with no last part, like `/`, names the tab as written; home stays `~`.
+#[test]
+fn term_at_the_root_is_named_slash_and_home_stays_a_tilde() {
+    let (b, mut st) = linked();
+    let fx = send(&b, &mut st, 1, term_op(PathBuf::from("/"), None));
+    let (_, cmds) = the_query(&fx);
+    assert_eq!(cmds, [new_window("⌨ /", "/")]);
+
+    let (b, mut st) = linked();
+    let fx = send(&b, &mut st, 1, term_op(b.home.clone(), None));
+    let (_, cmds) = the_query(&fx);
+    assert_eq!(cmds, [new_window("⌨ ~", &shown(&b.home))]);
+}
