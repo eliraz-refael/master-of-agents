@@ -172,7 +172,7 @@ pub struct Panel {
 }
 
 const CANCELLED: &str = "cancelled";
-/// What Ctrl-c says in a panel moa manages, with nothing open (L14).
+/// What Ctrl-c, or `q` in the picture, says in a panel moa manages (L14).
 const MANAGED: &str = "this panel is part of moa's layout; Ctrl-a r repairs the layout";
 
 /// How long a broadcast event stays in the footer, in milliseconds.
@@ -237,20 +237,26 @@ impl Panel {
         self.managed = managed;
     }
 
-    /// Ctrl-c (L14): it cancels an open prompt or y/N; with nothing open it quits a panel you
-    /// started, and leaves one moa manages where it is, saying why. A managed panel that
-    /// quit would leave a dead spot in moa's layout.
+    /// Ctrl-c (L14): it cancels an open prompt or y/N; with nothing open it quits as `q`
+    /// does in the picture (see [`quit`](Panel::quit)).
     pub fn interrupt(&mut self) -> Option<Out> {
         self.hover = None;
         if self.prompt.take().is_some() || self.confirm.take().is_some() {
             self.say(CANCELLED);
             return None;
         }
-        if !self.managed {
-            return Some(Out::Quit);
+        self.quit()
+    }
+
+    /// Quits a panel you started, and leaves one moa manages where it is, saying why
+    /// (L14): a managed panel that quit would leave a hole in moa's layout.
+    fn quit(&mut self) -> Option<Out> {
+        if self.managed {
+            self.say(MANAGED);
+            None
+        } else {
+            Some(Out::Quit)
         }
-        self.say(MANAGED);
-        None
     }
 
     /// The view the picture's shown tab draws; `None` for every other view.
@@ -419,13 +425,10 @@ impl Panel {
         self.prompt.is_some() || self.confirm.is_some()
     }
 
-    /// Whether `k` quits this panel when nothing is being typed: `q` in the picture, and
-    /// Ctrl-c in a panel moa doesn't manage (L14).
+    /// Whether `k` quits this panel when nothing is being typed: Ctrl-c, and `q` in the
+    /// picture, in a panel moa doesn't manage (L14).
     pub fn quits(&self, k: Key) -> bool {
-        if k == Key::Ctrl('c') {
-            return !self.managed;
-        }
-        keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
+        !self.managed && keys::actions(self.view, self.tab(), k).contains(&Action::Quit)
     }
 
     /// Pasted text goes to the prompt being answered, if any.
@@ -645,7 +648,7 @@ impl Panel {
                 self.list
                     .page(&self.lines, body, action == Action::PageDown);
             }
-            Action::Quit => return Some(vec![Out::Quit]),
+            Action::Quit => return Some(self.quit().into_iter().collect()),
             Action::Activate => {
                 return match selected? {
                     Item::Session(id) => {

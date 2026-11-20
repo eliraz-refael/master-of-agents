@@ -663,3 +663,50 @@ fn sigterm_and_sighup_give_the_terminal_back() {
         );
     }
 }
+
+/// L14's third way out, the one moa's own layout changes take: tmux kills the panel's pane
+/// (`kill-pane`) while its tab lives on. The terminal closes and tmux's SIGHUP comes at the
+/// same moment; whichever the panel hears first, `panel.log` gets exactly one end line for
+/// it, and it isn't a panic.
+#[test]
+fn a_panel_tmux_kills_logs_one_plain_end_line() {
+    let r = rig();
+    let log = r.tb.paths().log_dir().join("panel.log");
+    let cmd = format!("exec '{MOA}' panel tree");
+    let pane = tmux(
+        &r.tb,
+        &[
+            "new-window",
+            "-d",
+            "-t",
+            "=moa:",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &cmd,
+        ],
+    );
+    // A second pane keeps the tab when the panel's goes.
+    tmux(&r.tb, &["split-window", "-d", "-t", &pane]);
+    r.shows(&pane, &["▤ sessions", TREE_HINT]);
+    let pid: u32 = tmux(
+        &r.tb,
+        &["display-message", "-p", "-t", &pane, "#{pane_pid}"],
+    )
+    .parse()
+    .unwrap();
+
+    tmux(&r.tb, &["kill-pane", "-t", &pane]);
+    let gone = wait_for(SHOWS, || (!pid_alive(pid)).then_some(()));
+    assert!(gone.is_some(), "the panel outlived its pane");
+
+    let written = fs::read_to_string(&log).unwrap_or_default();
+    let mine = format!("panel tree in {pane}: ");
+    let ends: Vec<&str> = written
+        .lines()
+        .filter_map(|l| l.split_once(&mine).map(|(_, what)| what))
+        .filter(|what| *what != "started")
+        .collect();
+    assert_eq!(ends.len(), 1, "{ends:?}\n{written}");
+    assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
+}

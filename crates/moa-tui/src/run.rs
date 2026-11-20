@@ -8,12 +8,11 @@
 use std::collections::BTreeSet;
 use std::future::{Future, pending};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -37,11 +36,17 @@ use moa_view::panel::{Mouse, Out, Panel, Screen};
 use moa_view::text;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, CrosstermBackend};
-use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep, interval_at, sleep, sleep_until};
 
 use crate::draw::draw;
 use crate::theme::{self, Theme};
+
+mod logbook;
+mod signals;
+
+pub use logbook::log_line;
+use logbook::{Logbook, panic_message};
+use signals::Signals;
 
 /// What a panel needs to run.
 #[derive(Clone, Debug)]
@@ -58,107 +63,6 @@ pub struct PanelOptions {
     /// `panel.log`, where the panel writes a line per start, give-up, signal and panic
     /// (L14); `None` writes nothing.
     pub log: Option<PathBuf>,
-}
-
-/// A `panel.log` line (L14), without its time: the brain, the view (`-` while none is
-/// known), the pane (`-` outside the brain's terminal), then what happened, on one line.
-pub fn log_line(brain: &str, view: Option<View>, pane: Option<PaneId>, what: &str) -> String {
-    let view = view.map_or_else(|| "-".to_string(), |v| v.to_string());
-    let pane = pane.map_or_else(|| "-".to_string(), |p| p.to_string());
-    let what = what.replace(['\n', '\r'], " ");
-    format!("[{brain}] panel {view} in {pane}: {what}")
-}
-
-/// Where a panel writes its lines, and what they name. Every write is best-effort: a log
-/// that can't be written never stops the panel, and never panics (the panic hook writes
-/// too).
-#[derive(Clone, Debug)]
-struct Logbook {
-    path: PathBuf,
-    brain: String,
-    pane: Option<PaneId>,
-    /// The view the panel shows, once one is known; shared with the panic hook.
-    view: Arc<Mutex<Option<View>>>,
-}
-
-impl Logbook {
-    /// The panel's logbook, when `opts` names a log.
-    fn new(opts: &PanelOptions) -> Option<Logbook> {
-        Some(Logbook {
-            path: opts.log.clone()?,
-            brain: opts.client.brain.as_str().to_string(),
-            pane: opts.pane,
-            view: Arc::new(Mutex::new(opts.view)),
-        })
-    }
-
-    /// Appends `what` as a line, after the time. The folder isn't made: one that is gone
-    /// stays gone (L15).
-    fn write(&self, what: &str) {
-        // `try_lock`: the panic may have struck while the view was being set.
-        let view = self.view.try_lock().ok().and_then(|v| *v);
-        let line = log_line(&self.brain, view, self.pane, what);
-        // No `Timestamp::now`, which panics on a clock out of its range.
-        let at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_millis()).ok())
-            .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
-            .map_or_else(|| "-".to_string(), |t| t.to_string());
-        let file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&self.path);
-        if let Ok(mut file) = file {
-            let _ = file.write_all(format!("{at} {line}\n").as_bytes());
-        }
-    }
-
-    /// The view the next lines name.
-    fn shows(&self, view: Option<View>) {
-        if let Ok(mut shown) = self.view.lock() {
-            *shown = view;
-        }
-    }
-}
-
-/// A panic's message, or a stand-in when it carries none.
-fn panic_message<'a>(info: &'a std::panic::PanicHookInfo<'_>) -> &'a str {
-    let payload = info.payload();
-    payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("no message")
-}
-
-/// The signals that stop a panel (L14): `kill`'s SIGTERM, the SIGHUP tmux sends a tab it
-/// kills, and SIGINT. Each ends the loop as Ctrl-c does, so the terminal is given back.
-struct Signals {
-    term: Signal,
-    hup: Signal,
-    int: Signal,
-}
-
-impl Signals {
-    fn new() -> io::Result<Signals> {
-        Ok(Signals {
-            term: signal(SignalKind::terminate())?,
-            hup: signal(SignalKind::hangup())?,
-            int: signal(SignalKind::interrupt())?,
-        })
-    }
-
-    /// The next signal's name.
-    async fn recv(&mut self) -> &'static str {
-        tokio::select! {
-            Some(()) = self.term.recv() => "SIGTERM",
-            Some(()) = self.hup.recv() => "SIGHUP",
-            Some(()) = self.int.recv() => "SIGINT",
-            else => pending().await,
-        }
-    }
 }
 
 /// Taking the terminal: the alternate screen, the cursor hidden, every mouse event (motion
@@ -212,7 +116,7 @@ pub fn claim_pane(
 /// What a key does while moa is down and the panel waits for a key to try again.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DownKey {
-    /// `q` in the picture.
+    /// `q` in a picture moa doesn't manage.
     Quit,
     /// The panel takes the key, as usual: a prompt or a question is open, or it is Ctrl-c,
     /// which the panel decides on everywhere (L14).
@@ -223,6 +127,7 @@ pub enum DownKey {
 
 /// How `panel` takes `key` while the connection is down.
 pub fn down_key(panel: &Panel, key: Key) -> DownKey {
+    // The loop hands Ctrl-c to the panel before asking this; the answer agrees with it.
     if key == Key::Ctrl('c') || panel.typing() {
         DownKey::Panel
     } else if panel.quits(key) {
@@ -693,8 +598,15 @@ impl Loop {
     /// Input, a push, a connect's end, a timer.
     fn turn(&mut self, wake: Wake) -> Result<Turn, String> {
         let redraw = match wake {
-            Wake::Input(None) => return Ok(Turn::Quit),
-            Wake::Input(Some(Err(e))) => return Err(format!("can't read the terminal: {e}")),
+            // The terminal is gone: nothing more can be shown or read there.
+            Wake::Input(None) => {
+                self.log("stopped: the terminal closed");
+                return Ok(Turn::Quit);
+            }
+            Wake::Input(Some(Err(e))) => {
+                self.log(&format!("stopped: can't read the terminal: {e}"));
+                return Ok(Turn::Quit);
+            }
             Wake::Input(Some(Ok(event))) => return Ok(self.input(event)),
             Wake::Msg(msg) => self.take(msg),
             Wake::Linked(result) => self.linked(result),
@@ -971,21 +883,55 @@ impl Loop {
         }
         Ok(())
     }
+
+    /// One turn of the loop: `wake`, then everything the connection already holds, then one
+    /// draw. True to quit.
+    fn step<B: Backend>(&mut self, wake: Wake, term: &mut Terminal<B>) -> Result<bool, String> {
+        let mut redraw = match self.turn(wake)? {
+            Turn::Quit => return Ok(true),
+            Turn::Go(redraw) => redraw,
+        };
+        redraw |= self.drain();
+        if redraw {
+            self.draw(term)?;
+        }
+        self.tell_here();
+        self.note_view();
+        Ok(false)
+    }
 }
 
-/// Runs a panel until it quits: Ctrl-c in a panel you started, `q` in the picture, a
-/// signal, or the terminal's end. The terminal is given back on every way out.
+/// Runs a panel until it quits: Ctrl-c or `q` in a panel you started, a signal, or the
+/// terminal's end. The terminal is given back on every way out, and `panel.log` gets one
+/// line when the panel starts and one when it ends, unless it panics (L14).
 pub async fn run(opts: PanelOptions) -> Result<(), String> {
+    let log = Logbook::new(&opts);
+    if let Some(log) = &log {
+        log.write("started");
+    }
+    let ended = run_logged(opts, log.clone()).await;
+    if let (Err(e), Some(log)) = (&ended, &log) {
+        log.write(&format!("stopped: {e}"));
+    }
+    ended
+}
+
+/// [`run`], which logs how it ended when it ends with an error.
+async fn run_logged(opts: PanelOptions, log: Option<Logbook>) -> Result<(), String> {
     let in_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
     let colorterm = std::env::var("COLORTERM").ok();
     let theme = Theme {
         mode: theme::detect(in_tmux, colorterm.as_deref()),
     };
     let mut signals = Signals::new().map_err(|e| format!("can't watch for signals: {e}"))?;
-    let log = Logbook::new(&opts);
     let _taken = Taken::take(log.clone()).map_err(|e| format!("can't use this terminal: {e}"))?;
-    let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))
-        .map_err(|e| format!("can't use this terminal: {e}"))?;
+    // Never dropped: ratatui's `Terminal` shows the cursor again as it drops, and prints a
+    // failure with `eprintln!`, which panics on a terminal that is gone (tmux killed the
+    // tab). `restore` shows the cursor anyway.
+    let mut term = ManuallyDrop::new(
+        Terminal::new(CrosstermBackend::new(io::stdout()))
+            .map_err(|e| format!("can't use this terminal: {e}"))?,
+    );
     // Not `Terminal::clear`, which asks the terminal where its cursor is.
     term.backend_mut()
         .clear_region(ClearType::All)
@@ -1000,11 +946,10 @@ pub async fn run(opts: PanelOptions) -> Result<(), String> {
     let mut events = EventStream::new();
     let mut lp = Loop::new(opts, theme, size);
     lp.log = log;
-    lp.log("started");
     lp.connect(0);
-    lp.draw(&mut term)?;
+    lp.draw(&mut *term)?;
     loop {
-        let wake = next_wake(
+        let mut wake = next_wake(
             &mut events,
             &mut lp.link,
             lp.tick.as_mut(),
@@ -1012,16 +957,25 @@ pub async fn run(opts: PanelOptions) -> Result<(), String> {
             &mut signals,
         )
         .await;
-        let mut redraw = match lp.turn(wake)? {
-            Turn::Quit => return Ok(()),
-            Turn::Go(redraw) => redraw,
-        };
-        redraw |= lp.drain();
-        if redraw {
-            lp.draw(&mut term)?;
+        // When tmux kills the tab, the terminal closes and its SIGHUP comes at the same
+        // moment: the signal, if it came, says why the panel ends.
+        if matches!(wake, Wake::Input(None | Some(Err(_))))
+            && let Some(name) = signals.pending().await
+        {
+            wake = Wake::Signal(name);
         }
-        lp.tell_here();
-        lp.note_view();
+        match lp.step(wake, &mut *term) {
+            Ok(false) => {}
+            Ok(true) => return Ok(()),
+            // A draw into a terminal that went with its tab fails too.
+            Err(e) => match signals.pending().await {
+                Some(name) => {
+                    lp.log(&format!("stopped by {name}"));
+                    return Ok(());
+                }
+                None => return Err(e),
+            },
+        }
     }
 }
 
@@ -1037,7 +991,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::{Failed, Loop, PanelOptions, Turn, Wake, now};
+    use super::{Failed, Logbook, Loop, PanelOptions, Turn, Wake, now};
     use crate::theme::{ColorMode, Theme};
 
     const SIZE: Size = Size { w: 60, h: 12 };
@@ -1161,5 +1115,37 @@ mod tests {
         let mut by_hand = looped(Some(View::Tree), false);
         assert!(!by_hand.panel.managed());
         assert!(matches!(input(&mut by_hand, ctrl_c()), Turn::Quit));
+    }
+
+    /// L14: a terminal that closes, or can't be read, ends the panel cleanly with one plain
+    /// line in `panel.log`, never an error that would be printed to the gone terminal.
+    #[tokio::test]
+    async fn a_terminal_that_goes_ends_the_panel_with_one_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panel.log");
+        let ends: [(Wake, &str); 2] = [
+            (Wake::Input(None), "stopped: the terminal closed"),
+            (
+                Wake::Input(Some(Err(std::io::Error::other("gone")))),
+                "stopped: can't read the terminal: gone",
+            ),
+        ];
+        for (wake, line) in ends {
+            let mut lp = looped(Some(View::Tree), false);
+            lp.log = Logbook::new(&PanelOptions {
+                log: Some(path.clone()),
+                ..lp.opts.clone()
+            });
+            assert!(matches!(lp.turn(wake), Ok(Turn::Quit)));
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                written
+                    .lines()
+                    .last()
+                    .unwrap()
+                    .ends_with(&format!("[default] panel tree in -: {line}")),
+                "{written}"
+            );
+        }
     }
 }
