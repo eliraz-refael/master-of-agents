@@ -100,7 +100,7 @@ fn help_lists_the_layouts_with_the_current_one() {
         .iter()
         .position(|l| l == "Layouts")
         .expect("a Layouts heading");
-    let listed: Vec<&str> = lines[at + 1..at + 6].iter().map(|l| l.trim_end()).collect();
+    let listed: Vec<&str> = lines[at + 1..at + 7].iter().map(|l| l.trim_end()).collect();
     assert_eq!(
         listed,
         [
@@ -108,6 +108,7 @@ fn help_lists_the_layouts_with_the_current_one() {
             "    2 focus: tree · plan · agent · console",
             "    3 classic: console · plan · tree",
             "    4 triage: status · console · plan",
+            "  see one: moa layout show NAME",
             "  change one: moa layout set NAME JSON",
         ]
     );
@@ -126,6 +127,72 @@ fn help_lists_the_layouts_with_the_current_one() {
     let lines = texts(&data, &ctx, 80);
     assert!(lines.contains(&"    1 cockpit: tree · console · plan".to_string()));
     assert!(lines.contains(&"  ▸ 2 focus: no panel called nope".to_string()));
+}
+
+/// A preset's number is the `Ctrl-a` digit that builds it, wherever it is in the file's
+/// order: `moa layout set cockpit …` moves cockpit to the file's end, and `Ctrl-a 1` still
+/// builds it. A layout of your own has no key, so no number; it comes after the presets.
+#[test]
+fn layout_numbers_are_their_keys() {
+    let (mut data, ctx) = lantern();
+    let row = |name: &str, index: usize, leaves: &[&str]| {
+        json!({"key": name, "name": name, "index": index, "leaves": leaves,
+               "current": name == "cockpit", "error": null})
+    };
+    data.replace(
+        Topic::Layouts,
+        vec![
+            row("focus", 0, &["tree", "plan", "agent", "console"]),
+            row("classic", 1, &["console", "plan", "tree"]),
+            row("triage", 2, &["status", "console", "plan"]),
+            row("cockpit", 3, &["tree", "console"]),
+            row("wide", 4, &["console"]),
+        ],
+    );
+    let lines = texts(&data, &ctx, 80);
+    let at = lines.iter().position(|l| l == "Layouts").unwrap();
+    assert_eq!(
+        lines[at + 1..at + 6],
+        [
+            "  ▸ 1 cockpit: tree · console",
+            "    2 focus: tree · plan · agent · console",
+            "    3 classic: console · plan · tree",
+            "    4 triage: status · console · plan",
+            "      wide: console",
+        ]
+    );
+    let digits: Vec<&str> = ctrl_a(Form::Popup)
+        .into_iter()
+        .flatten()
+        .filter(|b| b.help.starts_with("switch to the "))
+        .map(|b| b.key)
+        .collect();
+    assert_eq!(digits, ["1", "2", "3", "4"]);
+}
+
+/// A word too long for its line is broken where the line ends, never split by a space, at a
+/// width too narrow to hang the rest under the words.
+#[test]
+fn a_long_word_wraps_whole() {
+    let (mut data, ctx) = lantern();
+    let long = "/h/private/a-very-long-folder-name-that-breaks/layouts.json";
+    data.upsert(
+        Topic::Layouts,
+        vec![json!({"key": "", "error": format!("can't read {long}")})],
+    );
+    for width in [20, 24, 30] {
+        let lines = texts(&data, &ctx, width);
+        let at = lines.iter().position(|l| l == "Layouts").unwrap();
+        let shown: String = lines[at + 1..]
+            .iter()
+            .take_while(|l| !l.contains("cockpit"))
+            .map(|l| l.trim())
+            .collect::<Vec<_>>()
+            .join("");
+        // The path may start beside `read`, or on the next line; no space is inside it.
+        let shown = shown.replacen("can't read ", "can't read", 1);
+        assert_eq!(shown, format!("can't read{long}"), "{width}");
+    }
 }
 
 /// `layouts.json` that doesn't parse: the file's row (key `""`) says why under the heading,

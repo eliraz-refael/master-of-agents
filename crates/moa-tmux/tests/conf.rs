@@ -272,10 +272,11 @@ fn the_help_key_is_a_popup_by_default() {
 
 /// S10 on this tmux: help's popup opens from the key and from the menu on a terminal
 /// narrower than 84 columns, exactly 84, and wider; a popup wider than the terminal would
-/// be refused, and never run moa.
+/// be refused, and never run moa. It is the terminal's width under 84 columns and 84
+/// otherwise: inside its border, two columns fewer.
 #[test]
 fn the_help_popup_opens_at_any_width() {
-    for cols in [60, 84, 100] {
+    for (cols, inside) in [(60, 58), (84, 82), (100, 82)] {
         let sb = Sandbox::start().unwrap();
         let odd = OddPaths::new(&sb);
         let text = moa_tmux("default", &UiConfig::default(), &odd.launch(), &odd.home);
@@ -284,10 +285,18 @@ fn the_help_popup_opens_at_any_width() {
             .unwrap();
         let term = attach_sized(&sb, cols, 30);
         term.press(b"\x01?");
-        odd.ran_as_told(&sb, &term, "help");
+        assert_eq!(
+            odd.ran_as_told(&sb, &term, "help"),
+            inside,
+            "{cols}: the key"
+        );
         open_menu(&term, b"\x01 ");
         term.press(b"?");
-        odd.ran_as_told(&sb, &term, "help");
+        assert_eq!(
+            odd.ran_as_told(&sb, &term, "help"),
+            inside,
+            "{cols}: the menu"
+        );
     }
 }
 
@@ -338,8 +347,9 @@ fn the_popup_env_is_the_panels_env() {
 }
 
 /// A popup's command line as the sandbox's tmux runs it: the fake `moa` at a path with a
-/// space, a quote and a `#`, at a home with a `#`, writes its pid, its folder, its
-/// environment and its arguments next to itself, then ends, and tmux closes the popup.
+/// space, a quote and a `#`, at a home with a `#`, writes its pid, its terminal's size, its
+/// folder, its environment and its arguments next to itself, then ends, and tmux closes the
+/// popup.
 struct OddPaths {
     exe: PathBuf,
     home: PathBuf,
@@ -354,7 +364,7 @@ impl OddPaths {
         // Written aside, then moved: `ran` is never seen half written.
         std::fs::write(
             &exe,
-            "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$$\" \"$(pwd -P)\" \"$MOA_BRAIN\" \
+            "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$$\" \"$(stty size)\" \"$(pwd -P)\" \"$MOA_BRAIN\" \
              \"$MOA_NO_AUTOSTART\" \"$MOA_ROOT\" \"$@\" > \"$d/ran.part\"\n\
              mv \"$d/ran.part\" \"$d/ran\"\n",
         )
@@ -379,9 +389,9 @@ impl OddPaths {
 
     /// Waits for the fake `moa`'s run of `view` and checks what it was given; then for tmux
     /// to reap it, which closes the popup, so the next key reaches tmux rather than the
-    /// popup.
+    /// popup. The popup's width inside its border.
     #[track_caller]
-    fn ran_as_told(&self, sb: &Sandbox, term: &Terminal, view: &str) {
+    fn ran_as_told(&self, sb: &Sandbox, term: &Terminal, view: &str) -> u16 {
         let got = wait_for(Duration::from_secs(10), || {
             std::fs::read_to_string(&self.ran).ok()
         });
@@ -392,6 +402,9 @@ impl OddPaths {
             )
         });
         let (pid, got) = got.split_once('\n').unwrap();
+        let (size, got) = got.split_once('\n').unwrap();
+        let cols = size.split_whitespace().nth(1).and_then(|c| c.parse().ok());
+        let cols = cols.unwrap_or_else(|| panic!("no size from `stty size`: {size:?}"));
         let home = std::fs::canonicalize(&self.home).unwrap();
         let want = format!(
             "{}\ndefault\n1\n{}\npanel\n{view}\n--once\n--brain\ndefault\n",
@@ -408,6 +421,7 @@ impl OddPaths {
             (!moa_platform::pid_alive(pid)).then_some(())
         });
         assert!(reaped.is_some(), "tmux never reaped the popup's moa");
+        cols
     }
 }
 

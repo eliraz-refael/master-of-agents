@@ -92,11 +92,43 @@ fn help_popups(tb: &TempBrain) -> usize {
         .count()
 }
 
+/// The pid of help's popup's moa: the child of this root's tmux server that runs
+/// `panel help --once` (tmux runs a popup's program itself, without a shell).
+fn help_popup_pid(tb: &TempBrain) -> Option<u32> {
+    let server = server_pid(tb);
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,command="])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&ps.stdout).lines().find_map(|l| {
+        let mut f = l.split_whitespace();
+        let (pid, ppid) = (f.next()?, f.next()?);
+        let command = f.collect::<Vec<_>>().join(" ");
+        (ppid == server && command.contains("panel help --once"))
+            .then(|| pid.parse().ok())
+            .flatten()
+    })
+}
+
+/// What `panel.log` says of help's popups, in order: each line's end.
+fn help_popup_log(tb: &TempBrain) -> Vec<String> {
+    let log = std::fs::read_to_string(tb.paths().log_dir().join("panel.log")).unwrap_or_default();
+    log.lines()
+        .filter_map(|l| {
+            l.split_once("panel help (popup) in -: ")
+                .map(|(_, w)| w.to_string())
+        })
+        .collect()
+}
+
 /// `press` opens help's popup (S10): it draws help over the tab, as a panel moa hears from.
-/// `q` closes it: the panel goes, and the terminal is still on the tab it was on.
+/// `q` closes it: the panel goes, its moa ends well (`panel.log` says it started, then
+/// quit) and tmux reaps it, so the next key reaches tmux; the terminal is still on the tab
+/// it was on.
 #[track_caller]
 fn the_help_popup_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl Fn()) {
     let before = client_field(tb, term, "#{window_id}");
+    let logged = help_popup_log(tb).len();
     term.mark();
     press();
     assert!(
@@ -106,6 +138,7 @@ fn the_help_popup_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl 
     );
     let up = wait_for(SHOWS, || (help_popups(tb) == 1).then_some(()));
     assert!(up.is_some(), "panels: {:?}", panels(tb));
+    let pid = wait_for(SHOWS, || help_popup_pid(tb)).expect("no moa runs help's popup");
     term.press(b"q");
     let gone = wait_for(SHOWS, || (help_popups(tb) == 0).then_some(()));
     assert!(
@@ -113,6 +146,14 @@ fn the_help_popup_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl 
         "help's popup never closed\n{}",
         what_happened(tb, term)
     );
+    let reaped = wait_for(SHOWS, || {
+        // tmux 3.4 and 3.5 built with utempter can lose the exit until tmux reaps a child
+        // of its own; the daemon nudges, and so does the test, unordered with it.
+        tmux(tb, &["run-shell", "true"]);
+        (!moa_platform::pid_alive(pid)).then_some(())
+    });
+    assert!(reaped.is_some(), "tmux never reaped help's popup ({pid})");
+    assert_eq!(help_popup_log(tb)[logged..], ["started", "stopped: quit"]);
     assert_eq!(client_field(tb, term, "#{window_id}"), before);
 }
 
@@ -434,8 +475,9 @@ const MOA_HOOKS: [&str; 5] = [
     "client-detached",
 ];
 
-/// S10 with `[ui] picker = "tab"`: `?` is the daemon's `help`, which opens help as a full
-/// tab, its keys in that form (`s` opens the popup); Ctrl-c closes it.
+/// S10 with `[ui] picker = "tab"`: `?` is the daemon's `help`, from the key and from the
+/// menu, which opens help as a full tab, its keys in that form (`s` opens the popup);
+/// Ctrl-c closes it.
 #[test]
 fn help_opens_as_a_full_tab_in_the_tab_form() {
     let tb = typical();
@@ -449,6 +491,17 @@ fn help_opens_as_a_full_tab_in_the_tab_form() {
         term.press(b"?");
     };
     a_sheet_opens_and_closes(&tb, &term, help, "find a session in a popup");
+    // The menu's `?` is the daemon's `help` too: an item that reaches the daemon.
+    let menu_help = || {
+        ctrl_a(&tb, &term);
+        term.press(b" ");
+        assert!(
+            term.wait_for_text(KeyAction::Plan.label(), QUICK),
+            "the menu never showed"
+        );
+        term.press(KeyAction::Help.key().as_bytes());
+    };
+    a_sheet_opens_and_closes(&tb, &term, menu_help, "find a session in a popup");
 }
 
 /// The user's own file, with screen's prefix (Ctrl-a), a waiting command and a hook.

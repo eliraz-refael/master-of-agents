@@ -130,12 +130,13 @@ fn menu_command(does: Does, popups: Popups) -> String {
         Does::PrevTab => "previous-window".into(),
         Does::NextTab => "next-window".into(),
         Does::SendCtrlA => "send-keys C-a".into(),
-        Does::Move => String::new(),
+        Does::Move | Does::Menu => String::new(),
     }
 }
 
-/// The menu's lines, written from the key table. `tall`: a separator between groups, and
-/// the greyed note on moving between splits; otherwise neither, for a short terminal.
+/// The menu's lines, written from the key table, without the menu's own key. `tall`: a
+/// separator between groups, and the greyed note on moving between splits; otherwise
+/// neither, for a short terminal.
 fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
     for (i, group) in ctrl_a(form).into_iter().enumerate() {
@@ -148,7 +149,8 @@ fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
                 Does::Move if tall => {
                     format!("\"-Ctrl-a {}  {}\" '' ''", b.key, b.label)
                 }
-                Does::Move => continue,
+                // The menu doesn't list itself.
+                Does::Move | Does::Menu => continue,
                 _ => format!(
                     "\"{}\" {} {}",
                     b.label,

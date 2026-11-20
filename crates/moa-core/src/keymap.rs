@@ -25,13 +25,16 @@ pub enum Does {
     SendCtrlA,
     /// Moving between splits with the arrows: a greyed note in the menu, not an item.
     Move,
+    /// The menu itself: help lists it, but the menu doesn't, and the template binds it (with
+    /// a second `Ctrl-a`).
+    Menu,
 }
 
 /// A key after `Ctrl-a`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Binding {
     /// The key, as tmux names it. `Move`'s is the four arrows as they're shown, `←↑↓→`: it
-    /// isn't one key, and no binding is written from it.
+    /// isn't one key. No binding is written from `Move` or `Menu`.
     pub key: &'static str,
     /// The menu's text.
     pub label: &'static str,
@@ -171,10 +174,17 @@ pub fn ctrl_a(form: Form) -> Vec<Vec<Binding>> {
         ],
         vec![
             plain(
+                "Space",
+                "The full menu",
+                "the full menu (or Ctrl-a twice): every key here by name, with new session, \
+                 layouts and repair",
+                Does::Menu,
+            ),
+            plain(
                 "←↑↓→",
                 "move between splits",
-                "move to the split that way (or h j k l); tap more arrows right after to \
-                 keep moving",
+                "move to the panel or split that way (or h j k l); tap more arrows right \
+                 after to keep moving",
                 Does::Move,
             ),
             plain("[", "Previous tab", "the previous tab", Does::PrevTab),

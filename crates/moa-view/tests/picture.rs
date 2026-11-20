@@ -197,7 +197,7 @@ fn the_tabs_rows_keep_their_views_keys() {
         "{projects}"
     );
     t.key(Key::Char('5'));
-    assert_eq!(hint(&mut t), "1-6/tab · j/k scroll · q");
+    assert_eq!(hint(&mut t), "1-6/tab · j/k scroll · q quit");
     t.key(Key::Char('6'));
     let status = hint(&mut t);
     assert_eq!(status, moa_view::keys::hint(View::Status, false));

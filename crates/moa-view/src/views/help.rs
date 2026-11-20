@@ -5,6 +5,7 @@
 
 use moa_core::config::Form;
 use moa_core::keymap::ctrl_a;
+use moa_core::layout::PRESET_KEYS;
 use moa_core::live::DisplayState;
 use moa_core::panel::View;
 
@@ -61,6 +62,9 @@ pub fn build(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
         width,
     ));
     out.extend(said("hold Shift to select text", width));
+
+    out.push(blank());
+    out.push(heading("Each panel's own keys", width));
     for view in VIEWS {
         let lead = Span::new(format!("  {}: ", view.label()), Tone::Head);
         out.extend(entry(lead, keys::hint(view, false), Tone::Text, width));
@@ -71,18 +75,15 @@ pub fn build(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
     if let Some(error) = &data.layouts_error {
         out.extend(entry(indent(), &clean(error), Tone::Warn, width));
     }
+    // A preset is numbered by its `Ctrl-a` digit, whatever its place in the file; the
+    // presets come first, in their keys' order, then the rest in the file's.
+    let key_of = |name: &str| PRESET_KEYS.iter().position(|k| *k == name);
     let mut layouts: Vec<_> = data.layouts.values().collect();
-    layouts.sort_by_key(|l| l.index);
+    layouts.sort_by_key(|l| (key_of(&l.name).unwrap_or(PRESET_KEYS.len()), l.index));
     for l in layouts {
         let mark = if l.current { "▸" } else { " " };
-        let lead = Span::new(
-            format!(
-                "  {mark} {} {}: ",
-                l.index.saturating_add(1),
-                clean(&l.name)
-            ),
-            Tone::Head,
-        );
+        let digit = key_of(&l.name).map_or(" ".to_string(), |i| (i + 1).to_string());
+        let lead = Span::new(format!("  {mark} {digit} {}: ", clean(&l.name)), Tone::Head);
         match &l.error {
             Some(error) => out.extend(entry(lead, &clean(error), Tone::Warn, width)),
             None => out.extend(entry(
@@ -93,6 +94,7 @@ pub fn build(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
             )),
         }
     }
+    out.extend(said("see one: moa layout show NAME", width));
     out.extend(said("change one: moa layout set NAME JSON", width));
 
     out.push(blank());
@@ -132,9 +134,16 @@ fn entry(lead: Span, words: &str, tone: Tone, width: usize) -> Vec<Line> {
     let hang = if width >= lead_w + 20 { lead_w } else { 4 };
     let room = width.saturating_sub(hang).max(10);
     let first_room = width.saturating_sub(lead_w).max(10);
-    let mut rows = wrap(words, first_room).into_iter();
-    let first = rows.next().unwrap_or_default();
-    let rest = wrap(&rows.collect::<Vec<_>>().join(" "), room);
+    let words = words.trim_start();
+    let mut rows = wrap(words, first_room);
+    let first = rows.remove(0);
+    // What the first line left, wrapped as it is, so a word broken across lines is never
+    // split by a space. The first line is a slice of the words; were it not, its rows.
+    let rest = match words.strip_prefix(first.as_str()) {
+        Some(rest) => rest.trim_start().to_string(),
+        None => rows.join(" "),
+    };
+    let rest = wrap(&rest, room);
     let mut lines = vec![fitted(vec![lead, Span::new(first, tone)], width)];
     for row in rest.into_iter().filter(|r| !r.is_empty()) {
         let spans = vec![Span::new(" ".repeat(hang), tone), Span::new(row, tone)];
