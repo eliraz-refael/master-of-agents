@@ -2,13 +2,18 @@
 //! cockpit (L6, L9, L12, L13, L18), and the agent spot's swap (L11). Every operation takes a
 //! listing of its own, sends one chain, and the next starts only once that chain is answered.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use jiff::tz::TimeZone;
+use moa_core::change::Change;
 use moa_core::cockpit::{Place, Role, Scene};
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Down, Effect, Input, LogLevel, Publish, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{
+    Down, Effect, Input, LogLevel, Publish, TimerKey, TmuxIn, TmuxToken, handle_checked,
+};
 use moa_core::layout::{CURRENT_KEY, Leaf};
 use moa_core::model::{Activity, AgentKind, Lifecycle, Location, PaneBinding, Session, SessionId};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
@@ -20,6 +25,8 @@ use moa_core::tmux::ids::{ClientName, Generation, PaneId, WindowId};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
+
+use common::{queries, the_listing};
 
 const TTY: &str = "/dev/ttys1";
 const LOST: &str = "moa lost its terminal; try again";
@@ -152,28 +159,6 @@ fn focus_built() -> Vec<String> {
         shown(5, "empty-slot"),
         shown(3, "console"),
     ]
-}
-
-/// Each tokened query in `fx`: its number and its commands.
-fn queries(fx: &[Effect]) -> Vec<(u64, Vec<Cmd>)> {
-    fx.iter()
-        .filter_map(|e| match e {
-            Effect::Tmux {
-                conn: 1,
-                cmds,
-                token: Some(TmuxToken::Query(n)),
-            } => Some((*n, cmds.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The one listing an operation asked in `fx`: its query number.
-fn the_listing(fx: &[Effect]) -> u64 {
-    match &queries(fx)[..] {
-        [(n, cmds)] if *cmds == refresh_cmds() => *n,
-        other => panic!("not one listing: {other:?}"),
-    }
 }
 
 /// Each command of a chain (or of a plain command), as one line of its words.
@@ -1129,6 +1114,12 @@ fn agent_spot(pane: u32, id: &str) -> String {
 /// `up()` with Lantern bound to `%9` and Kite to `%8`, the tabs reconciled, and the link's
 /// listing showing `panes` (a user's terminal attached).
 fn with_agents(panes: &[String]) -> State {
+    agents_up(panes, true, |_| {})
+}
+
+/// [`with_agents`], with a user's terminal attached or not, loaded from the snapshot `tweak`
+/// leaves.
+fn agents_up(panes: &[String], user: bool, tweak: impl FnOnce(&mut Snapshot)) -> State {
     let deps = Deps {
         home: PathBuf::from("/h"),
         panel: PanelLaunch {
@@ -1137,15 +1128,16 @@ fn with_agents(panes: &[String]) -> State {
         },
         ..Deps::default()
     };
-    let snapshot = Snapshot {
+    let mut snapshot = Snapshot {
         sessions: vec![live(L, "Lantern"), live(K, "Kite")],
         pane_bindings: vec![bound_to(L, "%9"), bound_to(K, "%8")],
         ..Snapshot::default()
     };
+    tweak(&mut snapshot);
     let mut st = State::new(BrainName::default_brain(), Config::default()).with_deps(deps);
     handle_checked(&mut st, Input::Startup(Box::new(snapshot)), now());
     feed(&mut st, connected());
-    feed(&mut st, refresh(lists(panes, true)));
+    feed(&mut st, refresh(lists(panes, user)));
     handle_checked(&mut st, Input::StartDrained, now());
     let asked: Vec<u64> = st.tmux().queries().collect();
     let [n] = asked[..] else {
@@ -1385,4 +1377,292 @@ fn a_swap_tmux_refuses_says_why() {
         Err("moa couldn't bring it to the screen: can't find pane: %9".into())
     );
     assert_eq!(st.tmux().topology.view_of(PaneId(9)), None);
+}
+
+// --- Taking an agent out of the spot (L11, L17) ---
+
+/// `focus` built with Lantern's agent `%9` in the spot, and Kite `%8` in a tab of its own;
+/// with a spare empty slot `%5` parked, or none.
+fn lantern_in_the_spot(spare: bool) -> Vec<String> {
+    let mut panes = focus_built();
+    panes[3] = agent_spot(9, L);
+    panes.push(agent_tab(8, K));
+    if spare {
+        panes.push(parked(5, "empty-slot"));
+    }
+    panes
+}
+
+/// [`lantern_in_the_spot`], off screen (no user's terminal attached), with Lantern heard
+/// from since moa bound its tab: idle long enough, it sleeps on its own.
+fn lantern_off_screen(spare: bool) -> State {
+    agents_up(&lantern_in_the_spot(spare), false, |snap| {
+        snap.sessions[0].last_seen_at = Some(UtcMs(2));
+    })
+}
+
+/// Seven hours on: Lantern, idle since the start, is past the six-hour threshold.
+fn hours_later() -> Now {
+    Now::at(
+        UtcMs(7 * 3_600_000),
+        Duration::from_secs(1),
+        TimeZone::posix("UTC0").unwrap(),
+    )
+}
+
+/// The sessions `fx` saved asleep.
+fn slept(fx: &[Effect]) -> Vec<SessionId> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Persist(c) => Some(c.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|c| match c {
+            Change::Session(s) if s.asleep_at.is_some() => Some(s.id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `fx` sends a `kill-pane`, in a chain or not.
+fn kills_any(fx: &[Effect]) -> bool {
+    fx.iter().any(|e| match e {
+        Effect::Tmux { cmds, .. } => cmds
+            .iter()
+            .flat_map(Cmd::parts)
+            .any(|c| c.name() == "kill-pane"),
+        _ => false,
+    })
+}
+
+fn sleep(st: &mut State, req: u64, q: &str) -> Vec<Effect> {
+    send(
+        st,
+        req,
+        Op::SessionSleep {
+            qs: vec![q.into()],
+            idle_ms: None,
+            dry_run: false,
+        },
+    )
+}
+
+/// The commit first, then the vacate's listing, and no kill before it: its number.
+fn committed_then_listed(fx: &[Effect]) -> u64 {
+    assert!(!kills_any(fx), "{fx:?}");
+    let persist = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
+    let listing = fx.iter().position(|e| {
+        matches!(e, Effect::Tmux { cmds, token: Some(TmuxToken::Query(_)), .. }
+            if *cmds == refresh_cmds())
+    });
+    assert!(persist.is_some() && persist < listing, "{fx:?}");
+    the_listing(fx)
+}
+
+/// L11: the spot's agent, asleep on its own, is taken out by swapping the spare empty slot
+/// in and killing it, from the vacate's own listing; nothing starts.
+#[test]
+fn sleeping_the_spots_agent_with_a_spare_slot_swaps_it_in() {
+    let mut st = lantern_off_screen(true);
+    let starts = panel_starts(&st);
+    let fx = handle_checked(&mut st, Input::Timer(TimerKey::Sleep), hours_later());
+    assert_eq!(slept(&fx), [sid(L)]);
+    let n = committed_then_listed(&fx);
+    let fx = feed(&mut st, answer(n, lists(&lantern_in_the_spot(true), false)));
+    let (n, chain) = the_chain(&fx);
+    assert_eq!(chain, ["swap-pane -d -s %5 -t %9", "kill-pane -t %9"]);
+    feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(panel_starts(&st), starts);
+    assert!(st.tmux().queries().next().is_none(), "nothing waits");
+}
+
+/// L11: with no spare, the spot is respawned in place as the empty slot, untagged as a
+/// session and tagged as the slot, kept on exit: one panel start.
+#[test]
+fn sleeping_the_spots_agent_with_no_spare_respawns_the_spot() {
+    let mut st = lantern_off_screen(false);
+    let starts = panel_starts(&st);
+    let fx = handle_checked(&mut st, Input::Timer(TimerKey::Sleep), hours_later());
+    assert_eq!(slept(&fx), [sid(L)]);
+    let n = committed_then_listed(&fx);
+    let fx = feed(
+        &mut st,
+        answer(n, lists(&lantern_in_the_spot(false), false)),
+    );
+    // The respawn takes the agent down; the slot's tags go once it is answered.
+    let (n, chain) = the_chain(&fx);
+    assert_eq!(
+        chain,
+        [
+            "respawn-pane -k -t %9 -c /h -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 /x/moa panel empty-slot --brain default"
+        ]
+    );
+    let (n, chain) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    assert_eq!(chain[0], "set-option -p -u -t %9 @moa_session");
+    assert!(chain.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
+    // Kept on exit, with its stopped line: a crashed slot stays for Repair (L11).
+    let kept = chain
+        .iter()
+        .position(|l| l == "set-option -p -t %9 remain-on-exit on")
+        .expect("kept on exit");
+    assert!(
+        chain[kept + 1].starts_with("set-option -p -t %9 remain-on-exit-format "),
+        "{chain:?}"
+    );
+    assert!(
+        !chain.iter().any(|l| l.starts_with("kill-pane")),
+        "{chain:?}"
+    );
+    feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert_eq!(panel_starts(&st), starts + 1);
+    let lantern = st.session(sid(L)).unwrap();
+    assert!(lantern.asleep_at.is_some(), "{lantern:?}");
+}
+
+/// `x` on the tree's row (`session.close`) of the spot's agent: closed at once, then the
+/// empty slot takes its place.
+#[test]
+fn closing_the_spots_agent_leaves_the_empty_slot() {
+    let mut st = with_agents(&lantern_in_the_spot(false));
+    let fx = send(&mut st, 1, Op::SessionClose { q: L.into() });
+    assert_eq!(reply_text(&fx), Ok("closed".into()));
+    assert_eq!(st.session(sid(L)).unwrap().lifecycle, Lifecycle::Ended);
+    let n = committed_then_listed(&fx);
+    let fx = feed(&mut st, answer(n, lists(&lantern_in_the_spot(false), true)));
+    let (n, chain) = the_chain(&fx);
+    assert!(chain[0].starts_with("respawn-pane -k -t %9 "), "{chain:?}");
+    let (_, chain) = the_chain(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+    assert!(chain.contains(&"set-option -p -t %9 @moa_view empty-slot".to_string()));
+}
+
+/// With a cockpit, an agent in a tab of its own goes through the queue too: its commit,
+/// then a listing, then a plain kill.
+#[test]
+fn closing_an_agent_outside_the_spot_kills_it_after_a_listing() {
+    let mut st = with_agents(&focus_and_tabs());
+    let fx = send(&mut st, 1, Op::SessionClose { q: K.into() });
+    assert_eq!(reply_text(&fx), Ok("closed".into()));
+    let n = committed_then_listed(&fx);
+    let (n, chain) = the_chain(&feed(&mut st, answer(n, lists(&focus_and_tabs(), true))));
+    assert_eq!(chain, ["kill-pane -t %8"]);
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    assert!(replies(&fx).is_empty() && logs(&fx).is_empty(), "{fx:?}");
+}
+
+/// L11: the spot's agent ending by itself (its tag read before its binding goes) puts the
+/// session to sleep and builds the current layout again, from a listing, selecting nothing.
+#[test]
+fn a_spot_whose_agent_ends_refills() {
+    let mut st = agents_up(&lantern_in_the_spot(true), true, |snap| {
+        snap.meta = vec![(CURRENT_KEY.to_string(), "focus".to_string())];
+    });
+    let fx = message(&mut st, "moa:hook pane-exited %9");
+    assert_eq!(slept(&fx), [sid(L)]);
+    let n = the_listing(&fx);
+    let mut gone = lantern_in_the_spot(true);
+    gone.remove(3);
+    let (_, chain) = the_chain(&feed(&mut st, answer(n, lists(&gone, true))));
+    assert!(
+        chain.iter().any(|l| l.contains("-s %5")),
+        "the spare slot joins: {chain:?}"
+    );
+    assert!(!selected(&chain), "{chain:?}");
+
+    // Kite's agent, in a tab of its own, ending changes no layout.
+    let mut st = with_agents(&focus_and_tabs());
+    let fx = message(&mut st, "moa:hook pane-exited %8");
+    assert_eq!(slept(&fx), [sid(K)]);
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+}
+
+/// L12: a stopped empty slot in the spot is logged, and left for Repair: no build.
+#[test]
+fn a_dead_empty_slot_in_the_spot_is_left_for_repair() {
+    let mut st = with_agents(&focus_and_tabs());
+    let fx = message(&mut st, "moa:hook pane-died %5");
+    assert_eq!(
+        logs(&fx),
+        [(LogLevel::Info, "panel empty-slot in %5 stopped".to_string())]
+    );
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+}
+
+/// R5: right after a show's chain is answered, with no listing in between, a sleep of the
+/// session just shown takes it out of the spot by the spot's chain, never a bare kill.
+#[test]
+fn sleep_right_after_a_show_vacates_the_spot() {
+    let mut st = with_agents(&focus_and_tabs());
+    let n = the_listing(&focus(&mut st, 1, L));
+    let (n, _) = the_chain(&feed(&mut st, answer(n, lists(&focus_and_tabs(), true))));
+    feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+
+    let fx = sleep(&mut st, 2, L);
+    assert_eq!(slept(&fx), [sid(L)]);
+    let n = committed_then_listed(&fx);
+    // tmux's listing: Lantern in the spot, the slot parked in `_moa`.
+    let (_, chain) = the_chain(&feed(
+        &mut st,
+        answer(n, lists(&lantern_in_the_spot(true), true)),
+    ));
+    assert_eq!(chain, ["swap-pane -d -s %5 -t %9", "kill-pane -t %9"]);
+}
+
+/// M1: the agent's session tag never landed, and the sleep's commit deleted its binding, so
+/// the vacate's listing shows a pane of no one's. The vacate still knows it as its own: a
+/// sleep that says `asleep` never leaves the agent running.
+#[test]
+fn a_sleep_takes_down_its_agent_whose_tag_never_landed() {
+    // Lantern in the spot (with a spare slot), then in a tab of its own.
+    for (panes, pane) in [(lantern_in_the_spot(true), 3), (focus_and_tabs(), 5)] {
+        let mut st = with_agents(&panes);
+        let fx = sleep(&mut st, 1, L);
+        assert!(
+            reply_text(&fx).unwrap().starts_with("asleep: Lantern"),
+            "{fx:?}"
+        );
+        let n = committed_then_listed(&fx);
+        let mut untagged = panes.clone();
+        untagged[pane] = untagged[pane].replace(&format!(" {L} "), "  ");
+        let (_, chain) = the_chain(&feed(&mut st, answer(n, lists(&untagged, true))));
+        assert!(
+            chain.iter().any(|l| l == "kill-pane -t %9"),
+            "{untagged:?}: {chain:?}"
+        );
+    }
+}
+
+/// L17: a vacate waits behind a build already running. When that build sent the agent home,
+/// the vacate kills it plainly; when its pane is gone, it does nothing, and the queue moves
+/// on to what waits behind it.
+#[test]
+fn a_vacate_whose_pane_left_the_spot_just_kills_it() {
+    for gone in [false, true] {
+        let mut st = with_agents(&lantern_in_the_spot(true));
+        let build = the_listing(&apply(&mut st, 1, "cockpit"));
+        let fx = sleep(&mut st, 2, L);
+        assert!(queries(&fx).is_empty() && !kills_any(&fx), "{fx:?}");
+        let fx = feed(
+            &mut st,
+            answer(build, lists(&lantern_in_the_spot(true), true)),
+        );
+        let (n, _) = the_chain(&fx);
+        let vacate = the_listing(&feed(&mut st, answer(n, vec![Ok(Vec::new())])));
+        // A key behind the vacate waits for it.
+        assert!(queries(&key(&mut st, "layout-2")).is_empty());
+        // The build sent Lantern home, to a tab of its own.
+        let mut home = cockpit_built();
+        home.push(agent_tab(8, K));
+        if !gone {
+            home.push(agent_tab(9, L));
+        }
+        let fx = feed(&mut st, answer(vacate, lists(&home, true)));
+        if gone {
+            assert!(!kills_any(&fx), "{fx:?}");
+            // Nothing to do: the queue is free, and the key's listing goes out.
+            the_listing(&fx);
+        } else {
+            assert_eq!(the_chain(&fx).1, ["kill-pane -t %9"]);
+        }
+    }
 }

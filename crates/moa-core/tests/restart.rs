@@ -26,6 +26,7 @@ use moa_core::state::{Deps, LoadNote, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::link::NOT_READY;
 use moa_core::tmux::notify::Notification;
+use moa_core::tmux::topology::refresh_cmds;
 use moa_testkit::brain::TypicalBrain;
 use serde_json::json;
 
@@ -511,6 +512,241 @@ fn restart_kills_then_resumes() {
     assert!(b.tracked && b.pane_id == "%7", "{b:?}");
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
     assert_ne!(why_not(&r.st, s_id(), r.b.now().wall, 0), Some("opening"));
+}
+
+// --- With the cockpit (5b's L11, L17): the kill is the queue's vacate ---
+
+/// A listing's answers: the cockpit, with a tree panel and, while `old`, S's old tab %5 in
+/// its spot; no spare empty slot.
+fn cockpit_scene(old: bool) -> Vec<Result<Vec<String>, String>> {
+    let lines = |l: &[String]| Ok(l.to_vec());
+    let mut panes = vec!["P %2 @1 $0 0 0 0 1  0 tree".to_string()];
+    if old {
+        panes.push(format!("P %5 @1 $0 1 0 0 1 {S} 0 agent"));
+    }
+    vec![
+        lines(&["S $0 moa".into(), "S $1 _moa".into()]),
+        lines(&panes),
+        lines(&["C 1 $1 client-9".into()]),
+    ]
+}
+
+/// tmux answers query `n` on connection `conn`.
+fn answer_on(
+    r: &mut Rig,
+    conn: u64,
+    n: u64,
+    results: Vec<Result<Vec<String>, String>>,
+) -> Vec<Effect> {
+    let token = TmuxToken::Query(n);
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn,
+            token,
+            results,
+        },
+    )
+}
+
+/// Whether `fx` sends a window for a launch.
+fn opens(fx: &[Effect]) -> bool {
+    fx.iter().any(|e| {
+        matches!(
+            e,
+            Effect::Tmux {
+                token: Some(TmuxToken::Open(_)),
+                ..
+            }
+        )
+    })
+}
+
+/// The cockpit listed with S's old tab %5 in its spot, then `restart S` with its pane query
+/// answered: the commit and the vacate's listing go out, never the kill or the new window
+/// yet (R24). The listing's number.
+fn restart_with_a_cockpit(r: &mut Rig) -> u64 {
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: cockpit_scene(true),
+        },
+    );
+    assert!(queried(&r.restart(1)));
+    let fx = r.listed();
+    assert!(kills(&fx).is_empty(), "{fx:?}");
+    assert!(!opens(&fx), "the new tab waits for the old agent: {fx:?}");
+    let n = the_listing(&fx);
+    let persist = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
+    let listing = fx.iter().position(
+        |e| matches!(e, Effect::Tmux { token: Some(TmuxToken::Query(q)), .. } if *q == n),
+    );
+    assert!(persist.is_some() && persist < listing, "{fx:?}");
+    n
+}
+
+/// S's old agent in the cockpit's spot (L11): restarted, the empty slot takes its place, by
+/// the cockpit's queue, from a listing of its own. Only once that chain is answered does the
+/// new tab open (R24): the old agent goes first, as with no cockpit.
+#[test]
+fn restarting_the_spots_agent_leaves_the_empty_slot() {
+    let mut r = World::new().reconciled();
+    let n = restart_with_a_cockpit(&mut r);
+    let fx = answer_on(&mut r, 1, n, cockpit_scene(true));
+    let [(n, chain)] = &queries(&fx)[..] else {
+        panic!("one chain: {fx:?}");
+    };
+    let first = &chain[0].parts()[0];
+    assert_eq!(
+        (first.name(), &first.argv()[..3]),
+        (
+            "respawn-pane",
+            &["-k".to_string(), "-t".into(), "%5".into()][..]
+        )
+    );
+    assert_eq!(chain[0].parts().len(), 1, "the respawn alone: {chain:?}");
+    assert!(!opens(&fx), "{fx:?}");
+
+    // The old agent is gone; the empty slot's tags follow, then the new tab opens.
+    let fx = answer_on(&mut r, 1, *n, vec![Ok(Vec::new())]);
+    assert!(!opens(&fx), "{fx:?}");
+    let [(n, tags)] = &queries(&fx)[..] else {
+        panic!("the slot's tags: {fx:?}");
+    };
+    assert!(
+        tags[0]
+            .parts()
+            .iter()
+            .any(|c| c.argv().iter().any(|a| a == "empty-slot")),
+        "{tags:?}"
+    );
+    let fx = answer_on(&mut r, 1, *n, vec![Ok(Vec::new())]);
+    let (id, cmds) = the_open(&fx);
+    assert_eq!((id, cmds[0].name()), (s_id(), "new-window"));
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(replies(&r.bound("%7")), [(ReqId(1), restarted())]);
+}
+
+/// The respawn took the old agent down, but tmux refused a tag after it: the agent is gone,
+/// so the restart goes ahead; the missing slot is logged.
+#[test]
+fn a_restart_whose_old_agent_went_resumes_though_a_tag_failed() {
+    let mut r = World::new().reconciled();
+    let n = restart_with_a_cockpit(&mut r);
+    let fx = answer_on(&mut r, 1, n, cockpit_scene(true));
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("the respawn: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Ok(Vec::new())]);
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("the slot's tags: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Err("invalid option: @moa_view".into())]);
+    assert_eq!(the_open(&fx).0, s_id());
+    let said = "the agent in %5 was taken down, but the empty slot there couldn't be set up: \
+                invalid option: @moa_view";
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Log(l) if l.message == said)),
+        "{fx:?}"
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+}
+
+/// The old tab went before the vacate's turn: nothing to take down, so the new tab opens.
+#[test]
+fn a_restart_whose_old_tab_is_gone_resumes() {
+    let mut r = World::new().reconciled();
+    let n = restart_with_a_cockpit(&mut r);
+    let fx = answer_on(&mut r, 1, n, cockpit_scene(false));
+    assert!(kills(&fx).is_empty(), "{fx:?}");
+    assert_eq!(the_open(&fx).0, s_id());
+    assert_eq!(replies(&r.bound("%7")), [(ReqId(1), restarted())]);
+}
+
+/// tmux refuses the vacate's chain: the old agent may still run, so nothing is resumed. The
+/// restart is answered plainly and logged, and S is asleep, no longer opening.
+#[test]
+fn a_restart_whose_old_agent_stays_isnt_resumed() {
+    let mut r = World::new().reconciled();
+    let n = restart_with_a_cockpit(&mut r);
+    let fx = answer_on(&mut r, 1, n, cockpit_scene(true));
+    let [(n, _)] = &queries(&fx)[..] else {
+        panic!("one chain: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 1, *n, vec![Err("can't find pane: %5".into())]);
+    assert!(!opens(&fx), "{fx:?}");
+    assert_eq!(
+        refusal(&fx),
+        "its old tab couldn't be closed, so it wasn't restarted; see moa's log"
+    );
+    let said = format!("session {S} wasn't restarted: its old agent in %5 couldn't be taken down");
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Log(l) if l.message == said)),
+        "{fx:?}"
+    );
+    assert!(is_asleep(r.s()), "{:?}", r.s());
+    assert_ne!(why_not(&r.st, s_id(), r.b.now().wall, 0), Some("opening"));
+
+    // Its old agent still runs in %5: what it says counts again, neither the restart's fence
+    // nor a killed tab's.
+    let started = HookKind::SessionStarted {
+        source: StartSource::Startup,
+    };
+    hook(&mut r, false, started, 1000, 901);
+    assert_eq!(r.s().lifecycle, Lifecycle::Live, "{:?}", r.s());
+}
+
+/// The link goes while the restart waits for its vacate: the restart hears so, and its new
+/// tab never opens; back on the same server, the vacate still takes the old agent down.
+#[test]
+fn a_restart_held_for_its_vacate_ends_with_the_link() {
+    let mut r = World::new().reconciled();
+    restart_with_a_cockpit(&mut r);
+    let fx = feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Err(OpError("moa's terminal went away before it opened".into()))
+        )]
+    );
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Connected {
+            conn: 2,
+            generation: generation(),
+            version: "3.5a".into(),
+            ctl: moa_core::tmux::ids::ClientName("client-9".into()),
+            socket: "moa".into(),
+        },
+    );
+    // The vacate's listing, beside the reconcile's look at the tabs.
+    let listings: Vec<u64> = queries(&fx)
+        .into_iter()
+        .filter(|(_, cmds)| *cmds == refresh_cmds())
+        .map(|(n, _)| n)
+        .collect();
+    let [n] = listings[..] else {
+        panic!("the vacate's listing: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 2, n, cockpit_scene(true));
+    let chains: Vec<u64> = queries(&fx)
+        .into_iter()
+        .filter(|(_, cmds)| cmds.len() == 1 && cmds[0].name() == "chain")
+        .map(|(n, _)| n)
+        .collect();
+    let [n] = chains[..] else {
+        panic!("the vacate's chain: {fx:?}");
+    };
+    let fx = answer_on(&mut r, 2, n, vec![Ok(Vec::new())]);
+    assert!(!opens(&fx), "{fx:?}");
 }
 
 /// The old tab's exit, before the new tab's answer or after it, isn't the session's end:

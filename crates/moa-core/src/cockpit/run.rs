@@ -8,13 +8,13 @@
 //! listing again), and its chain (`Asked::Chain`). Every answer carries the operation's
 //! `seq`; one for an operation no longer in flight is ignored.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::json;
 
 use super::assign::view_of;
 use super::build::{occupant_stays, panel_tags};
-use super::scene::{AGENT, Role, Scene};
+use super::scene::{AGENT, Place, Role, Scene};
 use super::spawn::{respawn, respawn_tail, spawn, spawned};
 use super::{Plan, plan, swap_in, vacate};
 use crate::Now;
@@ -59,13 +59,14 @@ pub(crate) enum CockpitOp {
     /// Builds the current layout when a user's terminal is attached and the cockpit holds
     /// no panel yet (L9).
     Lazy,
-    /// Builds the current layout again, whatever the cockpit holds: the spot's agent ended.
-    #[allow(dead_code)] // Queued from Task 10 (the spot's agent exiting).
+    /// Builds the current layout again, whatever the cockpit holds, selecting nothing: the
+    /// spot's agent ended (L11). A build waiting already does that: a refill behind one is
+    /// dropped. It never takes another's place, nor is replaced.
     Refill,
-    /// Takes the agent in `pane` down: from the spot, leaving the empty slot (L11);
-    /// elsewhere, a plain kill; gone, nothing. It survives a lost link and a reload.
-    #[allow(dead_code)] // Queued from Task 10 (`kill_tab` while a cockpit exists).
-    Vacate { pane: PaneId },
+    /// Takes session `id`'s agent in `pane` down (`kill_tab`): from the spot, leaving the
+    /// empty slot (L11); elsewhere, a plain kill; gone, or no longer its, nothing. It
+    /// survives a lost link and a reload.
+    Vacate { pane: PaneId, id: SessionId },
     /// `ui.select_view`: the panel in `pane` shows `view`, its tag and frame set (L8, L10).
     /// Queued, so it never races a build's retagging of the same pane.
     SelectView {
@@ -107,6 +108,23 @@ pub(crate) struct CockpitRun {
     stopped: BTreeSet<PaneId>,
     /// The link just came up: its first listing may queue the lazy build (L9).
     lazy_armed: bool,
+    /// The vacate in flight took its agent down: its kill (or the spot's respawn) was
+    /// answered `Ok`, whatever becomes of the tags after it (R24).
+    taken: bool,
+    /// The vacate's chain still to go once its agent is taken down: the empty slot's tags.
+    rest: Option<(Vec<Cmd>, Then)>,
+    /// Restarts whose new tab waits for the old agent to go (R24), by the vacated pane.
+    pub(crate) held: BTreeMap<PaneId, Held>,
+    /// The held vacates that ended since, and whether they took the agent down: the end of
+    /// the input releases or refuses their restarts (`ops::launch::released`).
+    pub(crate) vacated: Vec<(PaneId, bool)>,
+}
+
+/// A restart's resume window, held until its vacate ends.
+#[derive(Debug)]
+pub(crate) struct Held {
+    pub(crate) id: SessionId,
+    pub(crate) window: Effect,
 }
 
 impl CockpitRun {
@@ -115,6 +133,8 @@ impl CockpitRun {
         self.step = Step::Listing;
         self.replanned = false;
         self.restarted = None;
+        self.taken = false;
+        self.rest = None;
     }
 }
 
@@ -171,6 +191,10 @@ enum Next {
     Spawn(Vec<View>),
     Respawn(Vec<(PaneId, View)>),
     Chain(Vec<Cmd>, Then),
+    /// A vacate's chain that takes its agent down, then, once that is answered `Ok`, the
+    /// rest (the empty slot's tags), as a chain of its own: tmux's one answer for a chain
+    /// can't tell which command failed (R24 asks whether the agent went).
+    TakeDown(Vec<Cmd>, Then, Option<(Vec<Cmd>, Then)>),
 }
 
 /// Whom `op` answers: none for an operation nobody asked for, or whose asker left.
@@ -209,11 +233,25 @@ fn first_line(e: &str) -> &str {
         .unwrap_or("tmux gave no reason")
 }
 
+/// A vacate's second chain refused, its agent taken down already: only the empty slot's
+/// tags are missing. `None` for any other chain.
+fn vacate_failed(state: &State, op: &CockpitOp, e: &str) -> Option<Said> {
+    match op {
+        CockpitOp::Vacate { pane, .. } if state.cockpit.taken => Some(Said::Logged(format!(
+            "the agent in {pane} was taken down, but the empty slot there couldn't be set up: {}",
+            first_line(e)
+        ))),
+        _ => None,
+    }
+}
+
 /// A chain's error in plain words (L18).
 fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
     let why = first_line(e);
     let text = match op {
-        CockpitOp::Vacate { pane } => format!("the agent in {pane} couldn't be taken down: {why}"),
+        CockpitOp::Vacate { pane, .. } => {
+            format!("the agent in {pane} couldn't be taken down: {why}")
+        }
         CockpitOp::SelectView { pane, view, .. } => {
             format!("the panel in {pane} couldn't show {view}: {why}")
         }
@@ -277,13 +315,30 @@ fn build_kind(op: &CockpitOp) -> Option<bool> {
     }
 }
 
+/// Whether waiting `op` builds a layout whatever the cockpit holds, as a refill would: a
+/// layout switch (of a layout there is), Repair, or a refill.
+fn refills(state: &State, op: &CockpitOp) -> bool {
+    match op {
+        CockpitOp::Build {
+            name,
+            select: Select::Default,
+            ..
+        } => name.as_ref().is_none_or(|n| state.layouts.node(n).is_ok()),
+        CockpitOp::Repair { .. } | CockpitOp::Refill => true,
+        _ => false,
+    }
+}
+
 /// Runs `op` after those queued before it, now if none is. A build replaces a waiting
-/// build of its kind, which is told so. With no link, only a vacate waits; the rest are
-/// refused.
+/// build of its kind, which is told so; a refill behind a build is dropped. With no link,
+/// only a vacate waits; the rest are refused.
 pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     if state.tmux.conn().is_none() && !matches!(op, CockpitOp::Vacate { .. }) {
         let no = Err(OpError(NO_TERMINAL.into()));
         return told_all(state, tells_of(&op), &no);
+    }
+    if op == CockpitOp::Refill && state.cockpit.waiting.iter().any(|w| refills(state, w)) {
+        return Vec::new();
     }
     let mut fx = Vec::new();
     let kind = build_kind(&op);
@@ -306,11 +361,11 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     fx
 }
 
-/// Whether bringing a session to the screen goes through the queue (L11): a cockpit is
-/// there, so it may have a spot, or an operation that may build one is queued, and the show
-/// keeps its place behind it. Otherwise there is no spot, and the session's tab is selected
-/// at once (4b).
-pub(crate) fn shows_queued(state: &State) -> bool {
+/// Whether bringing a session to the screen, or taking its tab down, goes through the queue
+/// (L11, L17): a cockpit is there, so it may have a spot, or an operation that may build
+/// one is queued, and the show or the vacate keeps its place behind it. Otherwise there is
+/// no spot: the session's tab is selected, or killed, at once (4b).
+pub(crate) fn through_queue(state: &State) -> bool {
     state.tmux.topology.cockpit().is_some() || !idle(state)
 }
 
@@ -458,7 +513,17 @@ fn lost_now(state: &mut State) -> Vec<Effect> {
 fn finish(state: &mut State, said: Said) -> Vec<Effect> {
     let run = &mut state.cockpit;
     let op = run.in_flight.take().map(|(_, op)| op);
+    let taken = run.taken;
     run.reset_op();
+    // A vacate a restart waits for: done when its agent went (its kill or respawn answered
+    // `Ok`, whatever became of the slot's tags) or there was nothing left to take down;
+    // else not (L17, R24).
+    if let Some(CockpitOp::Vacate { pane, .. }) = &op
+        && run.held.contains_key(pane)
+    {
+        run.vacated
+            .push((*pane, taken || matches!(said, Said::Nothing)));
+    }
     let mut fx = Vec::new();
     match said {
         Said::Reply(result) => {
@@ -488,12 +553,48 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
             .iter()
             .find_map(|a| a.as_ref().err())
             .map_or("tmux's answer didn't parse", |e| first_line(e));
+        // A vacate can't plan with no listing, but its commit is saved: its agent is killed
+        // plainly, as 4b did (a pane id names one pane on its server), unless moa last knew
+        // the pane as a panel (its chain already ran).
+        if let Some((_, CockpitOp::Vacate { pane, .. })) = &state.cockpit.in_flight {
+            let pane = *pane;
+            let panel = state
+                .tmux
+                .topology
+                .view_of(pane)
+                .is_some_and(|v| v.parse::<View>().is_ok());
+            if !panel {
+                let mut fx = vec![log(
+                    LogLevel::Warn,
+                    format!(
+                        "moa couldn't read the terminal's state: {why}; the agent in {pane} is closed without it"
+                    ),
+                )];
+                let then = Then {
+                    tags: vec![(pane, None)],
+                    untagged: Vec::new(),
+                    moved: None,
+                    views: None,
+                    starts: 0,
+                    layout: String::new(),
+                    ok: Said::Nothing,
+                };
+                fx.extend(act(
+                    state,
+                    seq,
+                    Next::TakeDown(vec![kill_pane(pane)], then, None),
+                ));
+                return fx;
+            }
+        }
         let text = format!("moa couldn't read the terminal's state: {why}; try again");
-        let mut fx = vec![log(LogLevel::Warn, text.clone())];
-        let said = match &state.cockpit.in_flight {
-            // An operation nobody asked for has the log line only.
-            Some((_, op)) if !tells_of(op).is_empty() => refused(op, text),
-            _ => Said::Nothing,
+        // Logged either way; an operation nobody asked for has the log line only (and a
+        // vacate's ends as not done).
+        let (mut fx, said) = match &state.cockpit.in_flight {
+            Some((_, op)) if !tells_of(op).is_empty() => {
+                (vec![log(LogLevel::Warn, text.clone())], refused(op, text))
+            }
+            _ => (Vec::new(), Said::Logged(text)),
         };
         fx.extend(finish(state, said));
         return fx;
@@ -591,10 +692,28 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let (layout, node) = current(state);
             build(state, op, scene, layout, &node, None)
         }
-        CockpitOp::Vacate { pane } => {
+        CockpitOp::Vacate { pane, id } => {
             let Some(at) = scene.pane(*pane) else {
                 return Next::Done(Said::Nothing);
             };
+            // Still the agent's: its session's, or no one's. `kill_tab`'s commit deleted the
+            // binding, and the session tag may never have landed; a pane id names one pane
+            // on its server, and a vacate never runs on another. Not a panel's: its chain
+            // already ran (a vacate queued again after a lost link or a reload finds the
+            // empty slot it left).
+            let ours = match at.role {
+                Role::Spot(Some(s)) | Role::Agent(s) => s == *id,
+                Role::Other => true,
+                Role::Panel(_) | Role::Spot(None) => false,
+            };
+            if !ours {
+                return Next::Done(Said::Nothing);
+            }
+            // The spot's occupant, tagged `agent` there, with or without its session tag (an
+            // agent with a session and another view isn't the spot's).
+            let in_spot = at.place == Place::Cockpit
+                && (matches!(at.role, Role::Spot(Some(_)))
+                    || (matches!(at.role, Role::Other) && at.tagged));
             let then = |tags, untagged, starts| Then {
                 tags,
                 untagged,
@@ -604,23 +723,29 @@ fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 layout: String::new(),
                 ok: Said::Nothing,
             };
-            if matches!(at.role, Role::Spot(Some(_))) {
-                let v = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
-                // In place, the spot becomes the empty slot, no longer a session's tab; a spare
-                // one swapped in already is the slot, and the agent's pane is gone.
-                let then = match v.respawned {
-                    true => then(vec![(*pane, Some(View::EmptySlot.word()))], vec![*pane], 1),
-                    false => then(Vec::new(), Vec::new(), 0),
-                };
-                Next::Chain(v.chain.parts().to_vec(), then)
-            } else if at.agent().is_none() {
-                // Not an agent's any more: its chain already ran (a vacate queued again after
-                // a lost link or a reload finds the empty slot it left), or the pane is
-                // someone else's. Nothing is killed.
-                Next::Done(Said::Nothing)
-            } else {
-                Next::Chain(vec![kill_pane(*pane)], then(Vec::new(), Vec::new(), 0))
+            if !in_spot {
+                return Next::TakeDown(
+                    vec![kill_pane(*pane)],
+                    then(Vec::new(), Vec::new(), 0),
+                    None,
+                );
             }
+            let v = vacate(scene, *pane, &respawn_tail(state, View::EmptySlot));
+            let cmds = v.chain.parts().to_vec();
+            if !v.respawned {
+                // A spare one swapped in already is the slot, and the agent's pane is gone: no
+                // longer the spot's, so nothing reads an exit of it as the spot's agent ending.
+                return Next::TakeDown(cmds, then(vec![(*pane, None)], Vec::new(), 0), None);
+            }
+            // In place: the respawn takes the agent down (a panel start), then the spot
+            // becomes the empty slot, no longer a session's tab.
+            let (respawn, tags) = cmds.split_at(1);
+            let slot = then(vec![(*pane, Some(View::EmptySlot.word()))], vec![*pane], 0);
+            Next::TakeDown(
+                respawn.to_vec(),
+                then(Vec::new(), Vec::new(), 1),
+                Some((tags.to_vec(), slot)),
+            )
         }
         CockpitOp::SelectView { pane, view, .. } => {
             // Only a pane moa tagged as a panel; never the spot (its empty slot or its agent),
@@ -810,6 +935,10 @@ fn act(state: &mut State, seq: u64, next: Next) -> Vec<Effect> {
                 None => lost_now(state),
             }
         }
+        Next::TakeDown(cmds, then, rest) => {
+            state.cockpit.rest = rest;
+            act(state, seq, Next::Chain(cmds, then))
+        }
     }
 }
 
@@ -896,9 +1025,18 @@ pub(crate) fn chain_answered(
                     if let Some(views) = then.views {
                         fx.extend(views_given(state, &views));
                     }
+                    // A vacate's first chain took its agent down; its tags go next.
+                    if matches!(op, CockpitOp::Vacate { .. }) {
+                        state.cockpit.taken = true;
+                        if let Some((cmds, then)) = state.cockpit.rest.take() {
+                            fx.extend(act(state, seq, Next::Chain(cmds, then)));
+                            return fx;
+                        }
+                    }
                     said
                 }
-                Some(Err(e)) => chain_failed(&op, &then.layout, &e),
+                Some(Err(e)) => vacate_failed(state, &op, &e)
+                    .unwrap_or_else(|| chain_failed(&op, &then.layout, &e)),
                 None => chain_failed(&op, &then.layout, "tmux didn't answer"),
             };
             fx.extend(finish(state, said));
@@ -978,6 +1116,10 @@ fn drop_all(state: &mut State) -> (Vec<Effect>, bool) {
 /// The link went down, or another connection replaced it: nothing asked on it will be
 /// answered (L17).
 pub(crate) fn lost(state: &mut State) -> Vec<Effect> {
+    // The restarts held for their vacates heard the link go with their launch (R24): their
+    // windows are never sent, while the vacates still run once the link is back.
+    state.cockpit.held.clear();
+    state.cockpit.vacated.clear();
     let (mut fx, dropped) = drop_all(state);
     if dropped {
         fx.push(log(

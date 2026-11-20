@@ -27,6 +27,7 @@ use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
+use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
 use proptest::prelude::*;
@@ -111,16 +112,21 @@ fn base_panes() -> Vec<String> {
 const CLIENTS: &[&str] = &["C 0 $0 /dev/ttys1", "C 1 $1 client-9"];
 
 fn lists(panes: &[String]) -> TmuxIn {
-    let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
     TmuxIn::Replies {
         conn: 1,
         token: TmuxToken::Refresh,
-        results: vec![
-            lines(&["S $0 moa", "S $1 _moa"]),
-            Ok(panes.to_vec()),
-            lines(CLIENTS),
-        ],
+        results: listing_of(panes),
     }
+}
+
+/// A listing's three answers: sessions `moa` and `_moa`, `panes`, and [`CLIENTS`].
+fn listing_of(panes: &[String]) -> Vec<Result<Vec<String>, String>> {
+    let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
+    vec![
+        lines(&["S $0 moa", "S $1 _moa"]),
+        Ok(panes.to_vec()),
+        lines(CLIENTS),
+    ]
 }
 
 fn window_changed(window: u32) -> TmuxIn {
@@ -302,6 +308,7 @@ impl World {
             st,
             setup,
             due,
+            panes: self.panes,
         }
     }
 }
@@ -312,6 +319,26 @@ struct Rig {
     /// Every effect of loading, linking and reconciling.
     setup: Vec<Effect>,
     due: UtcMs,
+    /// The pane lines tmux lists when the cockpit's queue asks.
+    panes: Vec<String>,
+}
+
+/// A query the cockpit's queue asked in `e` (L17): its number, and whether it is a listing
+/// (else a chain).
+fn cockpit_asked(e: &Effect) -> Option<(u64, bool)> {
+    match e {
+        Effect::Tmux {
+            cmds,
+            token: Some(TmuxToken::Query(n)),
+            ..
+        } if *cmds == refresh_cmds() => Some((*n, true)),
+        Effect::Tmux {
+            cmds,
+            token: Some(TmuxToken::Query(n)),
+            ..
+        } if cmds.len() == 1 && cmds[0].name() == "chain" => Some((*n, false)),
+        _ => None,
+    }
 }
 
 impl Rig {
@@ -324,11 +351,25 @@ impl Rig {
         why_not(&self.st, s_id(), wall, SIX)
     }
 
+    /// `input` at `wall`, the cockpit's queue [`played`](Rig::played).
     fn input(&mut self, wall: UtcMs, input: Input) -> Vec<Effect> {
-        handle_checked(&mut self.st, input, at(wall))
+        let fx = handle_checked(&mut self.st, input, at(wall));
+        self.played(wall, fx)
     }
 
+    /// `sleep`, the cockpit's queue [`played`](Rig::played).
     fn sleep_op(
+        &mut self,
+        req: u64,
+        qs: &[&str],
+        idle_ms: Option<i64>,
+        dry_run: bool,
+    ) -> Vec<Effect> {
+        let fx = self.sleep_unplayed(req, qs, idle_ms, dry_run);
+        self.played(self.b.now().wall, fx)
+    }
+
+    fn sleep_unplayed(
         &mut self,
         req: u64,
         qs: &[&str],
@@ -342,21 +383,61 @@ impl Rig {
         };
         send(&self.b, &mut self.st, req, op)
     }
+
+    /// tmux, for the cockpit's queue: with a cockpit, a sleep's kill is the queue's vacate
+    /// (5b's L17). Each listing the queue asks in `fx` is answered with the rig's panes and
+    /// each chain with `Ok`, as the terminal server would; `fx`, then what those answers did.
+    fn played(&mut self, wall: UtcMs, mut fx: Vec<Effect>) -> Vec<Effect> {
+        let mut i = 0;
+        while i < fx.len() {
+            if let Some((n, listing)) = cockpit_asked(&fx[i]) {
+                let results = match listing {
+                    true => listing_of(&self.panes),
+                    false => vec![Ok(Vec::new())],
+                };
+                let answer = TmuxIn::Replies {
+                    conn: 1,
+                    token: TmuxToken::Query(n),
+                    results,
+                };
+                let more = handle_checked(&mut self.st, Input::Tmux(answer), at(wall));
+                fx.extend(more);
+            }
+            i += 1;
+        }
+        fx
+    }
 }
 
 fn kill(pane: &str) -> Cmd {
     Cmd::new("kill-pane").args(["-t", pane])
 }
 
-/// Every tmux command sent, untokened or not.
+/// Every tmux command sent, untokened or not, a chain's one by one.
 fn sent(fx: &[Effect]) -> Vec<&Cmd> {
     fx.iter()
         .filter_map(|e| match e {
-            Effect::Tmux { cmds, .. } => Some(cmds.iter()),
+            Effect::Tmux { cmds, .. } => Some(cmds.iter().flat_map(Cmd::parts)),
             _ => None,
         })
         .flatten()
         .collect()
+}
+
+/// Where `fx` kills tab `pane`: a plain kill, or in a vacate's chain.
+fn killed_at(fx: &[Effect], pane: &str) -> Option<usize> {
+    fx.iter().position(|e| match e {
+        Effect::Tmux { conn: 1, cmds, .. } => {
+            cmds.iter().flat_map(Cmd::parts).any(|c| *c == kill(pane))
+        }
+        _ => false,
+    })
+}
+
+/// Where `fx` asks the cockpit's queue's listing (L17).
+fn vacate_listed_at(fx: &[Effect]) -> Option<usize> {
+    fx.iter()
+        .position(|e| cockpit_asked(e).is_some_and(|(_, listing)| listing))
 }
 
 fn kills(fx: &[Effect]) -> Vec<&Cmd> {
@@ -454,13 +535,6 @@ fn sleep_eligibility_table() {
     w.s.last_seen_at = Some(w.binding.as_ref().unwrap().bound_at);
     cases.push(("never heard from", w, "never heard from"));
     let mut w = World::new();
-    w.panes = vec![
-        "P %0 @1 $0 1 0 0 1 ".into(),
-        format!("P %1 @1 $0 0 0 0 1 {S}"),
-        "P %5 @3 $0 1 1 0 0 ".into(),
-    ];
-    cases.push(("in the cockpit", w, "in the cockpit"));
-    let mut w = World::new();
     w.panes.truncate(1);
     cases.push(("not in the topology", w, "not listed"));
     let mut w = World::new();
@@ -479,6 +553,17 @@ fn sleep_eligibility_table() {
         let r = w.up();
         assert_eq!(r.why(r.due), Some(want), "{name}");
     }
+
+    // In the cockpit's spot, off screen: it can sleep, and the empty slot takes its place
+    // (5b's L11).
+    let mut w = World::new();
+    w.panes = vec![
+        "P %0 @1 $0 1 0 0 1 ".into(),
+        format!("P %1 @1 $0 0 0 0 1 {S} 0 agent"),
+        "P %5 @3 $0 1 1 0 0 ".into(),
+    ];
+    let r = w.up();
+    assert_eq!(r.why(r.due), None, "in the spot");
 
     // Working, but not quiet yet.
     let mut w = World::new();
@@ -631,17 +716,17 @@ fn an_idle_session_sleeps_at_its_deadline() {
         "{fx:?}"
     );
 
-    let killed = fx
-        .iter()
-        .position(
-            |e| matches!(e, Effect::Tmux { conn: 1, cmds, token: None } if cmds == &[kill("%1")]),
-        )
-        .expect("the tab is killed");
+    // With the cockpit there, the kill is the queue's vacate: its listing, then its chain.
+    let listed = vacate_listed_at(&fx).expect("the vacate's listing");
+    let killed = killed_at(&fx, "%1").expect("the tab is killed");
     let cancelled = fx
         .iter()
         .position(|e| matches!(e, Effect::CancelTimer(TimerKey::Sleep)))
         .expect("no deadline is left");
-    assert!(0 < killed && killed < cancelled, "{fx:?}");
+    assert!(
+        0 < listed && listed < cancelled && listed < killed,
+        "{fx:?}"
+    );
     assert_eq!(kills(&fx).len(), 1);
     assert!(is_asleep(r.s()));
     assert!(r.st.binding(s_id()).is_none());
@@ -678,7 +763,7 @@ fn a_timer_that_fires_early_is_armed_again() {
 fn an_overdue_session_on_screen_sleeps_when_it_leaves_the_screen() {
     let mut w = World::new();
     w.panes = vec![
-        "P %0 @1 $0 1 0 0 1 ".into(),
+        "P %0 @1 $0 1 0 0 1  0 console".into(),
         format!("P %1 @2 $0 1 1 0 0 {S}"),
     ];
     let mut r = w.up();
@@ -760,8 +845,10 @@ fn sleep_with_writes_refused_kills_nothing() {
 /// listing (5b's L16).
 #[test]
 fn a_renamed_window_moves_the_cockpit() {
-    let mut r = World::new().up();
-    let due = r.due;
+    let mut w = World::new();
+    w.panes = base_panes();
+    let mut r = w.up();
+    let cockpit = |r: &Rig| r.st.tmux().topology.cockpit();
     let rename = |r: &mut Rig, window: u32, name: &str| {
         let n = Notification::WindowRenamed {
             window: WindowId(window),
@@ -780,13 +867,68 @@ fn a_renamed_window_moves_the_cockpit() {
         assert_eq!(refreshes.count(), 0, "{fx:?}");
     };
     // The cockpit's own window gets another name, and S's tab's window is renamed `moa`.
+    assert_eq!(cockpit(&r), Some(WindowId(1)));
     rename(&mut r, 1, "Kite");
     rename(&mut r, 2, "moa");
-    assert_eq!(r.why(due), Some("in the cockpit"));
+    assert_eq!(cockpit(&r), Some(WindowId(2)));
     // And back.
     rename(&mut r, 2, "Tide tables");
     rename(&mut r, 1, "moa");
-    assert_eq!(r.why(due), None);
+    assert_eq!(cockpit(&r), Some(WindowId(1)));
+}
+
+/// 5a's carry: with a cockpit, a sleep's kill waits in the cockpit's queue. The link drops
+/// before it goes and comes back to the same terminal server; the kill then goes, after a
+/// listing of its own, and a late start from the killed tab is still history only.
+#[test]
+fn a_late_start_from_the_killed_tab_stays_history_across_a_reconnect_to_the_same_server() {
+    let mut r = World::new().up();
+    let fx = r.sleep_unplayed(1, &[S], None, false);
+    assert!(kills(&fx).is_empty(), "{fx:?}");
+    assert!(vacate_listed_at(&fx).is_some(), "{fx:?}");
+    assert!(is_asleep(r.s()));
+    let slept_at = r.b.now().wall;
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Connected {
+            conn: 2,
+            generation: generation(),
+            version: "3.5a".into(),
+            ctl: ClientName("client-9".into()),
+            socket: "moa".into(),
+        },
+    );
+    // The vacate's listing, on the new connection.
+    let listing = fx.iter().find_map(|e| match e {
+        Effect::Tmux {
+            conn: 2,
+            cmds,
+            token: Some(TmuxToken::Query(n)),
+        } if *cmds == refresh_cmds() => Some(*n),
+        _ => None,
+    });
+    let n = listing.unwrap_or_else(|| panic!("no listing: {fx:?}"));
+    let fx = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn: 2,
+            token: TmuxToken::Query(n),
+            results: listing_of(&base_panes()),
+        },
+    );
+    assert_eq!(kills(&fx), [&kill("%1")], "{fx:?}");
+
+    let late = UtcMs(slept_at.0 + 1000);
+    let fx = start_from(&mut r, "%1", late, UtcMs(late.0 + 1000), 101);
+    let saved = changes(&fx);
+    assert!(
+        matches!(saved.as_slice(), [Change::Event(e)] if e.session_id == Some(s_id())),
+        "{fx:?}"
+    );
+    assert!(is_asleep(r.s()), "{:?}", r.s());
 }
 
 // --- by name ---
@@ -814,10 +956,7 @@ fn sleep_by_name() {
         .iter()
         .position(|e| matches!(e, Effect::Persist(_)))
         .unwrap();
-    let killed = fx
-        .iter()
-        .position(|e| matches!(e, Effect::Tmux { token: None, cmds, .. } if cmds == &[kill("%1")]))
-        .unwrap();
+    let killed = killed_at(&fx, "%1").unwrap();
     assert!(persist < killed, "{fx:?}");
     assert!(is_asleep(r.s()));
     assert!(r.st.binding(s_id()).is_none());
@@ -1274,7 +1413,6 @@ impl Model {
             && self.listed
             && s.last_seen_at.is_some_and(|t| t > b.bound_at)
             && self.window(k) != self.current
-            && self.window(k) != 1
             && !open_ask
             && now.0 - since.0 >= SIX
             && self.reconciled
@@ -1391,9 +1529,10 @@ fn step(m: &Model, st: &mut State, input: Input, now: UtcMs) -> Result<(), TestC
             "s{k} slept but wasn't eligible: {:?}",
             m.sess[k]
         );
-        // Never on screen, adopted, unheard from, in the cockpit, or done.
+        // Never on screen, adopted, unheard from, or done. In the cockpit, off screen, it
+        // may (5b's L11).
         let p = &m.sess[k];
-        prop_assert!(p.tracked && p.heard && !p.cockpit);
+        prop_assert!(p.tracked && p.heard);
         prop_assert!(m.window(k) != m.current, "s{k} was on screen");
         let (s, _) = &before[k];
         prop_assert!(!matches!(s.last_turn_end_at.zip(s.seen_at), Some((end, seen)) if end > seen));

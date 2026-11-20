@@ -9,7 +9,7 @@ use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, T
 use crate::hooks;
 use crate::keys;
 use crate::live::{QUIET_AFTER, quiet_candidate};
-use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind};
+use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind, SessionId};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::ops::term::Tell;
@@ -21,6 +21,7 @@ use crate::state::{State, Table};
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
+use crate::tmux::ids::PaneId;
 use crate::tmux::link::{self, Asked, LaunchKind, Launching, Link};
 use crate::tmux::mailbox::{HookMsg, Mailbox};
 use crate::tmux::notify::Notification;
@@ -36,6 +37,9 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
+    // A restart held for its old agent's vacate opens its new tab, or is refused (R24).
+    let released = ops::launch::released(state, &now);
+    fold_in(&mut fx, released);
     // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
     sleep::run(state, &now, sleep_fired, &mut fx);
     // Last, so the status line shows what this input saved, after its `Persist`.
@@ -125,6 +129,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             {
                 return fx;
             }
+            // The spot's agent ending by itself leaves the spot empty: the layout is built
+            // again (L11). Its tag is read before `pane_gone` deletes the binding.
+            let refill = matches!(&mailbox, Some(Mailbox::Hook(HookMsg::PaneExited(pane)))
+                if state.tmux.topology.view_of(*pane) == Some(cockpit::AGENT));
             // A pane that exited puts its session to sleep, before the link looks at the tree.
             let mut fx = match link::exited_pane(&t) {
                 Some(pane) => {
@@ -291,6 +299,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     more.extend(cockpit::run::died(state, pane));
                 }
                 _ => {}
+            }
+            if refill {
+                more.extend(cockpit::run::queue(state, cockpit::run::CockpitOp::Refill));
             }
             if no_server {
                 more.extend(reconcile::no_server(state, now));
@@ -535,6 +546,7 @@ pub(crate) fn finish_op(
     if result.is_err() {
         tx.events.clear();
         tx.cmds.clear();
+        tx.vacates.clear();
     }
     let mut fx = post_commit(state, tx);
     fx.push(Effect::Reply { conn, req, result });
@@ -542,14 +554,16 @@ pub(crate) fn finish_op(
 }
 
 /// What a transaction's commits owe the world, in order: the `Persist`, the model it
-/// changed, its events, then its tmux commands (R15). The caller adds any reply after.
-/// The commands go only for a saved change, on the link's connection: with nothing saved
-/// or the link down, they are dropped.
+/// changed, its events, then its tmux commands (R15), then its vacates queued in the
+/// cockpit's queue (L17). The caller adds any reply after. The commands go only for a saved
+/// change, on the link's connection: with nothing saved or the link down, they are
+/// dropped. A vacate of a saved change waits for the link instead.
 pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
     let Tx {
         changes,
         events,
         cmds,
+        vacates,
         ..
     } = tx;
     let topics = topics_of(&changes);
@@ -580,6 +594,14 @@ pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
                     cmds.len()
                 ),
             })),
+        }
+    }
+    if saved {
+        for (pane, id) in vacates {
+            fx.extend(cockpit::run::queue(
+                state,
+                cockpit::run::CockpitOp::Vacate { pane, id },
+            ));
         }
     }
     fx
@@ -663,6 +685,9 @@ pub(crate) struct Tx {
     pub(crate) events: Vec<CoreEvent>,
     /// tmux commands for after the commit (R15): see [`Tx::tmux`].
     pub(crate) cmds: Vec<Cmd>,
+    /// Agents' tabs taken down through the cockpit's queue after the commit: see
+    /// [`Tx::vacate`].
+    pub(crate) vacates: Vec<(PaneId, SessionId)>,
     /// The last id handed out per table, for ids asked for before the commit.
     issued: Vec<(Table, i64)>,
 }
@@ -675,6 +700,7 @@ impl Tx {
             changes: Vec::new(),
             events: Vec::new(),
             cmds: Vec::new(),
+            vacates: Vec::new(),
             issued: Vec::new(),
         }
     }
@@ -685,6 +711,14 @@ impl Tx {
     pub(crate) fn tmux(&mut self, cmd: Cmd) {
         debug_assert!(!self.changes.is_empty(), "a tmux command before any commit");
         self.cmds.push(cmd);
+    }
+
+    /// Queues session `id`'s agent in `pane` to be taken down by the cockpit's queue once
+    /// this transaction is saved (L17), as [`Tx::tmux`] would kill it: only after a
+    /// successful [`Tx::commit`].
+    pub(crate) fn vacate(&mut self, pane: PaneId, id: SessionId) {
+        debug_assert!(!self.changes.is_empty(), "a vacate before any commit");
+        self.vacates.push((pane, id));
     }
 
     /// Checks every change, then applies all of them to `state` and records them. A refusal
