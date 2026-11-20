@@ -18,7 +18,7 @@ use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Answers, log};
 
 /// tmux's first words, or a reason all the same.
-pub(super) fn first_line(e: &str) -> &str {
+fn first_line(e: &str) -> &str {
     e.lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
@@ -26,11 +26,11 @@ pub(super) fn first_line(e: &str) -> &str {
 }
 
 /// A chain tmux gave no answer for (the link went first).
-pub(super) const NO_ANSWER: &str = "tmux didn't answer";
+const NO_ANSWER: &str = "tmux didn't answer";
 
 /// Why a chain didn't go through, in plain words, from tmux's: never tmux's own (they go to
 /// the log).
-pub(super) fn plainly(e: &str) -> &'static str {
+fn plainly(e: &str) -> &'static str {
     let why = first_line(e);
     if ["can't find pane", "can't find window", "can't find session"]
         .iter()
@@ -49,7 +49,7 @@ pub(super) fn plainly(e: &str) -> &'static str {
 /// - its pane is gone: nothing runs there, so it is done (R24);
 /// - the plain kill itself, or a pane moa last knew as a panel: it ends, said;
 /// - else `None`: the agent is killed plainly instead ([`vacate_plainly`]).
-pub(super) fn vacate_refused(state: &State, pane: PaneId, e: &str) -> Option<Said> {
+fn vacate_refused(state: &State, pane: PaneId, e: &str) -> Option<Said> {
     let why = plainly(e);
     if state.cockpit.taken {
         return Some(Said::Logged(format!(
@@ -68,7 +68,7 @@ pub(super) fn vacate_refused(state: &State, pane: PaneId, e: &str) -> Option<Sai
 }
 
 /// Whether moa last knew `pane` as a panel (the empty slot included): never killed blind.
-pub(super) fn known_panel(state: &State, pane: PaneId) -> bool {
+fn known_panel(state: &State, pane: PaneId) -> bool {
     state
         .tmux
         .topology
@@ -79,7 +79,7 @@ pub(super) fn known_panel(state: &State, pane: PaneId) -> bool {
 /// The vacate's agent in `pane` killed plainly, as 4b did (a pane id names one pane on its
 /// server), when its own chain was refused: an agent running while the brain says it's gone
 /// is worse than a spot left empty, which a refill builds again.
-pub(super) fn vacate_plainly(state: &mut State, seq: u64, pane: PaneId) -> Vec<Effect> {
+fn vacate_plainly(state: &mut State, seq: u64, pane: PaneId) -> Vec<Effect> {
     let mut fx = vec![log(
         LogLevel::Warn,
         format!("the agent in {pane} is closed plainly; the cockpit is built again after"),
@@ -104,7 +104,7 @@ pub(super) fn vacate_plainly(state: &mut State, seq: u64, pane: PaneId) -> Vec<E
 
 /// A chain's error in plain words (L18): the layout's fit said as such, the rest with a
 /// plain reason.
-pub(super) fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
+fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
     let raw = first_line(e);
     let why = plainly(e);
     let text = match op {
@@ -317,7 +317,7 @@ pub(crate) fn chain_answered(
 
 /// A chain tagged these panels with another view (a build, L5 step 3; `ui.select_view`):
 /// their rows show it, as moa's (L8).
-pub(super) fn views_given(state: &mut State, views: &[(PaneId, View)]) -> Option<Effect> {
+fn views_given(state: &mut State, views: &[(PaneId, View)]) -> Option<Effect> {
     for (pane, view) in views {
         state.pane_views.insert(*pane, *view);
         for reg in state.panels.values_mut() {
@@ -333,7 +333,7 @@ pub(super) fn views_given(state: &mut State, views: &[(PaneId, View)]) -> Option
 /// `layout.apply`'s layout was built: it becomes the brain's current one, with a `ui`
 /// event, then the reply. A commit the store refuses is logged; the reply still says the
 /// layout was applied, since it was. A broken `layouts.json` is said too (L2).
-pub(super) fn applied(state: &mut State, now: &Now, layout: String) -> (Vec<Effect>, Said) {
+fn applied(state: &mut State, now: &Now, layout: String) -> (Vec<Effect>, Said) {
     let mut tx = Tx::new(now);
     let change = Change::Meta {
         key: CURRENT_KEY.to_string(),

@@ -293,7 +293,7 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
 }
 
 /// `goto`'s answer: the leaf's word.
-pub(super) fn went_to(leaf: Leaf) -> Said {
+fn went_to(leaf: Leaf) -> Said {
     Said::Reply(Ok(Done {
         text: leaf.word().to_string(),
         data: json!({ "panel": leaf }),
@@ -302,7 +302,7 @@ pub(super) fn went_to(leaf: Leaf) -> Said {
 
 /// The build of `layout` in `scene`: its panels started first (once), else its chain, with
 /// the select asked for.
-pub(super) fn build(
+fn build(
     state: &State,
     op: &CockpitOp,
     scene: &Scene,
