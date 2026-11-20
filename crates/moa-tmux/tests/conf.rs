@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use moa_core::keymap::{Does, ctrl_a};
 use moa_core::tmux::ids::{ClientName, PaneId};
 use moa_core::tmux::mailbox::{HookMsg, KeyAction, Mailbox};
 use moa_testkit::{Sandbox, Terminal, tmux_path, wait_for};
@@ -109,6 +110,72 @@ fn load(sb: &Sandbox) {
     assert_eq!(out, "");
 }
 
+/// The keys bound in the `moa` table, from tmux's own listing: the word after `-T moa`, with
+/// tmux's quoting taken off.
+fn moa_keys(sb: &Sandbox) -> Vec<String> {
+    let keys = sb.tmux(&["list-keys", "-T", "moa"]).unwrap();
+    keys.lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            f.by_ref().find(|w| *w == "moa")?;
+            f.next().map(|k| k.replace(['\'', '\\'], ""))
+        })
+        .collect()
+}
+
+/// The key table and the generated file agree: every key the table names is bound (`Move`
+/// names the arrows, which `it_sources_cleanly_on_this_tmux` checks). Read from tmux's
+/// listing, not the file's text: the template spells `[` bare, `quote` gives `'['`.
+#[test]
+fn every_table_key_is_bound() {
+    let sb = Sandbox::start().unwrap();
+    load(&sb);
+    let bound = moa_keys(&sb);
+    let table: Vec<&str> = ctrl_a()
+        .into_iter()
+        .flatten()
+        .filter(|b| b.does != Does::Move)
+        .map(|b| b.key)
+        .collect();
+    assert!(!table.is_empty());
+    for k in table {
+        assert!(
+            bound.iter().any(|b| b == k),
+            "{k} isn't bound in: {bound:?}"
+        );
+    }
+}
+
+/// Each key the status line's hint names (`/ find · c console · …`, the arrows among them)
+/// is a key in the table, or `Space` (the menu).
+#[test]
+fn the_status_hint_names_only_table_keys() {
+    let template = include_str!("../src/moa.tmux.tpl");
+    let left = template
+        .lines()
+        .find(|l| l.starts_with("set -g  status-left "))
+        .expect("no status-left line");
+    // The hint is the one styled run whose text lists keys: `key what · key what · …`.
+    let hints: Vec<&str> = left
+        .split("#[")
+        .filter_map(|run| run.split_once(']').map(|(_, text)| text.trim()))
+        .filter(|text| text.contains(" · "))
+        .collect();
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    let named: Vec<&str> = hints[0]
+        .split(" · ")
+        .map(|item| item.split_whitespace().next().unwrap_or(""))
+        .collect();
+    assert!(named.len() >= 9, "{named:?}");
+    let table: Vec<&str> = ctrl_a().into_iter().flatten().map(|b| b.key).collect();
+    for k in named {
+        assert!(
+            k == "Space" || table.contains(&k),
+            "the hint names {k:?}, which isn't in the table"
+        );
+    }
+}
+
 #[test]
 fn it_sources_cleanly_on_this_tmux() {
     let sb = Sandbox::start().unwrap();
@@ -118,21 +185,12 @@ fn it_sources_cleanly_on_this_tmux() {
             .unwrap(),
         "0"
     );
-    let keys = sb.tmux(&["list-keys", "-T", "moa"]).unwrap();
-    // The key is the word after `-T moa`, with tmux's quoting taken off.
-    let bound: Vec<String> = keys
-        .lines()
-        .filter_map(|l| {
-            let mut f = l.split_whitespace();
-            f.by_ref().find(|w| *w == "moa")?;
-            f.next().map(|k| k.replace(['\'', '\\'], ""))
-        })
-        .collect();
-    let mut want: Vec<&str> = KeyAction::ALL.iter().map(|a| a.key()).collect();
-    want.extend([
-        "|", "-", "m", "z", "[", "]", "a", "Left", "Right", "Up", "Down",
-    ]);
-    want.extend(["h", "j", "k", "l", "Space", "C-a"]);
+    // The keys outside the table (`every_table_key_is_bound` checks the table's): the
+    // arrows and `h j k l`, and the menu's two.
+    let bound = moa_keys(&sb);
+    let want = [
+        "Left", "Right", "Up", "Down", "h", "j", "k", "l", "Space", "C-a",
+    ];
     for k in want {
         assert!(
             bound.iter().any(|b| b == k),
@@ -166,11 +224,15 @@ async fn connect(sb: &Sandbox) -> (ControlClient, Events, ServerInfo) {
 }
 
 fn attach(sb: &Sandbox) -> Terminal {
+    attach_sized(sb, 120, 30)
+}
+
+fn attach_sized(sb: &Sandbox, cols: u16, rows: u16) -> Terminal {
     let tmux = tmux_path().unwrap_or_else(|e| panic!("{e}"));
     let mut args: Vec<std::ffi::OsString> = vec!["-u".into()];
     args.extend(sb.socket_args());
     args.extend(["attach".into(), "-t".into(), "=sandbox".into()]);
-    let term = Terminal::spawn(&tmux, &args, &sb.env(), 120, 30).unwrap();
+    let term = Terminal::spawn(&tmux, &args, &sb.env(), cols, rows).unwrap();
     let tty = term.tty();
     let seen = wait_for(Duration::from_secs(5), || {
         let list = sb.tmux(&["list-clients", "-F", "#{client_name}"]).ok()?;
@@ -301,6 +363,35 @@ fn open_menu(term: &Terminal, open: &[u8]) {
     );
 }
 
+/// The menu fits the terminal, down to 80×24. tmux 3.4 never opens a menu taller than the
+/// terminal and 3.8 draws the status line over its end, so below the tall menu's height (26
+/// rows) and the status line's (2) the short one opens, without the separators and the
+/// note on moving between splits. At each height its last item is drawn.
+#[test]
+fn the_menu_fits_a_small_terminal() {
+    for (rows, tall) in [(24, false), (26, false), (27, false), (28, true)] {
+        let sb = Sandbox::start().unwrap();
+        load(&sb);
+        let term = attach_sized(&sb, 80, rows);
+        open_menu(&term, b"\x01 ");
+        assert!(
+            term.wait_for_text("Send Ctrl-a to the app", Duration::from_secs(5)),
+            "{rows} rows: the menu's last item wasn't drawn; the terminal showed: {}",
+            term.tail(600)
+        );
+        let note = String::from_utf8_lossy(&term.output()).contains("move between splits");
+        assert_eq!(note, tall, "{rows} rows: the note on moving between splits");
+        // And its items run: with no moa, the help item says so.
+        term.mark();
+        term.press(b"?");
+        assert!(
+            term.wait_for_text("moa isn't running: run moa", Duration::from_secs(5)),
+            "{rows} rows: the help item didn't run; the terminal showed: {}",
+            term.tail(600)
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_menu_and_its_items_reach_the_mailbox() {
     let sb = Sandbox::start().unwrap();
@@ -326,10 +417,10 @@ async fn the_menu_and_its_items_reach_the_mailbox() {
             other => panic!("{other:?}"),
         }
     }
-    // Every other daemon item. The menu has no item for "find in a full window".
+    // Every other daemon item, `s` (find, full tab) among them.
     for action in KeyAction::ALL
         .into_iter()
-        .filter(|a| *a != KeyAction::FindOther && *a != KeyAction::Console)
+        .filter(|a| *a != KeyAction::Console)
     {
         open_menu(&term, b"\x01 ");
         term.press(action.key().as_bytes());

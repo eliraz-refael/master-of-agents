@@ -27,6 +27,8 @@ use crate::state::State;
 pub(crate) const NO_TERMINAL: &str = "moa isn't open in a terminal yet; run moa first";
 /// An op that acts on bindings, before this connection's reconcile (R10).
 pub const NOT_READY: &str = "moa is still looking at its tabs; try again in a moment";
+/// A prompt's answer (`moa:prompt`) whose token waits for none.
+pub(crate) const NOTHING_WAITS: &str = "a prompt answer arrived that nothing waits for";
 const NOT_TMUX: &str = "that isn't a tmux program";
 const GAVE_UP: &str = "moa lost its terminal server and couldn't reconnect; see the log";
 const CANT_LINK: &str = "moa couldn't talk to its terminal; see moa's log";
@@ -247,8 +249,9 @@ pub(crate) enum LaunchKind {
 /// A launch waiting for tmux to say which pane its tab has.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Launching {
-    /// Whom to answer: nobody, once the caller's connection closed.
-    pub reply: Option<(ConnId, ReqId)>,
+    /// Whom to answer: the caller by its reply, or a key's client (`Ctrl-a n`) by a notice;
+    /// nobody, once the caller's connection closed.
+    pub reply: Option<Tell>,
     pub kind: LaunchKind,
     /// The tab is brought to the screen once it is bound.
     pub focus: bool,
@@ -614,7 +617,7 @@ impl TmuxState {
             }
         }
         for launching in self.opens.values_mut() {
-            if matches!(launching.reply, Some((c, _)) if c == conn) {
+            if matches!(launching.reply, Some(Tell::Reply(c, _)) if c == conn) {
                 launching.reply = None;
             }
             launching.waiters.retain(|(c, _)| *c != conn);
@@ -1001,10 +1004,8 @@ impl TmuxState {
                     })
                     .into_iter()
                     .collect(),
-                Ok(Mailbox::Prompt { .. }) => vec![log(
-                    LogLevel::Info,
-                    "a prompt answer arrived that nothing waits for".into(),
-                )],
+                // The answers that prompts wait for never get here (`prompt::answered`).
+                Ok(Mailbox::Prompt { .. }) => vec![log(LogLevel::Info, NOTHING_WAITS.into())],
                 Err(MailboxError::NotMoa) => vec![log(
                     LogLevel::Warn,
                     "tmux sent a message moa didn't ask for".into(),
