@@ -596,7 +596,8 @@ fn a_long_program_name_lists_as_process_name_reads_it() {
             .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
     };
     // `/bin/sleep` is a plain binary on macOS; elsewhere `sleep` may be a multicall
-    // `coreutils`, which takes the program's name as its first argument.
+    // `coreutils`, which picks its tool from argv[0] and refuses an unknown name, so a
+    // renamed copy is told the tool with `--coreutils-prog=sleep`.
     let sleep = std::fs::canonicalize(if cfg!(target_os = "macos") {
         PathBuf::from("/bin/sleep")
     } else {
@@ -620,7 +621,7 @@ fn a_long_program_name_lists_as_process_name_reads_it() {
     }
     let mut cmd = format!("exec '{}'", long.display());
     if multicall {
-        cmd.push_str(" sleep");
+        cmd.push_str(" --coreutils-prog=sleep");
     }
     cmd.push_str(" 100");
     tmux(&["new-session", "-d", "-s", "moa", "/bin/sh"]);
