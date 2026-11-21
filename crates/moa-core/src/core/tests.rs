@@ -87,6 +87,15 @@ fn unknown_rows_are_named_the_way_people_say_them() {
 }
 
 #[test]
+fn unknown_terminals_are_named_as_terminals() {
+    let s = state_with_unknown(vec![]);
+    assert_eq!(
+        unknown_message(&s, "terminals", "#4"),
+        "terminal #4 has a value this build doesn't know; update moa"
+    );
+}
+
+#[test]
 fn ids_advance_within_one_transaction() {
     let s = state_with_unknown(vec![]);
     let mut tx = Tx::new(&now());

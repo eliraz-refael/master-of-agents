@@ -63,7 +63,8 @@ int_ids!(
     SuggestionId,
     AskId,
     EventId,
-    ActivityId
+    ActivityId,
+    TermId
 );
 
 // ---------- closed enums ----------
@@ -156,6 +157,11 @@ str_enum!(ConversationReason, conversation_reason_round_trips, "conversation rea
     Start => "start", Clear => "clear", Fork => "fork", Resume => "resume", Import => "import",
     Adopt => "adopt" });
 str_enum!(ThreadKind, thread_kind_round_trips, "thread kind", { Daily => "daily", Manual => "manual" });
+str_enum!(
+    /// Who opened a terminal: you, moa at your request, or nobody moa knows of (`found`: moa
+    /// first saw it already open).
+    OpenedBy, opened_by_round_trips, "opened by",
+    { You => "you", Moa => "moa", Found => "found" });
 
 // ---------- group paths ----------
 
@@ -397,6 +403,33 @@ pub struct PaneBinding {
     /// moa started the agent in this pane, so its hooks reach moa. `false` for an agent moa
     /// adopted: it shows alive or dead only, and never sleeps on its own.
     pub tracked: bool,
+}
+
+/// A shell in moa's tmux that isn't an agent or a panel. tmux reuses `%N` across servers, so
+/// the server's generation is part of what names the pane. A closed terminal's row stays, as
+/// history; only open ones are loaded.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Terminal {
+    pub id: TermId,
+    pub server_pid: i64,
+    pub server_start: i64,
+    pub pane_id: String,
+    pub opened_by: OpenedBy,
+    pub cwd: String,
+    /// The session it belongs to: for a split, the agent whose tab it was split from.
+    pub session_id: Option<SessionId>,
+    pub opened_at: UtcMs,
+    /// When you last touched it.
+    pub touched_at: Option<UtcMs>,
+    pub name: String,
+    pub note: Option<String>,
+    /// When moa closes it, if you set a timeout.
+    pub timeout_at: Option<UtcMs>,
+    pub shell: String,
+    /// What runs in it now (tmux's current command), and since when moa first saw it.
+    pub command: String,
+    pub command_since: UtcMs,
+    pub closed_at: Option<UtcMs>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

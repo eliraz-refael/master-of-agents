@@ -253,11 +253,14 @@ impl Src<'_> {
         Ok(names.collect::<Result<_, _>>()?)
     }
 
-    /// Reads `cols` of `table` ordered by `order`. `rowid` is always available.
+    /// Reads `cols` of `table` ordered by `order`, only the rows `filter` keeps when it is
+    /// given. `filter` is a WHERE clause written in code, never built from data. `rowid` is
+    /// always available.
     pub(crate) fn rows(
         &self,
         table: &str,
         cols: &'static [&'static str],
+        filter: Option<&str>,
         order: &str,
     ) -> Result<Vec<SrcRow>, ImportError> {
         let have = self.columns(table)?;
@@ -274,8 +277,9 @@ impl Src<'_> {
                 }
             })
             .collect();
+        let filter = filter.map(|f| format!(" WHERE {f}")).unwrap_or_default();
         let sql = format!(
-            "SELECT {} FROM \"{table}\" ORDER BY {order}",
+            "SELECT {} FROM \"{table}\"{filter} ORDER BY {order}",
             select.join(", ")
         );
         let mut stmt = self.conn.prepare(&sql)?;

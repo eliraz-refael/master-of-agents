@@ -177,6 +177,27 @@ fn pane_binding() -> PaneBinding {
     }
 }
 
+fn terminal(id: i64) -> Terminal {
+    Terminal {
+        id: TermId(id),
+        server_pid: 100,
+        server_start: 101,
+        pane_id: "%3".into(),
+        opened_by: OpenedBy::Moa,
+        cwd: "/tmp/lantern".into(),
+        session_id: Some(sid(1)),
+        opened_at: UtcMs(72),
+        touched_at: Some(UtcMs(73)),
+        name: "build".into(),
+        note: Some("watch it".into()),
+        timeout_at: Some(UtcMs(74)),
+        shell: "zsh".into(),
+        command: "make".into(),
+        command_since: UtcMs(75),
+        closed_at: None,
+    }
+}
+
 fn spike_pane() -> SpikePane {
     SpikePane {
         session_id: sid(1),
@@ -275,6 +296,7 @@ fn one_of_each() -> Vec<Change> {
         Change::Thread(thread()),
         Change::Feed(feed()),
         Change::Nag(nag()),
+        Change::Terminal(terminal(1)),
         Change::Meta {
             key: "k".into(),
             value: Some("v".into()),
@@ -345,10 +367,12 @@ fn every_change_round_trips() {
     assert_eq!(s.asks, vec![ask()]);
     assert_eq!(s.threads, vec![thread()]);
     assert_eq!(s.nags, vec![nag()]);
+    assert_eq!(s.terminals, vec![terminal(1)]);
     assert_eq!(s.meta, vec![("k".to_string(), "v".to_string())]);
     assert!(s.unknown.is_empty(), "{:?}", s.unknown);
     assert_eq!(s.next_ids.event, 8);
     assert_eq!(s.next_ids.feed, 5);
+    assert_eq!(s.next_ids.terminal, 2);
 
     // Events and feed are not in a snapshot; read them back from the tables.
     let (ev, detail): (EventId, String) = rig
@@ -565,6 +589,7 @@ fn a_note_is_keyed_like_the_change_for_its_row() {
         "UPDATE asks SET status = 'x'",
         "UPDATE suggestions SET status = 'x'",
         "UPDATE moa_threads SET kind = 'x'",
+        "UPDATE terminals SET opened_by = 'x'",
     ] {
         c.execute(sql, []).unwrap();
     }
@@ -581,6 +606,7 @@ fn a_note_is_keyed_like_the_change_for_its_row() {
         Change::Ask(s.asks[0].clone()).row().unwrap(),
         Change::Suggestion(s.suggestions[0].clone()).row().unwrap(),
         Change::Thread(s.threads[0].clone()).row().unwrap(),
+        Change::Terminal(s.terminals[0].clone()).row().unwrap(),
     ];
     let mut got: Vec<(&str, String)> = s.unknown.iter().map(|n| (n.table, n.key.clone())).collect();
     want.sort();
@@ -590,6 +616,9 @@ fn a_note_is_keyed_like_the_change_for_its_row() {
     assert!(got.contains(&("conversations", "codex/c-1".to_string())));
     assert!(got.contains(&("sessions", sid(1).to_string())));
     assert!(got.contains(&("tasks", "#1".to_string())));
+    assert!(got.contains(&("terminals", "#1".to_string())));
+    // Nobody moa knows of opened it.
+    assert_eq!(s.terminals[0].opened_by, OpenedBy::Found);
 }
 
 #[test]
@@ -715,6 +744,85 @@ fn meta_is_read_lossily_and_a_missing_value_is_noted() {
         .map(|n| (n.table, n.key.as_str()))
         .collect();
     assert_eq!(got, vec![("meta", "a"), ("meta", "b")]);
+}
+
+/// A terminal with nothing optional set, that moa found open, comes back as written.
+#[test]
+fn a_bare_terminal_round_trips() {
+    let mut rig = empty();
+    let bare = Terminal {
+        opened_by: OpenedBy::Found,
+        session_id: None,
+        touched_at: None,
+        note: None,
+        timeout_at: None,
+        ..terminal(4)
+    };
+    rig.store.apply(&[Change::Terminal(bare.clone())]).unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(s.terminals, vec![bare]);
+    assert!(s.unknown.is_empty(), "{:?}", s.unknown);
+}
+
+/// tmux reuses `%N` across servers, so one pane id can be open once per server; on one
+/// server, only once until that record closes.
+#[test]
+fn the_store_refuses_two_open_records_for_one_pane() {
+    let mut rig = empty();
+    rig.store
+        .apply(&[
+            Change::Project(project(1, "Lantern")),
+            Change::Session(session(1)),
+            Change::Terminal(terminal(1)),
+        ])
+        .unwrap();
+    let err = rig
+        .store
+        .apply(&[Change::Terminal(terminal(2))])
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Sqlite(_)), "{err}");
+    assert_eq!(count(&rig.store, "terminals"), 1);
+
+    let other_server = Terminal {
+        server_start: 999,
+        ..terminal(3)
+    };
+    let closed = Terminal {
+        closed_at: Some(UtcMs(80)),
+        ..terminal(1)
+    };
+    rig.store
+        .apply(&[
+            Change::Terminal(other_server),
+            Change::Terminal(closed),
+            Change::Terminal(terminal(2)),
+        ])
+        .unwrap();
+    assert_eq!(count(&rig.store, "terminals"), 3);
+}
+
+/// Only open terminals load, so memory stays flat as history grows; a closed one's id is
+/// still taken.
+#[test]
+fn a_closed_terminal_is_not_loaded_but_its_id_is_not_reused() {
+    let mut rig = empty();
+    let closed = Terminal {
+        pane_id: "%4".into(),
+        closed_at: Some(UtcMs(80)),
+        ..terminal(2)
+    };
+    rig.store
+        .apply(&[
+            Change::Project(project(1, "Lantern")),
+            Change::Session(session(1)),
+            Change::Terminal(terminal(1)),
+            Change::Terminal(closed),
+        ])
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(s.terminals, vec![terminal(1)]);
+    assert_eq!(s.next_ids.terminal, 3);
+    assert_eq!(count(&rig.store, "terminals"), 2);
 }
 
 #[test]

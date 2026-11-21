@@ -23,6 +23,7 @@ pub(super) fn projects(run: &mut Run, tx: &Transaction) -> Result<(), ImportErro
             "created_at",
             "updated_at",
         ],
+        None,
         "id",
     )?;
     let (env_now, tz) = (run.env.now, run.env.tz.clone());
@@ -115,6 +116,7 @@ pub(super) fn notes(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> 
     let rows = run.src.rows(
         "notes",
         &["id", "project_id", "kind", "text", "created_at"],
+        None,
         "id",
     )?;
     let (env_now, tz) = (run.env.now, run.env.tz.clone());
@@ -171,7 +173,7 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
     let mut raws: HashSet<String> = HashSet::new();
     for r in run
         .src
-        .rows("groups", &["rowid", "path", "created_at"], "rowid")?
+        .rows("groups", &["rowid", "path", "created_at"], None, "rowid")?
     {
         let raw = r.text("path").unwrap_or_default();
         raws.insert(raw.clone());
@@ -182,7 +184,10 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
             lossy: r.lossy(),
         });
     }
-    for r in run.src.rows("sessions", &["session_id", "grp"], "rowid")? {
+    for r in run
+        .src
+        .rows("sessions", &["session_id", "grp"], None, "rowid")?
+    {
         let Some(raw) = r.text("grp").filter(|g| !g.is_empty()) else {
             continue;
         };
@@ -231,7 +236,7 @@ pub(super) fn groups(run: &mut Run, tx: &Transaction) -> Result<(), ImportError>
 pub(super) fn activity(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
     let rows = run
         .src
-        .rows("activity", &["id", "ts", "who", "text"], "id")?;
+        .rows("activity", &["id", "ts", "who", "text"], None, "id")?;
     let (env_now, tz) = (run.env.now, run.env.tz.clone());
     let (mut imported, mut warned) = (0, 0);
     for r in &rows {
@@ -272,7 +277,9 @@ struct ConsoleThread {
 }
 
 pub(super) fn meta(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
-    let rows = run.src.rows("meta", &["rowid", "key", "value"], "key")?;
+    let rows = run
+        .src
+        .rows("meta", &["rowid", "key", "value"], None, "key")?;
     let (mut carried, mut warned) = (0, 0);
     let (mut threads_source, mut threads_imported, mut threads_warned) = (0, 0, 0);
     for r in &rows {

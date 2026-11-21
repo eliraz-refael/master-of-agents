@@ -39,6 +39,7 @@ pub struct NextIds {
     pub event: i64,
     pub activity: i64,
     pub feed: i64,
+    pub terminal: i64,
 }
 
 impl Default for NextIds {
@@ -52,6 +53,7 @@ impl Default for NextIds {
             event: 1,
             activity: 1,
             feed: 1,
+            terminal: 1,
         }
     }
 }
@@ -67,6 +69,7 @@ pub enum Table {
     Event,
     Activity,
     Feed,
+    Terminal,
 }
 
 /// A row loaded with a default for text this build doesn't know. `key` is what
@@ -93,6 +96,8 @@ pub struct Snapshot {
     pub spike_panes: Vec<SpikePane>,
     pub threads: Vec<MoaThread>,
     pub nags: Vec<Nag>,
+    /// The open terminals only: a closed one's row stays on disk, as history.
+    pub terminals: Vec<Terminal>,
     pub activity_tail: Vec<ActivityRow>,
     pub meta: Vec<(String, String)>,
     pub next_ids: NextIds,
@@ -278,6 +283,8 @@ pub struct State {
     spike_panes: BTreeMap<SessionId, SpikePane>,
     threads: BTreeMap<String, MoaThread>,
     nags: BTreeMap<(TaskId, Date, Date), Nag>,
+    /// The open terminals: applying a closed one drops it, as a load leaves it out.
+    pub(crate) terminals: BTreeMap<TermId, Terminal>,
     pub(crate) activity: BTreeMap<ActivityId, ActivityRow>,
     meta: BTreeMap<String, String>,
     next_ids: NextIds,
@@ -363,6 +370,7 @@ impl State {
             spike_panes: BTreeMap::new(),
             threads: BTreeMap::new(),
             nags: BTreeMap::new(),
+            terminals: BTreeMap::new(),
             activity: BTreeMap::new(),
             meta: BTreeMap::new(),
             next_ids: NextIds::default(),
@@ -568,6 +576,7 @@ impl State {
             Table::Event => n.event,
             Table::Activity => n.activity,
             Table::Feed => n.feed,
+            Table::Terminal => n.terminal,
         }
     }
 
@@ -667,6 +676,7 @@ impl State {
         self.spike_panes = by(snap.spike_panes, |r| r.session_id);
         self.threads = by(snap.threads, |r| r.thread_id.clone());
         self.nags = by(snap.nags, nag_key);
+        self.terminals = by(snap.terminals, |r| r.id);
         self.activity = by(snap.activity_tail, |r| r.id);
         self.trim_activity();
         self.meta = snap.meta.into_iter().collect();
@@ -739,6 +749,14 @@ impl State {
             Change::Feed(r) => Self::bump(&mut self.next_ids.feed, r.id),
             Change::Nag(r) => {
                 self.nags.insert(nag_key(r), *r);
+            }
+            Change::Terminal(r) => {
+                Self::bump(&mut self.next_ids.terminal, r.id.0);
+                if r.closed_at.is_some() {
+                    self.terminals.remove(&r.id);
+                } else {
+                    self.terminals.insert(r.id, r.clone());
+                }
             }
             Change::Meta { key, value } => match value {
                 Some(v) => {

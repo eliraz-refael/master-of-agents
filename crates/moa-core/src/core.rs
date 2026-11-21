@@ -898,6 +898,7 @@ pub(crate) fn unknown_message(state: &State, table: &str, key: &str) -> String {
         "asks" => "ask",
         "moa_threads" => "thread",
         "nags" => "nag",
+        "terminals" => "terminal",
         "pane_bindings" | "spike_panes" => "pane",
         other => other,
     };

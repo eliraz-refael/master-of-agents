@@ -26,6 +26,12 @@ CREATE TABLE pane_bindings (session_id TEXT PRIMARY KEY REFERENCES sessions(id),
   bound_at INTEGER NOT NULL, tracked INTEGER NOT NULL DEFAULT 1) STRICT;
 CREATE TABLE spike_panes (session_id TEXT PRIMARY KEY REFERENCES sessions(id), pane_id TEXT NOT NULL,
   tmux TEXT, imported_at INTEGER NOT NULL) STRICT;
+CREATE TABLE terminals (id INTEGER PRIMARY KEY, server_pid INTEGER NOT NULL, server_start INTEGER NOT NULL,
+  pane_id TEXT NOT NULL, opened_by TEXT NOT NULL, cwd TEXT NOT NULL,
+  session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL, opened_at INTEGER NOT NULL, touched_at INTEGER,
+  name TEXT NOT NULL, note TEXT, timeout_at INTEGER, shell TEXT NOT NULL, command TEXT NOT NULL,
+  command_since INTEGER NOT NULL, closed_at INTEGER) STRICT;
+CREATE UNIQUE INDEX terminals_open ON terminals(server_pid, server_start, pane_id) WHERE closed_at IS NULL;
 CREATE TABLE events (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, session_id TEXT, conversation_id TEXT,
   account TEXT, cwd TEXT, kind TEXT NOT NULL, text TEXT, detail TEXT) STRICT;
 CREATE INDEX events_session ON events(session_id, id);

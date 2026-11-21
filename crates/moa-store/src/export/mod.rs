@@ -117,7 +117,7 @@ impl ExportReport {
 mod tables;
 
 /// Things v1 holds that the spike has no place for: `(table, key, reason)`.
-const NOT_EXPORTED: [(&str, &str, &str); 12] = [
+const NOT_EXPORTED: [(&str, &str, &str); 13] = [
     ("feed", "all", "the console feed is not exported"),
     ("nags", "all", "nags are not exported"),
     (
@@ -142,6 +142,7 @@ const NOT_EXPORTED: [(&str, &str, &str); 12] = [
     ("sessions", "title_locked", "title_locked is not exported"),
     ("sessions", "activity_why", "activity_why is not exported"),
     ("sessions", "resume_failed", "resume_failed is not exported"),
+    ("terminals", "all", "terminals are not exported"),
 ];
 
 /// Writes the brain in `src` as a spike database at `dst`. `dst` must not exist, nor may a

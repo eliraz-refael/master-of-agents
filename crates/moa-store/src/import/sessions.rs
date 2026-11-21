@@ -43,6 +43,7 @@ fn load_events(run: &Run) -> Result<Vec<Ev>, ImportError> {
     let rows = run.src.rows(
         "events",
         &["id", "ts", "session_id", "account", "cwd", "kind", "text"],
+        None,
         "id",
     )?;
     let tz = &run.env.tz;
@@ -129,6 +130,7 @@ fn sessions(run: &mut Run, tx: &Transaction, events: &[Ev]) -> Result<(), Import
             "grp",
             "asleep_at",
         ],
+        None,
         "rowid",
     )?;
     let by = facts(events);

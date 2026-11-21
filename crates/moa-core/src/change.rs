@@ -4,7 +4,7 @@
 use crate::layout::CURRENT_KEY;
 use crate::model::{
     ActivityRow, Ask, Conversation, Event, FeedEntry, Group, MoaThread, Nag, Note, PaneBinding,
-    Project, Session, SessionId, SpikePane, Suggestion, Task,
+    Project, Session, SessionId, SpikePane, Suggestion, Task, Terminal,
 };
 use crate::publish::Topic;
 
@@ -25,6 +25,7 @@ pub enum Change {
     Thread(MoaThread),
     Feed(FeedEntry),
     Nag(Nag),
+    Terminal(Terminal),
     /// `None` deletes the key.
     Meta {
         key: String,
@@ -65,6 +66,7 @@ impl Change {
             Change::Suggestion(_) => &[Topic::Suggestions],
             Change::Ask(_) => &[Topic::Asks],
             Change::Group(_) | Change::DeleteGroup(_) => &[Topic::Groups],
+            Change::Terminal(_) => &[Topic::Terms],
             Change::Event(_)
             | Change::Note(_)
             | Change::SpikePane(_)
@@ -102,6 +104,7 @@ impl Change {
             Change::Thread(r) => ("moa_threads", r.thread_id.clone()),
             Change::Feed(r) => ("feed", format!("#{}", r.id)),
             Change::Nag(r) => ("nags", nag_key(r.task_id, r.due, r.day)),
+            Change::Terminal(r) => ("terminals", format!("#{}", r.id)),
             Change::Meta { .. } => return None,
             Change::DeletePaneBinding(id) => ("pane_bindings", id.to_string()),
             Change::DeleteSpikePane(id) => ("spike_panes", id.to_string()),

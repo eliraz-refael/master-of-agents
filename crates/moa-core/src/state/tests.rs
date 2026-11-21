@@ -98,6 +98,27 @@ fn activity_row(id: i64) -> ActivityRow {
     }
 }
 
+fn terminal(id: i64, closed_at: Option<UtcMs>) -> Terminal {
+    Terminal {
+        id: TermId(id),
+        server_pid: 1,
+        server_start: 1,
+        pane_id: format!("%{id}"),
+        opened_by: OpenedBy::You,
+        cwd: "/tmp/lantern".into(),
+        session_id: None,
+        opened_at: UtcMs(1),
+        touched_at: None,
+        name: "zsh".into(),
+        note: None,
+        timeout_at: None,
+        shell: "zsh".into(),
+        command: "zsh".into(),
+        command_since: UtcMs(1),
+        closed_at,
+    }
+}
+
 fn snapshot() -> Snapshot {
     Snapshot {
         projects: vec![project(1, "Lantern"), project(2, "Tidepool")],
@@ -314,6 +335,7 @@ fn changes_name_their_topics() {
         [Topic::Activity]
     );
     assert_eq!(Change::DeleteGroup("g".into()).topics(), [Topic::Groups]);
+    assert_eq!(Change::Terminal(terminal(1, None)).topics(), [Topic::Terms]);
     assert_eq!(
         Change::Meta {
             key: "k".into(),
@@ -356,6 +378,36 @@ fn next_ids_start_at_one_and_follow_applied_rows() {
     });
     assert_eq!(s.next_id(Table::Task), 12);
     assert_eq!(s.next_id(Table::Feed), 1);
+}
+
+/// Memory holds the open terminals, as a load does: closing one drops it, and its id stays
+/// taken.
+#[test]
+fn applying_a_closed_terminal_drops_it_and_keeps_its_id() {
+    let mut s = new_state();
+    assert_eq!(s.next_id(Table::Terminal), 1);
+    s.apply(&Change::Terminal(terminal(1, None)));
+    s.apply(&Change::Terminal(terminal(2, None)));
+    assert_eq!(
+        s.terminals.keys().copied().collect::<Vec<_>>(),
+        [TermId(1), TermId(2)]
+    );
+    s.apply(&Change::Terminal(terminal(2, Some(UtcMs(5)))));
+    assert_eq!(s.terminals.keys().copied().collect::<Vec<_>>(), [TermId(1)]);
+    assert_eq!(s.next_id(Table::Terminal), 3);
+    s.load(Snapshot {
+        terminals: vec![terminal(1, None)],
+        next_ids: NextIds {
+            terminal: 3,
+            ..NextIds::default()
+        },
+        ..Snapshot::default()
+    });
+    assert_eq!(
+        s.terminals.values().cloned().collect::<Vec<_>>(),
+        [terminal(1, None)]
+    );
+    assert_eq!(s.next_id(Table::Terminal), 3);
 }
 
 #[test]
@@ -576,6 +628,11 @@ fn row_names_the_sql_table_for_every_variant() {
         (Change::Ask(ask), "asks", "#8".into()),
         (Change::Thread(thread), "moa_threads", "t1".into()),
         (Change::Feed(feed), "feed", "#4".into()),
+        (
+            Change::Terminal(terminal(5, None)),
+            "terminals",
+            "#5".into(),
+        ),
         (
             Change::Nag(nag(3, (2026, 11, 20), (2026, 11, 16))),
             "nags",
