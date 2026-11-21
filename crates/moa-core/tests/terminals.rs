@@ -540,6 +540,69 @@ fn a_terminal_moa_opened_is_registered_with_its_name() {
     assert_eq!(term_rows(&r.st)["%8"]["name"], title);
 }
 
+/// `moa term --title api` runs as the daemon connects: its tab is listed before tmux says
+/// which tab it is, the reconcile answer comes, then the new tab's. Reconcile's end is the
+/// first look, and it comes after the answers it can share an input with, so the new tab,
+/// still waiting for its answer, isn't recorded as a stranger tagged `⌨ shell`: it is
+/// recorded once, as yours, named `api`.
+#[test]
+fn a_terminal_opened_as_the_link_connects_keeps_its_name() {
+    let mut r = Rig::linked(Vec::new());
+    r.list(&[P5], &[plain("%5", "/r/a")]);
+    handle_checked(&mut r.st, Input::StartDrained, r.b.now());
+    let [reconcile] = r.st.tmux().queries().collect::<Vec<_>>()[..] else {
+        panic!("one query waiting");
+    };
+    let op = Op::TermOpen {
+        path: r.b.home.join("work"),
+        title: Some("api".into()),
+    };
+    let fx = send(&r.b, &mut r.st, 1, op);
+    let [(term, _)] = queries(&fx)[..] else {
+        panic!("one query: {fx:?}");
+    };
+    let fx = r.list(
+        &[P5, "P %8 @5 $0 1 0 0 0  0 "],
+        &[plain("%5", "/r/a"), plain("%8", "/r/work")],
+    );
+    assert!(records(&fx).is_empty(), "{fx:?}");
+
+    let conn = r.conn();
+    let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
+    let mut all = feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn,
+            token: TmuxToken::Query(reconcile),
+            results: vec![lines(&[&info("%5"), &info("%8")]), lines(&[])],
+        },
+    );
+    all.extend(feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn,
+            token: TmuxToken::Query(term),
+            results: vec![lines(&["P %8 1008"])],
+        },
+    ));
+    let recorded = records(&all);
+    let eight: Vec<_> = recorded.iter().filter(|t| t.pane_id == "%8").collect();
+    assert_eq!(eight.len(), 1, "{recorded:?}");
+    assert_eq!(
+        (eight[0].opened_by, eight[0].name.as_str()),
+        (OpenedBy::You, "api")
+    );
+    assert!(
+        marks(&all)
+            .iter()
+            .all(|c| !c.argv().iter().any(|a| a == "⌨ shell")),
+        "{all:?}"
+    );
+    assert_eq!(r.open(8).map(|t| t.name.as_str()), Some("api"));
+}
+
 /// A terminal moa opened whose shell's name can't be read takes the program the next
 /// listing shows as its shell, as a shell found by a listing does: it isn't running anything.
 #[test]

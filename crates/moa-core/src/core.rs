@@ -241,11 +241,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             };
             let was_reconciled = state.tmux().reconciled();
             let mut more = reconcile::answered(state, now, reconciles, replied);
-            // The end of this connection's reconcile is its first look at its terminals,
-            // against the listing it has.
-            if !was_reconciled && state.tmux().reconciled() {
-                more.extend(terminals::register(state, now));
-            }
+            let just_reconciled = !was_reconciled && state.tmux().reconciled();
             more.extend(unpaned);
             for (ask, answer) in resumes {
                 more.extend(ops::launch::resumed(state, now, ask, panes_of(answer)));
@@ -318,7 +314,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 let heal = cockpit::run::idle(state);
                 more.extend(panel::listed(state, heal));
                 more.extend(cockpit::run::link_listed(state));
-                // Each terminal is recorded when moa sees it, once the tabs are reconciled.
+            }
+            // Each terminal is recorded when moa sees it, once the tabs are reconciled: the
+            // end of this connection's reconcile is its first look, against the listing it
+            // has. After this input's answers, so a terminal `term` just opened is recorded
+            // with its name, not as a stranger, and only once when both happen here.
+            if link_listed || just_reconciled {
                 more.extend(terminals::register(state, now));
             }
             match mailbox {

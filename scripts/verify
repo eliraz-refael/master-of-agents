@@ -79,7 +79,8 @@ step() {
     passed=$((passed + 1))
   else
     printf '✗ %s (%ss) %s\n' "$name" $((SECONDS - t)) "$log"
-    excerpt "$kind" "$log" | sed 's/^/    /'
+    # An excerpt cut short (head closing its pipe) must not end the run under `set -e`.
+    excerpt "$kind" "$log" | sed 's/^/    /' || true
     failed=$((failed + 1))
   fi
 }

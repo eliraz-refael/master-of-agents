@@ -13,7 +13,7 @@ use crate::model::Terminal;
 use crate::ops::launch::title_of;
 use crate::panel::{View, key_of};
 use crate::state::State;
-use crate::terminals::open_for;
+use crate::terminals::open_by_pane;
 
 /// A named set of rows a view can subscribe to.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -334,12 +334,13 @@ impl State {
     }
 
     fn terms_rows(&self) -> BTreeMap<String, Value> {
+        let records = open_by_pane(self);
         self.tmux
             .topology
             .terms()
             .map(|(pane, name)| {
                 let key = pane.to_string();
-                let row = match open_for(self, &pane) {
+                let row = match records.get(key.as_str()) {
                     Some(t) => self.term_row(t),
                     None => TermRow {
                         name: name.to_string(),

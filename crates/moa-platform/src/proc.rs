@@ -118,12 +118,22 @@ pub fn name(pid: u32) -> Option<String> {
     shown_name(&sys::proc_name(pid)?)
 }
 
-/// tmux's rule for a program's name (`parse_window_name`), as far as a process's name can
-/// need it: leading spaces and `-`s dropped (a login shell's argv0 is `-zsh`), cut at the
-/// first space, and an absolute path's base name. `None` when nothing is left.
+/// tmux's rule for a program's name (`parse_window_name`): a leading `"` dropped and cut at
+/// the next one, a leading `exec ` dropped, leading spaces and `-`s dropped (a login shell's
+/// argv0 is `-zsh`), cut at the first space, trailing characters that are neither
+/// alphanumeric nor punctuation dropped, and an absolute path's base name. `None` when
+/// nothing is left.
 fn shown_name(raw: &str) -> Option<String> {
-    let name = raw.trim_start_matches([' ', '-']);
+    let name = raw.strip_prefix('"').unwrap_or(raw);
+    let name = name.split('"').next().unwrap_or_default();
+    let name = name.strip_prefix("exec ").unwrap_or(name);
+    let name = name.trim_start_matches([' ', '-']);
     let name = name.split(' ').next().unwrap_or_default();
+    // tmux keeps the first character whatever it is.
+    let keep = name.chars().next().map_or(0, char::len_utf8);
+    let tail = name[keep..]
+        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && !c.is_ascii_punctuation());
+    let name = &name[..keep + tail.len()];
     let name = if name.starts_with('/') {
         name.rsplit('/').find(|s| !s.is_empty()).unwrap_or(name)
     } else {
@@ -343,6 +353,9 @@ mod tests {
         assert_eq!(shown_name("/").as_deref(), Some("/"));
         assert_eq!(shown_name(""), None);
         assert_eq!(shown_name("--"), None);
+        assert_eq!(shown_name("\"vim\" x").as_deref(), Some("vim"));
+        assert_eq!(shown_name("exec bash").as_deref(), Some("bash"));
+        assert_eq!(shown_name("sh\t").as_deref(), Some("sh"));
     }
 
     #[test]

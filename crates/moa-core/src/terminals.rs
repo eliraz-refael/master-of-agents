@@ -3,7 +3,7 @@
 //! ([`listed`], T3): a new shell gets a record, a gone one's record closes, and a changed
 //! program or folder is updated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
@@ -46,12 +46,25 @@ pub fn is_terminal_pane(state: &State, pane: &PaneId) -> bool {
 
 /// The open record of terminal `pane` on the server the link last connected to.
 pub fn open_for<'a>(state: &'a State, pane: &PaneId) -> Option<&'a Terminal> {
-    let generation = state.tmux().generation()?;
     let pane = pane.to_string();
+    open_records(state).find(|t| t.pane_id == pane)
+}
+
+/// The open records of the server the link last connected to, by pane (`%N`): one lookup
+/// table for a whole listing, where [`open_for`] scans the records for each pane.
+pub(crate) fn open_by_pane(state: &State) -> BTreeMap<&str, &Terminal> {
+    open_records(state)
+        .map(|t| (t.pane_id.as_str(), t))
+        .collect()
+}
+
+/// The records of the server the link last connected to (none before it connected).
+fn open_records(state: &State) -> impl Iterator<Item = &Terminal> {
+    let generation = state.tmux().generation();
     state
         .terminals
         .values()
-        .find(|t| on(t, generation) && t.pane_id == pane)
+        .filter(move |t| generation.is_some_and(|g| on(t, g)))
 }
 
 /// Whether record `t` names a pane of server `generation`.
