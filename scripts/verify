@@ -56,8 +56,15 @@ excerpt() {
       grep -E -A3 'panicked at' "$2" | grep -v '^--$' || true
     } | head -40
   elif [[ $1 == flake ]]; then
-    # The Nix build replays the whole nextest log: keep its failures and errors.
-    grep -E 'FAIL|panicked|error' "$2" | head -40
+    # The failing check's output is in its build log, not in nix's own: fetch it, and read
+    # it as a nextest log. Anything else (an evaluation error) shows the last lines.
+    local drv build=${2%.log}-build.log
+    drv=$(grep -oE '/nix/store/[a-z0-9]+-[^ ]*\.drv' "$2" | tail -1 || true)
+    if [[ -n $drv ]] && nix log "$drv" 2>&1 | sed $'s/\x1b\\[[0-9;]*m//g' >"$build" && grep -q 'panicked at' "$build"; then
+      excerpt nextest "$build"
+    else
+      tail -30 "$2"
+    fi
   else
     tail -30 "$2"
   fi
