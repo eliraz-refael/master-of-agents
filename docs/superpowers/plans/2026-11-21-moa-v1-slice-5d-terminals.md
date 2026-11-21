@@ -141,6 +141,8 @@ The most important come first.
 Each PR branches from `main` after the previous one has merged, and gets:
 - `scripts/verify`: fmt, clippy (also for linux), the IO-crate checks, nextest three times, the
   tmux 3.4 pass on the tmux-facing crates, and `nix flake check`;
+- `/code-review medium --fix` over the PR's whole branch, with the fixes verified. This is the
+  PR's whole-branch review: it replaces a separate final-review pass, so every line gets one;
 - green CI.
 
 Bodies end with the try-it, when there is one. No "Restart needed" line.
