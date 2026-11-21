@@ -181,6 +181,9 @@ pub struct Panel {
     pointer: Option<(u16, u16)>,
     /// moa gave this panel its view (its `panels` row says `managed`, L8).
     managed: bool,
+    /// It draws in a tmux popup (`--once`, S8), which tmux frames: it draws no frame of its
+    /// own (S11).
+    popup: bool,
     /// The title of the pick the picker sent and waits on: its `Ok` closes the picker.
     /// Another Enter waits for it.
     picking: Option<String>,
@@ -240,6 +243,7 @@ impl Panel {
             hover: None,
             pointer: None,
             managed: false,
+            popup: false,
             picking: None,
             picks: None,
         }
@@ -255,12 +259,13 @@ impl Panel {
     }
 
     /// Shows another view, from its top, with nothing asked or said. Whether moa manages
-    /// the panel stays as it is.
+    /// the panel, and whether it is a popup, stay as they are.
     pub fn set_view(&mut self, view: View) {
         if view != self.view {
-            let managed = self.managed;
+            let (managed, popup) = (self.managed, self.popup);
             *self = Panel::new(view);
             self.managed = managed;
+            self.popup = popup;
         }
     }
 
@@ -281,6 +286,12 @@ impl Panel {
     /// starts it (L7). The panel's row, once it comes, decides from then on.
     pub fn set_managed(&mut self, managed: bool) {
         self.managed = managed;
+    }
+
+    /// Marks the panel as drawn in a tmux popup (S8), which tmux frames, so it draws no frame
+    /// of its own (S11).
+    pub fn set_popup(&mut self, popup: bool) {
+        self.popup = popup;
     }
 
     /// Ctrl-c (L14): it cancels an open prompt or y/N; with nothing open it quits as `q`
@@ -354,7 +365,7 @@ impl Panel {
     /// Rebuilds the lines from `data`, keeps the selection on its item (V8) and the view on
     /// the selection, and drops a hover whose item left the list.
     fn refresh(&mut self, data: &Data, ctx: &Ctx, size: Size) -> Geometry {
-        let g = geometry(self.view, self.view.framed(), size);
+        let g = geometry(self.view, self.view.framed() && !self.popup, size);
         let was = self.selected().cloned();
         let width = build_width(&g);
         self.lines = if self.view == View::Picker {

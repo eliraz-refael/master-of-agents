@@ -990,6 +990,20 @@ fn unframed_views_share_the_empty_slots_layout() {
     assert_eq!(slot.head, None);
 }
 
+/// S8, S11: a popup draws no frame of its own, since tmux frames the popup; it stays a
+/// popup when its view changes.
+#[test]
+fn a_popup_draws_no_frame() {
+    let (data, ctx) = lantern();
+    let mut p = Panel::new(View::Picker);
+    assert!(p.screen(&data, &ctx, SIZE).geometry.framed);
+    p.set_popup(true);
+    let screen = p.screen(&data, &ctx, SIZE);
+    assert_eq!(screen.geometry, geometry(View::Picker, false, SIZE));
+    p.set_view(View::Help);
+    assert!(!p.screen(&data, &ctx, SIZE).geometry.framed);
+}
+
 #[test]
 fn framed_follows_the_view() {
     for view in [View::Picker, View::Help, View::Setup] {

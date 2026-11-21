@@ -10,6 +10,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::cockpit::run::reap_nudge;
 use crate::cockpit::{HIDDEN, spawn_tags};
 use crate::effect::{Effect, Publish, TmuxToken};
 use crate::model::UnknownValue;
@@ -17,8 +18,9 @@ use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::publish::Topic;
 use crate::state::State;
 use crate::tmux::ids::PaneId;
-use crate::tmux::link::TmuxState;
+use crate::tmux::link::{Link, TmuxState};
 use crate::tmux::topology::Topology;
+use crate::tmux::version;
 
 /// What a panel shows.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -137,6 +139,8 @@ pub struct PanelReg {
     /// moa started this panel (it runs with `MOA_NO_AUTOSTART`): left untagged in `_moa`, it
     /// gets the tags its spawn would have given it (L18).
     pub placed: bool,
+    /// A popup (`moa panel … --once`, S8): tmux closes it when its program ends.
+    pub once: bool,
 }
 
 /// What `ui.panel` says to a tab id that isn't one (`%<digits>`).
@@ -166,6 +170,7 @@ pub(crate) fn register(
     pane: Option<&str>,
     view: Option<View>,
     placed: bool,
+    once: bool,
 ) -> Vec<Effect> {
     let pane = match pane.map(pane_arg).transpose() {
         Ok(p) => p,
@@ -185,6 +190,7 @@ pub(crate) fn register(
         here,
         managed: false,
         placed,
+        once,
     };
     // Not while a cockpit operation runs: the next listing heals it then (L17).
     let mut fx: Vec<Effect> = match crate::cockpit::run::idle(state) {
@@ -301,11 +307,26 @@ pub(crate) fn here(
     vec![reply(conn, req, result)]
 }
 
-/// The connection closed: its panel goes.
-pub(crate) fn gone(state: &mut State, conn: ConnId) -> Option<Effect> {
-    state.panels.remove(&conn)?;
-    publish_panels(state)
+/// The connection closed: its panel goes. A popup's program has ended, and tmux closes the
+/// popup once it reaps it, which tmux 3.4 and 3.5 built with utempter may not do until a
+/// child of its own ends (5b): there tmux is nudged to reap, as for a stopped panel.
+pub(crate) fn gone(state: &mut State, conn: ConnId) -> Vec<Effect> {
+    let Some(reg) = state.panels.remove(&conn) else {
+        return Vec::new();
+    };
+    let mut fx: Vec<Effect> = publish_panels(state).into_iter().collect();
+    if let Link::Up { conn, version, .. } = &state.tmux.link
+        && reg.once
+        && version::is(version, LOSE_EXITS)
+    {
+        fx.push(reap_nudge(*conn));
+    }
+    fx
 }
+
+/// The tmux releases whose Linux builds with utempter can lose a child's exit until tmux
+/// reaps another.
+const LOSE_EXITS: &[&str] = &["3.4", "3.5"];
 
 /// `panels`, when its rows changed.
 pub(crate) fn publish_panels(state: &mut State) -> Option<Effect> {

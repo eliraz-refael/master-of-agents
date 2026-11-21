@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jiff::tz::TimeZone;
-use moa_core::config::{BrainName, Config};
+use moa_core::config::{BrainName, Config, UiConfig};
 use moa_core::model::AgentKind;
 use moa_core::state::{Deps, PanelLaunch};
 use moa_platform::fs::write_if_changed;
@@ -113,11 +113,17 @@ fn remove_socket(sock: &Path) {
 }
 
 /// Writes the brain's two tmux config files when their text changed (T6), and says where
-/// its server is. The brain's folder is checked like the other private folders.
-fn tmux_link(paths: &Paths, b: &str, mouse: bool) -> Result<TmuxLink, DaemonError> {
+/// its server is. The brain's folder is checked like the other private folders. Its popups
+/// start panels as the core does, from `launch`, at home.
+fn tmux_link(
+    paths: &Paths,
+    b: &str,
+    ui: &UiConfig,
+    launch: &PanelLaunch,
+) -> Result<TmuxLink, DaemonError> {
     ensure_private_dir(&paths.brain_dir(b))?;
     let moa_tmux = paths.moa_tmux(b);
-    write_if_changed(&moa_tmux, &conf::moa_tmux(b, mouse))?;
+    write_if_changed(&moa_tmux, &conf::moa_tmux(b, ui, launch, paths.home()))?;
     write_if_changed(&paths.tmux_conf(b), &conf::tmux_conf(&moa_tmux))?;
     Ok(TmuxLink {
         socket: paths.tmux_socket(b)?,
@@ -239,14 +245,15 @@ async fn bring_up(
                 config.skipped_tables.join(", ")
             );
         }
+        let exe = daemon_exe()?;
+        let launch = panel_launch(paths, &exe);
         // T21: until the switch-over, only a sandbox's own server is ever touched.
         let tmux = if paths.is_sandboxed() {
-            Some(tmux_link(paths, b, config.ui.mouse)?)
+            Some(tmux_link(paths, b, &config.ui, &launch)?)
         } else {
             tracing::info!("the terminal link waits for the switch-over");
             None
         };
-        let exe = daemon_exe()?;
         let session_plugin = write_session_plugin(paths, &exe)?;
         let deps = Deps {
             parse_action: Some(moa_proto::cli::parse_action),
@@ -260,7 +267,7 @@ async fn bring_up(
             newest_conversation: moa_agents::claude::newest_conversation,
             read_text,
             layouts_file: paths.config_dir().join("layouts.json"),
-            panel: panel_launch(paths, &exe),
+            panel: launch,
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

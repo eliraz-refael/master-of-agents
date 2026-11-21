@@ -480,6 +480,7 @@ fn op_methods_match_the_variants() {
             pane: Some("%3".into()),
             view: Some(moa_core::panel::View::Tree),
             placed: false,
+            once: false,
         },
         Op::UiHere {
             folder: Some("/x".into()),

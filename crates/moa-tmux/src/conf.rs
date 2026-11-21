@@ -3,8 +3,12 @@
 
 use std::path::Path;
 
+use moa_core::cockpit::panel_env_of;
+use moa_core::config::{Form, UiConfig};
 use moa_core::keymap::{Does, ctrl_a};
-use moa_core::tmux::cmd::{Cmd, quote};
+use moa_core::panel::View;
+use moa_core::state::PanelLaunch;
+use moa_core::tmux::cmd::{Cmd, literal_format, quote};
 use moa_core::tmux::ids::ClientName;
 use moa_core::tmux::mailbox::KeyAction;
 
@@ -44,8 +48,57 @@ fn guarded(action: KeyAction, pane: &str) -> String {
     )
 }
 
+/// What a popup runs: moa's own program, as panels get it, for the brain, at home.
+#[derive(Clone, Copy)]
+struct Popups<'a> {
+    brain: &'a str,
+    launch: &'a PanelLaunch,
+    home: &'a Path,
+}
+
+impl Popups<'_> {
+    /// `display-popup` running `moa panel <view> --once` (S8), at home and with the
+    /// panels' environment (`panel_env_of`). `-EE` closes it when moa ends well; one that
+    /// fails (a broken `moa.toml`, a brain that isn't there) stays open, so what it said is
+    /// seen, until a key closes it. The program and its arguments go as separate
+    /// arguments, which tmux neither expands nor hands a shell; it expands `-d`, so the
+    /// folder is kept literal. `menu`: for a menu item, whose command tmux expands once
+    /// before it runs, every `#` in the folder, the environment and the program doubled
+    /// once more. The title holds nothing an expansion changes.
+    fn command(self, view: View, menu: bool) -> String {
+        let lit = |s: &str| match menu {
+            true => literal_format(s),
+            false => s.to_string(),
+        };
+        // Help's popup has a size and a title of its own (S10), which nothing writes yet.
+        let title = match view {
+            View::Picker => "⌕ find a session",
+            other => unreachable!("no popup is written for the {other} view"),
+        };
+        let mut words = vec![
+            "display-popup -EE -w 80% -h 70% -d".to_string(),
+            quote(&lit(&literal_format(&self.home.to_string_lossy()))),
+            format!("-T \"#[fg=#88c0d0 bold] {title} \""),
+        ];
+        let program = self.launch.exe.to_string_lossy();
+        let args = [program.as_ref(), "panel", view.word(), "--once", "--brain"];
+        words.extend(
+            panel_env_of(self.brain, self.launch)
+                .iter()
+                .map(String::as_str)
+                .chain(args)
+                .chain([self.brain])
+                .map(|w| quote(&lit(w))),
+        );
+        format!(
+            "if -F '#{{@moa_ctl}}' {{ {} }} {{ display-message -d 4000 \"{NOT_RUNNING}\" }}",
+            words.join(" ")
+        )
+    }
+}
+
 /// The menu command for what a key does.
-fn menu_command(does: Does) -> String {
+fn menu_command(does: Does, popups: Popups) -> String {
     let split = |flag: &str| {
         format!(
             "if -F '#{{==:#{{window_name}},moa}}' 'display \"split an agent or terminal tab; the cockpit is a layout\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
@@ -53,6 +106,7 @@ fn menu_command(does: Does) -> String {
     };
     match does {
         Does::Moa(a) => guarded(a, "-"),
+        Does::Popup(view) => popups.command(view, true),
         Does::SplitBeside => split("h"),
         Does::SplitBelow => split("v"),
         Does::BackToMoa => "select-window -t moa:moa".into(),
@@ -66,9 +120,9 @@ fn menu_command(does: Does) -> String {
 
 /// The menu's lines, written from the key table. `tall`: a separator between groups, and
 /// the greyed note on moving between splits; otherwise neither, for a short terminal.
-fn menu_items(tall: bool) -> Vec<String> {
+fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
-    for (i, group) in ctrl_a().into_iter().enumerate() {
+    for (i, group) in ctrl_a(form).into_iter().enumerate() {
         if tall && i > 0 {
             items.push("\"\"".into());
         }
@@ -83,7 +137,7 @@ fn menu_items(tall: bool) -> Vec<String> {
                     "\"{}\" {} {}",
                     b.label,
                     quote(b.key),
-                    quote(&menu_command(b.does))
+                    quote(&menu_command(b.does, popups))
                 ),
             };
             items.push(item);
@@ -109,13 +163,13 @@ fn display_menu(items: &[String]) -> String {
 /// the status line over its end, so a terminal shorter than the tall menu (its lines and
 /// the border) and the status line gets the short one. The short one's items all show
 /// down to 24 rows (on 3.8, its bottom border is under the status line's blank line).
-fn menu() -> String {
-    let tall = menu_items(true);
+fn menu(form: Form, popups: Popups) -> String {
+    let tall = menu_items(true, form, popups);
     let rows = tall.len() + 2 + STATUS_LINES;
     let indent = |menu: String| menu.replace('\n', "\n  ");
     format!(
         "if -F '#{{e|<:#{{client_height}},{rows}}}' {{\n  {}\n}} {{\n  {}\n}}",
-        indent(display_menu(&menu_items(false))),
+        indent(display_menu(&menu_items(false, form, popups))),
         indent(display_menu(&tall))
     )
 }
@@ -124,30 +178,38 @@ fn menu() -> String {
 /// with the mouse on.
 const MOUSE_ON: &str = "set -g  mouse on                # panels take clicks, hover and the wheel; [ui] mouse = false in moa.toml leaves it to you\n";
 
-/// moa's options, status line, key table and menu for `brain`. With `mouse` false the file
-/// says nothing about the mouse: `mouse off` would override a user who turns it on.
-pub fn moa_tmux(brain: &str, mouse: bool) -> String {
+/// moa's options, status line, key table and menu for `brain`. With `[ui] mouse` false the
+/// file says nothing about the mouse: `mouse off` would override a user who turns it on.
+/// `[ui] picker` says which key opens the picker's popup, which runs `launch`'s program with
+/// the panels' environment, at `home` (S8).
+pub fn moa_tmux(brain: &str, ui: &UiConfig, launch: &PanelLaunch, home: &Path) -> String {
     let title = if brain == "default" {
         "moa · #W".to_string()
     } else {
         format!("moa {} · #W", in_double_quotes(brain))
     };
-    // The daemon's keys, in the table's order; the plain tmux ones are in the template.
+    let popups = Popups {
+        brain,
+        launch,
+        home,
+    };
+    // The daemon's keys and the popups, in the table's order; the plain tmux ones are in
+    // the template.
     let mut keys = String::new();
-    for b in ctrl_a().into_iter().flatten() {
-        let Does::Moa(a) = b.does else { continue };
-        keys.push_str(&format!(
-            "bind -T moa {:<7} {}\n",
-            quote(b.key),
-            guarded(a, "##{pane_id}")
-        ));
+    for b in ctrl_a(ui.picker).into_iter().flatten() {
+        let command = match b.does {
+            Does::Moa(a) => guarded(a, "##{pane_id}"),
+            Does::Popup(view) => popups.command(view, false),
+            _ => continue,
+        };
+        keys.push_str(&format!("bind -T moa {:<7} {command}\n", quote(b.key)));
     }
-    let menu = menu();
+    let menu = menu(ui.picker, popups);
     // The menu text is inlined into each of the three bindings.
     TEMPLATE
         .replace("{{TITLE}}", &title)
         .replace("{{STATUS_LINES}}", &STATUS_LINES.to_string())
-        .replace("{{MOUSE}}\n", if mouse { MOUSE_ON } else { "" })
+        .replace("{{MOUSE}}\n", if ui.mouse { MOUSE_ON } else { "" })
         .replace("{{DAEMON_KEYS}}", keys.trim_end())
         .replace("{{MENU}}", &menu)
         .replace("{{REPAIR}}", &guarded(KeyAction::Repair, "-"))

@@ -10,3 +10,4 @@ pub mod notify;
 pub mod panes;
 pub mod status;
 pub mod topology;
+pub mod version;

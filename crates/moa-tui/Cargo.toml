@@ -22,6 +22,8 @@ tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
+# A scripted daemon for the loop's own tests.
+tokio = { workspace = true, features = ["io-util", "net"] }
 # The tests draw the Lantern fixture.
 moa-view = { path = "../moa-view", features = ["fixture"] }
 

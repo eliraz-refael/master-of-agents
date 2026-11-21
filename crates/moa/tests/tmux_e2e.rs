@@ -95,9 +95,11 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
     let before = launches(&tb);
 
     // `$` opens a tab now (slice 5a's Task 14 tests it end to end), and the cockpit's keys
-    // act (cockpit_run.rs in moa-core): the rest still say they're coming.
-    for a in [KeyAction::Find, KeyAction::FindOther, KeyAction::Help] {
-        moa_key(&tb, &term, a.key(), &notice(a));
+    // act (cockpit_run.rs in moa-core): the rest still say they're coming. `/` opens the
+    // picker's popup (moa-tmux's conf.rs tests it), and the full tab is `s`, the daemon's
+    // `find`.
+    for (key, a) in [("s", KeyAction::Find), ("?", KeyAction::Help)] {
+        moa_key(&tb, &term, key, &notice(a));
     }
     // `n` asks for a folder in the status line; Ctrl-c puts it away and answers nothing.
     // (Esc would too, but tmux reads an Esc then the next Ctrl-a as one key.)

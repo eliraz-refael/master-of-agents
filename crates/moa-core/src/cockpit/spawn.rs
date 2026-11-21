@@ -6,7 +6,7 @@ use super::build::{keep_on_exit, view_tags};
 use super::scene::HIDDEN;
 use crate::effect::{Effect, LogLevel, TmuxToken};
 use crate::panel::View;
-use crate::state::State;
+use crate::state::{PanelLaunch, State};
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Answers, Asked, log};
@@ -31,20 +31,18 @@ pub(crate) fn panel_argv(state: &State, view: View) -> Vec<String> {
 pub const NO_AUTOSTART: &str = "MOA_NO_AUTOSTART";
 
 /// A panel's environment, as `-e` flags: `MOA_BRAIN`, `MOA_NO_AUTOSTART`, then the daemon's
-/// (`MOA_ROOT` when sandboxed, `MOA_REAL_HOME` when it may use the real home).
-fn panel_env(state: &State) -> Vec<String> {
-    [("MOA_BRAIN", state.brain().as_str()), (NO_AUTOSTART, "1")]
+/// (`MOA_ROOT` when sandboxed, `MOA_REAL_HOME` when it may use the real home). The one
+/// source for every panel moa starts and for the popup its tmux file binds (lesson 5).
+pub fn panel_env_of(brain: &str, launch: &PanelLaunch) -> Vec<String> {
+    [("MOA_BRAIN", brain), (NO_AUTOSTART, "1")]
         .into_iter()
-        .chain(
-            state
-                .deps()
-                .panel
-                .env
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str())),
-        )
+        .chain(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .flat_map(|(k, v)| ["-e".to_string(), format!("{k}={v}")])
         .collect()
+}
+
+fn panel_env(state: &State) -> Vec<String> {
+    panel_env_of(state.brain().as_str(), &state.deps().panel)
 }
 
 /// Home, as `-c` takes it: tmux expands it as a format.

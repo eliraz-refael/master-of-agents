@@ -51,6 +51,7 @@ fn panel(pane: Option<&str>, view: Option<View>) -> Op {
         pane: pane.map(str::to_string),
         view,
         placed: false,
+        once: false,
     }
 }
 
@@ -880,6 +881,7 @@ fn placed_panel(pane: &str, view: View, placed: bool) -> Op {
         pane: Some(pane.to_string()),
         view: Some(view),
         placed,
+        once: false,
     }
 }
 
@@ -1326,5 +1328,90 @@ fn select_view_help_sets_the_frame() {
             "set-option -p -t %3 window-style fg=#4c566a",
             "set-option -p -t %3 window-active-style fg=#88c0d0",
         ]
+    );
+}
+
+// --- Popups (S8) ---
+
+/// `ui.panel` from a popup (`moa panel picker --once`).
+fn popup() -> Op {
+    Op::UiPanel {
+        pane: None,
+        view: Some(View::Picker),
+        placed: false,
+        once: true,
+    }
+}
+
+/// The `run-shell true` nudges in `fx`, which make tmux reap what it hasn't.
+fn nudges(fx: &[Effect]) -> usize {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| c.line() == "run-shell true")
+        .count()
+}
+
+/// S8: a popup's connection going means its program ended; tmux closes the popup only once
+/// it reaps that program, which 3.4 and 3.5 built with utempter may not do on their own
+/// (5b). There, and only there, the core nudges, once. No other panel's going nudges.
+#[test]
+fn a_once_connection_going_nudges_on_3_4() {
+    for (version, want) in [
+        ("3.4", 1),
+        ("3.5a", 1),
+        ("next-3.5", 1),
+        ("3.6", 0),
+        ("3.8", 0),
+    ] {
+        let (b, mut st) = loaded(TOML);
+        let fx = feed(
+            &b,
+            &mut st,
+            TmuxIn::Connected {
+                conn: 1,
+                generation: generation(),
+                version: version.into(),
+                ctl: ClientName("client-9".into()),
+                socket: "moa".into(),
+            },
+        );
+        assert_eq!(nudges(&fx), 0, "{version}");
+        send_on(&b, &mut st, 7, 1, popup());
+        send_on(&b, &mut st, 8, 1, placed_panel("%3", View::Tree, true));
+        send_on(&b, &mut st, 9, 1, panel(Some("%4"), Some(View::Tree)));
+        for conn in [8, 9] {
+            let fx = handle_checked(&mut st, Input::ClientGone(ConnId(conn)), b.now());
+            assert_eq!(nudges(&fx), 0, "{version}: c{conn}");
+        }
+        let fx = handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+        assert_eq!(nudges(&fx), want, "{version}");
+        // It has gone: its connection can't go twice.
+        let fx = handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+        assert_eq!(nudges(&fx), 0, "{version}");
+    }
+    // With the link down there is no tmux to nudge.
+    let (b, mut st) = loaded(TOML);
+    send_on(&b, &mut st, 7, 1, popup());
+    let fx = handle_checked(&mut st, Input::ClientGone(ConnId(7)), b.now());
+    assert_eq!(nudges(&fx), 0);
+}
+
+/// A popup claims no tab and is never moa's: its row has no pane, and the reply says
+/// `managed: false`.
+#[test]
+fn a_popup_registers_without_a_tab() {
+    let (b, mut st) = loaded(TOML);
+    let fx = send_on(&b, &mut st, 7, 1, popup());
+    assert_eq!(
+        the_reply(&fx).unwrap().data,
+        json!({"key": "c7", "view": "picker", "managed": false})
+    );
+    assert_eq!(
+        published_panels(&st),
+        json!({"c7": {"key": "c7", "pane": null, "view": "picker", "managed": false}})
     );
 }

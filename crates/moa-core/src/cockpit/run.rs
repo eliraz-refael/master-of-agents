@@ -543,11 +543,17 @@ fn stopped_listed(state: &mut State) -> Option<Effect> {
         return None;
     }
     run.nudged.extend(unsaid);
-    Some(Effect::Tmux {
+    Some(reap_nudge(conn))
+}
+
+/// `run-shell true` on `conn`: a child of tmux's own whose end makes it reap the children
+/// whose exits it lost (tmux 3.4 and 3.5 built with utempter; see [`stopped_listed`]).
+pub(crate) fn reap_nudge(conn: u64) -> Effect {
+    Effect::Tmux {
         conn,
         cmds: vec![Cmd::new("run-shell").arg("true")],
         token: None,
-    })
+    }
 }
 
 /// The link's own listing came back: what it shows of stopped panels is taken in

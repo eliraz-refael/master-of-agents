@@ -90,6 +90,7 @@ fn ui_panel_decodes() {
                 pane: Some("%3".into()),
                 view: Some(moa_core::panel::View::Tree),
                 placed: false,
+                once: false,
             })
         }
     );

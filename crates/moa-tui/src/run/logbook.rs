@@ -12,9 +12,20 @@ use moa_core::tmux::ids::PaneId;
 use super::PanelOptions;
 
 /// A `panel.log` line (L14), without its time: the brain, the view (`-` while none is
-/// known), the pane (`-` outside the brain's terminal), then what happened, on one line.
-pub fn log_line(brain: &str, view: Option<View>, pane: Option<PaneId>, what: &str) -> String {
-    let view = view.map_or_else(|| "-".to_string(), |v| v.to_string());
+/// known; a `popup`'s says so, as `picker (popup)`), the pane (`-` outside the brain's
+/// terminal), then what happened, on one line.
+pub fn log_line(
+    brain: &str,
+    view: Option<View>,
+    popup: bool,
+    pane: Option<PaneId>,
+    what: &str,
+) -> String {
+    let view = match (view, popup) {
+        (None, _) => "-".to_string(),
+        (Some(v), false) => v.to_string(),
+        (Some(v), true) => format!("{v} (popup)"),
+    };
     let pane = pane.map_or_else(|| "-".to_string(), |p| p.to_string());
     let what = what.replace(['\n', '\r'], " ");
     format!("[{brain}] panel {view} in {pane}: {what}")
@@ -28,6 +39,8 @@ pub(super) struct Logbook {
     path: PathBuf,
     brain: String,
     pane: Option<PaneId>,
+    /// A popup's panel (`--once`).
+    popup: bool,
     /// The view the panel shows, once one is known; shared with the panic hook.
     view: Arc<Mutex<Option<View>>>,
 }
@@ -39,6 +52,7 @@ impl Logbook {
             path: opts.log.clone()?,
             brain: opts.client.brain.as_str().to_string(),
             pane: opts.pane,
+            popup: opts.once,
             view: Arc::new(Mutex::new(opts.view)),
         })
     }
@@ -48,7 +62,7 @@ impl Logbook {
     pub(super) fn write(&self, what: &str) {
         // `try_lock`: the panic may have struck while the view was being set.
         let view = self.view.try_lock().ok().and_then(|v| *v);
-        let line = log_line(&self.brain, view, self.pane, what);
+        let line = log_line(&self.brain, view, self.popup, self.pane, what);
         // No `Timestamp::now`, which panics on a clock out of its range.
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)

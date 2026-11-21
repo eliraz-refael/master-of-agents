@@ -14,6 +14,7 @@ use crate::state::State;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::ids::ClientName;
 use crate::tmux::link::{Link, NOTHING_WAITS, log};
+use crate::tmux::version;
 
 /// How many prompts wait at most; a new one drops the oldest. Esc and Ctrl-c in tmux's
 /// prompt send nothing, so a prompt put away waits until then.
@@ -37,7 +38,7 @@ pub(crate) enum Asking {
 /// alone writes a typed `$` as `\$`, so only there is it taken back. The rule is the one
 /// `moa.tmux` uses (`#{m:3.4*}` or `next-3.4*`); on later versions a typed `\$` stays.
 pub fn typed(version: &str, text: &str) -> String {
-    if version.starts_with("3.4") || version.starts_with("next-3.4") {
+    if version::is(version, &["3.4"]) {
         text.replace(r"\$", "$")
     } else {
         text.to_string()

@@ -176,7 +176,8 @@ pub enum Op {
     /// it shows, and whether moa `placed` it (it runs with `MOA_NO_AUTOSTART`). The view moa
     /// tagged the tab with wins over the one asked for; without either it gets the one this
     /// pane last had, else the picture. Answers `{key, view, managed}`: `managed` when the
-    /// view is moa's.
+    /// view is moa's. `once`: a popup (`moa panel … --once`), which tmux ends when its
+    /// program does.
     #[serde(rename = "ui.panel")]
     UiPanel {
         #[serde(default)]
@@ -185,6 +186,8 @@ pub enum Op {
         view: Option<View>,
         #[serde(default)]
         placed: bool,
+        #[serde(default)]
+        once: bool,
     },
     /// Gives the panel in tab `pane` (`%N`) another view: its tag, its frame and its
     /// `panels` row. Answers `{pane, view}`.
