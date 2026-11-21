@@ -230,6 +230,76 @@ fn picker_tab_swaps_the_keys() {
     assert_eq!(s, bind_line(&conf(), "/"));
 }
 
+/// S10: `?` opens help in a popup that tmux runs itself, guarded as the daemon keys are:
+/// 84 columns wide, or the whole width on a narrower terminal (tmux refuses a popup wider
+/// than the terminal, and `-w` takes no format). With `[ui] picker = "tab"`, `?` is the
+/// daemon key `help`, which opens the full tab.
+#[test]
+fn the_help_key_is_a_popup_by_default() {
+    let popup = |size: &str| {
+        format!(
+            "display-popup -EE {size} -d /r -T \"#[fg=#88c0d0 bold] keys and help \" \
+             -e MOA_BRAIN=default -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa \
+             panel help --once --brain default"
+        )
+    };
+    let want = format!(
+        "if -F '#{{@moa_ctl}}' {{ if -F '#{{e|<:#{{client_width}},84}}' {{ {} }} {{ {} }} }} \
+         {{ display-message -d 4000 \"moa isn't running: run moa\" }}",
+        popup("-w 100% -h 90%"),
+        popup("-w 84 -h 90%"),
+    );
+    let text = conf();
+    assert_eq!(bind_line(&text, "?"), want);
+    // The menu's item is the same: the fixture's paths hold no `#` to double.
+    assert_eq!(
+        menu_item(&text, "Keys and help"),
+        format!("{} {}", quote("?"), quote(&want))
+    );
+
+    let help = FIND_KEY.replace("moa:key find", "moa:key help");
+    let text = conf_with("default", &ui(Form::Tab));
+    assert_eq!(bind_line(&text, "?"), help);
+    assert_eq!(
+        menu_item(&text, "Keys and help"),
+        format!(
+            "{} {}",
+            quote("?"),
+            quote(&help.replace("##{pane_id}", "-"))
+        )
+    );
+}
+
+/// S10 on this tmux: help's popup opens from the key and from the menu on a terminal
+/// narrower than 84 columns, exactly 84, and wider; a popup wider than the terminal would
+/// be refused, and never run moa. It is the terminal's width under 84 columns and 84
+/// otherwise: inside its border, two columns fewer.
+#[test]
+fn the_help_popup_opens_at_any_width() {
+    for (cols, inside) in [(60, 58), (84, 82), (100, 82)] {
+        let sb = Sandbox::start().unwrap();
+        let odd = OddPaths::new(&sb);
+        let text = moa_tmux("default", &UiConfig::default(), &odd.launch(), &odd.home);
+        load_text(&sb, &text);
+        sb.tmux(&["set-option", "-g", "@moa_ctl", "not-a-client"])
+            .unwrap();
+        let term = attach_sized(&sb, cols, 30);
+        term.press(b"\x01?");
+        assert_eq!(
+            odd.ran_as_told(&sb, &term, "help"),
+            inside,
+            "{cols}: the key"
+        );
+        open_menu(&term, b"\x01 ");
+        term.press(b"?");
+        assert_eq!(
+            odd.ran_as_told(&sb, &term, "help"),
+            inside,
+            "{cols}: the menu"
+        );
+    }
+}
+
 /// The menu's items for the picker, by key: the text after the label, its key and its
 /// command (quoted), from the tall menu.
 fn menu_item(text: &str, label: &str) -> String {
@@ -277,8 +347,9 @@ fn the_popup_env_is_the_panels_env() {
 }
 
 /// A popup's command line as the sandbox's tmux runs it: the fake `moa` at a path with a
-/// space, a quote and a `#`, at a home with a `#`, writes its pid, its folder, its
-/// environment and its arguments next to itself, then ends, and tmux closes the popup.
+/// space, a quote and a `#`, at a home with a `#`, writes its pid, its terminal's size, its
+/// folder, its environment and its arguments next to itself, then ends, and tmux closes the
+/// popup.
 struct OddPaths {
     exe: PathBuf,
     home: PathBuf,
@@ -293,7 +364,7 @@ impl OddPaths {
         // Written aside, then moved: `ran` is never seen half written.
         std::fs::write(
             &exe,
-            "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$$\" \"$(pwd -P)\" \"$MOA_BRAIN\" \
+            "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$$\" \"$(stty size)\" \"$(pwd -P)\" \"$MOA_BRAIN\" \
              \"$MOA_NO_AUTOSTART\" \"$MOA_ROOT\" \"$@\" > \"$d/ran.part\"\n\
              mv \"$d/ran.part\" \"$d/ran\"\n",
         )
@@ -316,10 +387,11 @@ impl OddPaths {
         }
     }
 
-    /// Waits for the fake `moa`'s run and checks what it was given; then for tmux to reap
-    /// it, which closes the popup, so the next key reaches tmux rather than the popup.
+    /// Waits for the fake `moa`'s run of `view` and checks what it was given; then for tmux
+    /// to reap it, which closes the popup, so the next key reaches tmux rather than the
+    /// popup. The popup's width inside its border.
     #[track_caller]
-    fn ran_as_told(&self, sb: &Sandbox, term: &Terminal) {
+    fn ran_as_told(&self, sb: &Sandbox, term: &Terminal, view: &str) -> u16 {
         let got = wait_for(Duration::from_secs(10), || {
             std::fs::read_to_string(&self.ran).ok()
         });
@@ -330,9 +402,12 @@ impl OddPaths {
             )
         });
         let (pid, got) = got.split_once('\n').unwrap();
+        let (size, got) = got.split_once('\n').unwrap();
+        let cols = size.split_whitespace().nth(1).and_then(|c| c.parse().ok());
+        let cols = cols.unwrap_or_else(|| panic!("no size from `stty size`: {size:?}"));
         let home = std::fs::canonicalize(&self.home).unwrap();
         let want = format!(
-            "{}\ndefault\n1\n{}\npanel\npicker\n--once\n--brain\ndefault\n",
+            "{}\ndefault\n1\n{}\npanel\n{view}\n--once\n--brain\ndefault\n",
             home.display(),
             self.home.display()
         );
@@ -346,6 +421,7 @@ impl OddPaths {
             (!moa_platform::pid_alive(pid)).then_some(())
         });
         assert!(reaped.is_some(), "tmux never reaped the popup's moa");
+        cols
     }
 }
 
@@ -382,10 +458,10 @@ fn a_path_with_spaces_quotes_and_hashes_survives() {
         .unwrap();
     let term = attach(&sb);
     term.press(b"\x01/");
-    odd.ran_as_told(&sb, &term);
+    odd.ran_as_told(&sb, &term, "picker");
     open_menu(&term, b"\x01 ");
     term.press(b"/");
-    odd.ran_as_told(&sb, &term);
+    odd.ran_as_told(&sb, &term, "picker");
 }
 
 /// S8: a popup whose moa fails (a broken `moa.toml`, a brain that isn't there) stays open

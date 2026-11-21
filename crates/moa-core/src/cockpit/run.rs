@@ -32,7 +32,7 @@ mod sheets;
 
 pub(crate) use answers::{chain_answered, scene_answered, spawn_answered};
 use decide::{Said, Step, Then, layout_refused, wants_lazy};
-use sheets::{linked_out, sheet_of, stale_sheets};
+use sheets::{linked_out, sheet_name, sheet_of, stale_sheets};
 pub(crate) use sheets::{sheet_news, sheets_notified, ui_close};
 
 /// An operation the link went away under, or a reload dropped.

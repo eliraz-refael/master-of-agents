@@ -110,6 +110,8 @@ fn rows(view: View, key: Key) -> &'static [Action] {
         (View::Plan | View::Status | View::Projects | View::Today, Key::Char('N')) => {
             &[Action::ChooseAccount]
         }
+        // Help closes, as Ctrl-c closes it (S10).
+        (View::Help, Key::Char('q') | Key::Esc) => &[Action::Quit],
         _ => &[],
     }
 }
@@ -152,10 +154,11 @@ pub fn hint(view: View, adopted_selected: bool) -> &'static str {
         View::Projects => "⏎ expand · a archive · x close · n new session · N choose account",
         View::Activity => "j/k scroll",
         View::Picture => {
-            "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q"
+            "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q quit"
         }
         View::Picker => "↵ jump · ↑↓ move · esc close",
-        View::Console | View::EmptySlot | View::Help | View::Setup => "",
+        View::Help => "j/k scroll · q close",
+        View::Console | View::EmptySlot | View::Setup => "",
     }
 }
 
@@ -165,12 +168,12 @@ pub fn hint(view: View, adopted_selected: bool) -> &'static str {
 pub fn picture_hint(tab: View, adopted_selected: bool) -> &'static str {
     match tab {
         View::Tree | View::Status => hint(tab, adopted_selected),
-        View::Plan => "1-6/tab · j/k · ⏎ jump · d done · x drop · a archive · n/N new · q",
+        View::Plan => "1-6/tab · j/k · ⏎ jump · d done · x drop · a archive · n/N new · q quit",
         View::Today => {
-            "1-6/tab · j/k · ⏎ jump · y/n suggestion · a archive · x close · n/N new · q"
+            "1-6/tab · j/k · ⏎ jump · y/n suggestion · a archive · x close · n/N new · q quit"
         }
-        View::Projects => "1-6/tab · j/k · ⏎ expand/jump · a archive · x close · n/N new · q",
-        View::Activity => "1-6/tab · j/k scroll · q",
+        View::Projects => "1-6/tab · j/k · ⏎ expand/jump · a archive · x close · n/N new · q quit",
+        View::Activity => "1-6/tab · j/k scroll · q quit",
         View::Picture
         | View::Console
         | View::Picker

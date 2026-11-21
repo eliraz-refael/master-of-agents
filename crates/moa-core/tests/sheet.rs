@@ -317,7 +317,15 @@ fn the_first_find_starts_the_picker_then_links_it() {
     assert_eq!(cmds[0].check(), Ok(()));
     let spawn = lines(&cmds[0]).join(" ");
     assert!(spawn.starts_with("new-window -d -P"), "{spawn}");
-    assert!(spawn.contains("-t =_moa: -n picker"), "{spawn}");
+    // Named as its frame is: the status line shows the name while it is open.
+    assert_eq!(
+        cmds[0]
+            .argv()
+            .windows(2)
+            .find(|w| w[0] == "-n")
+            .map(|w| &w[1][..]),
+        Some("find a session")
+    );
     assert!(
         spawn.ends_with("/x/moa panel picker --brain default"),
         "{spawn}"
@@ -690,7 +698,8 @@ fn find_from_moas_hidden_session_says_so() {
     assert_eq!(notices(&fx), ["moa: open moa's tab first"]);
 }
 
-/// A picker that couldn't start is said once its spawn's listing shows none.
+/// A picker that couldn't start is said once its spawn's listing shows none. tmux refused
+/// the start, so its words are in moa's log.
 #[test]
 fn a_picker_that_cant_start_says_so() {
     let mut st = up(&cockpit());
@@ -708,7 +717,7 @@ fn a_picker_that_cant_start_says_so() {
     assert!(queries(&fx).is_empty(), "{fx:?}");
     assert_eq!(
         notices(&fx),
-        ["moa: couldn't start the picker; see panel.log"]
+        ["moa: the picker couldn't start; see moa's log"]
     );
 }
 
@@ -824,24 +833,223 @@ fn only_a_parked_panel_is_a_sheet() {
 }
 
 /// Task 9 review M4: a picker whose restart failed is never linked dead: the key is told it
-/// couldn't start.
+/// couldn't start, and where to look. tmux refused the restart: moa's log has its words. It
+/// restarted and stopped again: the panel said why in `panel.log`.
 #[test]
 fn a_picker_whose_restart_failed_isnt_linked() {
-    let mut st = up(&with_picker(true, &[]));
-    let n = the_listing(&find(&mut st));
-    let fx = feed(&mut st, answer(n, lists(&with_picker(true, &[]), user())));
+    for (answered, log) in [
+        (Err("no such tab".to_string()), "moa's log"),
+        (Ok(Vec::new()), "panel.log"),
+    ] {
+        let mut st = up(&with_picker(true, &[]));
+        let n = the_listing(&find(&mut st));
+        let fx = feed(&mut st, answer(n, lists(&with_picker(true, &[]), user())));
+        let [(n, _)] = &queries(&fx)[..] else {
+            panic!("not one respawn: {fx:?}")
+        };
+        let fx = feed(&mut st, answer(*n, vec![answered]));
+        let n = the_listing(&fx);
+        let fx = feed(&mut st, answer(n, lists(&with_picker(true, &[]), user())));
+        assert!(queries(&fx).is_empty(), "{fx:?}");
+        assert_eq!(
+            notices(&fx),
+            [format!("moa: the picker couldn't start; see {log}")]
+        );
+        assert_eq!(st.sheet(PaneId(PICKER)), None);
+    }
+}
+
+/// Final review M5: help is named plainly when it can't start.
+#[test]
+fn help_that_cant_start_says_so_plainly() {
+    let mut st = up(&cockpit());
+    let n = the_listing(&key_in(&mut st, "help", 0));
+    let fx = feed(&mut st, answer(n, lists(&cockpit(), user())));
     let [(n, _)] = &queries(&fx)[..] else {
-        panic!("not one respawn: {fx:?}")
+        panic!("not one spawn: {fx:?}")
     };
-    let fx = feed(&mut st, answer(*n, vec![Err("no such tab".into())]));
-    let n = the_listing(&fx);
-    let fx = feed(&mut st, answer(n, lists(&with_picker(true, &[]), user())));
+    let n = the_listing(&feed(&mut st, answer(*n, vec![Err("no space".into())])));
+    let fx = feed(&mut st, answer(n, lists(&cockpit(), user())));
+    assert_eq!(notices(&fx), ["moa: help couldn't start; see moa's log"]);
+}
+
+/// The cockpit, and the picker parked in `_moa` and linked into each of `linked`, where it
+/// isn't the tab shown (`#{window_active}` is 0): `moa` shows the cockpit.
+fn with_picker_behind(linked: &[u32]) -> Vec<String> {
+    let mut panes = with_picker(false, &[]);
+    for s in linked {
+        panes.push(format!("P %{PICKER} @{PICKER_TAB} ${s} 1 0 0 0  0 picker"));
+    }
+    panes
+}
+
+/// Final review re-review: sessions in a group (`tmux new -t moa`) share their tabs, so the
+/// picker linked into `moa` is in `work` too, where `work` stays on a tab of its own. While
+/// `moa` shows it, it stays open: a listing asks nothing.
+#[test]
+fn a_sheet_one_session_shows_stays_open() {
+    let mut st = open_picker();
+    // `_moa`, then `moa` showing it (its line last in `$0`), then `work` on its own tab.
+    let mut panes = with_picker(false, &[0]);
+    panes.push(format!("P %{PICKER} @{PICKER_TAB} $2 1 0 0 0  0 picker"));
+    panes.push("P %8 @8 $2 1 1 0 0  0 ".to_string());
+    let users: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 2)];
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&panes, users),
+        },
+    );
     assert!(queries(&fx).is_empty(), "{fx:?}");
     assert_eq!(
-        notices(&fx),
-        ["moa: couldn't start the picker; see panel.log"]
+        st.tmux().topology.current_of(TmuxSessionId(2)),
+        Some(WindowId(8))
     );
-    assert_eq!(st.sheet(PaneId(PICKER)), None);
+    assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL));
+}
+
+/// The picker open, linked into `moa` and `work`, each showing it, with a terminal on each.
+fn open_in_both() -> State {
+    let mut st = open_picker();
+    let both: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 2)];
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&with_picker(false, &[0, 2]), both),
+        },
+    );
+    assert!(queries(&fx).is_empty(), "shown in both: {fx:?}");
+    st
+}
+
+/// A session nobody is attached to keeps its current tab, but nobody sees it: once `work`
+/// detached, `moa` detaching closes the picker, rather than leave it open for the next attach.
+#[test]
+fn a_detached_session_doesnt_keep_a_sheet_open() {
+    let detached = |tty: &str| Notification::ClientDetached {
+        client: ClientName(tty.into()),
+    };
+    let mut st = open_in_both();
+    let fx = notify(&mut st, detached("/dev/ttys2"));
+    assert!(queries(&fx).is_empty(), "moa still shows it: {fx:?}");
+    let n = the_listing(&notify(&mut st, detached(TTY)));
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0, 2]), &[])));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(
+        chain,
+        [
+            format!("unlink-window -t $0:@{PICKER_TAB}"),
+            format!("unlink-window -t $2:@{PICKER_TAB}"),
+        ]
+    );
+
+    // The same from a listing, when the detaches' news never came (a lost link, say).
+    let mut st = open_in_both();
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&with_picker(false, &[0, 2]), &[]),
+        },
+    );
+    let n = the_listing(&fx);
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[0, 2]), &[])));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(chain.len(), 2, "{chain:?}");
+}
+
+/// Sessions in a group share their tabs: `work` moving to another of its tabs, or its last
+/// terminal detaching, leaves the picker `moa` still shows open.
+#[test]
+fn a_grouped_session_leaving_keeps_the_sheet_another_shows() {
+    let mut st = open_picker();
+    let mut panes = with_picker(false, &[0]);
+    panes.push(format!("P %{PICKER} @{PICKER_TAB} $2 1 0 0 0  0 picker"));
+    panes.push("P %8 @8 $2 1 1 0 0  0 ".to_string());
+    panes.push("P %9 @9 $2 1 0 0 0  0 ".to_string());
+    let users: &[(&str, u32)] = &[(TTY, 0), ("/dev/ttys2", 2)];
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&panes, users),
+        },
+    );
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    let fx = notify(&mut st, window_changed(2, 9));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    let fx = notify(
+        &mut st,
+        Notification::ClientDetached {
+            client: ClientName("/dev/ttys2".into()),
+        },
+    );
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL));
+}
+
+/// Final review M2: a tab left while its own open was still in flight (that news is
+/// dropped then) is closed by the next listing, which shows its session on another tab.
+#[test]
+fn a_sheet_left_during_its_open_is_closed_by_the_next_listing() {
+    let mut st = up(&with_picker(false, &[]));
+    let n = the_listing(&find(&mut st));
+    let fx = feed(&mut st, answer(n, lists(&with_picker(false, &[]), user())));
+    let (n, _) = the_chain(&fx);
+    let fx = notify(&mut st, window_changed(0, 1));
+    assert!(queries(&fx).is_empty(), "the open is under way: {fx:?}");
+    let fx = feed(&mut st, answer(n, ok()));
+    assert!(queries(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.sheet(PaneId(PICKER)), Some(WALL));
+
+    // The link's own listing (its `%window-add` asked one) shows `$0` on the cockpit.
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&with_picker_behind(&[0]), user()),
+        },
+    );
+    let n = the_listing(&fx);
+    let fx = feed(&mut st, answer(n, lists(&with_picker_behind(&[0]), user())));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(chain, [format!("unlink-window -t $0:@{PICKER_TAB}")]);
+}
+
+/// Final review M2: an open sheet whose leave came while the link was lost is closed by the
+/// first listing on the new connection. One still shown stays.
+#[test]
+fn a_sheet_left_while_the_link_was_lost_is_closed() {
+    let mut st = open_picker();
+    feed(&mut st, TmuxIn::Down(Down::Lost));
+    feed(&mut st, connected());
+    let shown = TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Refresh,
+        results: lists(&with_picker(false, &[0]), user()),
+    };
+    let fx = feed(&mut st, shown);
+    assert!(queries(&fx).is_empty(), "still shown: {fx:?}");
+
+    let fx = feed(
+        &mut st,
+        TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Refresh,
+            results: lists(&with_picker_behind(&[0]), user()),
+        },
+    );
+    let n = the_listing(&fx);
+    let fx = feed(&mut st, answer(n, lists(&with_picker_behind(&[0]), user())));
+    let (_, chain) = the_chain(&fx);
+    assert_eq!(chain, [format!("unlink-window -t $0:@{PICKER_TAB}")]);
 }
 
 /// Task 9 review M5: with no link, a close can't run, and `ui.close` says so.

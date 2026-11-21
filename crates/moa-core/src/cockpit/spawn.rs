@@ -58,11 +58,17 @@ pub fn spawn_cmds(state: &State, views: &[View]) -> Vec<Cmd> {
     views
         .iter()
         .map(|view| {
-            // A view's word has no `#` for `-n` to expand.
+            // A sheet's tab shows in the status line while it is open, so it is named as its
+            // frame is (`find a session`); a layout panel's is never seen, and keeps its word.
+            // `-n` is expanded as a format: the name keeps any `#` literal.
+            let name = match view.is_sheet() {
+                true => view.label(),
+                false => view.word(),
+            };
             Cmd::new("new-window")
                 .args(["-d", "-P", "-F", SPAWNED_FORMAT, "-c"])
                 .arg(home_dir(state))
-                .args(["-t", &format!("={HIDDEN}:"), "-n", view.word()])
+                .args(["-t", &format!("={HIDDEN}:"), "-n", &literal_format(name)])
                 .args(panel_env(state))
                 .args(panel_argv(state, *view))
         })

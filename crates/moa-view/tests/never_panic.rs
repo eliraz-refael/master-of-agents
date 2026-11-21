@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use moa_core::UtcMs;
+use moa_core::config::Form;
 use moa_core::live::DisplayState;
 use moa_core::model::{
     Activity, ActivityId, ActivityRow, ActivityWho, AgentKind, Group, Lifecycle, Location,
@@ -13,7 +14,7 @@ use moa_core::model::{
     SuggestionStatus, Task, TaskId, TaskStatus, Who,
 };
 use moa_core::panel::View;
-use moa_core::publish::BrainRow;
+use moa_core::publish::{BrainRow, LayoutRow};
 use moa_view::ctx::Ctx;
 use moa_view::data::{Data, SessionRow};
 use moa_view::geometry::Size;
@@ -328,14 +329,32 @@ fn brain() -> impl Strategy<Value = BrainRow> {
         vec(text(), 0..3),
         option::of(text()),
         vec(group_path(), 0..3),
+        any::<bool>(),
     )
-        .prop_map(|(name, folders, accounts, open_account, folded)| BrainRow {
+        .prop_map(
+            |(name, folders, accounts, open_account, folded, tab)| BrainRow {
+                name,
+                folders,
+                accounts,
+                open_account,
+                folded,
+                picker: if tab { Form::Tab } else { Form::Popup },
+            },
+        )
+}
+
+/// A `layouts` row: a name, its leaves (any text, as a hand-written file might hold), and
+/// whether it is current or broken; its index is set by the data.
+fn layout() -> impl Strategy<Value = LayoutRow> {
+    (text(), vec(text(), 0..4), any::<bool>(), option::of(text())).prop_map(
+        |(name, leaves, current, error)| LayoutRow {
             name,
-            folders,
-            accounts,
-            open_account,
-            folded,
-        })
+            index: 0,
+            leaves,
+            current,
+            error,
+        },
+    )
 }
 
 fn data() -> impl Strategy<Value = Data> {
@@ -347,9 +366,11 @@ fn data() -> impl Strategy<Value = Data> {
         vec(suggestion(), 0..4),
         vec(activity_row(), 0..12),
         option::of(brain()),
+        vec(layout(), 0..5),
+        option::of(text()),
     )
         .prop_map(
-            |(sessions, groups, projects, tasks, suggestions, activity, brain)| {
+            |(sessions, groups, projects, tasks, suggestions, activity, brain, layouts, broken)| {
                 let mut data = Data::default();
                 for (n, mut row) in (0u8..).zip(sessions) {
                     row.session.id = session_id(n);
@@ -380,6 +401,12 @@ fn data() -> impl Strategy<Value = Data> {
                     data.activity.insert(a.id, a);
                 }
                 data.brain = brain;
+                // Indexes out of order, as the rows are by name, and one as large as can be.
+                for (n, mut l) in (0usize..).zip(layouts) {
+                    l.index = if n == 4 { usize::MAX } else { (n * 3) % 5 };
+                    data.layouts.insert(format!("{n}{}", l.name), l);
+                }
+                data.layouts_error = broken;
                 data
             },
         )

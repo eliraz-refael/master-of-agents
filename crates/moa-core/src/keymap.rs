@@ -25,13 +25,16 @@ pub enum Does {
     SendCtrlA,
     /// Moving between splits with the arrows: a greyed note in the menu, not an item.
     Move,
+    /// The menu itself: help lists it, but the menu doesn't, and the template binds it (with
+    /// a second `Ctrl-a`).
+    Menu,
 }
 
 /// A key after `Ctrl-a`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Binding {
     /// The key, as tmux names it. `Move`'s is the four arrows as they're shown, `←↑↓→`: it
-    /// isn't one key, and no binding is written from it.
+    /// isn't one key. No binding is written from `Move` or `Menu`.
     pub key: &'static str,
     /// The menu's text.
     pub label: &'static str,
@@ -88,8 +91,23 @@ fn find_keys(form: Form) -> [Binding; 2] {
     ]
 }
 
-/// moa's `Ctrl-a` keys, in the menu's groups and order, with the picker's keys as `form`
-/// has them; a separator goes between groups.
+/// Help's key, `?`, in the form `form` names, as `/` is (S10). The popup is a binding of its
+/// own; the full tab is the daemon's `help`.
+fn help_key(form: Form) -> Binding {
+    let does = match form {
+        Form::Popup => Does::Popup(View::Help),
+        Form::Tab => Does::Moa(KeyAction::Help),
+    };
+    plain(
+        KeyAction::Help.key(),
+        KeyAction::Help.label(),
+        "this help: every key moa has",
+        does,
+    )
+}
+
+/// moa's `Ctrl-a` keys, in the menu's groups and order, with the picker's and help's keys
+/// as `form` has them; a separator goes between groups.
 pub fn ctrl_a(form: Form) -> Vec<Vec<Binding>> {
     let [find, find_other] = find_keys(form);
     vec![
@@ -156,15 +174,22 @@ pub fn ctrl_a(form: Form) -> Vec<Vec<Binding>> {
         ],
         vec![
             plain(
+                "Space",
+                "The full menu",
+                "the full menu (or Ctrl-a twice): every key here by name, with new session, \
+                 layouts and repair",
+                Does::Menu,
+            ),
+            plain(
                 "←↑↓→",
                 "move between splits",
-                "move to the split that way (or h j k l); tap more arrows right after to \
-                 keep moving",
+                "move to the panel or split that way (or h j k l); tap more arrows right \
+                 after to keep moving",
                 Does::Move,
             ),
             plain("[", "Previous tab", "the previous tab", Does::PrevTab),
             plain("]", "Next tab", "the next tab", Does::NextTab),
-            moa(KeyAction::Help, "this help: every key moa has"),
+            help_key(form),
             plain(
                 "a",
                 "Send Ctrl-a to the app",
@@ -230,19 +255,46 @@ mod tests {
         assert!(!says_tmux_words("restart moa's panels"));
     }
 
-    /// The daemon's keys are written from the table, so every action must be in it, once,
-    /// in either form.
+    /// S10: `?` opens help in the form `[ui] picker` names: the popup, or the daemon's
+    /// `help`, which opens the full tab.
     #[test]
-    fn every_key_action_is_in_the_table_once() {
+    fn the_picker_form_picks_helps_key() {
+        assert_eq!(binding(Form::Popup, "?").does, Does::Popup(View::Help));
+        assert_eq!(binding(Form::Tab, "?").does, Does::Moa(KeyAction::Help));
+        for form in FORMS {
+            assert_eq!(binding(form, "?").label, "Keys and help");
+        }
+    }
+
+    /// The daemon's keys are written from the table, so every action must be in it, in
+    /// either form: once as the daemon's key, or as its view's popup (S8, S10). Help is in
+    /// the table once, and find twice: `/` and `s`.
+    #[test]
+    fn every_key_action_is_in_the_table() {
         for form in FORMS {
             let table = ctrl_a(form);
             for a in KeyAction::ALL {
-                let n = table
+                let popup = match a {
+                    KeyAction::Find => Some(Does::Popup(View::Picker)),
+                    KeyAction::Help => Some(Does::Popup(View::Help)),
+                    _ => None,
+                };
+                let daemon = table
                     .iter()
                     .flatten()
                     .filter(|b| b.does == Does::Moa(a))
                     .count();
-                assert_eq!(n, 1, "{form:?}: {a:?}");
+                let popups = table
+                    .iter()
+                    .flatten()
+                    .filter(|b| Some(b.does) == popup)
+                    .count();
+                let want = match a {
+                    KeyAction::Find => (1, 1),
+                    KeyAction::Help if form == Form::Popup => (0, 1),
+                    _ => (1, 0),
+                };
+                assert_eq!((daemon, popups), want, "{form:?}: {a:?}");
             }
         }
     }

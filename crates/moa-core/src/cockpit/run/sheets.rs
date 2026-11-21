@@ -19,6 +19,14 @@ use crate::tmux::topology::{HIDDEN, Topology};
 /// `ui.close` from a panel that isn't a sheet moa placed.
 const ONLY_SHEETS: &str = "only the picker and help close this way";
 
+/// A sheet's name in what moa says: "the picker", "help".
+pub(super) fn sheet_name(view: View) -> &'static str {
+    match view {
+        View::Help => "help",
+        _ => "the picker",
+    }
+}
+
 /// The sheet `op` opens or closes, by its view (a sheet has one panel): a newer open or close
 /// of it replaces a waiting one.
 pub(super) fn sheet_of(state: &State, op: &CockpitOp) -> Option<View> {
@@ -112,7 +120,8 @@ pub(crate) fn sheet_news(state: &State, t: &TmuxIn) -> Option<SheetNews> {
 
 /// What `news` means for the sheets open, once the topology took it in: one whose tab a
 /// user's session left for another of its tabs, or whose session the last user's terminal
-/// detached from, is closed, so nobody comes back to a stale sheet. Not while an open or
+/// detached from, is closed, so nobody comes back to a stale sheet, unless another session
+/// it is linked into (one grouped with it) still shows it. Not while an open or
 /// close of that sheet is under way: a close queued now would replace an open you asked for
 /// since, or unlink one just made.
 pub(crate) fn sheets_notified(state: &mut State, news: SheetNews) -> Vec<Effect> {
@@ -134,8 +143,13 @@ pub(crate) fn sheets_notified(state: &mut State, news: SheetNews) -> Vec<Effect>
                 SheetNews::Shows { session, window: w } => (session, w != window),
                 SheetNews::Detached { session } => (session, !topology.attached(session)),
             };
-            left && topology.sessions_of(window).contains(&session)
-                && topology.session_name(session) != Some(HIDDEN)
+            // Sessions in a group share their tabs: another one still showing the sheet
+            // keeps it open, as a listing keeps it (`stale_sheets`).
+            let linked = linked_out(topology, window);
+            let shown_elsewhere = linked
+                .iter()
+                .any(|s| *s != session && shows(topology, *s, window));
+            left && linked.contains(&session) && !shown_elsewhere
         })
         .collect();
     let mut fx = Vec::new();
@@ -143,6 +157,13 @@ pub(crate) fn sheets_notified(state: &mut State, news: SheetNews) -> Vec<Effect>
         fx.extend(queue(state, CockpitOp::Unsheet { pane }));
     }
     fx
+}
+
+/// Whether a user sees sheet tab `w` in session `s`: a terminal is attached there, and `w`
+/// is the tab it shows. A session nobody is attached to keeps its current tab, so on its
+/// own that says nothing. The one rule for keeping a sheet open, on news and on a listing.
+fn shows(topology: &Topology, s: TmuxSessionId, w: WindowId) -> bool {
+    topology.attached(s) && topology.current_of(s) == Some(w)
 }
 
 /// The sheets an open or close is under way for: running, or waiting its turn.
@@ -156,10 +177,15 @@ fn busy(state: &State) -> BTreeSet<View> {
         .collect()
 }
 
-/// What a listing (an operation's, or the link's) shows of sheets left open with nothing
-/// recording their open: a daemon that restarted forgot them, or a lost link dropped their
-/// close, and they are closed. Not while an open or close of that sheet is under way: its
-/// open isn't recorded until tmux answers its link.
+/// What a listing (an operation's, or the link's) shows of sheets left linked into a user's
+/// session that nobody looks at, and closes them:
+/// - with no open recorded: a daemon that restarted forgot them, or a lost link dropped
+///   their close;
+/// - open, but no session it is linked into shows it: it was left while its own open was
+///   under way (that news is dropped then), or while the link was lost.
+///
+/// Not while an open or close of that sheet is under way: its open isn't recorded until tmux
+/// answers its link, and the tab it selects isn't current until then.
 pub(super) fn stale_sheets(state: &mut State) -> Vec<Effect> {
     let busy = busy(state);
     let topology = &state.tmux.topology;
@@ -167,11 +193,18 @@ pub(super) fn stale_sheets(state: &mut State) -> Vec<Effect> {
         .panes()
         .filter(|p| {
             let view = topology.view_of(*p).and_then(|v| v.parse::<View>().ok());
-            view.is_some_and(|v| v.is_sheet() && !busy.contains(&v))
-                && !state.sheets.contains_key(p)
-                && topology
-                    .window_of(*p)
-                    .is_some_and(|w| !linked_out(topology, w).is_empty())
+            if !view.is_some_and(|v| v.is_sheet() && !busy.contains(&v)) {
+                return false;
+            }
+            let Some(w) = topology.window_of(*p) else {
+                return false;
+            };
+            let linked = linked_out(topology, w);
+            // Sessions in a group share their tabs: a link into one is in every one of them,
+            // and the others stay on their own tab. So an open is left only once no session
+            // it is linked into shows it.
+            let shown = linked.iter().any(|s| shows(topology, *s, w));
+            !linked.is_empty() && (!state.sheets.contains_key(p) || !shown)
         })
         .collect();
     let mut fx = Vec::new();

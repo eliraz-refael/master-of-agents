@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: text
+---
+╭─ keys and help ──────────────────────────────────────────╮
+│ Ctrl-a keys                                              │
+│   c      go to the console panel                         │
+│   t      the sessions tree: every session, by group      │
+│   p      the big picture: what every session is doing    │
+│   g      the agent spot: the session open in the cockpit │
+│   /      find a session: type part of its name, Enter    │
+│          jumps                                           │
+│   s      find a session in a full tab: type part of its  │
+│          name, Enter jumps                               │
+│   n      start a new session                             │
+│   $      a plain terminal in a new tab (for a dev        │
+│          server…), in the folder of the agent or session │
+│                                                          │
+│ j/k scroll · q close                                     │
+╰──────────────────────────────────────────────────────────╯

@@ -43,4 +43,7 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 textwrap = { version = "0.16", default-features = false, features = ["unicode-width"] }
 ratatui = "0.30"
-crossterm = "0.29"
+# `use-dev-tty`: crossterm reads the terminal with a level-triggered poll. Its default reader
+# is edge-triggered and, when a resize and a key wake it together, can answer the resize and
+# drop the key's wake, leaving the key unread until more input comes.
+crossterm = { version = "0.29", features = ["use-dev-tty"] }

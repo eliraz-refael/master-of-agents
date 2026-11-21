@@ -194,7 +194,7 @@ fn hints_are_the_spikes() {
     assert_eq!(hint(View::Activity, true), "j/k scroll");
     assert_eq!(
         hint(View::Picture, false),
-        "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q"
+        "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q quit"
     );
 }
 

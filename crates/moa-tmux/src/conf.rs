@@ -20,6 +20,9 @@ const STATUS_LINES: usize = 2;
 /// The hook index moa owns; a user's hooks at other indexes are never touched.
 const HOOK_INDEX: u32 = 90;
 
+/// Help's popup width: the spike's help, whose widest line it fits (S10).
+const HELP_WIDTH: u16 = 84;
+
 /// What a key says when moa isn't running.
 const NOT_RUNNING: &str = "moa isn't running: run moa";
 
@@ -65,18 +68,34 @@ impl Popups<'_> {
     /// folder is kept literal. `menu`: for a menu item, whose command tmux expands once
     /// before it runs, every `#` in the folder, the environment and the program doubled
     /// once more. The title holds nothing an expansion changes.
+    ///
+    /// Help's popup is [`HELP_WIDTH`] columns wide, or the whole width on a narrower
+    /// terminal: tmux refuses a popup wider than the terminal, and `-w` takes no format, so
+    /// a check picks between the two (S10).
     fn command(self, view: View, menu: bool) -> String {
+        let popup = |size: &str, title: &str| self.popup(view, size, title, menu);
+        let body = match view {
+            View::Picker => popup("-w 80% -h 70%", "⌕ find a session"),
+            View::Help => format!(
+                "if -F '#{{e|<:#{{client_width}},{HELP_WIDTH}}}' {{ {} }} {{ {} }}",
+                popup("-w 100% -h 90%", "keys and help"),
+                popup(&format!("-w {HELP_WIDTH} -h 90%"), "keys and help"),
+            ),
+            other => unreachable!("no popup is written for the {other} view"),
+        };
+        format!(
+            "if -F '#{{@moa_ctl}}' {{ {body} }} {{ display-message -d 4000 \"{NOT_RUNNING}\" }}"
+        )
+    }
+
+    /// One `display-popup` of `size` (its `-w` and `-h`) titled `title`, running `view`.
+    fn popup(self, view: View, size: &str, title: &str, menu: bool) -> String {
         let lit = |s: &str| match menu {
             true => literal_format(s),
             false => s.to_string(),
         };
-        // Help's popup has a size and a title of its own (S10), which nothing writes yet.
-        let title = match view {
-            View::Picker => "⌕ find a session",
-            other => unreachable!("no popup is written for the {other} view"),
-        };
         let mut words = vec![
-            "display-popup -EE -w 80% -h 70% -d".to_string(),
+            format!("display-popup -EE {size} -d"),
             quote(&lit(&literal_format(&self.home.to_string_lossy()))),
             format!("-T \"#[fg=#88c0d0 bold] {title} \""),
         ];
@@ -90,18 +109,24 @@ impl Popups<'_> {
                 .chain([self.brain])
                 .map(|w| quote(&lit(w))),
         );
-        format!(
-            "if -F '#{{@moa_ctl}}' {{ {} }} {{ display-message -d 4000 \"{NOT_RUNNING}\" }}",
-            words.join(" ")
-        )
+        words.join(" ")
     }
 }
+
+/// Where `|` and `-` don't split, in the menu and the template's own bindings alike: the
+/// cockpit (its panes are the layout's), and the picker's or help's full tab, which waits
+/// parked for its next open (a shell split into it would come back with it).
+const SPLIT_REFUSED: &str =
+    "#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}";
+/// Why, in the refusal: the cockpit's, or a sheet's.
+const SPLIT_WHY: &str =
+    "#{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}";
 
 /// The menu command for what a key does.
 fn menu_command(does: Does, popups: Popups) -> String {
     let split = |flag: &str| {
         format!(
-            "if -F '#{{==:#{{window_name}},moa}}' 'display \"split an agent or terminal tab; the cockpit is a layout\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
+            "if -F '{SPLIT_REFUSED}' 'display \"split an agent or terminal tab; {SPLIT_WHY}\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
         )
     };
     match does {
@@ -114,12 +139,13 @@ fn menu_command(does: Does, popups: Popups) -> String {
         Does::PrevTab => "previous-window".into(),
         Does::NextTab => "next-window".into(),
         Does::SendCtrlA => "send-keys C-a".into(),
-        Does::Move => String::new(),
+        Does::Move | Does::Menu => String::new(),
     }
 }
 
-/// The menu's lines, written from the key table. `tall`: a separator between groups, and
-/// the greyed note on moving between splits; otherwise neither, for a short terminal.
+/// The menu's lines, written from the key table, without the menu's own key. `tall`: a
+/// separator between groups, and the greyed note on moving between splits; otherwise
+/// neither, for a short terminal.
 fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
     for (i, group) in ctrl_a(form).into_iter().enumerate() {
@@ -132,7 +158,8 @@ fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
                 Does::Move if tall => {
                     format!("\"-Ctrl-a {}  {}\" '' ''", b.key, b.label)
                 }
-                Does::Move => continue,
+                // The menu doesn't list itself.
+                Does::Move | Does::Menu => continue,
                 _ => format!(
                     "\"{}\" {} {}",
                     b.label,
@@ -180,8 +207,8 @@ const MOUSE_ON: &str = "set -g  mouse on                # panels take clicks, ho
 
 /// moa's options, status line, key table and menu for `brain`. With `[ui] mouse` false the
 /// file says nothing about the mouse: `mouse off` would override a user who turns it on.
-/// `[ui] picker` says which key opens the picker's popup, which runs `launch`'s program with
-/// the panels' environment, at `home` (S8).
+/// `[ui] picker` says which key opens the picker's popup, and whether `?` opens help's
+/// (S8, S10); a popup runs `launch`'s program with the panels' environment, at `home`.
 pub fn moa_tmux(brain: &str, ui: &UiConfig, launch: &PanelLaunch, home: &Path) -> String {
     let title = if brain == "default" {
         "moa · #W".to_string()
@@ -213,6 +240,8 @@ pub fn moa_tmux(brain: &str, ui: &UiConfig, launch: &PanelLaunch, home: &Path) -
         .replace("{{DAEMON_KEYS}}", keys.trim_end())
         .replace("{{MENU}}", &menu)
         .replace("{{REPAIR}}", &guarded(KeyAction::Repair, "-"))
+        .replace("{{SPLIT_REFUSED}}", SPLIT_REFUSED)
+        .replace("{{SPLIT_WHY}}", SPLIT_WHY)
 }
 
 /// The `-f` file: the user's own config first, then moa's. `-f` replaces tmux's own search,

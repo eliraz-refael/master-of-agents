@@ -181,6 +181,17 @@ fn the_picker_at_every_width() {
     }
 }
 
+/// Help, framed and titled, from its top, its long keys wrapped under their words (S10).
+#[test]
+fn help_at_every_width() {
+    for width in WIDTHS {
+        let buf = T::new(View::Help).drawn(width, HEIGHT);
+        let text = screen_text(&buf);
+        assert!(text.contains("keys and help"), "{text}");
+        insta::assert_snapshot!(format!("help@{width}"), text);
+    }
+}
+
 /// The empty slot draws unframed: its four dim lines, no title and no key hints.
 #[test]
 fn the_empty_slot_at_40_and_80() {
@@ -394,7 +405,11 @@ fn tiny_sizes_draw_without_panicking() {
     let outside = Style::new().fg(Color::Indexed(9)).bg(Color::Indexed(4));
     let mut filled = Cell::new("#");
     filled.set_style(outside);
-    let more = [("empty-slot", View::EmptySlot), ("picker", View::Picker)];
+    let more = [
+        ("empty-slot", View::EmptySlot),
+        ("picker", View::Picker),
+        ("help", View::Help),
+    ];
     for (name, view) in VIEWS.into_iter().chain(more) {
         for w in 0..=12 {
             for h in 0..=4 {

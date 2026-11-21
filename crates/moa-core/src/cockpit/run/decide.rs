@@ -1,6 +1,9 @@
 use serde_json::json;
 
-use super::{CockpitOp, Select, current, finish, in_cockpit, linked_out, lost_now, refused, title};
+use super::{
+    CockpitOp, Select, current, finish, in_cockpit, linked_out, lost_now, refused, sheet_name,
+    title,
+};
 use crate::cockpit::assign::view_of;
 use crate::cockpit::build::{fit_to_terminal, occupant_stays, panel_tags};
 use crate::cockpit::scene::{AGENT, HIDDEN, Place, Role, Scene};
@@ -19,6 +22,10 @@ use crate::tmux::link::{Asked, NO_TERMINAL};
 
 /// A sheet's key pressed in moa's hidden session, where it has its tab already.
 const FROM_HIDDEN: &str = "open moa's tab first";
+/// Where a sheet that couldn't start says to look: tmux refused it (its words are in moa's
+/// log), or the panel started and stopped (it said why in its own log).
+const MOA_LOG: &str = "moa's log";
+const PANEL_LOG: &str = "panel.log";
 
 #[derive(Debug, Default)]
 pub(super) enum Step {
@@ -367,13 +374,15 @@ fn sheet(state: &State, op: &CockpitOp, scene: &Scene, view: View, session: Tmux
             at.panel_view() == Some(view) && at.place == Place::Hidden && at.dead == dead
         })
     };
-    let cant_start = || {
-        let text = format!("couldn't start the {view}; see panel.log");
+    // Where to look: tmux's own refusal of a start is in moa's log; a panel that started and
+    // stopped wrote why in `panel.log`.
+    let cant_start = |log: &str| {
+        let text = format!("{} couldn't start; see {log}", sheet_name(view));
         Next::Done(refused(op, text))
     };
     let Some(at) = panel(false).or_else(|| panel(true)) else {
         if state.cockpit.replanned {
-            return cant_start();
+            return cant_start(MOA_LOG);
         }
         return Next::Spawn(vec![view]);
     };
@@ -381,7 +390,8 @@ fn sheet(state: &State, op: &CockpitOp, scene: &Scene, view: View, session: Tmux
     if at.dead {
         return match state.cockpit.restarted {
             None => Next::Respawn(vec![(at.pane, view)]),
-            Some(_) => cant_start(),
+            Some(0) => cant_start(MOA_LOG),
+            Some(_) => cant_start(PANEL_LOG),
         };
     }
     let mut cmds = vec![if topology.sessions_of(at.window).contains(&session) {

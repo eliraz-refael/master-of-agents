@@ -668,12 +668,6 @@ fn a_panel_tmux_kills_logs_one_plain_end_line() {
     assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
 }
 
-/// Whether a `panel.log` line's text says how a panel ended: `stopped…`, or `panicked…`
-/// (which a test must see to fail on it). A note such as `can't watch the terminal…` isn't.
-fn is_end(what: &str) -> bool {
-    what.starts_with("stopped") || what.starts_with("panicked")
-}
-
 /// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
 /// panel behind.
 struct Reaped(std::process::Child);
@@ -872,6 +866,46 @@ fn a_closed_master_is_heard_as_the_terminal_going() {
     assert!(woke.is_some(), "a closed master never woke it");
     waiting.join().unwrap().unwrap();
     assert!(moa_platform::terminal_gone(slave.as_fd()));
+}
+
+/// A key that comes with a resize is read at once, not when the next key comes. crossterm's
+/// default reader (0.29, kqueue or epoll, edge-triggered) could take a SIGWINCH and the
+/// terminal's input in one wake, answer the resize and drop the input's wake: the key then
+/// waited, unread, for more input (the cockpit's focus test lost a `j` so, when tmux resized
+/// its tree as the key came). Here each key is typed amid a burst of SIGWINCH, and must show
+/// before anything else is typed.
+#[test]
+fn a_key_amid_resizes_is_read_at_once() {
+    let tb = TempBrain::new(None);
+    let term = open(&tb, &["panel", "tree"], &[]);
+    assert!(
+        term.wait_for_text(TREE_HINT, SHOWS),
+        "the tree never drew: {}",
+        term.tail(600)
+    );
+    // `+` opens the footer's editor; each letter then shows in it.
+    let mut typed = String::new();
+    for key in "+abcdefghij".chars() {
+        let want = if key == '+' {
+            "new group:".to_string()
+        } else {
+            typed.push(key);
+            format!("new group: {typed}")
+        };
+        term.winch(50).unwrap();
+        term.press(key.to_string().as_bytes());
+        term.winch(50).unwrap();
+        let shown = wait_for(SHOWS, || {
+            let screen = common::screen::Screen::of(&term).text();
+            screen.contains(&want).then_some(())
+        });
+        assert!(
+            shown.is_some(),
+            "{key:?}, typed amid resizes, was never read: no {want:?} in\n{}",
+            common::screen::Screen::of(&term).text()
+        );
+    }
+    term.press(b"\x1b");
 }
 
 // --- Popups (S8): `moa panel picker --once`, run here in a tab of its own ---

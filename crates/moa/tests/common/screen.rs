@@ -52,9 +52,10 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// What `term`, `cols` by `rows`, shows now.
-    pub fn of(term: &Terminal, cols: usize, rows: usize) -> Screen {
-        let mut s = Screen::blank(cols, rows);
+    /// What `term` shows now, at its size.
+    pub fn of(term: &Terminal) -> Screen {
+        let (cols, rows) = term.size();
+        let mut s = Screen::blank(usize::from(cols), usize::from(rows));
         s.feed(&String::from_utf8_lossy(&term.output()));
         s
     }

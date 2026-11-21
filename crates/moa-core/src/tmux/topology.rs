@@ -382,6 +382,11 @@ impl Topology {
         self.sessions.get(&s).map(String::as_str)
     }
 
+    /// The tab session `s` shows, if the lists say.
+    pub fn current_of(&self, s: TmuxSessionId) -> Option<WindowId> {
+        self.current.get(&s).copied()
+    }
+
     /// The session user's terminal `c` shows, if it is attached.
     pub fn client_session(&self, c: &ClientName) -> Option<TmuxSessionId> {
         self.clients.get(c).copied()

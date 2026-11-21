@@ -9,7 +9,7 @@ use moa_core::model::{
     ActivityId, ActivityRow, Group, Project, ProjectId, Session, SessionId, Suggestion,
     SuggestionId, Task, TaskId,
 };
-use moa_core::publish::{BrainRow, PanelRow, TermRow, Topic};
+use moa_core::publish::{BrainRow, LayoutFileRow, LayoutRow, PanelRow, TermRow, Topic};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,6 +24,7 @@ pub const TOPICS: &[Topic] = &[
     Topic::Activity,
     Topic::Brain,
     Topic::Panels,
+    Topic::Layouts,
     Topic::Terms,
 ];
 
@@ -61,6 +62,10 @@ pub struct Data {
     pub panels: BTreeMap<String, PanelRow>,
     /// The terminals moa opened, by tab id (`%N`).
     pub terms: BTreeMap<String, TermRow>,
+    /// The layouts, by name: [`LayoutRow::index`] is their order.
+    pub layouts: BTreeMap<String, LayoutRow>,
+    /// Why `layouts.json` doesn't parse (the `layouts` row keyed `""`), while it doesn't.
+    pub layouts_error: Option<String>,
     /// The keys of rows that didn't decode, by topic.
     unreadable: BTreeSet<(Topic, String)>,
     /// See [`Data::revision`].
@@ -136,7 +141,11 @@ impl Data {
             Topic::Brain => self.brain = None,
             Topic::Panels => self.panels.clear(),
             Topic::Terms => self.terms.clear(),
-            Topic::Asks | Topic::Status | Topic::Layouts => {}
+            Topic::Layouts => {
+                self.layouts.clear();
+                self.layouts_error = None;
+            }
+            Topic::Asks | Topic::Status => {}
         }
         self.unreadable.retain(|(t, _)| *t != topic);
         self.upsert(topic, rows);
@@ -172,7 +181,14 @@ impl Data {
             }
             Topic::Panels => put(&mut self.panels, Some(key.to_string()), row),
             Topic::Terms => put(&mut self.terms, Some(key.to_string()), row),
-            Topic::Asks | Topic::Status | Topic::Layouts => true,
+            // The file's row, there while `layouts.json` doesn't parse.
+            Topic::Layouts if key.is_empty() => {
+                let file: Option<LayoutFileRow> = serde_json::from_value(row).ok();
+                self.layouts_error = file.map(|f| f.error);
+                self.layouts_error.is_some()
+            }
+            Topic::Layouts => put(&mut self.layouts, Some(key.to_string()), row),
+            Topic::Asks | Topic::Status => true,
         }
     }
 
@@ -196,7 +212,9 @@ impl Data {
                 Topic::Brain => self.brain = None,
                 Topic::Panels => drop_key(&mut self.panels, Some(key.clone())),
                 Topic::Terms => drop_key(&mut self.terms, Some(key.clone())),
-                Topic::Asks | Topic::Status | Topic::Layouts => {}
+                Topic::Layouts if key.is_empty() => self.layouts_error = None,
+                Topic::Layouts => drop_key(&mut self.layouts, Some(key.clone())),
+                Topic::Asks | Topic::Status => {}
             }
             self.unreadable.remove(&(topic, key.clone()));
         }

@@ -1,10 +1,12 @@
 //! The terminal's input, read off the loop's thread.
 //!
-//! crossterm's reader never returns once its terminal is gone: on an end of file or a read
-//! error it reads again, for ever (crossterm 0.29, `event/source/unix/mio.rs`). Run on the
-//! loop's thread, as `EventStream` runs it, that spin would also starve every other wake,
-//! signals included. So the reader runs on a thread of its own, and a second thread waits
-//! for the terminal to hang up, which no input wakes. The loop hears both through one
+//! crossterm's reader may never return once its terminal is gone: on an end of file it polls
+//! and reads again, for ever (crossterm 0.29, `event/source/unix/tty.rs`, the reader its
+//! `use-dev-tty` feature picks; the workspace's `Cargo.toml` says why). A read error it does
+//! return, and one only a gone terminal gives (Linux's EIO) is the terminal's end. Run on
+//! the loop's thread, as `EventStream` runs it, that spin would also starve every other
+//! wake, signals included. So the reader runs on a thread of its own, and a second thread
+//! waits for the terminal to hang up, which no input wakes. The loop hears both through one
 //! channel and never touches crossterm's reader itself.
 //!
 //! **Never ask crossterm's reader anything from the loop's thread.** The reader thread holds
@@ -99,11 +101,20 @@ fn note(log: Option<&Logbook>, e: &io::Error) {
 /// Reads events until the loop stops listening, or after the first error.
 fn read(tx: &UnboundedSender<Sent>) {
     loop {
-        let event = crossterm::event::read();
-        let failed = event.is_err();
-        if tx.send(Some(event)).is_err() || failed {
+        let sent = sent(crossterm::event::read());
+        let last = !matches!(sent, Some(Ok(_)));
+        if tx.send(sent).is_err() || last {
             return;
         }
+    }
+}
+
+/// What a read tells the loop. A read that fails as only a gone terminal fails (EIO once the
+/// other end has closed, as Linux says it) is the terminal's end, as the watch says it.
+fn sent(read: io::Result<Event>) -> Sent {
+    match read {
+        Err(e) if moa_platform::terminal_gone_error(&e) => None,
+        read => Some(read),
     }
 }
 
@@ -114,5 +125,29 @@ fn watch(tty: &OwnedFd, tx: &UnboundedSender<Sent>, log: Option<&Logbook>) {
             let _ = tx.send(None);
         }
         Err(e) => note(log, &e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    use super::sent;
+
+    #[test]
+    fn a_read_failing_as_a_gone_terminal_is_its_end() {
+        // EIO, ENXIO and EPIPE, the same numbers on Linux and macOS.
+        for errno in [5, 6, 32] {
+            assert!(
+                sent(Err(io::Error::from_raw_os_error(errno))).is_none(),
+                "{errno}"
+            );
+        }
+        let other = sent(Err(io::Error::other("odd")));
+        assert!(matches!(other, Some(Err(e)) if e.to_string() == "odd"));
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(sent(Ok(key.clone())), Some(Ok(e)) if e == key));
     }
 }

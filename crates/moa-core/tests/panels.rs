@@ -718,6 +718,18 @@ fn brain_row(st: &State) -> BrainRow {
     serde_json::from_value(st.model().topics[&Topic::Brain]["brain"].clone()).unwrap()
 }
 
+/// The `brain` row says which form `Ctrl-a /` opens the picker in (`[ui] picker`), so help
+/// knows which key opens which (S10): `"popup"` by default.
+#[test]
+fn the_brain_row_carries_the_picker_form() {
+    let raw = |st: &State| st.model().topics[&Topic::Brain]["brain"]["picker"].clone();
+    let (_, st) = loaded(TOML);
+    assert_eq!(raw(&st), json!("popup"));
+    let (_, st) = loaded(&format!("{TOML}\n[ui]\npicker = \"tab\"\n"));
+    assert_eq!(raw(&st), json!("tab"));
+    assert_eq!(brain_row(&st).picker, moa_core::config::Form::Tab);
+}
+
 #[test]
 fn a_fold_is_one_meta_value() {
     let (b, mut st) = loaded(TOML);

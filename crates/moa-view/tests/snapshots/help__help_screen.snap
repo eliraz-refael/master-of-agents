@@ -1,0 +1,17 @@
+---
+source: crates/moa-view/tests/help.rs
+expression: "debug_screen(&panel.screen(&data, &ctx, SIZE))"
+---
+  [head*]Ctrl-a keys
+  [head]  c      [text]go to the console panel
+  [head]  t      [text]the sessions tree: every session, by group
+  [head]  p      [text]the big picture: what every session is doing
+  [head]  g      [text]the agent spot: the session open in the cockpit
+  [head]  /      [text]find a session: type part of its name, Enter jumps
+  [head]  s      [text]find a session in a full tab: type part of its name, Enter jumps
+  [head]  n      [text]start a new session
+  [head]  $      [text]a plain terminal in a new tab (for a dev server…), in the folder of
+  [text]         [text]the agent or session you're on; `exit` closes it
+  [head]  |      [text]split the agent or terminal tab you're on: a shell beside it, in the
+  [text]         [text]same folder; `exit` closes it
+footer: [dim]j/k scroll · q close
