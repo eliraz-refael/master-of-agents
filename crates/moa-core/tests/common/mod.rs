@@ -165,6 +165,14 @@ pub fn listed(st: &mut State, b: &TypicalBrain, info: &[&str], start: &[&str]) -
     )
 }
 
+/// A terminal's line in the refresh's fourth list (`LIST_TERMS`): `pane` (`%N`), marked
+/// `@moa_term` and labelled `label` as tmux prints it, its shell `sh` (pid `1000 + N`) at
+/// its prompt in `/r`.
+pub fn term_line(pane: &str, label: &str) -> String {
+    let pid = 1000 + pane.trim_start_matches('%').parse::<u32>().unwrap_or(0);
+    format!("T\t{pane}\t{pid}\t1\tsh\t/r\t{label}")
+}
+
 /// `set-option -p -u -t <pane> <name>`: one of moa's options taken off a tab.
 pub fn unset(pane: &str, name: &str) -> Cmd {
     Cmd::new("set-option").args(["-p", "-u", "-t", pane, name])

@@ -174,6 +174,10 @@ pub struct Deps {
     /// (the daemon reads them in-process), or that none does, or that the reads failed.
     /// Called only where a pane is checked, never per event.
     pub inspect: fn(i64, &[String]) -> Inspected,
+    /// A process's name as tmux's `#{pane_current_command}` shows it when that process is
+    /// in front (`moa_platform::proc::name`), or `None` when it is gone: a terminal's shell,
+    /// read once, when the terminal is recorded.
+    pub process_name: fn(u32) -> Option<String>,
     /// Looks for a conversation's transcript in a store (`moa_agents::claude::find_transcript`):
     /// directory reads only, before a resume (C11 rule 2).
     pub transcript: fn(&Path, &str) -> TranscriptCheck,
@@ -229,6 +233,7 @@ impl Default for Deps {
             new_uuid: sequential_uuid,
             session_plugin: PathBuf::new(),
             inspect: |_, _| Inspected::Gone,
+            process_name: |_| None,
             transcript: |_, _| TranscriptCheck::Present(PathBuf::new()),
             is_dir: |_| true,
             newest_conversation: |_, _, _, _| None,

@@ -126,7 +126,7 @@ const SPLIT_WHY: &str =
 fn menu_command(does: Does, popups: Popups) -> String {
     let split = |flag: &str| {
         format!(
-            "if -F '{SPLIT_REFUSED}' 'display \"split an agent or terminal tab; {SPLIT_WHY}\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\"'"
+            "if -F '{SPLIT_REFUSED}' 'display \"split an agent or terminal tab; {SPLIT_WHY}\"' 'split-window -{flag} -c \"##{{pane_current_path}}\" ; set -p @moa_label \"⌨ shell\" ; set -p @moa_term 1'"
         )
     };
     match does {

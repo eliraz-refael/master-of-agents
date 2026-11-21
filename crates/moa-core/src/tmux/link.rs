@@ -1099,10 +1099,11 @@ impl TmuxState {
     }
 
     /// The topology from the four lists `refresh_cmds` asks for, keeping the tags sent that
-    /// they don't show yet, and what the log is told of it. The terminals' list failing alone
-    /// leaves the other three good: the topology has no terminals then (but those moa just
-    /// tagged), and the log says so. `None`, with what was known kept, when the other three
-    /// aren't there.
+    /// they don't show yet, and what the log is told of it. The fourth list (the panes'
+    /// programs and terminals) failing alone leaves the other three good: the topology has
+    /// no terminals then (but those moa just tagged) and no pane's program or folder
+    /// (`panes_listed` is false), and the log says so. `None`, with what was known kept,
+    /// when the other three aren't there.
     fn rebuild(&mut self, results: &[Result<Vec<String>, String>]) -> Option<Vec<Effect>> {
         let [Ok(sessions), Ok(panes), Ok(clients), terms] = results else {
             // No information: what was known stays.

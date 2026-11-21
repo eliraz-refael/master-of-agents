@@ -326,6 +326,26 @@ pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
     std::time::UNIX_EPOCH.checked_add(at)
 }
 
+/// `pid`'s name as tmux reads it (`osdep-darwin.c`): `proc_pidinfo(PROC_PIDTBSDINFO)`'s
+/// `pbi_name`, or its `pbi_comm` when that is empty.
+pub(crate) fn proc_name(pid: u32) -> Option<String> {
+    let info = bsd_info(pid)?;
+    let text = |chars: &[libc::c_char]| {
+        let bytes: Vec<u8> = chars
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let name = text(&info.pbi_name);
+    Some(if name.is_empty() {
+        text(&info.pbi_comm)
+    } else {
+        name
+    })
+}
+
 /// `pid`'s real and effective user ids, from `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`, which
 /// answers for any user's process, the system's own daemons among them (the full
 /// `PROC_PIDTBSDINFO` is refused for many of those).

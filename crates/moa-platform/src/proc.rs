@@ -110,8 +110,30 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     sys::start_time(pid)
 }
 
+/// `pid`'s name as tmux's `#{pane_current_command}` shows it while `pid` is in front of its
+/// terminal: read where tmux reads it (macOS: libproc's name for the process; Linux: its
+/// argv0), then put through tmux's rule ([`shown_name`]). `None` when it is gone or has no
+/// name.
+pub fn name(pid: u32) -> Option<String> {
+    shown_name(&sys::proc_name(pid)?)
+}
+
+/// tmux's rule for a program's name (`parse_window_name`), as far as a process's name can
+/// need it: leading spaces and `-`s dropped (a login shell's argv0 is `-zsh`), cut at the
+/// first space, and an absolute path's base name. `None` when nothing is left.
+fn shown_name(raw: &str) -> Option<String> {
+    let name = raw.trim_start_matches([' ', '-']);
+    let name = name.split(' ').next().unwrap_or_default();
+    let name = if name.starts_with('/') {
+        name.rsplit('/').find(|s| !s.is_empty()).unwrap_or(name)
+    } else {
+        name
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// The NUL-terminated strings of `buf`, as lossy UTF-8.
-fn strings(buf: &[u8]) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn strings(buf: &[u8]) -> impl Iterator<Item = String> + '_ {
     buf.split(|&b| b == 0)
         .map(|s| String::from_utf8_lossy(s).into_owned())
 }
@@ -304,6 +326,23 @@ mod tests {
         assert_eq!(why_unread(true, None, 501), Unread::Failed);
         assert!(!foreign((501, 501), 501));
         assert!(foreign((501, 501), 0));
+    }
+
+    /// tmux's rule: a login shell's `-`, a path, and words after a space all go.
+    #[test]
+    fn a_name_reads_as_tmux_shows_it() {
+        assert_eq!(shown_name("bash").as_deref(), Some("bash"));
+        assert_eq!(shown_name("-zsh").as_deref(), Some("zsh"));
+        assert_eq!(shown_name("/bin/sh").as_deref(), Some("sh"));
+        assert_eq!(shown_name("-/usr/bin/fish").as_deref(), Some("fish"));
+        assert_eq!(
+            shown_name("Google Chrome Helper").as_deref(),
+            Some("Google")
+        );
+        assert_eq!(shown_name("./run").as_deref(), Some("./run"));
+        assert_eq!(shown_name("/").as_deref(), Some("/"));
+        assert_eq!(shown_name(""), None);
+        assert_eq!(shown_name("--"), None);
     }
 
     #[test]

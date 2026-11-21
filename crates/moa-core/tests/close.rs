@@ -794,7 +794,7 @@ fn closed_in_a_terminal(label: &str) -> (Rig, Vec<Effect>) {
                 Ok(vec!["S $0 moa".into()]),
                 Ok(vec![format!("P %9 @9 $0 1 1 0 0 {S} 0 ")]),
                 Ok(Vec::new()),
-                Ok(vec![format!("T %9 {label}")]),
+                Ok(vec![term_line("%9", label)]),
             ],
         },
     );

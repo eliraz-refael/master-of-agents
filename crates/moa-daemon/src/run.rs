@@ -262,6 +262,7 @@ async fn bring_up(
             new_uuid: moa_store::new_uuid,
             session_plugin,
             inspect: crate::inspect::inspect_pane,
+            process_name: moa_platform::proc::name,
             transcript: moa_agents::claude::find_transcript,
             is_dir: std::path::Path::is_dir,
             newest_conversation: moa_agents::claude::newest_conversation,

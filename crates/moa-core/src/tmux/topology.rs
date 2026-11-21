@@ -13,20 +13,20 @@ pub const LIST_SESSIONS: &str = "S #{session_id} #{session_name}";
 /// the pane is dead, and its `@moa_view` tag last, since it is free text.
 pub const LIST_PANES: &str = "P #{pane_id} #{window_id} #{session_id} #{pane_active} #{window_active} #{window_zoomed_flag} #{&&:#{==:#{session_name},moa},#{==:#{window_name},moa}} #{@moa_session} #{pane_dead} #{@moa_view}";
 pub const LIST_CLIENTS: &str = "C #{client_control_mode} #{session_id} #{client_name}";
-/// The terminals moa opened (`@moa_term`), each with its `@moa_label`: a list of their own,
-/// since `LIST_PANES` already ends in free text.
-pub const LIST_TERMS: &str = "T #{pane_id} #{@moa_label}";
+/// Every pane again, with what runs in it: its process, its terminal mark (`@moa_term`), the
+/// program in front, its folder, then its `@moa_label`. Tab-separated with the label last,
+/// since a folder or a label can hold spaces and a label tabs too: a list of its own, as
+/// `LIST_PANES` already ends in free text.
+pub const LIST_TERMS: &str = "T\t#{pane_id}\t#{pane_pid}\t#{@moa_term}\t#{pane_current_command}\t#{pane_current_path}\t#{@moa_label}";
 
 /// The four queries that rebuild a `Topology`: the three `from_lists` takes, in its order,
-/// then the terminals' for `terms_listed`.
+/// then the panes' programs and terminals, for `terms_listed`.
 pub fn refresh_cmds() -> Vec<Cmd> {
     vec![
         Cmd::new("list-sessions").arg("-F").arg(LIST_SESSIONS),
         Cmd::new("list-panes").arg("-a").arg("-F").arg(LIST_PANES),
         Cmd::new("list-clients").arg("-F").arg(LIST_CLIENTS),
-        Cmd::new("list-panes")
-            .args(["-a", "-f", "#{@moa_term}", "-F"])
-            .arg(LIST_TERMS),
+        Cmd::new("list-panes").arg("-a").arg("-F").arg(LIST_TERMS),
     ]
 }
 
@@ -44,6 +44,16 @@ pub enum Applied {
     Same,
     /// The lists must be read again.
     Refresh,
+}
+
+/// What `LIST_TERMS` says runs in a pane: its process (`#{pane_pid}`), the program in front
+/// (`#{pane_current_command}`, as of the listing: tmux tells nothing when it changes), and
+/// that program's folder.
+#[derive(Clone, Debug)]
+struct Running {
+    pid: u32,
+    command: String,
+    cwd: String,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -64,6 +74,11 @@ pub struct Topology {
     /// The terminals moa opened (`@moa_term`), each with its `@moa_label` as moa meant it
     /// (tmux keeps it with every `#` doubled).
     terms: BTreeMap<PaneId, String>,
+    /// What runs in each pane, from `LIST_TERMS`.
+    running: BTreeMap<PaneId, Running>,
+    /// Whether `LIST_TERMS` came back with this listing: without it, no pane has a program
+    /// or folder, and the only terminals known are those moa tagged since.
+    panes_listed: bool,
 }
 
 /// The session the user's terminal shows, which holds the cockpit (the window of the same
@@ -131,27 +146,68 @@ impl Topology {
         t
     }
 
-    /// The terminals' list (`LIST_TERMS`) replaces the terminals known; it is read after the
-    /// panes' list. Lines that don't parse are skipped; an unset label prints as an empty
-    /// one. A label holding a newline could print a line of its own, so only a pane the
-    /// panes' list holds counts, and a pane listed twice doesn't.
+    /// The panes' programs and terminals (`LIST_TERMS`) replace those known; it is read
+    /// after the panes' list. A pane is a terminal when its `@moa_term` is set, as tmux's
+    /// `-f` reads a flag (neither empty nor `0`). Lines that don't parse are skipped; an
+    /// unset label prints as an empty one, and a label keeps any tabs it has. A label or a
+    /// folder holding a newline could print a line of its own, so only a pane the panes'
+    /// list holds counts, and a pane listed twice (a window linked into two sessions, or a
+    /// forged line) keeps neither its program nor its terminal mark.
     pub fn terms_listed(&mut self, lines: &[String]) {
         self.terms.clear();
+        self.running.clear();
         let mut twice = BTreeSet::new();
         for line in lines {
-            let mut f = line.splitn(3, ' ');
-            if let (Some("T"), Some(pane)) = (f.next(), f.next())
-                && let Ok(pane) = pane.parse()
-                && self.has_pane(pane)
-            {
+            let mut f = line.splitn(7, '\t');
+            let (Some("T"), Some(pane), Some(pid), Some(term), Some(command), Some(cwd)) =
+                (f.next(), f.next(), f.next(), f.next(), f.next(), f.next())
+            else {
+                continue;
+            };
+            let (Ok(pane), Ok(pid)) = (pane.parse(), pid.parse()) else {
+                continue;
+            };
+            if !self.has_pane(pane) {
+                continue;
+            }
+            let running = Running {
+                pid,
+                command: command.to_string(),
+                cwd: cwd.to_string(),
+            };
+            if self.running.insert(pane, running).is_some() {
+                twice.insert(pane);
+            }
+            if !term.is_empty() && term != "0" {
                 // Set through `literal_format`, which doubles every `#`.
                 let label = f.next().unwrap_or_default().replace("##", "#");
-                if self.terms.insert(pane, label).is_some() {
-                    twice.insert(pane);
-                }
+                self.terms.insert(pane, label);
             }
         }
         self.terms.retain(|p, _| !twice.contains(p));
+        self.running.retain(|p, _| !twice.contains(p));
+        self.panes_listed = true;
+    }
+
+    /// Whether this listing's `LIST_TERMS` came back: when it failed, no pane has a program
+    /// or folder, so nothing can be told of what runs where.
+    pub fn panes_listed(&self) -> bool {
+        self.panes_listed
+    }
+
+    /// The process tmux started in pane `p` (`#{pane_pid}`): a terminal's shell.
+    pub fn pid_of(&self, p: &PaneId) -> Option<u32> {
+        self.running.get(p).map(|r| r.pid)
+    }
+
+    /// The program in front in pane `p` (`#{pane_current_command}`) when it was listed.
+    pub fn command_of(&self, p: &PaneId) -> Option<&str> {
+        self.running.get(p).map(|r| r.command.as_str())
+    }
+
+    /// The folder of pane `p`'s program in front (`#{pane_current_path}`) when it was listed.
+    pub fn cwd_of(&self, p: &PaneId) -> Option<&str> {
+        self.running.get(p).map(|r| r.cwd.as_str())
     }
 
     fn add_pane(&mut self, line: &str) {
@@ -556,6 +612,11 @@ mod tests {
         ]
     }
 
+    /// A line that looks like `LIST_TERMS`'s: tab-separated words of ids, digits and text.
+    fn tab_line() -> impl Strategy<Value = String> {
+        "T?(\t{1,2}[%0-9a-z /#-]{0,12}){0,9}"
+    }
+
     proptest! {
         /// Whatever tmux prints, the lists build a topology (R27). A panic here would reload
         /// the core, and the reload's refresh would read the same lines again.
@@ -564,11 +625,12 @@ mod tests {
             sessions in prop::collection::vec(line(), 0..8),
             panes in prop::collection::vec(line(), 0..8),
             clients in prop::collection::vec(line(), 0..8),
-            terms in prop::collection::vec(line(), 0..8),
+            terms in prop::collection::vec(prop_oneof![line(), tab_line()], 0..8),
         ) {
             let mut t = Topology::from_lists(&sessions, &panes, &clients);
             t.terms_listed(&terms);
             let _ = t.visible();
+            let _ = t.terms().count();
         }
     }
 
@@ -658,7 +720,10 @@ mod tests {
             &s(&["P %3 @3 $0 1 0 0 0  0 ", "P %4 @4 $0 1 0 0 0  1 "]),
             &s(&[]),
         );
-        t.terms_listed(&s(&["T %3 ⌨ api", "T %4 ⌨ web"]));
+        t.terms_listed(&s(&[
+            "T\t%3\t30\t1\tsh\t/r\t⌨ api",
+            "T\t%4\t40\t1\tsh\t/r\t⌨ web",
+        ]));
         assert_eq!(t.terms().collect::<Vec<_>>(), [(PaneId(3), "api")]);
         assert_eq!(t.term_name(PaneId(4)), None);
         assert_eq!(

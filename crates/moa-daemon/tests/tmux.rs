@@ -477,49 +477,105 @@ fn the_cockpit_flag_names_the_moa_window() {
     }
 }
 
-/// The refresh's queries on a real server: only the tab tagged `@moa_term` is a terminal,
-/// with its label read as moa set it, a run of `#`s halved and not collapsed (S6b).
+/// The refresh's queries on a real server. Every tab is listed with its process, the
+/// program in front and that program's folder, word for word (a space and a `#` in it);
+/// only the tab tagged `@moa_term` is a terminal, with its label read as moa set it, a run
+/// of `#`s halved and not collapsed (S6b). A shell at its prompt lists as its process's own
+/// name (`process_name`, what a terminal's record keeps as its shell), whatever
+/// `default-shell` is called: macOS runs `/bin/sh` as `bash`. A program typed into it
+/// lists as something else; its name isn't checked, as a nix `sleep` lists as
+/// `coreutils`.
 #[test]
-fn the_terminals_query_lists_only_terminals() {
+fn the_pane_query_lists_programs_and_folders() {
     let tb = TempBrain::new(None);
     let tmux = |args: &[&str]| {
         tb.tmux(B, args)
             .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
     };
+    let folder = tb.root().join("a b").join("#x");
+    std::fs::create_dir_all(&folder).unwrap();
+    // tmux lists a folder as the system resolves it (`/tmp` is `/private/tmp` on macOS).
+    let folder = std::fs::canonicalize(&folder)
+        .unwrap()
+        .display()
+        .to_string();
     tmux(&["new-session", "-d", "-s", "moa", "/bin/sh"]);
-    let shell = tmux(&[
-        "new-window",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-t",
-        "=moa:",
-        "/bin/sh",
-    ]);
-    tmux(&["set-option", "-p", "-t", &shell, "@moa_term", "1"]);
-    let label = literal_format("⌨ kite ##x #[fg=red]");
-    tmux(&["set-option", "-p", "-t", &shell, "@moa_label", &label]);
-    // Each of the refresh's queries, as the link sends them.
-    let lists: Vec<Vec<String>> = topology::refresh_cmds()
-        .iter()
-        .map(|query| {
-            let args: Vec<&str> = std::iter::once(query.name())
-                .chain(query.argv().iter().map(String::as_str))
-                .collect();
-            tmux(&args).lines().map(str::to_string).collect()
-        })
-        .collect();
-    let [sessions, panes, clients, terms] = &lists[..] else {
-        panic!("four lists: {lists:?}");
+    // A tab running `default-shell`, as a terminal moa opens does.
+    let new_shell = |cwd: &str| -> PaneId {
+        let id = tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-c",
+            &literal_format(cwd),
+            "-t",
+            "=moa:",
+        ]);
+        id.parse().expect("a pane id")
     };
-    let mut t = Topology::from_lists(sessions, panes, clients);
-    t.terms_listed(terms);
-    let shell: PaneId = shell.parse().expect("a pane id");
+    let shell = new_shell(&folder);
+    let target = shell.to_string();
+    tmux(&["set-option", "-p", "-t", &target, "@moa_term", "1"]);
+    let label = literal_format("⌨ kite ##x #[fg=red]");
+    tmux(&["set-option", "-p", "-t", &target, "@moa_label", &label]);
+    let busy = new_shell(&tb.root().display().to_string());
+    let busy_target = busy.to_string();
+    tmux(&["send-keys", "-t", &busy_target, "sleep 100", "Enter"]);
+
+    // Each of the refresh's queries, as the link sends them.
+    let listed = || {
+        let lists: Vec<Vec<String>> = topology::refresh_cmds()
+            .iter()
+            .map(|query| {
+                let args: Vec<&str> = std::iter::once(query.name())
+                    .chain(query.argv().iter().map(String::as_str))
+                    .collect();
+                tmux(&args).lines().map(str::to_string).collect()
+            })
+            .collect();
+        let [sessions, panes, clients, terms] = &lists[..] else {
+            panic!("four lists: {lists:?}");
+        };
+        let mut t = Topology::from_lists(sessions, panes, clients);
+        t.terms_listed(terms);
+        (t, lists)
+    };
+    // Whether `p` lists its own process's name: its shell is in front.
+    let at_its_prompt = |t: &Topology, p: PaneId| {
+        let name = t.pid_of(&p).and_then(moa_platform::proc::name);
+        name.is_some() && t.command_of(&p) == name.as_deref()
+    };
+
+    let seen = wait_for(Duration::from_secs(10), || {
+        let (t, lists) = listed();
+        let busy_in_front = t.command_of(&busy).is_some() && !at_its_prompt(&t, busy);
+        (at_its_prompt(&t, shell) && busy_in_front).then_some((t, lists))
+    });
+    let Some((t, lists)) = seen else {
+        panic!(
+            "the shell never listed as itself, or the sleep as other: {:?}",
+            listed().1
+        );
+    };
+    assert!(t.panes_listed());
+    assert_eq!(t.cwd_of(&shell), Some(folder.as_str()), "{lists:?}");
     assert_eq!(
         t.terms().collect::<Vec<_>>(),
         [(shell, "kite ##x #[fg=red]")],
         "{lists:?}"
+    );
+
+    // Stopped, the program leaves its shell in front again.
+    tmux(&["send-keys", "-t", &busy_target, "C-c"]);
+    let back = wait_for(Duration::from_secs(10), || {
+        at_its_prompt(&listed().0, busy).then_some(())
+    });
+    assert!(
+        back.is_some(),
+        "the shell never came back: {:?}",
+        listed().1
     );
 }
 

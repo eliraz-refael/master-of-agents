@@ -4,7 +4,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime};
 
 use moa_platform::kill_term;
-use moa_platform::proc::{ENV_KEPT, Reader, Unread, children, owned_by_another, started};
+use moa_platform::proc::{ENV_KEPT, Reader, Unread, children, name, owned_by_another, started};
 
 /// Polls `f` every 20 ms for up to 10 s.
 fn wait_for<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
@@ -179,4 +179,16 @@ fn a_live_process_reads_as_itself() {
     let me = std::process::id();
     assert!(Reader::new().args(me).is_ok_and(|a| !a.argv.is_empty()));
     assert!(children(me).is_ok());
+}
+
+/// A process's name is what tmux would list for it in front of a terminal: this test's own
+/// is its executable's base name. A pid that is no process has none.
+#[test]
+fn process_name_matches_tmux() {
+    let exe = std::env::current_exe().unwrap();
+    let base = exe.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(name(std::process::id()), Some(base));
+    for pid in [i32::MAX as u32, 0] {
+        assert_eq!(name(pid), None);
+    }
 }

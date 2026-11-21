@@ -831,6 +831,183 @@ async fn the_menu_and_its_items_reach_the_mailbox() {
     client.close().await;
 }
 
+/// The current tab's panes, each with its terminal mark and its label, as tmux has them.
+fn marks(sb: &Sandbox) -> Vec<(PaneId, String, String)> {
+    let out = sb
+        .tmux(&[
+            "list-panes",
+            "-t",
+            "=sandbox:",
+            "-F",
+            "#{pane_id}\t#{@moa_term}\t#{@moa_label}",
+        ])
+        .unwrap();
+    out.lines()
+        .filter_map(|l| {
+            let [pane, term, label] = l.splitn(3, '\t').collect::<Vec<_>>()[..] else {
+                return None;
+            };
+            Some((pane.parse().ok()?, term.to_string(), label.to_string()))
+        })
+        .collect()
+}
+
+/// Waits for the tab to hold `n` panes, and answers the newest one's mark and label.
+fn split_to(sb: &Sandbox, term: &Terminal, n: usize) -> (String, String) {
+    let found = wait_for(Duration::from_secs(10), || {
+        let panes = marks(sb);
+        (panes.len() == n).then(|| panes.into_iter().max_by_key(|(p, _, _)| p.0))?
+    });
+    let Some((_, mark, label)) = found else {
+        panic!(
+            "no split to {n} panes: {:?}; the terminal showed: {}",
+            marks(sb),
+            term.tail(600)
+        );
+    };
+    (mark, label)
+}
+
+/// `|` and `-` open a shell that moa lists with its terminals: the new pane has the
+/// terminal mark and the `⌨ shell` label, from a key and from the menu alike.
+#[test]
+fn the_split_keys_mark_terminals() {
+    let sb = Sandbox::start().unwrap();
+    load(&sb);
+    let term = attach(&sb);
+    let tty = ClientName(term.tty());
+    let shell = ("1".to_string(), "⌨ shell".to_string());
+    term.press(b"\x01|");
+    assert_eq!(split_to(&sb, &term, 2), shell, "Ctrl-a |");
+    wait_for_root(&sb, &tty);
+    open_menu(&term, b"\x01 ");
+    term.press(b"-");
+    assert_eq!(split_to(&sb, &term, 3), shell, "the menu's -");
+}
+
+/// What a plain key runs, as tmux lists it with the quoting taken off: what the table's
+/// `Does` stands for. `None` for the keys that go to the daemon or open a popup, which
+/// `every_daemon_key_reaches_the_mailbox` and the popup tests cover, and for the two that
+/// are no command of their own.
+fn runs(does: Does) -> Option<&'static str> {
+    match does {
+        Does::SplitBeside => Some(
+            "split-window -h -c #{pane_current_path} ; set -p @moa_label ⌨ shell ; set -p @moa_term 1",
+        ),
+        Does::SplitBelow => Some(
+            "split-window -v -c #{pane_current_path} ; set -p @moa_label ⌨ shell ; set -p @moa_term 1",
+        ),
+        Does::BackToMoa => Some("select-window -t moa:moa"),
+        Does::Zoom => Some("resize-pane -Z"),
+        Does::PrevTab => Some("previous-window"),
+        Does::NextTab => Some("next-window"),
+        Does::SendCtrlA => Some("send-keys C-a"),
+        Does::Moa(_) | Does::Popup(_) | Does::Move | Does::Menu => None,
+    }
+}
+
+/// The words of a command as tmux lists it: `"…"` (with `\` escapes), `'…'`, or bare (with
+/// `\` escapes too: tmux lists the key `$` as `\$`).
+fn listed_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let mut word = String::new();
+        match c {
+            ' ' | '\n' => continue,
+            '\'' => word.extend(chars.by_ref().take_while(|&c| c != '\'')),
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => word.extend(chars.next()),
+                        '"' => break,
+                        _ => word.push(c),
+                    }
+                }
+            }
+            _ => {
+                let mut c = Some(c);
+                while let Some(ch) = c {
+                    match ch {
+                        '\\' => word.extend(chars.next()),
+                        _ => word.push(ch),
+                    }
+                    c = chars.next_if(|&c| c != ' ' && c != '\n');
+                }
+            }
+        }
+        words.push(word);
+    }
+    words
+}
+
+/// A command with its inner quoting taken off, and `##` read as `#`, as a menu item's
+/// command is expanded once before it runs.
+fn unquoted(text: &str) -> String {
+    text.replace(['\'', '"', '\\'], "").replace("##", "#")
+}
+
+/// Every menu item in tmux's listing of the menu's binding, each as its key and its
+/// command: the short menu's and the tall one's.
+fn menu_items_listed(listed: &str) -> Vec<(String, String)> {
+    let words = listed_words(listed);
+    let mut items = Vec::new();
+    let mut at = 0;
+    while let Some(start) = words[at..].iter().position(|w| w == "display-menu") {
+        at += start + 1;
+        while matches!(words[at].as_str(), "-T" | "-x" | "-y") {
+            at += 2;
+        }
+        while words[at] != "}" {
+            // An empty label is a separator, alone; any other item is a label, a key and
+            // a command (a greyed note's are empty).
+            if words[at].is_empty() {
+                at += 1;
+                continue;
+            }
+            items.push((words[at + 1].clone(), words[at + 2].clone()));
+            at += 3;
+        }
+    }
+    items
+}
+
+/// The template's plain keys and the menu's copies of them, which are written apart, as
+/// this tmux reads them: each runs what the table's `Does` says, so neither drifts.
+#[test]
+fn the_plain_keys_do_what_the_table_says() {
+    let sb = Sandbox::start().unwrap();
+    load(&sb);
+    let menu = menu_items_listed(&sb.tmux(&["list-keys", "-T", "moa", "Space"]).unwrap());
+    let mut checked = Vec::new();
+    for b in ctrl_a(UiConfig::default().picker).into_iter().flatten() {
+        let Some(want) = runs(b.does) else {
+            continue;
+        };
+        let listed = sb.tmux(&["list-keys", "-T", "moa", b.key]).unwrap();
+        let words = listed_words(&listed);
+        assert_eq!(words[1..4], ["-T", "moa", b.key], "{listed}");
+        let key = unquoted(&words[4..].join(" "));
+        assert!(key.ends_with(want), "{}: {key}", b.key);
+        let copies: Vec<String> = menu
+            .iter()
+            .filter(|(k, _)| k == b.key)
+            .map(|(_, cmd)| unquoted(cmd))
+            .collect();
+        assert_eq!(
+            copies.len(),
+            2,
+            "{}: the short menu's and the tall one's",
+            b.key
+        );
+        for copy in copies {
+            assert!(copy.ends_with(want), "{}: the menu's {copy}", b.key);
+        }
+        checked.push(b.key);
+    }
+    assert_eq!(checked, ["|", "-", "m", "z", "[", "]", "a"]);
+}
+
 /// A daemon key and the popup's both say so; the popup opens nothing.
 #[test]
 fn keys_say_moa_isnt_running_without_a_ctl() {
