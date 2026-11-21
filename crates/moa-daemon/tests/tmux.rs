@@ -477,6 +477,26 @@ fn the_cockpit_flag_names_the_moa_window() {
     }
 }
 
+/// The refresh's queries on a real server, as the link sends them, and the topology they
+/// build, with the raw lists for a failure message.
+fn listed_topology(tmux: &impl Fn(&[&str]) -> String) -> (Topology, Vec<Vec<String>>) {
+    let lists: Vec<Vec<String>> = topology::refresh_cmds()
+        .iter()
+        .map(|query| {
+            let args: Vec<&str> = std::iter::once(query.name())
+                .chain(query.argv().iter().map(String::as_str))
+                .collect();
+            tmux(&args).lines().map(str::to_string).collect()
+        })
+        .collect();
+    let [sessions, panes, clients, terms] = &lists[..] else {
+        panic!("four lists: {lists:?}");
+    };
+    let mut t = Topology::from_lists(sessions, panes, clients);
+    t.terms_listed(terms);
+    (t, lists)
+}
+
 /// The refresh's queries on a real server. Every tab is listed with its process, the
 /// program in front and that program's folder, word for word (a space and a `#` in it);
 /// only the tab tagged `@moa_term` is a terminal, with its label read as moa set it, a run
@@ -525,23 +545,7 @@ fn the_pane_query_lists_programs_and_folders() {
     tmux(&["send-keys", "-t", &busy_target, "sleep 100", "Enter"]);
 
     // Each of the refresh's queries, as the link sends them.
-    let listed = || {
-        let lists: Vec<Vec<String>> = topology::refresh_cmds()
-            .iter()
-            .map(|query| {
-                let args: Vec<&str> = std::iter::once(query.name())
-                    .chain(query.argv().iter().map(String::as_str))
-                    .collect();
-                tmux(&args).lines().map(str::to_string).collect()
-            })
-            .collect();
-        let [sessions, panes, clients, terms] = &lists[..] else {
-            panic!("four lists: {lists:?}");
-        };
-        let mut t = Topology::from_lists(sessions, panes, clients);
-        t.terms_listed(terms);
-        (t, lists)
-    };
+    let listed = || listed_topology(&tmux);
     // Whether `p` lists its own process's name: its shell is in front.
     let at_its_prompt = |t: &Topology, p: PaneId| {
         let name = t.pid_of(&p).and_then(moa_platform::proc::name);
@@ -632,26 +636,7 @@ fn a_long_program_name_lists_as_process_name_reads_it() {
     ])
     .parse()
     .expect("a pane id");
-    let listed = || {
-        let sessions: Vec<String> = tmux(&["list-sessions", "-F", topology::LIST_SESSIONS])
-            .lines()
-            .map(str::to_string)
-            .collect();
-        let panes: Vec<String> = tmux(&["list-panes", "-a", "-F", topology::LIST_PANES])
-            .lines()
-            .map(str::to_string)
-            .collect();
-        let terms: Vec<String> = {
-            let q = &topology::refresh_cmds()[3];
-            let args: Vec<&str> = std::iter::once(q.name())
-                .chain(q.argv().iter().map(String::as_str))
-                .collect();
-            tmux(&args).lines().map(str::to_string).collect()
-        };
-        let mut t = Topology::from_lists(&sessions, &panes, &[]);
-        t.terms_listed(&terms);
-        t
-    };
+    let listed = || listed_topology(&tmux).0;
     // The sh the program is exec'd from lists first; wait for the program itself.
     let seen = wait_for(Duration::from_secs(10), || {
         let t = listed();
