@@ -2,7 +2,7 @@
 //! its brain and an explicit environment, answered per command (L18). Every pane that
 //! started is tagged, recorded in the topology and counted, whatever the others' answers.
 
-use super::build::{keep_on_exit, view_tags};
+use super::build::{keep_on_exit, panel_tags, view_tags};
 use super::scene::HIDDEN;
 use crate::effect::{Effect, LogLevel, TmuxToken};
 use crate::panel::View;
@@ -86,10 +86,14 @@ pub(crate) fn respawn(state: &State, pane: PaneId, view: View) -> Cmd {
 }
 
 /// L7's tags for a panel just started in `pane`: its view, its label, and a pane that stays
-/// when its program stops, saying so. Its frame comes with the build that places it (L10).
-/// Public only so the daemon's real-tmux test can run these very commands.
+/// when its program stops, saying so. Its frame comes with the build that places it (L10);
+/// a sheet, which no build places, takes its frame now, so tmux draws no label above it
+/// (S9). Public only so the daemon's real-tmux test can run these very commands.
 pub fn spawn_tags(pane: PaneId, view: View) -> Vec<Cmd> {
-    let mut cmds = view_tags(pane, view).to_vec();
+    let mut cmds = match view.is_sheet() {
+        true => panel_tags(pane, view),
+        false => view_tags(pane, view).to_vec(),
+    };
     cmds.extend(keep_on_exit(pane));
     cmds
 }

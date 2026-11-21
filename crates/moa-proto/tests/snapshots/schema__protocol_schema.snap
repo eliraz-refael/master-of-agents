@@ -999,6 +999,23 @@ expression: all
             "type": "object"
           },
           {
+            "description": "A sheet (the picker or help, linked into your session) is done: its tab is unlinked\nfrom every session but moa's hidden one. Only a sheet's own panel sends it.",
+            "properties": {
+              "method": {
+                "const": "ui.close",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "description": "The layouts in `layouts.json` and the presets, the brain's current one marked.",
             "properties": {
               "method": {

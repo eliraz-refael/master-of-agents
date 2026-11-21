@@ -28,6 +28,8 @@ pub const ALLOWED: &[&str] = &[
     "rename-window",
     "resize-window",
     "run-shell",
+    "link-window",
+    "unlink-window",
 ];
 
 /// A command that must not be sent, with the reason.
@@ -55,6 +57,8 @@ const RENAME_FORMAT: &str = "rename-window's name must keep # literal (##)";
 const RESIZE_WINDOW: &str = "resize-window needs -A and a tab id";
 const WINDOW_SIZE: &str = "window-size is only unset, on a tab id's window";
 const REAP: &str = "run-shell only runs true";
+const LINK: &str = "link-window needs -s and a tab id, then -t and a session id with a colon";
+const UNLINK: &str = "unlink-window needs -t and a session id with a window id";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
 /// What a chain is called where a name is asked for (a log line). It is no tmux command.
@@ -196,10 +200,30 @@ impl Cmd {
                 [t, pane] if t == "-t" && is_pane_id(pane) => Ok(()),
                 _ => Err(Refused(ONE_PANE)),
             },
-            // The pane, by its id: its window, or the pane in it.
+            // The pane, by its id: its window, or the pane in it. A sheet's window is
+            // selected in the session it is linked into, by both ids (S9).
             "select-window" | "select-pane" => match self.args.as_slice() {
                 [t, pane] if t == "-t" && is_pane_id(pane) => Ok(()),
+                [t, w] if self.name == "select-window" && t == "-t" && is_session_window(w) => {
+                    Ok(())
+                }
                 _ => Err(Refused(NEEDS_T)),
+            },
+            // A sheet (S9): its pane's window linked into a user's session, at the next free
+            // index (`$N:`), and unlinked from it by both ids. Never `-k`, which would kill
+            // the window when it is linked nowhere else.
+            "link-window" => match self.args.as_slice() {
+                [s, pane, t, session] if s == "-s" && is_pane_id(pane) && t == "-t" => {
+                    match session.strip_suffix(':') {
+                        Some(id) if is_id(id, '$') => Ok(()),
+                        _ => Err(Refused(LINK)),
+                    }
+                }
+                _ => Err(Refused(LINK)),
+            },
+            "unlink-window" => match self.args.as_slice() {
+                [t, w] if t == "-t" && is_session_window(w) => Ok(()),
+                _ => Err(Refused(UNLINK)),
             },
             // The commands that move panes (L4) name panes by id and sessions exactly, so a
             // prefix never matches a stranger, and `-d` keeps the user's view where it is.
@@ -451,8 +475,19 @@ fn is_answer_template(t: &str) -> bool {
 
 /// A pane id as tmux prints it: `%` and digits.
 fn is_pane_id(s: &str) -> bool {
-    s.strip_prefix('%')
+    is_id(s, '%')
+}
+
+/// An id as tmux prints it: `prefix` and digits.
+fn is_id(s: &str, prefix: char) -> bool {
+    s.strip_prefix(prefix)
         .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A window in a session, by both ids: `$N:@N`.
+fn is_session_window(s: &str) -> bool {
+    s.split_once(':')
+        .is_some_and(|(session, window)| is_id(session, '$') && is_id(window, '@'))
 }
 
 /// An absolute path to a file named exactly `moa.tmux`, with no glob characters.

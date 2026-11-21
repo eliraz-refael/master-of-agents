@@ -91,6 +91,12 @@ impl View {
         }
     }
 
+    /// Whether moa shows the view as a sheet (S9): one panel, parked, whose tab is linked
+    /// into your session while it is open. No layout holds one, and a build never takes one.
+    pub fn is_sheet(self) -> bool {
+        matches!(self, View::Picker | View::Help)
+    }
+
     /// Whether the panel draws its own frame: the spike's `FRAMED`, plus the picker, help and
     /// setup (S11).
     pub fn framed(self) -> bool {

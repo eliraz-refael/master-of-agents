@@ -22,7 +22,7 @@ use futures_util::FutureExt;
 use jiff::tz::TimeZone;
 use moa_client::{Client, ClientOptions, Live, LiveMsg};
 use moa_core::UtcMs;
-use moa_core::op::{Done, Op};
+use moa_core::op::{Done, NoParams, Op};
 use moa_core::panel::View;
 use moa_core::publish::{CoreEvent, Topic};
 use moa_core::tmux::ids::PaneId;
@@ -673,10 +673,15 @@ impl Loop {
         for out in outs {
             match out {
                 Out::Quit => return true,
-                // A picker you started quits, as Ctrl-c quits any panel you started; one moa
-                // placed stays where it is.
+                // A picker you started quits, as Ctrl-c quits any panel you started; a sheet
+                // moa placed asks moa to close it, and stays, parked, for its next open (S9).
+                // That reply isn't the footer's.
                 Out::Close if !self.panel.managed() => return true,
-                Out::Close => {}
+                Out::Close => {
+                    if let Link::Up { live, .. } = &mut self.link {
+                        live.send(Op::UiClose(NoParams));
+                    }
+                }
                 Out::Send(op) => match &mut self.link {
                     Link::Up { live, .. } => {
                         self.asked.insert(live.send(op));

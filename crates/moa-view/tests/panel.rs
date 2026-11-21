@@ -946,6 +946,7 @@ fn panels_row(key: &str, view: View, managed: bool) -> Data {
             pane: Some("%3".into()),
             view,
             managed,
+            sheet: None,
         },
     );
     data

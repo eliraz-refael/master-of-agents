@@ -12,24 +12,24 @@ pub enum KeyAction {
     Tree,
     Plan,
     Agent,
+    /// A sheet of the picker linked into your session (S9).
     Find,
-    FindOther,
     New,
     Terminal,
     /// A layout, 1 to 4.
     Layout(u8),
     Repair,
+    /// A sheet of help linked into your session (S9).
     Help,
 }
 
 impl KeyAction {
-    pub const ALL: [KeyAction; 14] = [
+    pub const ALL: [KeyAction; 13] = [
         KeyAction::Console,
         KeyAction::Tree,
         KeyAction::Plan,
         KeyAction::Agent,
         KeyAction::Find,
-        KeyAction::FindOther,
         KeyAction::New,
         KeyAction::Terminal,
         KeyAction::Layout(1),
@@ -48,7 +48,6 @@ impl KeyAction {
             KeyAction::Plan => "plan".into(),
             KeyAction::Agent => "agent".into(),
             KeyAction::Find => "find".into(),
-            KeyAction::FindOther => "find-other".into(),
             KeyAction::New => "new".into(),
             KeyAction::Terminal => "terminal".into(),
             KeyAction::Layout(n) => format!("layout-{n}"),
@@ -61,9 +60,9 @@ impl KeyAction {
         KeyAction::ALL.into_iter().find(|a| a.word() == w)
     }
 
-    /// The key that triggers it, after moa's prefix. Not for `Find` and `FindOther`: `[ui]
-    /// picker` decides which key is `find`'s, so `keymap::ctrl_a` is the only source for
-    /// their keys and labels (S8); `FindOther` is no key's.
+    /// The key that triggers it, after moa's prefix. Not for `Find`: `[ui] picker` decides
+    /// which key is `find`'s, so `keymap::ctrl_a` is the only source for its key and label
+    /// (S8).
     pub fn key(self) -> &'static str {
         match self {
             KeyAction::Console => "c",
@@ -71,7 +70,6 @@ impl KeyAction {
             KeyAction::Plan => "p",
             KeyAction::Agent => "g",
             KeyAction::Find => "/",
-            KeyAction::FindOther => "s",
             KeyAction::New => "n",
             KeyAction::Terminal => "$",
             KeyAction::Layout(1) => "1",
@@ -83,7 +81,7 @@ impl KeyAction {
         }
     }
 
-    /// The menu text. Not for `Find` and `FindOther`, as with [`key`](KeyAction::key).
+    /// The menu text. Not for `Find`, as with [`key`](KeyAction::key).
     pub fn label(self) -> &'static str {
         match self {
             KeyAction::Console => "Console",
@@ -91,7 +89,6 @@ impl KeyAction {
             KeyAction::Plan => "Big picture",
             KeyAction::Agent => "Agent spot",
             KeyAction::Find => "Find a session…",
-            KeyAction::FindOther => "Find a session, full tab…",
             KeyAction::New => "New session…",
             KeyAction::Terminal => "Terminal here",
             KeyAction::Layout(1) => "Layout: cockpit",
@@ -100,25 +97,6 @@ impl KeyAction {
             KeyAction::Layout(_) => "Layout: triage (status)",
             KeyAction::Repair => "Repair panels",
             KeyAction::Help => "Keys and help",
-        }
-    }
-
-    /// The notice shown until the action's slice lands.
-    /// `None` for a key the core acts on (`keys::run`).
-    pub fn not_yet(self) -> Option<&'static str> {
-        match self {
-            KeyAction::Find | KeyAction::FindOther => {
-                Some("finding a session isn't in this build yet")
-            }
-            KeyAction::Help => Some("help isn't in this build yet"),
-            KeyAction::Console
-            | KeyAction::Tree
-            | KeyAction::Plan
-            | KeyAction::Agent
-            | KeyAction::New
-            | KeyAction::Terminal
-            | KeyAction::Layout(_)
-            | KeyAction::Repair => None,
         }
     }
 }

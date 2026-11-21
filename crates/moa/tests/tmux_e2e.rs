@@ -44,9 +44,42 @@ fn moa_key(tb: &TempBrain, term: &Terminal, key: &str, says: &str) {
     );
 }
 
-/// The notice a daemon key shows in this build.
-fn notice(a: KeyAction) -> String {
-    format!("moa: {}", a.not_yet().unwrap())
+/// What help shows until it is a view of its own.
+const HELP_NOT_YET: &str = "help isn't in this build yet";
+
+/// `press` opens a sheet (S9): the terminal's tab becomes one whose panel shows `says`, linked
+/// into session `moa` from `_moa`. Ctrl-c closes it: the terminal is back on the tab it
+/// was on, and session `moa` no longer has the sheet's tab.
+#[track_caller]
+fn a_sheet_opens_and_closes(tb: &TempBrain, term: &Terminal, press: impl Fn(), says: &str) {
+    let before = client_field(tb, term, "#{window_id}");
+    press();
+    let sheet = wait_for(SHOWS, || {
+        let pane = client_field(tb, term, "#{pane_id}")?;
+        screen_of(tb, &pane)
+            .contains(says)
+            .then(|| client_field(tb, term, "#{window_id}"))
+            .flatten()
+    });
+    let Some(sheet) = sheet else {
+        let pane = client_field(tb, term, "#{pane_id}").unwrap_or_default();
+        panic!(
+            "no sheet showed {says:?}; {pane} shows:\n{}\n{}",
+            tab_shows(tb, &pane),
+            what_happened(tb, term)
+        )
+    };
+    term.press(b"\x03");
+    let closed = wait_for(SHOWS, || {
+        let tabs = tmux(tb, &["list-windows", "-t", "=moa:", "-F", "#{window_id}"]);
+        let back = client_field(tb, term, "#{window_id}") == before;
+        (back && !tabs.lines().any(|w| w == sheet)).then_some(())
+    });
+    assert!(
+        closed.is_some(),
+        "the sheet {sheet} never closed\n{}",
+        what_happened(tb, term)
+    );
 }
 
 fn launches(tb: &TempBrain) -> u64 {
@@ -95,11 +128,14 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
     let before = launches(&tb);
 
     // `$` opens a tab now (slice 5a's Task 14 tests it end to end), and the cockpit's keys
-    // act (cockpit_run.rs in moa-core): the rest still say they're coming. `/` opens the
-    // picker's popup (moa-tmux's conf.rs tests it), and the full tab is `s`, the daemon's
-    // `find`.
-    for (key, a) in [("s", KeyAction::Find), ("?", KeyAction::Help)] {
-        moa_key(&tb, &term, key, &notice(a));
+    // act (cockpit_run.rs in moa-core). `/` opens the picker's popup (moa-tmux's conf.rs
+    // tests it), and the full tab is `s`, the daemon's `find`; `?` opens help's (S9).
+    for (key, says) in [("s", "esc close"), ("?", HELP_NOT_YET)] {
+        let press = || {
+            ctrl_a(&tb, &term);
+            term.press(key.as_bytes());
+        };
+        a_sheet_opens_and_closes(&tb, &term, press, says);
     }
     // `n` asks for a folder in the status line; Ctrl-c puts it away and answers nothing.
     // (Esc would too, but tmux reads an Esc then the next Ctrl-a as one key.)
@@ -107,18 +143,16 @@ fn keys_and_menu_reach_the_daemon_with_zero_launches() {
     term.press(b"\x03");
 
     // The menu, then an item in it.
-    ctrl_a(&tb, &term);
-    term.press(b" ");
-    assert!(
-        term.wait_for_text(KeyAction::Plan.label(), QUICK),
-        "the menu never showed"
-    );
-    term.mark();
-    term.press(KeyAction::Help.key().as_bytes());
-    assert!(
-        term.wait_for_text(&notice(KeyAction::Help), QUICK),
-        "the menu's help item never answered"
-    );
+    let menu_help = || {
+        ctrl_a(&tb, &term);
+        term.press(b" ");
+        assert!(
+            term.wait_for_text(KeyAction::Plan.label(), QUICK),
+            "the menu never showed"
+        );
+        term.press(KeyAction::Help.key().as_bytes());
+    };
+    a_sheet_opens_and_closes(&tb, &term, menu_help, HELP_NOT_YET);
 
     // Pure keys: the next and previous tab, and no split in the cockpit.
     tmux(&tb, &["new-window", "-d", "-t", "=moa:"]);
@@ -214,7 +248,11 @@ fn keys_say_moa_isnt_running_when_the_daemon_is_gone() {
     // Back again, from a second terminal; the first one's keys work.
     let again = open(&tb, &[], &[]);
     came_up(&tb, &again);
-    moa_key(&tb, &term, "?", &notice(KeyAction::Help));
+    let help = || {
+        ctrl_a(&tb, &term);
+        term.press(b"?");
+    };
+    a_sheet_opens_and_closes(&tb, &term, help, HELP_NOT_YET);
 
     // A crash.
     let pid = status_json(&tb)["pid"].to_string();
@@ -373,7 +411,11 @@ fn a_user_tmux_conf_with_run_shell_and_hooks() {
     .unwrap();
     let term = open(&tb, &[], &[]);
     came_up(&tb, &term);
-    moa_key(&tb, &term, "?", &notice(KeyAction::Help));
+    let help = || {
+        ctrl_a(&tb, &term);
+        term.press(b"?");
+    };
+    a_sheet_opens_and_closes(&tb, &term, help, HELP_NOT_YET);
 
     assert_eq!(option(&tb, "@user_opt"), "1");
     let set = hooks(&tb);

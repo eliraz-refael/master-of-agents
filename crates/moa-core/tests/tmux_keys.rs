@@ -93,63 +93,34 @@ fn tmux_effects(fx: &[Effect]) -> Vec<&Effect> {
         .collect()
 }
 
-/// The argv of the one `Tmux` effect's one command, which is untokened.
-fn the_notice(fx: &[Effect]) -> Vec<String> {
+/// The one listing a cockpit operation asks first (L17), in `fx`, with nothing logged.
+fn lists_first(fx: &[Effect], what: &str) {
     let [
         Effect::Tmux {
             conn: 1,
             cmds,
-            token: None,
+            token: Some(TmuxToken::Query(_)),
         },
     ] = tmux_effects(fx)[..]
     else {
-        panic!("{fx:?}")
+        panic!("{what}: {fx:?}")
     };
-    assert_eq!(cmds.len(), 1);
-    assert_eq!(cmds[0].name(), "display-message");
-    cmds[0].argv().to_vec()
-}
-
-fn expected(client: &str, a: KeyAction) -> Vec<String> {
-    ["-c", client, "-d", "4000", "-l"]
-        .into_iter()
-        .map(String::from)
-        .chain([format!("moa: {}", a.not_yet().unwrap())])
-        .collect()
-}
-
-/// The keys whose slice hasn't landed (5c) still say so.
-#[test]
-fn every_key_gets_its_notice() {
-    let mut s = up();
-    for a in [KeyAction::Find, KeyAction::FindOther, KeyAction::Help] {
-        let fx = message(&mut s, &format!("moa:key {} %3 $0 /dev/ttys1", a.word()));
-        assert_eq!(the_notice(&fx), expected("/dev/ttys1", a), "{a:?}");
-        assert!(logs(&fx).is_empty(), "{a:?}");
-    }
+    assert_eq!(*cmds, refresh_cmds(), "{what}");
+    assert!(logs(fx).is_empty(), "{what}");
 }
 
 /// The cockpit's keys (L13): `c t p g` go to a panel, `1`–`4` apply a preset and `r`
-/// repairs. Each starts a cockpit operation, which lists the panes first (L17); none says
-/// "not yet".
+/// repairs; `find` and `help` open their sheets (S9). Each starts a cockpit operation, which
+/// lists the panes first (L17). No key says "not yet" any more.
 #[test]
 fn the_cockpit_keys_act() {
-    for k in ["c", "t", "p", "g", "1", "2", "3", "4", "r"] {
-        let a = KeyAction::ALL.into_iter().find(|a| a.key() == k).unwrap();
+    for a in KeyAction::ALL {
+        if matches!(a, KeyAction::Terminal | KeyAction::New) {
+            continue;
+        }
         let mut s = up();
         let fx = message(&mut s, &format!("moa:key {} %3 $0 /dev/ttys1", a.word()));
-        let [
-            Effect::Tmux {
-                conn: 1,
-                cmds,
-                token: Some(TmuxToken::Query(_)),
-            },
-        ] = tmux_effects(&fx)[..]
-        else {
-            panic!("{k}: {fx:?}")
-        };
-        assert_eq!(*cmds, refresh_cmds(), "{k}");
-        assert!(logs(&fx).is_empty(), "{k}");
+        lists_first(&fx, &a.word());
     }
 }
 
@@ -175,10 +146,10 @@ fn the_terminal_key_is_no_longer_a_notice() {
 }
 
 #[test]
-fn a_menu_item_without_a_pane_still_answers() {
+fn a_menu_item_without_a_pane_still_acts() {
     let mut s = up();
     let fx = message(&mut s, "moa:key help - $0 /dev/ttys1");
-    assert_eq!(the_notice(&fx), expected("/dev/ttys1", KeyAction::Help));
+    lists_first(&fx, "help");
 }
 
 #[test]

@@ -22,15 +22,18 @@ use crate::publish::Topic;
 use crate::state::State;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::bound_session;
-use crate::tmux::ids::PaneId;
+use crate::tmux::ids::{ClientName, PaneId, TmuxSessionId};
 use crate::tmux::link::{Asked, NO_TERMINAL, log};
 use crate::tmux::topology::refresh_cmds;
 
 mod answers;
 mod decide;
+mod sheets;
 
 pub(crate) use answers::{chain_answered, scene_answered, spawn_answered};
 use decide::{Said, Step, Then, layout_refused, wants_lazy};
+use sheets::{linked_out, sheet_of, stale_sheets};
+pub(crate) use sheets::{sheet_news, sheets_notified, ui_close};
 
 /// An operation the link went away under, or a reload dropped.
 pub(crate) const LOST: &str = "moa lost its terminal; try again";
@@ -76,6 +79,18 @@ pub(crate) enum CockpitOp {
     /// for the tab (the launch's own caller was answered by it). Never replaced, and never
     /// replaces a waiting operation: each runs in its turn.
     Show { pane: PaneId, tells: Vec<Tell> },
+    /// Opens the `view` sheet in tmux session `session` (S9): the tab of its panel, parked
+    /// in `_moa`, linked into the session and selected, or selected when it is there
+    /// already. With no panel, one is started first; a stopped one is restarted in place.
+    /// `client` pressed the key, and hears a refusal.
+    Sheet {
+        view: View,
+        session: TmuxSessionId,
+        client: ClientName,
+    },
+    /// Closes the sheet whose panel is in `pane` (S9): its tab unlinked from every session
+    /// but `_moa`, where it waits for the next open. Nobody hears of it.
+    Unsheet { pane: PaneId },
 }
 
 /// Which pane a build selects once it is done (L6 step 7).
@@ -148,7 +163,11 @@ fn tells_of(op: &CockpitOp) -> Vec<Tell> {
         | CockpitOp::Repair { tell }
         | CockpitOp::SelectView { tell, .. } => tell.iter().cloned().collect(),
         CockpitOp::Show { tells, .. } => tells.clone(),
-        CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => Vec::new(),
+        CockpitOp::Sheet { client, .. } => vec![Tell::Notice(client.clone())],
+        CockpitOp::Lazy
+        | CockpitOp::Refill
+        | CockpitOp::Vacate { .. }
+        | CockpitOp::Unsheet { .. } => Vec::new(),
     }
 }
 
@@ -226,8 +245,9 @@ fn refills(state: &State, op: &CockpitOp) -> bool {
 }
 
 /// Runs `op` after those queued before it, now if none is. A build replaces a waiting
-/// build of its kind, which is told so; a refill behind a build is dropped. With no link,
-/// only a vacate waits; the rest are refused.
+/// build of its kind, which is told so; a refill behind a build is dropped; a sheet's open
+/// or close replaces a waiting one of the same sheet, which nobody hears of (a key has no
+/// reply). With no link, only a vacate waits; the rest are refused.
 pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     if state.tmux.conn().is_none() && !matches!(op, CockpitOp::Vacate { .. }) {
         let no = Err(OpError(NO_TERMINAL.into()));
@@ -235,6 +255,14 @@ pub(crate) fn queue(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     }
     if op == CockpitOp::Refill && state.cockpit.waiting.iter().any(|w| refills(state, w)) {
         return Vec::new();
+    }
+    if let Some(sheet) = sheet_of(state, &op) {
+        let waiting = std::mem::take(&mut state.cockpit.waiting);
+        let kept = waiting
+            .into_iter()
+            .filter(|w| sheet_of(state, w) != Some(sheet))
+            .collect();
+        state.cockpit.waiting = kept;
     }
     let mut fx = Vec::new();
     let kind = build_kind(&op);
@@ -323,9 +351,10 @@ pub(crate) fn select_view(
     pane: &str,
     view: View,
 ) -> Vec<Effect> {
-    // The empty slot is the spot's, and the picker a prompt's: neither is a panel's to pick.
+    // The empty slot is the spot's, and the picker and help are sheets, parked between opens
+    // (S9): none is a panel's to pick.
     let pane = match crate::panel::pane_arg(pane) {
-        Ok(_) if matches!(view, View::EmptySlot | View::Picker) => {
+        Ok(_) if view == View::EmptySlot || view.is_sheet() => {
             Err(OpError(format!("{view} can't be chosen for a panel")))
         }
         p => p,
@@ -370,7 +399,11 @@ fn start(state: &mut State, op: CockpitOp) -> Vec<Effect> {
     let mut fx = Vec::new();
     if !matches!(
         op,
-        CockpitOp::Vacate { .. } | CockpitOp::SelectView { .. } | CockpitOp::Show { .. }
+        CockpitOp::Vacate { .. }
+            | CockpitOp::SelectView { .. }
+            | CockpitOp::Show { .. }
+            | CockpitOp::Sheet { .. }
+            | CockpitOp::Unsheet { .. }
     ) {
         state.layouts = crate::ops::layout::read(state);
         fx.extend(
@@ -467,11 +500,18 @@ fn drop_all(state: &mut State) -> (Vec<Effect>, bool) {
             .is_some_and(|op| !matches!(op, CockpitOp::Vacate { .. }));
     let ops: Vec<CockpitOp> = in_flight.into_iter().chain(run.waiting.drain(..)).collect();
     let mut fx = Vec::new();
+    let mut unsheeted = false;
     for op in ops {
         match op {
             CockpitOp::Vacate { .. } => state.cockpit.waiting.push_back(op),
+            // A sheet's close that won't run forgets its open (S9): the next listing finds
+            // its tab linked with no open recorded, and closes it then (`stale_sheets`).
+            CockpitOp::Unsheet { pane } => unsheeted |= state.sheets.remove(&pane).is_some(),
             op => fx.extend(told_all(state, tells_of(&op), &Err(OpError(LOST.into())))),
         }
+    }
+    if unsheeted {
+        fx.extend(crate::panel::publish_panels(state));
     }
     (fx, dropped)
 }
@@ -557,11 +597,13 @@ pub(crate) fn reap_nudge(conn: u64) -> Effect {
 }
 
 /// The link's own listing came back: what it shows of stopped panels is taken in
-/// ([`stopped_listed`]). The first after a link-up queues the lazy build when
+/// ([`stopped_listed`]), and of sheets left open ([`stale_sheets`]). The first after a
+/// link-up queues the lazy build when
 /// it shows what the build looks for, a user's terminal and a cockpit with no panel in it;
 /// the build then takes a listing of its own, as every operation does (L17).
 pub(crate) fn link_listed(state: &mut State) -> Vec<Effect> {
     let mut fx: Vec<Effect> = stopped_listed(state).into_iter().collect();
+    fx.extend(stale_sheets(state));
     if !std::mem::take(&mut state.cockpit.lazy_armed) {
         return fx;
     }
@@ -592,7 +634,12 @@ pub(crate) fn client_gone(state: &mut State, conn: ConnId) {
                 }
             }
             CockpitOp::Show { tells, .. } => tells.retain(|t| !gone(t)),
-            CockpitOp::Lazy | CockpitOp::Refill | CockpitOp::Vacate { .. } => {}
+            // A sheet's key tells its client, which no connection is.
+            CockpitOp::Lazy
+            | CockpitOp::Refill
+            | CockpitOp::Vacate { .. }
+            | CockpitOp::Sheet { .. }
+            | CockpitOp::Unsheet { .. } => {}
         }
     }
 }

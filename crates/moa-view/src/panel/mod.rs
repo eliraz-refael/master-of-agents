@@ -184,6 +184,11 @@ pub struct Panel {
     /// It draws in a tmux popup (`--once`, S8), which tmux frames: it draws no frame of its
     /// own (S11).
     popup: bool,
+    /// Its `panels` row names a tab: moa can place it there.
+    in_tab: bool,
+    /// The sheet's open its row last said (S9): a new number opens it afresh, and `None` in
+    /// a sheet moa placed is a closed one, which draws nothing.
+    open: Option<i64>,
     /// The title of the pick the picker sent and waits on: its `Ok` closes the picker.
     /// Another Enter waits for it.
     picking: Option<String>,
@@ -244,6 +249,8 @@ impl Panel {
             pointer: None,
             managed: false,
             popup: false,
+            in_tab: false,
+            open: None,
             picking: None,
             picks: None,
         }
@@ -259,27 +266,43 @@ impl Panel {
     }
 
     /// Shows another view, from its top, with nothing asked or said. Whether moa manages
-    /// the panel, and whether it is a popup, stay as they are.
+    /// the panel, whether it is a popup, and what its row last said of its tab and its
+    /// sheet's open stay as they are.
     pub fn set_view(&mut self, view: View) {
         if view != self.view {
-            let (managed, popup) = (self.managed, self.popup);
+            let (managed, popup, in_tab, open) = (self.managed, self.popup, self.in_tab, self.open);
             *self = Panel::new(view);
             self.managed = managed;
             self.popup = popup;
+            self.in_tab = in_tab;
+            self.open = open;
         }
     }
 
     /// Follows the panel's own `panels` row (`key`, from `ui.panel`'s reply): the view moa
-    /// gives it, and whether moa manages it (L8). A row for another key, or none, changes
-    /// nothing. True when the view changed.
+    /// gives it, and whether moa manages it (L8); for a sheet, its open (S9), a new one of
+    /// which starts it afresh. A row for another key, or none, changes nothing. True when
+    /// the view changed.
     pub fn follow(&mut self, data: &Data, key: &str) -> bool {
         let Some(row) = data.panels.get(key) else {
             return false;
         };
         self.managed = row.managed;
+        self.in_tab = row.pane.is_some();
         let changed = row.view != self.view;
         self.set_view(row.view);
+        if row.sheet.is_some() && row.sheet != self.open {
+            self.reset_pick();
+        }
+        self.open = row.sheet;
         changed
+    }
+
+    /// A sheet moa placed in a tab whose row says it is closed (S9): it waits, parked, for
+    /// its next open, and draws nothing meanwhile. One you started, or a popup, always
+    /// draws.
+    fn closed(&self) -> bool {
+        self.view.is_sheet() && self.managed && self.in_tab && !self.popup && self.open.is_none()
     }
 
     /// Marks the panel as moa's before any row says so: moa tags a panel it places as it
@@ -295,21 +318,22 @@ impl Panel {
     }
 
     /// Ctrl-c (L14): it cancels an open prompt or y/N; with nothing open it quits as `q`
-    /// does in the picture (see [`quit`](Panel::quit)). The picker closes, as Esc closes it,
-    /// and never says the managed line (S7).
+    /// does in the picture (see [`quit`](Panel::quit)). The picker and help close, as Esc
+    /// closes the picker, and never say the managed line (S7, S9).
     pub fn interrupt(&mut self) -> Option<Out> {
         self.hover = None;
         if self.prompt.take().is_some() || self.confirm.take().is_some() {
             self.say(CANCELLED);
             return None;
         }
-        if self.view == View::Picker && pick_keys::closes(Key::Ctrl('c')) {
+        if self.view.is_sheet() {
             return Some(Out::Close);
         }
         self.quit()
     }
 
-    /// The picker opens again (S9): its query empty, its first row selected, nothing said.
+    /// The picker, or help, opens again (S9): the query empty, the first row selected and
+    /// help at its top, nothing said.
     pub fn reset_pick(&mut self) {
         self.ui.query.clear();
         self.list = ListState::default();
@@ -574,8 +598,24 @@ impl Panel {
             .filter(|m| m.until.is_none_or(|t| now < t))
     }
 
-    /// The frame to draw now.
+    /// The frame to draw now. A closed sheet's is blank, with nothing to move or change.
     pub fn screen(&mut self, data: &Data, ctx: &Ctx, size: Size) -> Screen {
+        if self.closed() {
+            return Screen {
+                geometry: geometry(self.view, false, size),
+                title: None,
+                tabs: None,
+                brand: None,
+                head: Vec::new(),
+                cursor: None,
+                body: Vec::new(),
+                rule: None,
+                strip: Vec::new(),
+                footer: Span::new("", Tone::Dim),
+                animate: false,
+                wake_at: None,
+            };
+        }
         let g = self.refresh(data, ctx, size);
         let shown = self
             .lines

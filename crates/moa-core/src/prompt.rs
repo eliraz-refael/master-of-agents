@@ -35,8 +35,9 @@ pub(crate) enum Asking {
 }
 
 /// What was typed, from a prompt answer's text as tmux sent it, on a tmux of `version`: 3.4
-/// alone writes a typed `$` as `\$`, so only there is it taken back. The rule is the one
-/// `moa.tmux` uses (`#{m:3.4*}` or `next-3.4*`); on later versions a typed `\$` stays.
+/// alone writes a typed `$` as `\$`, so only there is it taken back: 3.4, a patch of it or
+/// `next-3.4`, as [`version::is`] reads them (never `3.40`). On later versions a typed `\$`
+/// stays.
 pub fn typed(version: &str, text: &str) -> String {
     if version::is(version, &["3.4"]) {
         text.replace(r"\$", "$")

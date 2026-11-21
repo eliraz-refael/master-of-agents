@@ -1,9 +1,9 @@
 use serde_json::json;
 
-use super::{CockpitOp, Select, current, finish, in_cockpit, lost_now, refused, title};
+use super::{CockpitOp, Select, current, finish, in_cockpit, linked_out, lost_now, refused, title};
 use crate::cockpit::assign::view_of;
-use crate::cockpit::build::{occupant_stays, panel_tags};
-use crate::cockpit::scene::{AGENT, Place, Role, Scene};
+use crate::cockpit::build::{fit_to_terminal, occupant_stays, panel_tags};
+use crate::cockpit::scene::{AGENT, HIDDEN, Place, Role, Scene};
 use crate::cockpit::spawn::{respawn, respawn_tail, spawn};
 use crate::cockpit::{Plan, plan, swap_in, vacate};
 use crate::effect::Effect;
@@ -14,8 +14,11 @@ use crate::panel::View;
 use crate::sleep::kill_pane;
 use crate::state::State;
 use crate::tmux::cmd::Cmd;
-use crate::tmux::ids::PaneId;
+use crate::tmux::ids::{PaneId, TmuxSessionId, WindowId};
 use crate::tmux::link::{Asked, NO_TERMINAL};
+
+/// A sheet's key pressed in moa's hidden session, where it has its tab already.
+const FROM_HIDDEN: &str = "open moa's tab first";
 
 #[derive(Debug, Default)]
 pub(super) enum Step {
@@ -41,9 +44,45 @@ pub(super) struct Then {
     pub(super) views: Option<Vec<(PaneId, View)>>,
     /// The panels it starts in place.
     pub(super) starts: u32,
+    /// A sheet's tab it links or unlinks (S9), recorded at once too.
+    pub(super) sheet: Option<Sheeted>,
     /// The layout it builds, for its error.
     pub(super) layout: String,
     pub(super) ok: Said,
+}
+
+impl Then {
+    /// A chain that records nothing and ends as `ok`: each plan sets what its chain does
+    /// over it (`Then { tags, ..Then::quiet(ok) }`).
+    pub(super) fn quiet(ok: Said) -> Then {
+        Then {
+            tags: Vec::new(),
+            untagged: Vec::new(),
+            moved: None,
+            views: None,
+            starts: 0,
+            sheet: None,
+            layout: String::new(),
+            ok,
+        }
+    }
+}
+
+/// What a sheet's chain did (S9).
+#[derive(Clone, Debug)]
+pub(super) enum Sheeted {
+    /// The sheet in `pane`, whose tab is `window`, is open in `session`: linked there, or
+    /// selected where it was linked already.
+    Opened {
+        pane: PaneId,
+        window: WindowId,
+        session: TmuxSessionId,
+    },
+    /// Tab `window` is unlinked from `sessions`.
+    Closed {
+        window: WindowId,
+        sessions: Vec<TmuxSessionId>,
+    },
 }
 
 /// Where a swap into the spot (L11) puts the panes: `pane` takes the spot's place, and the
@@ -73,8 +112,9 @@ pub(super) enum Next {
     Chain(Vec<Cmd>, Then),
     /// A vacate's chain that takes its agent down, then, once that is answered `Ok`, the
     /// rest (the empty slot's tags), as a chain of its own: tmux's one answer for a chain
-    /// can't tell which command failed (R24 asks whether the agent went).
-    TakeDown(Vec<Cmd>, Then, Option<(Vec<Cmd>, Then)>),
+    /// can't tell which command failed (R24 asks whether the agent went). The rest is boxed:
+    /// two plans in one variant would make every `Next` twice the size.
+    TakeDown(Vec<Cmd>, Then, Option<Box<(Vec<Cmd>, Then)>>),
 }
 
 /// A layout that can't be built, as said to whoever asked for it. While `layouts.json`
@@ -115,13 +155,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                         return Next::Chain(
                             focus_cmds(pane).to_vec(),
                             Then {
-                                tags: Vec::new(),
-                                untagged: Vec::new(),
-                                moved: None,
-                                views: None,
-                                starts: 0,
                                 layout,
-                                ok: went_to(*leaf),
+                                ..Then::quiet(went_to(*leaf))
                             },
                         );
                     }
@@ -192,11 +227,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             let then = |tags, untagged, starts| Then {
                 tags,
                 untagged,
-                moved: None,
-                views: None,
                 starts,
-                layout: String::new(),
-                ok: Said::Nothing,
+                ..Then::quiet(Said::Nothing)
             };
             if !in_spot {
                 return Next::TakeDown(
@@ -219,7 +251,7 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             Next::TakeDown(
                 respawn.to_vec(),
                 then(Vec::new(), vec![*pane], 1),
-                Some((tags.to_vec(), slot)),
+                Some(Box::new((tags.to_vec(), slot))),
             )
         }
         CockpitOp::SelectView { pane, view, .. } => {
@@ -246,12 +278,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 panel_tags(*pane, *view),
                 Then {
                     tags: vec![(*pane, Some(view.word()))],
-                    untagged: Vec::new(),
-                    moved: None,
                     views: Some(vec![(*pane, *view)]),
-                    starts: 0,
-                    layout: String::new(),
-                    ok: Said::Reply(Ok(done)),
+                    ..Then::quiet(Said::Reply(Ok(done)))
                 },
             )
         }
@@ -263,12 +291,8 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
             };
             let then = |tags, moved: Option<Moved>| Then {
                 tags,
-                untagged: Vec::new(),
                 moved,
-                views: None,
-                starts: 0,
-                layout: String::new(),
-                ok: Said::Reply(Ok(shown(state, id, moved.is_some()))),
+                ..Then::quiet(Said::Reply(Ok(shown(state, id, moved.is_some()))))
             };
             let swap = swap_in(scene, *pane, |id| title(state, id));
             match (swap, scene.spot(), scene.pane(*pane)) {
@@ -290,7 +314,88 @@ pub(super) fn decide(state: &State, op: &CockpitOp, scene: &Scene) -> Next {
                 _ => Next::Chain(focus_cmds(*pane).to_vec(), then(Vec::new(), None)),
             }
         }
+        CockpitOp::Sheet { view, session, .. } => sheet(state, op, scene, *view, *session),
+        CockpitOp::Unsheet { pane } => {
+            // Gone, or linked nowhere but `_moa` (a close after a pick finds the pick's
+            // close done): nothing to unlink, and a second unlink would fail.
+            let Some(at) = scene.pane(*pane) else {
+                return Next::Done(Said::Nothing);
+            };
+            let sessions = linked_out(&state.tmux.topology, at.window);
+            if sessions.is_empty() {
+                return Next::Done(Said::Nothing);
+            }
+            let cmds = sessions
+                .iter()
+                .map(|s| Cmd::new("unlink-window").args(["-t", &format!("{s}:{}", at.window)]))
+                .collect();
+            let closed = Sheeted::Closed {
+                window: at.window,
+                sessions,
+            };
+            Next::Chain(cmds, sheet_then(closed))
+        }
     }
+}
+
+/// A sheet's chain: it records only the sheet's change, and says nothing.
+fn sheet_then(sheeted: Sheeted) -> Then {
+    Then {
+        sheet: Some(sheeted),
+        ..Then::quiet(Said::Nothing)
+    }
+}
+
+/// S9's open of the `view` sheet in tmux session `session`: its panel started first when
+/// there is none (once), restarted in place when it stopped (once), then its tab selected
+/// where it is linked already, else linked there (and selected). Then the tab takes your
+/// terminal's size: tmux sizes a window by the terminal last used in it, and none ever was
+/// in a parked one (`_moa`'s 10x3), so it would stay that small.
+fn sheet(state: &State, op: &CockpitOp, scene: &Scene, view: View, session: TmuxSessionId) -> Next {
+    let topology = &state.tmux.topology;
+    match topology.session_name(session) {
+        Some(HIDDEN) => return Next::Done(refused(op, FROM_HIDDEN.into())),
+        // The session the key came from is gone: nobody is there to see it.
+        None => return Next::Done(Said::Nothing),
+        Some(_) => {}
+    }
+    // Its panel, parked in `_moa` (a linked one reads as parked there): a live one first,
+    // else a stopped one. A pane tagged with the view anywhere else is no sheet of moa's: its
+    // tab, linked out, could never be unlinked.
+    let panel = |dead: bool| {
+        scene.panes.iter().find(|at| {
+            at.panel_view() == Some(view) && at.place == Place::Hidden && at.dead == dead
+        })
+    };
+    let cant_start = || {
+        let text = format!("couldn't start the {view}; see panel.log");
+        Next::Done(refused(op, text))
+    };
+    let Some(at) = panel(false).or_else(|| panel(true)) else {
+        if state.cockpit.replanned {
+            return cant_start();
+        }
+        return Next::Spawn(vec![view]);
+    };
+    // Stopped: restarted in place once; still stopped after that, it isn't linked.
+    if at.dead {
+        return match state.cockpit.restarted {
+            None => Next::Respawn(vec![(at.pane, view)]),
+            Some(_) => cant_start(),
+        };
+    }
+    let mut cmds = vec![if topology.sessions_of(at.window).contains(&session) {
+        Cmd::new("select-window").args(["-t", &format!("{session}:{}", at.window)])
+    } else {
+        Cmd::new("link-window").args(["-s", &at.pane.to_string(), "-t", &format!("{session}:")])
+    }];
+    cmds.extend(fit_to_terminal(at.pane));
+    let opened = Sheeted::Opened {
+        pane: at.pane,
+        window: at.window,
+        session,
+    };
+    Next::Chain(cmds, sheet_then(opened))
 }
 
 /// `goto`'s answer: the leaf's word.
@@ -373,12 +478,9 @@ fn build(
         cmds,
         Then {
             tags,
-            untagged: Vec::new(),
-            moved: None,
             views: Some(b.views),
-            starts: 0,
             layout,
-            ok,
+            ..Then::quiet(ok)
         },
     )
 }
@@ -412,7 +514,7 @@ pub(super) fn act(state: &mut State, seq: u64, next: Next) -> Vec<Effect> {
         }
         Next::TakeDown(cmds, then, rest) => {
             state.cockpit.plain_kill = matches!(&cmds[..], [c] if c.name() == "kill-pane");
-            state.cockpit.rest = rest;
+            state.cockpit.rest = rest.map(|rest| *rest);
             act(state, seq, Next::Chain(cmds, then))
         }
     }

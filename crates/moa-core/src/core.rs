@@ -121,8 +121,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx
         }
         Input::Tmux(t) => {
-            // Every key the core has goes through one dispatch (L13); the link answers the
-            // rest with a notice.
+            // Every key goes through one dispatch (L13).
             let mailbox = match &t {
                 TmuxIn::Notification(Notification::Message(m)) => Mailbox::parse(m).ok(),
                 _ => None,
@@ -130,12 +129,11 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             if let Some(Mailbox::Key {
                 action,
                 pane,
+                session,
                 client,
-                ..
             }) = &mailbox
-                && let Some(fx) = keys::run(state, *action, *pane, client.clone())
             {
-                return fx;
+                return keys::run(state, *action, *pane, *session, client.clone());
             }
             // So does every answer to a prompt that waits for one (S5); the link logs the
             // rest.
@@ -195,8 +193,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             let mut unpaned = None;
             if another_server {
                 state.pane_views.clear();
+                state.sheets.clear();
                 unpaned = panel::server_changed(state);
             }
+            // A user's session leaving a tab, or a terminal detaching, may close a sheet (S9),
+            // once the topology has taken the notification in.
+            let sheet_news = cockpit::run::sheet_news(state, &t);
             fx.extend(state.tmux.input(t));
             if lost {
                 fx.extend(cockpit::run::lost(state));
@@ -322,6 +324,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             if refill {
                 more.extend(cockpit::run::queue(state, cockpit::run::CockpitOp::Refill));
             }
+            if let Some(news) = sheet_news {
+                more.extend(cockpit::run::sheets_notified(state, news));
+            }
             if no_server {
                 more.extend(reconcile::no_server(state, now));
             }
@@ -430,6 +435,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::UiHere { folder },
             ..
         } => panel::here(state, conn, req, folder),
+        // A sheet's close runs in the cockpit's queue (S9, L17); it is answered at once.
+        Input::Client {
+            conn,
+            req,
+            op: Op::UiClose(_),
+            ..
+        } => cockpit::run::ui_close(state, conn, req),
         // `layouts.json` is read again first, and only the daemon writes it: nothing is saved.
         Input::Client {
             conn,

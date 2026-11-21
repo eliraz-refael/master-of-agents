@@ -636,3 +636,71 @@ fn a_vacate_with_an_unreadable_listing_still_kills_its_agent() {
     );
     assert!(st.cockpit.in_flight.is_none());
 }
+
+/// The picker (`%7`), its tab `@107` parked in `_moa` and linked into `moa`, as
+/// `list-panes -a` lists it: `_moa`'s line first.
+fn picker_linked() -> [String; 2] {
+    [
+        pane(7, 107, 1, false, "", "picker"),
+        pane(7, 107, 0, false, "", "picker"),
+    ]
+}
+
+/// S9: an open sheet lives in `_moa`, whichever line came last, and a build leaves it where
+/// it is: its chain names nothing of it, and nothing starts because of it.
+#[test]
+fn a_linked_sheet_is_left_alone() {
+    let mut st = up();
+    let mut panes = vec![
+        pane(2, 1, 0, true, "", "tree"),
+        pane(3, 1, 0, true, "", "console"),
+        pane(4, 1, 0, true, "", "plan"),
+        pane(6, 106, 1, false, "", "status"),
+    ];
+    panes.extend(picker_linked());
+    let n = the_listing(&apply(&mut st, 1, "triage"));
+    let (n, lines) = the_chain(&feed(&mut st, answer(n, lists(panes))));
+    let scene = Scene::read(&st.tmux.topology, |_| None);
+    let picker = scene.pane(PaneId(7)).expect("listed");
+    assert_eq!(picker.place, crate::cockpit::Place::Hidden);
+    assert!(!lines.iter().any(|l| l.contains("%7")), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("new-window")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("%6")),
+        "the parked status panel is the one taken: {lines:?}"
+    );
+    let fx = feed(&mut st, answer(n, vec![Ok(Vec::new())]));
+    let applied = replies(&fx).into_iter().map(|(_, r)| r.map(|d| d.text));
+    assert_eq!(
+        applied.collect::<Vec<_>>(),
+        [Ok("layout triage applied".into())]
+    );
+    assert_eq!(st.panel_starts, 0);
+}
+
+/// S9: a sheet is never a spare: a layout needing a panel nobody shows starts one, rather
+/// than take the parked picker.
+#[test]
+fn sheets_are_never_reused_for_a_layout() {
+    let mut st = up();
+    let panes = vec![
+        pane(3, 1, 0, true, "", "console"),
+        pane(4, 1, 0, true, "", "plan"),
+        pane(7, 107, 1, false, "", "picker"),
+    ];
+    let n = the_listing(&apply(&mut st, 1, "triage"));
+    let fx = feed(&mut st, answer(n, lists(panes)));
+    let [(_, cmds)] = &queries(&fx)[..] else {
+        panic!("not one spawn: {fx:?}")
+    };
+    let words: Vec<String> = cmds
+        .iter()
+        .map(|c| format!("{} {}", c.name(), c.argv().join(" ")))
+        .collect();
+    assert_eq!(words.len(), 1, "{words:?}");
+    assert!(words[0].starts_with("new-window"), "{words:?}");
+    assert!(words[0].contains("panel status --brain"), "{words:?}");
+}

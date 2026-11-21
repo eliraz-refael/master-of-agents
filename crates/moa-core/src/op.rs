@@ -199,6 +199,10 @@ pub enum Op {
         #[serde(default)]
         folder: Option<String>,
     },
+    /// A sheet (the picker or help, linked into your session) is done: its tab is unlinked
+    /// from every session but moa's hidden one. Only a sheet's own panel sends it.
+    #[serde(rename = "ui.close")]
+    UiClose(NoParams),
     /// The layouts in `layouts.json` and the presets, the brain's current one marked.
     #[serde(rename = "layout.list")]
     LayoutList(NoParams),
@@ -365,6 +369,7 @@ impl Op {
         "tmux.ensure",
         "ui.panel",
         "ui.here",
+        "ui.close",
         "ui.select_view",
         "layout.list",
         "layout.show",
@@ -410,6 +415,7 @@ impl Op {
             | Op::TermShow { .. }
             | Op::UiPanel { .. }
             | Op::UiHere { .. }
+            | Op::UiClose(_)
             | Op::UiSelectView { .. }
             | Op::LayoutList(_)
             | Op::LayoutShow { .. }
@@ -452,6 +458,7 @@ impl Op {
             Op::TmuxEnsure { .. } => "tmux.ensure",
             Op::UiPanel { .. } => "ui.panel",
             Op::UiHere { .. } => "ui.here",
+            Op::UiClose(_) => "ui.close",
             Op::UiSelectView { .. } => "ui.select_view",
             Op::LayoutList(_) => "layout.list",
             Op::LayoutShow { .. } => "layout.show",

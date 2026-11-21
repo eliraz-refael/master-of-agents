@@ -1,7 +1,7 @@
 //! moa's keys, all taken here (L13): `$` opens a terminal, `n` asks for a new session's
-//! folder and title, `c t p g` go to a panel, `1`–`4` apply the presets and `r` repairs.
-//! Each answers the client that pressed it with a notice. The keys whose slice hasn't landed
-//! fall through to the link's "not yet" notice.
+//! folder and title, `c t p g` go to a panel, `1`–`4` apply the presets, `r` repairs, and
+//! `find` and `?` link the picker's or help's sheet into your session (S9). Each answers the
+//! client that pressed it with a notice.
 
 use crate::cockpit::run::{CockpitOp, Select, queue};
 use crate::effect::Effect;
@@ -10,26 +10,32 @@ use crate::ops::term::{Tell, term_key};
 use crate::panel::View;
 use crate::prompt;
 use crate::state::State;
-use crate::tmux::ids::{ClientName, PaneId};
+use crate::tmux::ids::{ClientName, PaneId, TmuxSessionId};
 use crate::tmux::mailbox::KeyAction;
 
-/// What `key`, pressed in `pane` (none from a menu) by `client`, does. `None` for a key
-/// this build doesn't have yet.
+/// What `key`, pressed in `pane` (none from a menu) of tmux session `session` by `client`,
+/// does.
 pub(crate) fn run(
     state: &mut State,
     key: KeyAction,
     pane: Option<PaneId>,
+    session: TmuxSessionId,
     client: ClientName,
-) -> Option<Vec<Effect>> {
+) -> Vec<Effect> {
     let tell = Some(Tell::Notice(client.clone()));
     let goto = |leaf| CockpitOp::Build {
         name: None,
         tell: tell.clone(),
         select: Select::Leaf(leaf),
     };
+    let sheet = |view| CockpitOp::Sheet {
+        view,
+        session,
+        client: client.clone(),
+    };
     let op = match key {
-        KeyAction::Terminal => return Some(term_key(state, pane, client)),
-        KeyAction::New => return Some(prompt::new_session(state, client)),
+        KeyAction::Terminal => return term_key(state, pane, client),
+        KeyAction::New => return prompt::new_session(state, client),
         KeyAction::Console => goto(Leaf::Panel(View::Console)),
         KeyAction::Tree => goto(Leaf::Panel(View::Tree)),
         KeyAction::Plan => goto(Leaf::Panel(View::Plan)),
@@ -41,7 +47,8 @@ pub(crate) fn run(
             select: Select::Default,
         },
         KeyAction::Repair => CockpitOp::Repair { tell: tell.clone() },
-        KeyAction::Find | KeyAction::FindOther | KeyAction::Help => return None,
+        KeyAction::Find => sheet(View::Picker),
+        KeyAction::Help => sheet(View::Help),
     };
-    Some(queue(state, op))
+    queue(state, op)
 }

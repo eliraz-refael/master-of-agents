@@ -231,7 +231,7 @@ mod tests {
     }
 
     /// The daemon's keys are written from the table, so every action must be in it, once,
-    /// in either form. `FindOther` is no key's since `s` became the daemon's `find` (S8).
+    /// in either form.
     #[test]
     fn every_key_action_is_in_the_table_once() {
         for form in FORMS {
@@ -242,8 +242,7 @@ mod tests {
                     .flatten()
                     .filter(|b| b.does == Does::Moa(a))
                     .count();
-                let want = usize::from(a != KeyAction::FindOther);
-                assert_eq!(n, want, "{form:?}: {a:?}");
+                assert_eq!(n, 1, "{form:?}: {a:?}");
             }
         }
     }

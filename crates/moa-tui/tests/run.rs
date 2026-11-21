@@ -147,6 +147,7 @@ fn a_reconnect_sends_the_view_it_last_followed() {
             pane: Some("%3".into()),
             view: View::Status,
             managed: true,
+            sheet: None,
         },
     );
     assert!(panel.follow(&data, "c7"));

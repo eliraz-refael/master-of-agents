@@ -1,7 +1,9 @@
 use serde_json::json;
 
-use super::decide::{Next, Said, Step, Then, act, decide};
-use super::{CockpitOp, awaits, finish, listing, queue, refused, stopped_listed, tells_of};
+use super::decide::{Next, Said, Sheeted, Step, Then, act, decide};
+use super::{
+    CockpitOp, awaits, finish, listing, queue, refused, stale_sheets, stopped_listed, tells_of,
+};
 use crate::Now;
 use crate::change::Change;
 use crate::cockpit::scene::Scene;
@@ -86,12 +88,7 @@ fn vacate_plainly(state: &mut State, seq: u64, pane: PaneId) -> Vec<Effect> {
     )];
     let then = Then {
         tags: vec![(pane, None)],
-        untagged: Vec::new(),
-        moved: None,
-        views: None,
-        starts: 0,
-        layout: String::new(),
-        ok: Said::Nothing,
+        ..Then::quiet(Said::Nothing)
     };
     fx.extend(act(
         state,
@@ -115,6 +112,10 @@ fn chain_failed(op: &CockpitOp, layout: &str, e: &str) -> Said {
             format!("the panel in {pane} couldn't show {view}: {why}")
         }
         CockpitOp::Show { .. } => format!("moa couldn't bring it to the screen: {why}"),
+        CockpitOp::Sheet { view, .. } => format!("the {view} couldn't open: {why}"),
+        CockpitOp::Unsheet { pane } => {
+            format!("the tab of the panel in {pane} couldn't close: {why}")
+        }
         _ if raw.contains("no space for") || raw.contains("pane too small") => {
             format!("the {layout} layout doesn't fit this window; make the terminal bigger")
         }
@@ -155,12 +156,7 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
                 ];
                 let then = Then {
                     tags: vec![(pane, None)],
-                    untagged: Vec::new(),
-                    moved: None,
-                    views: None,
-                    starts: 0,
-                    layout: String::new(),
-                    ok: Said::Nothing,
+                    ..Then::quiet(Said::Nothing)
                 };
                 fx.extend(act(
                     state,
@@ -193,7 +189,15 @@ pub(crate) fn scene_answered(state: &mut State, seq: u64, answers: Answers) -> V
         return fx;
     };
     let next = decide(state, &op, &scene);
+    // A close forgets its open as it plans (S9): the notifications its own unlink brings
+    // never read as leaving an open sheet.
+    if let CockpitOp::Unsheet { pane } = &op
+        && state.sheets.remove(pane).is_some()
+    {
+        fx.extend(crate::panel::publish_panels(state));
+    }
     fx.extend(act(state, seq, next));
+    fx.extend(stale_sheets(state));
     fx
 }
 
@@ -257,6 +261,16 @@ pub(crate) fn chain_answered(
             };
             let answer = match answers.into_iter().next() {
                 Some(Ok(_)) => Ok(()),
+                // A close whose tab is gone from a session is done there (S9). Sessions in
+                // a group share their tabs, so the first unlink takes it from them all, and
+                // the next one finds no tab. Should a session tmux skipped after it still
+                // hold the tab, the next listing finds it linked with no open, and closes it.
+                Some(Err(e))
+                    if matches!(op, CockpitOp::Unsheet { .. })
+                        && first_line(&e).starts_with("can't find window") =>
+                {
+                    Ok(())
+                }
                 Some(Err(e)) => Err(e),
                 None => Err(NO_ANSWER.to_string()),
             };
@@ -279,6 +293,9 @@ pub(crate) fn chain_answered(
                         }
                     }
                     state.panel_starts += then.starts;
+                    if let Some(sheeted) = then.sheet {
+                        fx.extend(sheeted_now(state, now, sheeted));
+                    }
                     let said = match then.ok {
                         Said::Applied(layout) => {
                             let (more, said) = applied(state, now, layout);
@@ -324,6 +341,32 @@ pub(crate) fn chain_answered(
         step => state.cockpit.step = step,
     }
     fx
+}
+
+/// A sheet's chain went through (S9), straight into the topology as a swap's does. An open
+/// is recorded by its panel's pane, numbered by the wall clock (one later than the last
+/// should two fall in one millisecond), and `panels` says so: the panel clears itself for
+/// it.
+fn sheeted_now(state: &mut State, now: &Now, sheeted: Sheeted) -> Option<Effect> {
+    match sheeted {
+        Sheeted::Opened {
+            pane,
+            window,
+            session,
+        } => {
+            state.tmux.topology.linked(window, session);
+            let number = now.wall.0.max(state.last_sheet + 1);
+            state.last_sheet = number;
+            state.sheets.insert(pane, number);
+            crate::panel::publish_panels(state)
+        }
+        Sheeted::Closed { window, sessions } => {
+            for s in sessions {
+                state.tmux.topology.unlinked(window, s);
+            }
+            None
+        }
+    }
 }
 
 /// A chain tagged these panels with another view (a build, L5 step 3; `ui.select_view`):

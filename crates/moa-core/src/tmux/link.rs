@@ -1053,24 +1053,16 @@ impl TmuxState {
     }
 
     fn notification(&mut self, n: &Notification) -> Vec<Effect> {
-        let Some(conn) = self.conn() else {
+        if self.conn().is_none() {
             return Vec::new();
-        };
+        }
         match n {
             // Hooks say the tree changed in a way no notification does.
             // The log lines never carry the message text.
             Notification::Message(m) => match Mailbox::parse(m) {
                 Ok(Mailbox::Hook(_)) => self.refresh(),
-                // The keys the core acts on never get here (`keys::run`).
-                Ok(Mailbox::Key { action, client, .. }) => action
-                    .not_yet()
-                    .map(|text| Effect::Tmux {
-                        conn,
-                        cmds: vec![notice(&client, text)],
-                        token: None,
-                    })
-                    .into_iter()
-                    .collect(),
+                // The core takes every key before the link sees it (`keys::run`).
+                Ok(Mailbox::Key { .. }) => Vec::new(),
                 // The answers that prompts wait for never get here (`prompt::answered`).
                 Ok(Mailbox::Prompt { .. }) => vec![log(LogLevel::Info, NOTHING_WAITS.into())],
                 Err(MailboxError::NotMoa) => vec![log(
