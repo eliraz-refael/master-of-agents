@@ -950,3 +950,30 @@ fn the_terms_topic_is_built_from_records() {
         })
     );
 }
+
+/// A terminal's row names its session by title: renaming the session publishes the row
+/// again, with the new title, in the same input (`handle` rebuilds `terms` after every
+/// input, so a session's change reaches it without `Topic::Terms` among its topics).
+#[test]
+fn a_renamed_session_renames_its_terminals_row() {
+    let kite = Terminal {
+        session_id: Some(s_id()),
+        ..record(1, "%5", "kite")
+    };
+    let mut r = Rig::linked(vec![kite]);
+    r.list(&[P5], &[term_line("%5", "⌨ kite")]);
+    assert_eq!(term_rows(&r.st)["%5"]["session"], "lantern");
+    let rename = Op::SessionSet {
+        q: S.into(),
+        title: Some("harbor".into()),
+        group: None,
+    };
+    let fx = send(&r.b, &mut r.st, 1, rename);
+    let published = published_term_rows(&fx);
+    assert_eq!(
+        published.last().map(|rows| rows["%5"]["session"].clone()),
+        Some(json!("harbor")),
+        "{fx:?}"
+    );
+    assert_eq!(term_rows(&r.st)["%5"]["session"], "harbor");
+}
