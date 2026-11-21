@@ -579,6 +579,108 @@ fn the_pane_query_lists_programs_and_folders() {
     );
 }
 
+/// A program named with 16 bytes or more lists as tmux cuts its name (15 bytes on macOS),
+/// and `process_name` cuts it the same way: the two are equal, which is what a terminal's
+/// stored shell needs to be compared with its listed program. The program is a copy of
+/// `sleep` under a long name (a symlink would show its target's name), signed again on macOS.
+#[test]
+fn a_long_program_name_lists_as_process_name_reads_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    // `/bin/sleep` is a plain binary on macOS; elsewhere `sleep` may be a multicall
+    // `coreutils`, which takes the program's name as its first argument.
+    let sleep = std::fs::canonicalize(if cfg!(target_os = "macos") {
+        PathBuf::from("/bin/sleep")
+    } else {
+        which_sleep()
+    })
+    .unwrap();
+    let multicall = sleep.file_name().is_some_and(|n| n == "coreutils");
+    let dir = tb.root().join("long");
+    std::fs::create_dir_all(&dir).unwrap();
+    let long = dir.join("a-long-program-name-for-sleep");
+    std::fs::copy(&sleep, &long).unwrap();
+    std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if cfg!(target_os = "macos") {
+        // A copy of a system binary is killed on launch until it is signed again.
+        let signed = std::process::Command::new("codesign")
+            .args(["-f", "-s", "-"])
+            .arg(&long)
+            .output()
+            .unwrap();
+        assert!(signed.status.success(), "{signed:?}");
+    }
+    let mut cmd = format!("exec '{}'", long.display());
+    if multicall {
+        cmd.push_str(" sleep");
+    }
+    cmd.push_str(" 100");
+    tmux(&["new-session", "-d", "-s", "moa", "/bin/sh"]);
+    let pane: PaneId = tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "=moa:",
+        &cmd,
+    ])
+    .parse()
+    .expect("a pane id");
+    let listed = || {
+        let sessions: Vec<String> = tmux(&["list-sessions", "-F", topology::LIST_SESSIONS])
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let panes: Vec<String> = tmux(&["list-panes", "-a", "-F", topology::LIST_PANES])
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let terms: Vec<String> = {
+            let q = &topology::refresh_cmds()[3];
+            let args: Vec<&str> = std::iter::once(q.name())
+                .chain(q.argv().iter().map(String::as_str))
+                .collect();
+            tmux(&args).lines().map(str::to_string).collect()
+        };
+        let mut t = Topology::from_lists(&sessions, &panes, &[]);
+        t.terms_listed(&terms);
+        t
+    };
+    // The sh the program is exec'd from lists first; wait for the program itself.
+    let seen = wait_for(Duration::from_secs(10), || {
+        let t = listed();
+        let name = t.pid_of(&pane).and_then(moa_platform::proc::name)?;
+        name.starts_with("a-long-program")
+            .then(|| (t.command_of(&pane).map(str::to_string), name))
+    });
+    let Some((command, name)) = seen else {
+        panic!(
+            "the long-named program never listed: {:?}",
+            listed().command_of(&pane)
+        );
+    };
+    assert_eq!(command.as_deref(), Some(name.as_str()));
+    // macOS cuts a name to 15 bytes; Linux's argv0 isn't cut.
+    if cfg!(target_os = "macos") {
+        assert_eq!(name, "a-long-program-");
+    }
+}
+
+fn which_sleep() -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|d| d.join("sleep"))
+        .find(|p| p.exists())
+        .expect("a sleep on PATH")
+}
+
 /// L7 on a real server: a panel starts parked in `_moa`, in a window named by its view, in
 /// `-c`'s folder, with its view, brain and root; its tags land; and when its program stops
 /// the pane stays, saying how to bring it back. `exe` stands in for moa: it writes what it

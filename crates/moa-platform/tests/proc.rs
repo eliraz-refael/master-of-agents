@@ -182,11 +182,14 @@ fn a_live_process_reads_as_itself() {
 }
 
 /// A process's name is what tmux would list for it in front of a terminal: this test's own
-/// is its executable's base name. A pid that is no process has none.
+/// is its executable's base name, which macOS cuts to its first 15 bytes (a Cargo test
+/// binary's is longer). A pid that is no process has none.
 #[test]
 fn process_name_matches_tmux() {
     let exe = std::env::current_exe().unwrap();
     let base = exe.file_name().unwrap().to_string_lossy().into_owned();
+    #[cfg(target_os = "macos")]
+    let base = String::from_utf8_lossy(&base.as_bytes()[..base.len().min(15)]).into_owned();
     assert_eq!(name(std::process::id()), Some(base));
     for pid in [i32::MAX as u32, 0] {
         assert_eq!(name(pid), None);
