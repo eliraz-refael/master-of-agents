@@ -674,8 +674,8 @@ spot) and 5c (the picker, help and new sessions). The split table is in
 `2026-11-18-moa-v1-slice-5a-panels-and-views.md`, under "Slice 5 is three plans".
 
 **Detailed plans:** `2026-11-18-moa-v1-slice-5a-panels-and-views.md` (5a),
-`2026-11-19-moa-v1-slice-5b-layouts-and-the-agent-spot.md` (5b). 5c's is written just before it
-starts.
+`2026-11-19-moa-v1-slice-5b-layouts-and-the-agent-spot.md` (5b),
+`2026-11-20-moa-v1-slice-5c-picker-help-and-new-sessions.md` (5c).
 
 1. **`moa-view`**:
    - View-models for tree, plan, status, today, projects, activity and picture (the 7-line
@@ -725,6 +725,14 @@ slice 9, before panels subscribe.
   launches once the panels are parked.
 
 **Try it:** `moa --sandbox` gives the full cockpit with fake agents.
+
+## Slice 5d: terminals
+
+Added on 2026-11-21 from the user's backlog (`docs/backlog.md`, "Terminals"). Terminals get a
+view of their own. Each one records who opened it and for which session, and is shown as
+working or idle, with its folder, age and last use. A terminal can be closed from the view,
+and idle ones are offered for cleanup, but moa never closes one with something running in it
+without asking. Its detailed plan is written just before it starts, after 5c.
 
 ## Slice 6: moa, the central agent
 
