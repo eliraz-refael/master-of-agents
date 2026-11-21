@@ -139,11 +139,8 @@ The most important come first.
 ## PRs (roadmap P4)
 
 Each PR branches from `main` after the previous one has merged, and gets:
-- the full verify: `cargo fmt --check`; clippy, also with `--target x86_64-unknown-linux-gnu`
-  for `moa-platform` and `moa-tmux`; `cargo nextest run --workspace` three times; and
-  `nix flake check`;
-- the tmux 3.4 pass on the tmux-facing crates it touched;
-- `/code-review medium --fix`, with the fixes verified and pushed;
+- `scripts/verify`: fmt, clippy (also for linux), the IO-crate checks, nextest three times, the
+  tmux 3.4 pass on the tmux-facing crates, and `nix flake check`;
 - green CI.
 
 Bodies end with the try-it, when there is one. No "Restart needed" line.
