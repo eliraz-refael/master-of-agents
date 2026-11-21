@@ -467,20 +467,38 @@ fn log_lines(fx: &[Effect]) -> Vec<(LogLevel, String)> {
         .collect()
 }
 
-/// `fx` opens a terminal tab `name` in `path`; once tmux answers with its pane, the tab is
+/// `fx` opens a terminal tab `name` in `path`; once tmux answers with its pane (a new one
+/// each time, as tmux never gives one again), it is recorded in `path`, then the tab is
 /// tagged and brought to the screen, and the key's client gets the notice. The `terms`
 /// topic has it at once (published unless it already had it so).
 fn opens_in(b: &TypicalBrain, st: &mut State, fx: &[Effect], name: &str, path: &str) {
     only_tmux(fx);
     let (n, cmds) = the_query(fx);
     assert_eq!(cmds, [new_window(name, path)]);
-    let fx = answer(b, st, n, line("P %9 777"));
+    let pane = format!("%{}", 100 + n);
+    let fx = answer(b, st, n, line(&format!("P {pane} 777")));
+    let recorded: Vec<(&str, &str)> = changes(&fx)
+        .into_iter()
+        .map(|c| match c {
+            Change::Terminal(t) => (t.pane_id.as_str(), t.cwd.as_str()),
+            other => panic!("only the terminal's record: {other:?}"),
+        })
+        .collect();
+    assert_eq!(recorded, [(pane.as_str(), path)]);
+    // A commit sets the quiet timer again, as every saved input does.
+    let saved = |e: &Effect| {
+        matches!(
+            e,
+            Effect::Persist(_) | Effect::SetTimer { .. } | Effect::CancelTimer(_)
+        )
+    };
     let (published, fx): (Vec<_>, Vec<_>) = fx
         .into_iter()
+        .filter(|e| !saved(e))
         .partition(|e| matches!(e, Effect::Publish(_)));
     assert!(published.len() <= 1, "{published:?}");
     assert_eq!(
-        st.model().topics[&Topic::Terms]["%9"]["name"],
+        st.model().topics[&Topic::Terms][&pane]["name"],
         name.trim_start_matches("⌨ ")
     );
     only_tmux(&fx);
@@ -492,10 +510,10 @@ fn opens_in(b: &TypicalBrain, st: &mut State, fx: &[Effect], name: &str, path: &
     assert_eq!(
         all_cmds(&fx),
         [
-            Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_term", "1"]),
-            Cmd::new("set-option").args(["-p", "-t", "%9", "@moa_label", name]),
-            Cmd::new("select-window").args(["-t", "%9"]),
-            Cmd::new("select-pane").args(["-t", "%9"]),
+            Cmd::new("set-option").args(["-p", "-t", &pane, "@moa_term", "1"]),
+            Cmd::new("set-option").args(["-p", "-t", &pane, "@moa_label", name]),
+            Cmd::new("select-window").args(["-t", &pane]),
+            Cmd::new("select-pane").args(["-t", &pane]),
             notice(
                 &ClientName("/dev/ttys1".into()),
                 &format!("opened a terminal in {shown} (tab {name})")

@@ -9,8 +9,11 @@ use serde_json::{Map, Value};
 use crate::config::Form;
 use crate::layout::{current_layout, leaves};
 use crate::live::{DisplayState, display_state};
+use crate::model::Terminal;
+use crate::ops::launch::title_of;
 use crate::panel::{View, key_of};
 use crate::state::State;
+use crate::terminals::open_for;
 
 /// A named set of rows a view can subscribe to.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -102,12 +105,46 @@ pub struct LayoutRow {
     pub error: Option<String>,
 }
 
-/// A `terms` row (key: its tab id, `%N`): a terminal moa opened (`@moa_term`), named by its
-/// label without the `⌨ `. Read from the topology: nothing about it is saved. One running a
-/// session's agent is that session, and has no row.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// A `terms` row (key: its tab id, `%N`): a terminal (`@moa_term`), from the topology, so the
+/// picker never loses one whose record wasn't saved. One running a session's agent is that
+/// session, and has no row. The rest is its open record's (T9): with none, only `name` (its
+/// label without the `⌨ `) is set. Every field but `name` is absent from an older daemon's
+/// rows.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct TermRow {
+    /// The record's name, else the label's.
     pub name: String,
+    /// The record's number (`term ls`'s `#<id>`); 0 with none.
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub folder: String,
+    /// The program in front, as of the last listing.
+    #[serde(default)]
+    pub command: String,
+    /// A program other than the shell is in front.
+    #[serde(default)]
+    pub running: bool,
+    /// Since when moa has seen `command` in front.
+    #[serde(default)]
+    pub since: i64,
+    #[serde(default)]
+    pub opened_at: i64,
+    #[serde(default)]
+    pub touched_at: Option<i64>,
+    /// A user is looking at it now.
+    #[serde(default)]
+    pub active: bool,
+    /// `you`, `moa` or `found`.
+    #[serde(default)]
+    pub opened_by: String,
+    /// The title of the session it belongs to.
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub timeout_at: Option<i64>,
 }
 
 /// The `layouts` row with key `""` (no layout can be named that), there while
@@ -302,13 +339,39 @@ impl State {
             .terms()
             .map(|(pane, name)| {
                 let key = pane.to_string();
-                let row = TermRow {
-                    name: name.to_string(),
+                let row = match open_for(self, &pane) {
+                    Some(t) => self.term_row(t),
+                    None => TermRow {
+                        name: name.to_string(),
+                        ..TermRow::default()
+                    },
                 };
                 let v = keyed(&key, &row);
                 (key, v)
             })
             .collect()
+    }
+
+    /// Open record `t`'s `terms` row.
+    fn term_row(&self, t: &Terminal) -> TermRow {
+        TermRow {
+            name: t.name.clone(),
+            id: t.id.0,
+            folder: t.cwd.clone(),
+            command: t.command.clone(),
+            running: t.command != t.shell,
+            since: t.command_since.0,
+            opened_at: t.opened_at.0,
+            touched_at: t.touched_at.map(|at| at.0),
+            active: false,
+            opened_by: t.opened_by.as_str().to_string(),
+            session: t
+                .session_id
+                .and_then(|id| self.session(id))
+                .map(|s| title_of(self, s)),
+            note: t.note.clone(),
+            timeout_at: t.timeout_at.map(|at| at.0),
+        }
     }
 
     fn build(&self, topic: Topic) -> BTreeMap<String, Value> {

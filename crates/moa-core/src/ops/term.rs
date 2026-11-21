@@ -6,17 +6,20 @@ use serde_json::json;
 
 use super::cut;
 use super::launch::{WENT_AWAY, WINDOW_NAME_CUT, focus_cmds, warn};
+use crate::Now;
+use crate::change::Change;
 use crate::cockpit::Scene;
+use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::folders::tilde;
+use crate::model::{OpenedBy, Terminal};
 use crate::op::{ConnId, Done, OpError, ReqId};
-use crate::state::State;
+use crate::state::{State, Table};
+use crate::terminals;
 use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
-use crate::tmux::link::{
-    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, set_pane_option,
-};
+use crate::tmux::link::{Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane};
 
 const TERM_NOT_FULL: &str = "term needs a full path";
 const NO_SHELL: &str = "couldn't open a terminal; see moa's log";
@@ -132,8 +135,8 @@ fn term_here(state: &mut State, client: ClientName, folder: Option<&str>) -> Vec
 }
 
 /// `term [PATH]` (R16): a plain shell in a new tab, in folder `path`. The window runs no
-/// command, so it is the user's shell with no moa environment, and nothing is bound or
-/// saved. [`term_opened`] tags it once tmux says which pane it has, and tells `tell`.
+/// command, so it is the user's shell with no moa environment, and nothing is bound.
+/// [`term_opened`] records and tags it once tmux says which pane it has, and tells `tell`.
 pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&str>) -> Vec<Effect> {
     if !path.is_absolute() {
         let refused = Err(OpError(TERM_NOT_FULL.into()));
@@ -142,7 +145,7 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
     let folder = path.display().to_string();
     let deps = state.deps();
     // The title, else `~` for home, else the folder's name, else the folder.
-    let named = title
+    let name = title
         .filter(|t| !t.trim().is_empty())
         .map(str::to_string)
         .or_else(|| {
@@ -153,12 +156,10 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
         // A folder with no name, like `/`, is named as it is written.
         .unwrap_or_else(|| folder.clone());
     // On one line: a newline in the label would print as a line of the terminals' list.
-    let named = one_line(&named);
-    // Cut before `literal_format`, as a launch's name is.
-    let name = cut(&format!("⌨ {named}"), WINDOW_NAME_CUT);
+    let name = one_line(&name);
     let cmd = Cmd::new("new-window")
         .args(["-d", "-P", "-F", OPENED_FORMAT, "-n"])
-        .arg(literal_format(&name))
+        .arg(literal_format(&tab_label(&name)))
         .arg("-c")
         .arg(literal_format(&folder))
         .args(["-t", "=moa:"]);
@@ -177,14 +178,23 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
     }
 }
 
-/// tmux answered a terminal's new window: its tab is tagged as a terminal with its label
-/// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen; the
-/// topology has the terminal at once, so the `terms` topic does. Nothing is saved, so the
-/// commands go out on their own, before the reply or notice. A caller that went has nobody
-/// to tell, and the tab is still tagged. `replied` is whether tmux answered: otherwise the
-/// link went before it did, and the answer says so as a launch's does.
+/// A terminal named `name`'s label, on its tab and its `@moa_label`: `⌨ <name>`, cut before
+/// `literal_format`, as a launch's name is.
+fn tab_label(name: &str) -> String {
+    cut(&format!("⌨ {name}"), WINDOW_NAME_CUT)
+}
+
+/// tmux answered a terminal's new window, named `name`: it is recorded as yours, with that
+/// name whole. Its tab is tagged as a terminal with its label (literal, so a `#[…]` in it
+/// doesn't style the border), then brought to the screen; the topology has the terminal at
+/// once, so the `terms` topic does. The commands go out after the record's commit, and
+/// still do when it wasn't saved (the next listing records the terminal then), before the
+/// reply or notice. A caller that went has nobody to tell, and the tab is still tagged.
+/// `replied` is whether tmux answered: otherwise the link went before it did, and the
+/// answer says so as a launch's does.
 pub(crate) fn term_opened(
     state: &mut State,
+    now: &Now,
     tell: Option<Tell>,
     name: &str,
     path: &str,
@@ -209,25 +219,25 @@ pub(crate) fn term_opened(
     });
     let mut fx = Vec::new();
     let result = match (pane, state.tmux().conn()) {
-        (Some((pane, _)), Some(conn)) => {
-            let mut cmds = vec![
-                set_pane_option(pane, "@moa_term", "1"),
-                set_pane_option(pane, "@moa_label", &literal_format(name)),
-            ];
+        (Some((pane, pid)), Some(conn)) => {
+            // The topology has the terminal before the record's commit publishes the topic.
+            let label = tab_label(name);
+            state.tmux.term_sent(pane, &label);
+            fx.extend(record_opened(state, now, pane, pid, name, path));
+            let mut cmds = terminals::mark(pane, &label).to_vec();
             cmds.extend(focus_cmds(pane));
             fx.push(Effect::Tmux {
                 conn,
                 cmds,
                 token: None,
             });
-            state.tmux.term_sent(pane, name);
             let deps = state.deps();
             Ok(Done {
                 text: format!(
-                    "opened a terminal in {} (tab {name})",
+                    "opened a terminal in {} (tab {label})",
                     with_tilde(path, &deps.home, deps.canonical)
                 ),
-                data: json!({ "pane": pane.to_string(), "name": name }),
+                data: json!({ "pane": pane.to_string(), "name": label }),
             })
         }
         _ => {
@@ -241,6 +251,47 @@ pub(crate) fn term_opened(
     };
     fx.extend(told(state, tell, result));
     fx
+}
+
+/// The record of terminal `pane` (process `pid`) that moa just opened for you in folder
+/// `path`, named `name`: its shell is the process's name (when that can't be read, the next
+/// listing's program), and nothing else runs yet. A commit that wasn't saved saves nothing;
+/// the next listing records the terminal.
+fn record_opened(
+    state: &mut State,
+    now: &Now,
+    pane: PaneId,
+    pid: i64,
+    name: &str,
+    path: &str,
+) -> Vec<Effect> {
+    let Some(generation) = state.tmux().generation() else {
+        return Vec::new();
+    };
+    // The store holds one open record per pane: one already there is kept.
+    if terminals::open_for(state, &pane).is_some() {
+        return Vec::new();
+    }
+    let shell = u32::try_from(pid)
+        .ok()
+        .and_then(state.deps().process_name)
+        .unwrap_or_default();
+    let mut tx = Tx::new(now);
+    let id = tx.next_id(state, Table::Terminal);
+    let t = Terminal {
+        cwd: path.to_string(),
+        name: name.to_string(),
+        shell: shell.clone(),
+        command: shell,
+        ..terminals::opened(id, generation, pane, OpenedBy::You, now.wall)
+    };
+    if tx.commit(state, vec![Change::Terminal(t)]).is_err() {
+        return vec![log(
+            LogLevel::Debug,
+            "a terminal's record wasn't saved; the next listing records it".into(),
+        )];
+    }
+    post_commit(state, tx)
 }
 
 /// `term.show` (the picker's pick of a terminal): brings terminal `pane` to the screen, as

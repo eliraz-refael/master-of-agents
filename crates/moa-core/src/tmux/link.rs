@@ -137,6 +137,9 @@ pub struct TmuxState {
     pub(crate) unfinished_reconciles: u32,
     /// This connection's reconciles were given up on, and the log said so.
     pub(crate) reconcile_given_up: bool,
+    /// This connection's first look at its terminals is still to come: the shells it records
+    /// were open before moa saw them (`found`, T3).
+    pub(crate) terms_unseen: bool,
     /// Moa's tags that no listing has shown yet.
     sent: Sent,
 }
@@ -331,6 +334,7 @@ impl Default for TmuxState {
             reconciled: false,
             unfinished_reconciles: 0,
             reconcile_given_up: false,
+            terms_unseen: true,
             sent: Sent::default(),
         }
     }
@@ -751,6 +755,11 @@ impl TmuxState {
         self.queries.keys().copied()
     }
 
+    /// What each pane query waiting for its answer was asked for.
+    pub(crate) fn asked(&self) -> impl Iterator<Item = &Asked> + '_ {
+        self.queries.values()
+    }
+
     /// The events waiting with the look at the tabs asked for session `id`, while one is.
     pub(crate) fn looking(&mut self, id: SessionId) -> Option<&mut Vec<HookEnvelope>> {
         self.queries.values_mut().find_map(|a| match a {
@@ -982,6 +991,7 @@ impl TmuxState {
             self.sent.clear();
             self.unfinished_reconciles = 0;
             self.reconcile_given_up = false;
+            self.terms_unseen = true;
         }
         if self.generation.is_some_and(|g| g != generation) {
             self.restarts += 1;

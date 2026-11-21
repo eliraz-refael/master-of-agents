@@ -6,9 +6,8 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use moa_core::effect::{Effect, LogLevel, Publish, TmuxIn, TmuxToken};
+use moa_core::effect::{Effect, LogLevel, TmuxIn, TmuxToken};
 use moa_core::op::{Done, Op, OpError, ReqId};
-use moa_core::publish::Topic;
 use moa_core::state::State;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{PaneId, WindowId};
@@ -24,35 +23,10 @@ const TOML: &str = r#"
 folders = ["~/work"]
 "#;
 
-/// The link's lists: `%5` and `%6` in the session `moa`, a user attached, and `terms` as
-/// the fourth query (`LIST_TERMS`) answers.
-fn lists(panes: &[&str], terms: &[String]) -> Vec<Result<Vec<String>, String>> {
-    let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
-    vec![
-        lines(&["S $0 moa", "S $1 _moa"]),
-        lines(panes),
-        lines(&["C 0 $0 /dev/ttys1"]),
-        Ok(terms.to_vec()),
-    ]
-}
-
 const BOTH: &[&str] = &["P %5 @2 $0 1 1 0 0  0 ", "P %6 @3 $0 1 0 0 0  0 "];
 
 /// `%6`'s line in the fourth list: a shell with no terminal mark.
 const PLAIN_6: &str = "T\t%6\t1006\t\tzsh\t/r/web\t";
-
-/// tmux answers the refresh in flight.
-fn refreshed(b: &TypicalBrain, st: &mut State, panes: &[&str], terms: &[String]) -> Vec<Effect> {
-    feed(
-        b,
-        st,
-        TmuxIn::Replies {
-            conn: 1,
-            token: TmuxToken::Refresh,
-            results: lists(panes, terms),
-        },
-    )
-}
 
 /// The typical brain, linked, and its first listing answered with `terms`.
 fn listed_with(terms: &[String]) -> (TypicalBrain, State) {
@@ -62,20 +36,24 @@ fn listed_with(terms: &[String]) -> (TypicalBrain, State) {
     (b, st)
 }
 
-/// The `terms` topic's rows, as published.
-fn terms(st: &State) -> BTreeMap<String, Value> {
-    (*st.model().topics[&Topic::Terms]).clone()
+/// A published `terms` row as this file looks at it: its key and its name.
+fn named(rows: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    rows.into_iter()
+        .map(|(k, v)| {
+            let row = json!({ "key": v["key"], "name": v["name"] });
+            (k, row)
+        })
+        .collect()
 }
 
-/// The `terms` rows each publish in `fx` carried.
+/// The `terms` topic's rows, as published, by name.
+fn terms(st: &State) -> BTreeMap<String, Value> {
+    named(term_rows(st))
+}
+
+/// The `terms` rows each publish in `fx` carried, by name.
 fn published_terms(fx: &[Effect]) -> Vec<BTreeMap<String, Value>> {
-    fx.iter()
-        .filter_map(|e| match e {
-            Effect::Publish(Publish::Model(m)) => m.topics.get(&Topic::Terms),
-            _ => None,
-        })
-        .map(|t| (**t).clone())
-        .collect()
+    published_term_rows(fx).into_iter().map(named).collect()
 }
 
 fn row(key: &str, name: &str) -> (String, Value) {

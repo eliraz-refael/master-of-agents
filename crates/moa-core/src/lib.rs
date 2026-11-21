@@ -26,6 +26,7 @@ mod reconcile;
 pub mod route;
 pub mod sleep;
 pub mod state;
+pub mod terminals;
 pub mod time;
 pub mod tmux;
 mod wake;

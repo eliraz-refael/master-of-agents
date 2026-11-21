@@ -94,7 +94,7 @@ static NO_SESSIONS: BTreeSet<TmuxSessionId> = BTreeSet::new();
 /// What a terminal with no label is called: an agent that ran in it, in the spot, took its
 /// label (`● <title>`) and left with it. The cockpit names a shell it sends home the same
 /// (`⌨ shell`).
-const UNNAMED: &str = "shell";
+pub(crate) const UNNAMED: &str = "shell";
 
 /// What the label of the agent in the spot starts with: `● <title>`.
 pub const AGENT_MARK: &str = "● ";

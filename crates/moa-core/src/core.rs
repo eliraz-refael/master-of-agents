@@ -19,6 +19,7 @@ use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
 use crate::sleep;
 use crate::state::{State, Table};
+use crate::terminals;
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::mark_seen;
@@ -238,7 +239,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     _ => Err(()),
                 })
             };
+            let was_reconciled = state.tmux().reconciled();
             let mut more = reconcile::answered(state, now, reconciles, replied);
+            // The end of this connection's reconcile is its first look at its terminals,
+            // against the listing it has.
+            if !was_reconciled && state.tmux().reconciled() {
+                more.extend(terminals::register(state, now));
+            }
             more.extend(unpaned);
             for (ask, answer) in resumes {
                 more.extend(ops::launch::resumed(state, now, ask, panes_of(answer)));
@@ -265,7 +272,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             }
             for (tell, name, path, answer) in terms {
                 more.extend(ops::term::term_opened(
-                    state, tell, &name, &path, answer, replied,
+                    state, now, tell, &name, &path, answer, replied,
                 ));
             }
             for (client, answer) in heres {
@@ -311,6 +318,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 let heal = cockpit::run::idle(state);
                 more.extend(panel::listed(state, heal));
                 more.extend(cockpit::run::link_listed(state));
+                // Each terminal is recorded when moa sees it, once the tabs are reconciled.
+                more.extend(terminals::register(state, now));
             }
             match mailbox {
                 Some(Mailbox::Hook(HookMsg::ClientAttached(_))) => {

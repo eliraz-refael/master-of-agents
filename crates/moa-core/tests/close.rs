@@ -18,10 +18,10 @@ use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::is_asleep;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, EventKind, Inspected, Lifecycle,
-    Location, PaneAgent, PaneBinding, Session, SessionId,
+    Location, OpenedBy, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
-use moa_core::publish::Topic;
+use moa_core::publish::{TermRow, Topic};
 use moa_core::state::{Deps, LoadNote, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::link::NOT_READY;
@@ -700,7 +700,19 @@ fn term_opens_a_shell_tab_and_tags_it() {
     assert!(cmds[0].check().is_ok());
 
     let fx = answer(&b, &mut st, n, "P %5 777");
-    assert!(changes(&fx).is_empty(), "{fx:?}");
+    // It is recorded as yours, by the name it was given, before it is tagged.
+    let recorded: Vec<_> = changes(&fx)
+        .into_iter()
+        .map(|c| match c {
+            Change::Terminal(t) => (t.pane_id.as_str(), t.opened_by, t.name.as_str()),
+            other => panic!("only the terminal's record: {other:?}"),
+        })
+        .collect();
+    assert_eq!(recorded, [("%5", OpenedBy::You, "lantern")]);
+    let persisted = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Persist(_)))
+        .expect("saved");
     let tagged = fx
         .iter()
         .position(|e| {
@@ -708,6 +720,7 @@ fn term_opens_a_shell_tab_and_tags_it() {
                 if *cmds == tags("%5", "⌨ lantern"))
         })
         .unwrap_or_else(|| panic!("tagged and focused: {fx:?}"));
+    assert!(persisted < tagged, "{fx:?}");
     let replied = fx
         .iter()
         .position(|e| matches!(e, Effect::Reply { .. }))
@@ -760,7 +773,7 @@ fn a_terminal_whose_agent_left_is_published_by_the_close() {
     let (r, fx) = closed_in_a_terminal("⌨ lantern");
     // Its own label stays: only the session's tags come off.
     assert_eq!(unsets(&fx), untagged("%9").iter().collect::<Vec<_>>());
-    let want = json!({ "%9": { "key": "%9", "name": "lantern" } });
+    let want = json!({ "%9": unrecorded("%9", "lantern") });
     assert_eq!(last_terms(&fx), Some(want.clone()), "{fx:?}");
     assert_eq!(serde_json::to_value(&*terms(&r.st)).unwrap(), want);
 }
@@ -774,7 +787,7 @@ fn a_terminal_whose_spot_agent_left_drops_the_agents_label() {
     let mut want = untagged("%9");
     want.push(unset("%9", "@moa_label"));
     assert_eq!(unsets(&fx), want.iter().collect::<Vec<_>>());
-    let want = json!({ "%9": { "key": "%9", "name": "shell" } });
+    let want = json!({ "%9": unrecorded("%9", "shell") });
     assert_eq!(last_terms(&fx), Some(want.clone()), "{fx:?}");
     assert_eq!(serde_json::to_value(&*terms(&r.st)).unwrap(), want);
 }
@@ -806,6 +819,17 @@ fn closed_in_a_terminal(label: &str) -> (Rig, Vec<Effect>) {
 
 fn terms(st: &State) -> Arc<BTreeMap<String, serde_json::Value>> {
     st.model().topics[&Topic::Terms].clone()
+}
+
+/// The `terms` row of terminal `key` with no record: its name, and nothing else.
+fn unrecorded(key: &str, name: &str) -> serde_json::Value {
+    let mut row = serde_json::to_value(TermRow {
+        name: name.into(),
+        ..TermRow::default()
+    })
+    .unwrap();
+    row["key"] = key.into();
+    row
 }
 
 /// The `terms` rows of the last model `fx` published. Each model carries every topic: a
