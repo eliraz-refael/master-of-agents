@@ -611,7 +611,7 @@ fn a_long_program_name_lists_as_process_name_reads_it() {
     std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o755)).unwrap();
     if cfg!(target_os = "macos") {
         // A copy of a system binary is killed on launch until it is signed again.
-        let signed = std::process::Command::new("codesign")
+        let signed = std::process::Command::new("/usr/bin/codesign")
             .args(["-f", "-s", "-"])
             .arg(&long)
             .output()
