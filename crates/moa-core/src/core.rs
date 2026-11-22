@@ -403,9 +403,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         }
         // The checks at the end of every input do the work.
         Input::Timer(TimerKey::Sleep | TimerKey::Terminals) => Vec::new(),
-        // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
-        // gets its tags (R26). A panel on it goes, and `panels` says so; a popup's going may
-        // nudge tmux to reap it.
+        // Its waiters are dropped; a launch it asked for goes on, as does moa's turn, and a
+        // terminal's tab still gets its tags (R26). A panel on it goes, and `panels` says so;
+        // a popup's going may nudge tmux to reap it.
         Input::ClientGone(conn) => {
             // A panel moa placed keeps its connection for life: once it goes, its program
             // has ended, and a listing shows whether its pane is dead (L12).
@@ -415,6 +415,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 .is_some_and(|r| r.placed && r.pane.is_some());
             state.tmux.client_gone(conn);
             state.term_ls.retain(|(c, _)| *c != conn);
+            central::client_gone(state, conn);
             cockpit::run::client_gone(state, conn);
             let mut fx = panel::gone(state, conn);
             if ended {

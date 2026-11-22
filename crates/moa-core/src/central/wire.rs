@@ -210,3 +210,17 @@ pub enum StopReason {
     /// A reason this build doesn't know, by its name.
     Other(String),
 }
+
+impl StopReason {
+    /// The protocol's name for it (`end_turn`, `max_tokens`, ...).
+    pub fn name(&self) -> &str {
+        match self {
+            StopReason::EndTurn => "end_turn",
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::MaxTurnRequests => "max_turn_requests",
+            StopReason::Refusal => "refusal",
+            StopReason::Cancelled => "cancelled",
+            StopReason::Other(name) => name,
+        }
+    }
+}

@@ -3,13 +3,17 @@
 //!
 //! A prompt starts moa's agent when it isn't running, opens today's thread when it isn't
 //! open ([`threads`]), saves the prompt's `you` row, and only then sends it: the prompt waits
-//! for the commit. One prompt at a time.
+//! for the commit. One prompt at a time. What moa says in its turn lands in the feed as it
+//! comes, and the turn's end answers whoever waits ([`turn`]).
 
 pub mod feed;
 pub mod launch;
 pub mod prompt;
 pub mod threads;
+mod turn;
 pub mod wire;
+
+use std::collections::BTreeMap;
 
 use serde_json::json;
 
@@ -21,7 +25,7 @@ use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine, Publish};
-use crate::model::{MoaThread, ThreadKind};
+use crate::model::{FeedEntry, MoaThread, ThreadKind};
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::publish::{CoreEvent, MoaRow, Topic};
 use crate::state::State;
@@ -120,6 +124,12 @@ pub struct Moa {
     pub replaying: bool,
     /// The last prompt's number.
     pub prompts: u64,
+    /// The rows the turn under way (or a load's replay) has written, by id, as written,
+    /// saved or not: moa's next words extend them.
+    pub written: BTreeMap<i64, FeedEntry>,
+    /// moa's updates that couldn't be saved since the count was last logged, at a turn's
+    /// end.
+    pub unsaved: u64,
 }
 
 impl Moa {
@@ -198,15 +208,14 @@ pub fn send(
     let mut fx = match start {
         Some((account, spec)) => {
             // A new run: nothing of the last one carries over. A turn its agent left
-            // unended is over, and whoever waits for it is told.
+            // unended is over, and whoever still waits for it is told.
             let left = moa.turn.take().and_then(|t| {
-                let why = t.exited.unwrap_or_else(|| "moa's agent stopped".into());
+                let why = t.exited.unwrap_or_else(|| "its turn never ended".into());
                 t.waiter.map(|w| (w, why))
             });
             let mut fx = Vec::new();
             if let Some((w, why)) = left {
-                let ended = format!("moa's turn ended early: {why}");
-                fx.extend(answer(Some(w), Err(OpError(ended))));
+                fx.extend(answer(Some(w), Err(OpError(stopped(&why)))));
             }
             moa.generation += 1;
             moa.phase = Phase::Starting;
@@ -234,10 +243,16 @@ pub fn heard(state: &mut State, now: &Now, input: AcpIn) -> Vec<Effect> {
     let mut fx = match input {
         AcpIn::Started { caps, .. } => started(state, now, caps),
         AcpIn::Opened { result, .. } => opened(state, now, result),
-        AcpIn::TurnEnded { prompt, .. } => turn_ended(state, prompt),
-        AcpIn::Exited { why, .. } => exited(state, why),
-        // What moa says in a turn isn't written to the feed yet.
-        AcpIn::Update { .. } | AcpIn::Permission { .. } => Vec::new(),
+        AcpIn::Update { thread, update, .. } => turn::update(state, now, &thread, update),
+        AcpIn::Permission {
+            req,
+            thread,
+            title,
+            options,
+            ..
+        } => turn::permission(state, now, req, thread, &title, &options),
+        AcpIn::TurnEnded { prompt, result, .. } => turn::ended(state, now, prompt, result),
+        AcpIn::Exited { why, .. } => exited(state, now, why),
     };
     fx.extend(said(state));
     fx
@@ -280,10 +295,25 @@ pub fn reload(state: &mut State) -> Vec<Effect> {
         if moa.phase == Phase::Thinking {
             moa.phase = Phase::Ready;
         }
+        moa.written.clear();
         fx.extend(answer(turn.waiter, Err(OpError(UNSAVED.into()))));
     }
+    turn::reloaded(state);
     fx.extend(said(state));
     fx
+}
+
+/// Connection `conn` is gone: nobody waits there any more. A turn it asked for goes on, and
+/// lands in the feed.
+pub fn client_gone(state: &mut State, conn: ConnId) {
+    let moa = &mut state.central;
+    let turn = moa.turn.as_mut().map(|t| &mut t.waiter);
+    let pending = moa.pending.as_mut().map(|p| &mut p.waiter);
+    for waiter in turn.into_iter().chain(pending) {
+        if waiter.is_some_and(|w| w.conn == conn) {
+            *waiter = None;
+        }
+    }
 }
 
 /// Whether the row with `message_id` in `thread` is saved.
@@ -332,6 +362,9 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     let cwd = state.deps().agent_dir.clone();
     let moa = &mut state.central;
     moa.replaying = matches!(how, ThreadHow::Load { .. });
+    if moa.replaying {
+        moa.written.clear();
+    }
     if let Some(p) = &mut moa.pending {
         p.reopening = matches!(how, ThreadHow::Resume { .. } | ThreadHow::Load { .. });
         p.brief = brief;
@@ -436,6 +469,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     };
     let moa = &mut state.central;
     moa.phase = Phase::Thinking;
+    moa.written.clear();
     moa.turn = Some(Turn {
         prompt: p.prompt,
         message_id: p.message_id.clone(),
@@ -462,23 +496,12 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     fx
 }
 
-/// Turn `prompt` ended: moa is ready for the next one.
-fn turn_ended(state: &mut State, prompt: u64) -> Vec<Effect> {
-    let moa = &mut state.central;
-    if moa.turn.as_ref().is_none_or(|t| t.prompt != prompt) {
-        return Vec::new();
-    }
-    moa.turn = None;
-    if moa.phase == Phase::Thinking {
-        moa.phase = Phase::Ready;
-    }
-    Vec::new()
-}
-
 /// moa's agent is gone: a start that failed leaves moa `Failed`, any other exit `Off`. The
-/// prompt waiting for it is refused; the next prompt starts it again. A turn under way is
-/// left to its own end, which may still come: the exit can overtake the run's last words.
-fn exited(state: &mut State, why: String) -> Vec<Effect> {
+/// prompt waiting for it is refused; the next prompt starts it again. A turn under way says
+/// so in an `error` line, and whoever waits for it hears the same at once; the turn itself
+/// stays until its end, which may still come with the run's last words: the exit can
+/// overtake them.
+fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     let moa = &mut state.central;
     let (phase, told, logged) = match moa.phase {
         Phase::Off | Phase::Failed(_) => return Vec::new(),
@@ -487,23 +510,36 @@ fn exited(state: &mut State, why: String) -> Vec<Effect> {
             format!("moa's agent couldn't start: {why}"),
             "moa's agent couldn't start",
         ),
-        Phase::Ready | Phase::Thinking => (
-            Phase::Off,
-            format!("moa's agent stopped: {why}; your next prompt starts it again"),
-            "moa's agent stopped",
-        ),
+        Phase::Ready | Phase::Thinking => (Phase::Off, stopped(&why), "moa's agent stopped"),
     };
     moa.phase = phase;
     moa.caps = None;
     moa.thread = None;
     moa.replaying = false;
-    if let Some(turn) = &mut moa.turn {
-        turn.exited = Some(why);
-    }
-    let waiter = moa.pending.take().and_then(|p| p.waiter);
+    let mut waiters: Vec<Waiter> = moa
+        .pending
+        .take()
+        .and_then(|p| p.waiter)
+        .into_iter()
+        .collect();
     let mut fx = vec![warn(logged)];
-    fx.extend(answer(waiter, Err(OpError(told))));
+    if let Some(turn) = &mut moa.turn
+        && turn.exited.is_none()
+    {
+        turn.exited = Some(why);
+        waiters.extend(turn.waiter.take());
+        let thread = turn.thread.clone();
+        fx.extend(turn::stopped(state, now, &thread, &told));
+    }
+    for w in waiters {
+        fx.extend(answer(Some(w), Err(OpError(told.clone()))));
+    }
     fx
+}
+
+/// What whoever waits hears when moa's agent stops.
+fn stopped(why: &str) -> String {
+    format!("moa's agent stopped: {why}; your next prompt starts it again")
 }
 
 /// The answer to `waiter`, if anyone waits.
@@ -526,9 +562,13 @@ fn said(state: &mut State) -> Option<Effect> {
         .map(|m| Effect::Publish(Publish::Model(m)))
 }
 
-fn warn(message: &str) -> Effect {
+fn warn(message: impl Into<String>) -> Effect {
+    log(LogLevel::Warn, message)
+}
+
+fn log(level: LogLevel, message: impl Into<String>) -> Effect {
     Effect::Log(LogLine {
-        level: LogLevel::Warn,
+        level,
         message: message.into(),
     })
 }
