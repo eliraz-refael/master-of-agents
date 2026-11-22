@@ -86,9 +86,13 @@ name_type!(
     "letters, digits, ., - and _"
 );
 
+/// The name of moa's constitution file in moa's config folder, `constitution.md`. A brain
+/// can't be called this: its scope file, `<brain>.md` in the same folder, would be that file.
+pub const CONSTITUTION_NAME: &str = "constitution";
+
 /// Words a brain can't be called, since `moa <word>` already means a command: `moa`'s
 /// subcommands (clap's `help` among them) and every `moactl` verb (T18). Tests in `moa` and
-/// `moa-proto` check that each one is here.
+/// `moa-proto` check that each one is here. Last, [`CONSTITUTION_NAME`], which names a file.
 pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "adopt-spike",
     "export-spike",
@@ -129,6 +133,7 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "asks",
     "setup",
     "import-herdr",
+    CONSTITUTION_NAME,
 ];
 
 impl BrainName {
@@ -418,6 +423,11 @@ impl Config {
         };
         for (name, b) in &raw.brains {
             let name = BrainName::parse(name)?;
+            if name.as_str() == CONSTITUTION_NAME {
+                return Err(problem(format_args!(
+                    "a brain can't be called {name}; moa's constitution file has that name"
+                )));
+            }
             if RESERVED_BRAIN_NAMES.contains(&name.as_str()) {
                 return Err(problem(format_args!(
                     "a brain can't be called {name}; moa uses that word for a command"

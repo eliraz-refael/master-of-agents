@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use common::loaded_with;
 use moa_core::central::launch::{settings, spec};
 use moa_core::central::prompt::{CONSTITUTION, system_text};
+use moa_core::effect::{LogLevel, LogLine};
+use moa_core::model::NoteKind;
 use moa_core::op::{NoParams, Op};
 use moa_core::state::{Deps, PanelLaunch, State};
 use moa_testkit::brain::{TypicalBrain, run};
@@ -183,6 +185,15 @@ fn the_allow_list_is_exact() {
     );
 }
 
+/// A folder is spelled by its parts, so a trailing `/` adds nothing; an empty one is skipped.
+#[test]
+fn the_allow_list_spells_each_folder_once() {
+    let folders = [PathBuf::from("/h/kite/"), PathBuf::new()];
+    assert_eq!(settings(&folders), settings(&[PathBuf::from("/h/kite")]));
+    assert!(settings(&folders).contains("\"Read(//h/kite/**)\""));
+    assert_eq!(settings(&folders).matches("Read(").count(), 1);
+}
+
 /// The scope file holds "Lantern lives in ~/private/lantern."; the constitution file is
 /// missing.
 fn scope_only(p: &Path) -> io::Result<Option<String>> {
@@ -198,6 +209,11 @@ fn both(p: &Path) -> io::Result<Option<String>> {
     } else {
         None
     })
+}
+
+/// Every file is there, and none can be read.
+fn unreadable(_: &Path) -> io::Result<Option<String>> {
+    Err(io::ErrorKind::PermissionDenied.into())
 }
 
 #[test]
@@ -219,6 +235,7 @@ fn the_system_text_is_constitution_scope_and_brief() {
         format!("{constitution}\n\n# This brain: default\n\nLantern lives in ~/private/lantern.")
     );
     assert_eq!(text.full, format!("{}\n\n{brief}", text.claude_md));
+    assert_eq!(text.warnings, vec![]);
 
     // `Deps::default` reads no file.
     let st = state(&b, &toml("~/.claude-acct-a", ""), deps(&b));
@@ -228,6 +245,46 @@ fn the_system_text_is_constitution_scope_and_brief() {
         format!("{constitution}\n\n# This brain: default\n\n(no scope file)")
     );
     assert_eq!(text.full, format!("{}\n\n{brief}", text.claude_md));
+    // A missing file says nothing.
+    assert_eq!(text.warnings, vec![]);
+}
+
+/// A file that is there but can't be read is left out as a missing one is, and the log says
+/// which and why, so an override is never ignored without a word.
+#[test]
+fn an_unreadable_file_falls_back_and_says_so() {
+    let b = TypicalBrain::new();
+    let deps = Deps {
+        read_text: unreadable,
+        constitution_file: b.home.join(".config/moa/constitution.md"),
+        ..deps(&b)
+    };
+    let st = state(&b, &toml("~/.claude-acct-a", ""), deps);
+    let text = system_text(&st, &b.now());
+    assert_eq!(
+        text.claude_md,
+        format!(
+            "{}\n\n# This brain: default\n\n(no scope file)",
+            CONSTITUTION.trim_end()
+        )
+    );
+    let warn = |message: &str| LogLine {
+        level: LogLevel::Warn,
+        message: message.into(),
+    };
+    assert_eq!(
+        text.warnings,
+        vec![
+            warn(
+                "~/.config/moa/constitution.md can't be read (permission denied); \
+                 moa's agent is told the built-in constitution"
+            ),
+            warn(
+                "/tmp/moa-test-config/default.md can't be read (permission denied); \
+                 moa's agent is told this brain has no scope file"
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -243,13 +300,29 @@ fn a_constitution_file_replaces_the_embedded_one() {
         text.claude_md,
         "You are moa, and brief.\n\n# This brain: default\n\nLantern lives in ~/private/lantern."
     );
+    assert_eq!(text.warnings, vec![]);
 }
 
 #[test]
 fn the_embedded_constitution_is_short_and_anonymous() {
-    assert!(CONSTITUTION.len() <= 8_192, "{} bytes", CONSTITUTION.len());
+    assert!(CONSTITUTION.len() <= 10_240, "{} bytes", CONSTITUTION.len());
     for word in ["/Users/", "/home/", "@", ".claude-"] {
         assert!(!CONSTITUTION.contains(word), "it holds {word}");
     }
     assert!(CONSTITUTION.starts_with("# You are moa"));
+}
+
+/// `note` saves any kind it's given, so moa is told the ones the brief reads back, and the
+/// one it writes at wrap-up.
+#[test]
+fn the_constitution_names_the_note_kinds() {
+    for kind in [
+        NoteKind::FACT,
+        NoteKind::PREFERENCE,
+        NoteKind::ROUTINE,
+        NoteKind::OBSERVATION,
+        NoteKind::THREAD_SUMMARY,
+    ] {
+        assert!(CONSTITUTION.contains(&format!("`{kind}`")), "{kind}");
+    }
 }

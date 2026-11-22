@@ -1,4 +1,5 @@
-//! moa's own agent, the central one: the core's side of its conversation. No IO.
+//! moa's own agent, the central one: the core's side of its conversation. No IO of its own:
+//! the files it is told (`prompt`) are read through `Deps::read_text`, as the layout ops do.
 
 pub mod feed;
 pub mod launch;
