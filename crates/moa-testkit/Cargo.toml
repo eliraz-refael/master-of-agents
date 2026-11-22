@@ -7,7 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-moa-agents = { path = "../moa-agents" }
+agent-client-protocol.workspace = true
+moa-agents = { path = "../moa-agents", features = ["acp"] }
 moa-core = { path = "../moa-core" }
 moa-platform = { path = "../moa-platform" }
 jiff.workspace = true
@@ -18,10 +19,16 @@ rustix = { version = "1", features = ["pty", "termios", "fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "io-std", "io-util", "process", "sync", "time"] }
+tokio-util = { workspace = true, features = ["compat"] }
 
 [[bin]]
 name = "fake-claude"
 path = "src/bin/fake-claude.rs"
+
+[[bin]]
+name = "stub-acp"
+path = "src/bin/stub-acp.rs"
 
 [lints]
 workspace = true
