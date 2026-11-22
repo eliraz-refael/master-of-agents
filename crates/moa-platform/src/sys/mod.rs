@@ -39,6 +39,15 @@ pub fn kill_term(pid: u32) {
     }
 }
 
+/// Sends `signal` to every process in the process group `pgid`. Errors are ignored: the group
+/// may be gone already.
+pub fn kill_group(pgid: u32, signal: libc::c_int) {
+    if let Some(pgid) = signalable(pgid) {
+        // SAFETY: `killpg` takes two integers and touches no memory.
+        unsafe { libc::killpg(pgid, signal) };
+    }
+}
+
 /// Blocks until this process's child `pid` has exited, and leaves it unreaped: a zombie
 /// whose pid can't be given to another process until something reaps it (`WNOWAIT`).
 pub fn wait_exited(pid: u32) -> std::io::Result<()> {

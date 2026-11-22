@@ -1322,11 +1322,17 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "insta",
+ "libc",
  "moa-core",
+ "moa-platform",
+ "moa-testkit",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

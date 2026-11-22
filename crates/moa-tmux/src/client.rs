@@ -13,11 +13,12 @@ use std::time::Duration;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
-use moa_platform::{Spawner, kill_term, wait_exited};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use moa_platform::child::{Reaper, first_stderr_line};
+use moa_platform::{Spawner, kill_term};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe;
 use tokio::process::{ChildStderr, ChildStdin};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::parse::{Frame, Parser};
 
@@ -244,8 +245,7 @@ enum Msg {
 
 pub struct ControlClient {
     tx: mpsc::UnboundedSender<Msg>,
-    pid: u32,
-    exited: watch::Receiver<bool>,
+    reaper: Reaper,
 }
 
 impl ControlClient {
@@ -272,26 +272,15 @@ impl ControlClient {
         let (mut child, out_r) = Spawner
             .spawn_with_held_stdout(&mut cmd)
             .map_err(ConnectError::Spawn)?;
-        let pid = child.id();
         let stdin = child.stdin.take().map(ChildStdin::from_std).transpose();
         let stdout = pipe::Receiver::from_owned_fd(OwnedFd::from(out_r)).map(Some);
         let stderr = child.stderr.take().map(ChildStderr::from_std).transpose();
         // The reaper reports the exit, so `close` can wait for it and nothing signals a pid
-        // that is gone. It sees the exit without reaping, so the pid stays the child's
-        // (a zombie) until the flag is up, and only then reaps.
-        let (exit_tx, exited) = watch::channel(false);
-        std::thread::spawn(move || {
-            after_wait(
-                wait_exited(pid),
-                || {
-                    let _ = exit_tx.send(true);
-                },
-                || drop(child.wait()),
-            );
-        });
+        // that is gone.
+        let reaper = Reaper::watch(child, || {});
         let (Ok(Some(mut stdin)), Ok(Some(mut stdout)), Ok(Some(stderr))) = (stdin, stdout, stderr)
         else {
-            kill_unless_exited(pid, &exited);
+            reaper.kill_unless_exited(kill_term);
             return Err(ConnectError::Protocol("no pipes to the child"));
         };
         let first_line = first_stderr_line(stderr);
@@ -309,7 +298,7 @@ impl ControlClient {
         let reply = 'read: loop {
             let n = match tokio::time::timeout_at(deadline, stdout.read(&mut buf)).await {
                 Err(_) => {
-                    kill_unless_exited(pid, &exited);
+                    reaper.kill_unless_exited(kill_term);
                     // If tmux said why on stderr, that is the better error.
                     return Err(match stderr_line(first_line).await {
                         Some(line) => ConnectError::Exited(line),
@@ -319,7 +308,7 @@ impl ControlClient {
                 Ok(Ok(0)) => return Err(exited_error(first_line).await),
                 Ok(Err(_)) => {
                     // A read error doesn't mean the child is gone.
-                    kill_unless_exited(pid, &exited);
+                    reaper.kill_unless_exited(kill_term);
                     return Err(exited_error(first_line).await);
                 }
                 Ok(Ok(n)) => n,
@@ -327,7 +316,7 @@ impl ControlClient {
             let frames = match parser.push(&buf[..n]) {
                 Ok(f) => f,
                 Err(_) => {
-                    kill_unless_exited(pid, &exited);
+                    reaper.kill_unless_exited(kill_term);
                     return Err(ConnectError::Protocol("a line was too long"));
                 }
             };
@@ -352,11 +341,11 @@ impl ControlClient {
         };
         let (error, lines) = reply;
         if error {
-            kill_unless_exited(pid, &exited);
+            reaper.kill_unless_exited(kill_term);
             return Err(ConnectError::Protocol("the first command failed"));
         }
         let info = parse_info(&lines).ok_or_else(|| {
-            kill_unless_exited(pid, &exited);
+            reaper.kill_unless_exited(kill_term);
             ConnectError::Protocol("the first reply didn't parse")
         })?;
         parser.set_notifications_in_blocks(!notifications_after_blocks(&info.version));
@@ -374,10 +363,9 @@ impl ControlClient {
             leftover,
             shared,
             ev_tx,
-            pid,
-            exited.clone(),
+            reaper.clone(),
         ));
-        let client = ControlClient { tx, pid, exited };
+        let client = ControlClient { tx, reaper };
         if !version_ok(&info.version) {
             let version = info.version.clone();
             client.close().await;
@@ -413,66 +401,16 @@ impl ControlClient {
     /// Closes the child's stdin, waits up to 1 s for it to exit, then signals it.
     pub async fn close(self) {
         let _ = self.tx.send(Msg::Close);
-        let mut exited = self.exited.clone();
-        let waited = tokio::time::timeout(CLOSE_WAIT, exited.wait_for(|gone| *gone)).await;
+        let waited = tokio::time::timeout(CLOSE_WAIT, self.reaper.exited()).await;
         if waited.is_err() {
-            kill_unless_exited(self.pid, &self.exited);
+            self.reaper.kill_unless_exited(kill_term);
         }
     }
 
     #[doc(hidden)]
     pub fn child_pid(&self) -> u32 {
-        self.pid
+        self.reaper.pid()
     }
-}
-
-/// The reaper's steps once `wait_exited` has returned (it retries an interrupted wait
-/// itself): `flag` raises the exited flag, `reap` reaps the child.
-/// - Seen exited: the flag goes up while the pid is still the child's (a zombie), then the
-///   child is reaped.
-/// - The wait failed: nothing says the child has exited. It is reaped first (a blocking
-///   wait), and only then is the flag raised, so the flag never says "exited" of a child
-///   that still runs. A pid reused in between would be the one gap, as before `WNOWAIT`.
-fn after_wait(waited: io::Result<()>, flag: impl FnOnce(), reap: impl FnOnce()) {
-    match waited {
-        Ok(()) => {
-            flag();
-            reap();
-        }
-        Err(e) => {
-            tracing::warn!("tmux's reaper couldn't watch for its exit: {}", e.kind());
-            reap();
-            flag();
-        }
-    }
-}
-
-/// Signals `pid` only while its reaper has not reported the exit, so a reused pid is
-/// never signalled.
-fn kill_unless_exited(pid: u32, exited: &watch::Receiver<bool>) {
-    // The read guard is held across the kill (R28): the reaper's `send(true)` waits for it,
-    // and so does the reap after that, so the pid can't be reaped and reused between the
-    // look and the signal.
-    let seen = exited.borrow();
-    if !*seen {
-        kill_term(pid);
-    }
-    drop(seen);
-}
-
-/// Reads stderr to its end, handing back the first line and discarding the rest.
-fn first_stderr_line(stderr: ChildStderr) -> oneshot::Receiver<String> {
-    let (tx, rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let mut tx = Some(tx);
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(tx) = tx.take() {
-                let _ = tx.send(line);
-            }
-        }
-    });
-    rx
 }
 
 /// The first stderr line, if tmux wrote one within a short wait.
@@ -606,8 +544,7 @@ async fn read_loop(
     leftover: Vec<Frame>,
     shared: Arc<Mutex<Shared>>,
     events: mpsc::UnboundedSender<Event>,
-    pid: u32,
-    exited: watch::Receiver<bool>,
+    reaper: Reaper,
 ) {
     for frame in leftover {
         handle(frame, &shared, &events);
@@ -626,7 +563,7 @@ async fn read_loop(
             }
             Err(e) => {
                 tracing::warn!("dropping the tmux connection: {e}");
-                kill_unless_exited(pid, &exited);
+                reaper.kill_unless_exited(kill_term);
                 break;
             }
         }
@@ -714,30 +651,6 @@ fn file_error(shared: &Mutex<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The order of the reaper's steps after a wait that came back with `waited`.
-    fn reaper_steps(waited: io::Result<()>) -> Vec<&'static str> {
-        let steps = std::cell::RefCell::new(Vec::new());
-        after_wait(
-            waited,
-            || steps.borrow_mut().push("flag"),
-            || steps.borrow_mut().push("reap"),
-        );
-        steps.into_inner()
-    }
-
-    #[test]
-    fn a_seen_exit_is_flagged_before_the_reap() {
-        assert_eq!(reaper_steps(Ok(())), ["flag", "reap"]);
-    }
-
-    /// Code review (b1): a wait that failed says nothing about the child, so the flag waits
-    /// for the reap: never a false "exited" for a child that still runs.
-    #[test]
-    fn a_failed_wait_reaps_before_it_flags() {
-        let failed = io::Error::from(io::ErrorKind::InvalidInput);
-        assert_eq!(reaper_steps(Err(failed)), ["reap", "flag"]);
-    }
 
     /// A file's parse error, said outside any block (a bare line before 3.8, `%config-error`
     /// from 3.8), fails only a command that sources a file. A chain at the front stays `Ok`.
