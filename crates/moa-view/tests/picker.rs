@@ -264,6 +264,14 @@ fn the_hay_holds_the_folder_handle_and_id() {
     );
     let kite = rows.iter().find(|r| r.item == term("%5")).unwrap();
     assert_eq!(kite.hay, "kite terminal %5");
+    // A terminal is found by its folder's last part and its program.
+    let mut data = data;
+    let row = data.terms.get_mut("%5").unwrap();
+    row.folder = "/h/private/harbor".into();
+    row.command = "node".into();
+    let again = moa_view::views::picker::rows(&data);
+    let kite = again.iter().find(|r| r.item == term("%5")).unwrap();
+    assert_eq!(kite.hay, "kite terminal harbor node %5");
 }
 
 // ---------- the screen ----------
@@ -917,4 +925,27 @@ fn ctrl_c_closes_a_sheet() {
     let mut help = Panel::new(View::Help);
     help.set_managed(true);
     assert_eq!(help.interrupt(), Some(Out::Close));
+}
+
+#[test]
+fn a_terminal_row_shows_its_folder_and_program() {
+    let (mut data, ctx) = fixture();
+    data.upsert(
+        Topic::Terms,
+        vec![json!({"key": "%5", "name": "kite", "folder": "/h/private/kite", "command": "node"})],
+    );
+    let ui = ViewUi::default();
+    let lines = views::build(View::Picker, &data, &ctx, &ui, 80);
+    let row = lines
+        .iter()
+        .find(|l| l.item == Some(term("%5")))
+        .expect("kite's row");
+    assert!(
+        row.text().trim_end().ends_with("  ~/private/kite · node"),
+        "{}",
+        row.text()
+    );
+    // The row without a folder or program keeps the name-only look.
+    let harbor = lines.iter().find(|l| l.item == Some(term("%7"))).unwrap();
+    assert!(!harbor.text().contains('·'), "{}", harbor.text());
 }

@@ -13,7 +13,7 @@ use crate::model::Terminal;
 use crate::ops::launch::title_of;
 use crate::panel::{View, key_of};
 use crate::state::State;
-use crate::terminals::open_by_pane;
+use crate::terminals::{is_active, open_by_pane};
 
 /// A named set of rows a view can subscribe to.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -354,7 +354,7 @@ impl State {
     }
 
     /// Open record `t`'s `terms` row.
-    fn term_row(&self, t: &Terminal) -> TermRow {
+    pub(crate) fn term_row(&self, t: &Terminal) -> TermRow {
         TermRow {
             name: t.name.clone(),
             id: t.id.0,
@@ -364,7 +364,7 @@ impl State {
             since: t.command_since.0,
             opened_at: t.opened_at.0,
             touched_at: t.touched_at.map(|at| at.0),
-            active: false,
+            active: is_active(self, t),
             opened_by: t.opened_by.as_str().to_string(),
             session: t
                 .session_id

@@ -993,3 +993,82 @@ async fn a_missing_cockpit_is_made_again_at_its_terminals_size() {
     assert_eq!(cells(&keeper).len(), 3);
     ctl.close().await;
 }
+
+/// `term name` on a real server (5d): the record, the pane's `@moa_label` and the tab keep a
+/// name whole, whatever characters tmux would read as syntax or as a format: `#` stays
+/// literal in the label and the tab, quotes and `;` are text, a leading `-` is no flag.
+/// `term ls` then reads the label back from tmux's own listing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn naming_round_trips_odd_names() {
+    let (rig, mut c) = adopted().await;
+    // tmux 3.4 alone stores a `$` in an option or a window's name with a backslash before it.
+    let v34 = moa_core::tmux::version::is(
+        status(&mut c)["tmux"]["version"].as_str().unwrap(),
+        &["3.4"],
+    );
+    let stored = |s: String| if v34 { s.replace('$', "\\$") } else { s };
+    let home = rig.paths.home().display().to_string();
+    let opened = c.call("term.open", json!({"path": home, "title": "Kite"}));
+    let pane = opened["result"]["data"]["pane"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{opened}"))
+        .to_string();
+    // `term ls`'s row for this terminal: the server's own first shell may be listed too.
+    let row_of = |ls: &Value| -> Option<Value> {
+        ls["result"]["data"]
+            .as_array()?
+            .iter()
+            .find(|r| r["pane"] == json!(pane))
+            .cloned()
+    };
+    // The terminal is recorded once tmux's listing shows it.
+    wait_for(Duration::from_secs(10), || {
+        row_of(&c.call("term.ls", json!({})))
+    })
+    .expect("the terminal is listed within 10 s");
+
+    for name in [
+        "#(echo hi)",
+        "#{pane_id} ##",
+        "it's \"quoted\"",
+        "a;b ; c",
+        "-x --title",
+        "$HOME `id` 100%",
+        "back\\slash",
+        "emoji 🚀 Harbor",
+        "Lantern",
+    ] {
+        let named = c.call("term.name", json!({"target": pane, "name": name}));
+        assert_eq!(
+            named["result"]["text"],
+            json!(format!("named it {name}")),
+            "{name}: {named}"
+        );
+        // The label holds the name with `#` doubled, as tmux reads a format. (Read through a
+        // format: tmux 3.4's `show-options -v` prints a `$` with a backslash before it.)
+        let label = stored(format!("⌨ {name}").replace('#', "##"));
+        let shown = wait_for(Duration::from_secs(10), || {
+            let got = rig.tmux(&["display-message", "-p", "-t", &pane, "#{@moa_label}"]);
+            (got.trim_end_matches('\n') == label).then_some(got)
+        });
+        assert!(
+            shown.is_some(),
+            "{name}: @moa_label is {:?}, wanted {label:?}",
+            rig.tmux(&["display-message", "-p", "-t", &pane, "#{@moa_label}"])
+        );
+        // The tab, alone in its window, reads the same name, cut as a new terminal's is.
+        // tmux shows a backslash in a window's name doubled, as it does a control character.
+        let tab: String = format!("⌨ {name}").chars().take(24).collect();
+        let tab = stored(tab).replace('\\', "\\\\");
+        assert_eq!(
+            rig.tmux(&["display-message", "-p", "-t", &pane, "#{window_name}"])
+                .trim_end_matches('\n'),
+            tab,
+            "{name}"
+        );
+        // moa's own listing gives back the name it was given, whole.
+        let ls = c.call("term.ls", json!({}));
+        let row = row_of(&ls).unwrap_or_else(|| panic!("{ls}"));
+        assert_eq!(row["name"], json!(name), "{ls}");
+    }
+}

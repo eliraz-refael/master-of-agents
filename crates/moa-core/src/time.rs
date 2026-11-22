@@ -121,20 +121,39 @@ pub fn days_ago(now: &Now, days: i64) -> UtcMs {
     }
 }
 
-/// Age of `from` at `now` as the spike printed it: `?`, `{m}m`, `{h}h` or `{d}d`; the future is `0m`.
+pub const MINUTE: i64 = 60_000;
+pub const HOUR: i64 = 60 * MINUTE;
+pub const DAY: i64 = 24 * HOUR;
+
+/// How long `ms` is, in the one unit moa writes it in: `now` under a minute (and for a
+/// negative span), then `{m}m`, `{h}h`, `{d}d`. The one place these units live.
+pub fn span(ms: i64) -> String {
+    if ms < MINUTE {
+        "now".to_string()
+    } else if ms < HOUR {
+        format!("{}m", ms / MINUTE)
+    } else if ms < DAY {
+        format!("{}h", ms / HOUR)
+    } else {
+        format!("{}d", ms / DAY)
+    }
+}
+
+/// Age of `from` at `now` as the spike printed it: `?`, `{m}m`, `{h}h` or `{d}d`; under a
+/// minute, and the future, is `0m`.
 pub fn age(from: Option<UtcMs>, now: UtcMs) -> String {
     let Some(from) = from else {
         return "?".to_string();
     };
-    let ms = now.0.saturating_sub(from.0).max(0);
-    let minutes = ms / 60_000;
-    if minutes < 60 {
-        format!("{minutes}m")
-    } else if minutes < 24 * 60 {
-        format!("{}h", minutes / 60)
-    } else {
-        format!("{}d", minutes / (24 * 60))
+    match span(now.0.saturating_sub(from.0)).as_str() {
+        "now" => "0m".to_string(),
+        s => s.to_string(),
     }
+}
+
+/// How long from `now` until `at`, as [`span`] writes it (`now` once it is here).
+pub fn until(at: UtcMs, now: UtcMs) -> String {
+    span(at.0.saturating_sub(now.0))
 }
 
 /// `YYYY-MM-DD HH:MM:SS` in `tz`, as the spike printed it.
@@ -251,6 +270,30 @@ mod tests {
             "23h"
         );
         assert_eq!(age(Some(UtcMs(now.0 - 49 * 3_600_000)), now), "2d");
+    }
+    /// `age`, `until` and the view's `ago` write one set of units: `time::span`.
+    #[test]
+    fn age_ago_and_until_share_one_formatter() {
+        assert_eq!(span(-5), "now");
+        assert_eq!(span(59_999), "now");
+        assert_eq!(span(MINUTE), "1m");
+        assert_eq!(span(59 * MINUTE + 59_999), "59m");
+        assert_eq!(span(HOUR), "1h");
+        assert_eq!(span(DAY - 1), "23h");
+        assert_eq!(span(DAY), "1d");
+        assert_eq!(span(49 * HOUR), "2d");
+        let now = utc("2026-11-15T12:00:00Z");
+        // The same span through each: `age` reads under a minute as `0m`, as it always did.
+        for ms in [0, 30_000, MINUTE, 90 * MINUTE, 5 * HOUR, 3 * DAY] {
+            let want = if ms < MINUTE {
+                "0m".to_string()
+            } else {
+                span(ms)
+            };
+            assert_eq!(age(Some(UtcMs(now.0 - ms)), now), want, "{ms}");
+            assert_eq!(until(UtcMs(now.0 + ms), now), span(ms), "{ms}");
+        }
+        assert_eq!(until(UtcMs(now.0 - HOUR), now), "now");
     }
     #[test]
     fn days_ago_keeps_the_local_wall_time_across_dst() {

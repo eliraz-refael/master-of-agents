@@ -746,7 +746,8 @@ impl Panel {
         Span::new(hint, Tone::Dim)
     }
 
-    /// The folder the selected row is in: a session's, a project's, a task's session's.
+    /// The folder the selected row is in: a session's, a project's, a task's session's, a
+    /// terminal's.
     pub fn here(&self, data: &Data) -> Option<String> {
         match self.selected()? {
             Item::Session(id) => data.sessions.get(id)?.session.cwd.clone(),
@@ -755,7 +756,10 @@ impl Panel {
                 let session = data.tasks.get(id)?.session_id?;
                 data.sessions.get(&session)?.session.cwd.clone()
             }
-            Item::Group(_) | Item::Suggestion(_) | Item::Term { .. } => None,
+            Item::Term { pane } => {
+                Some(data.terms.get(pane)?.folder.clone()).filter(|f| !f.is_empty())
+            }
+            Item::Group(_) | Item::Suggestion(_) => None,
         }
     }
 

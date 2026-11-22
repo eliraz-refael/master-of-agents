@@ -602,6 +602,81 @@ expression: all
             "type": "object"
           },
           {
+            "description": "The open terminals, from one fresh listing of the tabs.",
+            "properties": {
+              "method": {
+                "const": "term.ls",
+                "type": "string"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Names terminal `target` (its number `7` or `#7`, its tab `%12`, or its name) `name`.",
+            "properties": {
+              "method": {
+                "const": "term.name",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target",
+                  "name"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Notes terminal `target` with `note`; an empty one clears it.",
+            "properties": {
+              "method": {
+                "const": "term.note",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "note": {
+                    "type": "string"
+                  },
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target",
+                  "note"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "method": {
                 "const": "task.ls",

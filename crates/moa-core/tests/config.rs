@@ -511,6 +511,42 @@ fn sleep_after_hours_parses() {
     }
 }
 
+/// 5d: a terminal you haven't touched for `[ui] terminal_idle_hours` (default 2) shows as idle;
+/// `0` turns the mark off, and anything but a number of hours, 0 or more, is refused.
+/// `sleep_after_hours` reads its number the same way.
+#[test]
+fn terminal_idle_hours_parses() {
+    use moa_core::config::{SleepAfter, hours_ms};
+    let idle = |text: &str| Config::parse(text, home()).map(|c| c.ui.terminal_idle_ms);
+    assert_eq!(idle("").unwrap(), 7_200_000);
+    assert_eq!(Config::default().ui.terminal_idle_ms, 7_200_000);
+    assert_eq!(
+        idle("[ui]\nterminal_idle_hours = 0.5\n").unwrap(),
+        1_800_000
+    );
+    assert_eq!(idle("[ui]\nterminal_idle_hours = 3\n").unwrap(), 10_800_000);
+    assert_eq!(idle("[ui]\nterminal_idle_hours = 0\n").unwrap(), 0);
+    let refused = "moa.toml: terminal_idle_hours in [ui] must be a number of hours, 0 or more";
+    for bad in ["-1", "\"x\"", "-0.5", "nan", "inf", "true", "[1]"] {
+        assert_eq!(
+            err(&format!("[ui]\nterminal_idle_hours = {bad}\n")),
+            refused,
+            "{bad}"
+        );
+    }
+    // The one reader both settings use.
+    assert_eq!(hours_ms(&toml::Value::Float(0.5)), Some(1_800_000));
+    assert_eq!(hours_ms(&toml::Value::Integer(0)), Some(0));
+    assert_eq!(hours_ms(&toml::Value::Integer(-1)), None);
+    assert_eq!(
+        Config::parse("[brains.default]\nsleep_after_hours = 2\n", home())
+            .unwrap()
+            .brains[&brain("default")]
+            .sleep_after,
+        SleepAfter(7_200_000)
+    );
+}
+
 /// V11: moa's terminal turns the mouse on unless `[ui] mouse = false`; anything but a boolean
 /// is refused.
 #[test]

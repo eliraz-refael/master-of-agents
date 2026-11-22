@@ -15,13 +15,15 @@ use moa_core::model::{
     Activity, AgentKind, Inspected, Lifecycle, Location, OpenedBy, PaneAgent, PaneBinding, Session,
     SessionId, TermId, Terminal,
 };
-use moa_core::op::Op;
+use moa_core::op::{NoParams, Op, OpError};
 use moa_core::panel::View;
-use moa_core::state::{Deps, Snapshot, State};
-use moa_core::terminals::open_for;
+use moa_core::state::{Deps, LoadNote, Snapshot, State};
+use moa_core::terminals::{find, is_idle, open_for};
 use moa_core::tmux::cmd::Cmd;
-use moa_core::tmux::ids::{ClientName, PaneId};
+use moa_core::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::link::Link;
+use moa_core::tmux::notify::Notification;
+use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
 use moa_testkit::brain::TypicalBrain;
 use serde_json::json;
@@ -239,9 +241,28 @@ impl Rig {
 
     /// [`Rig::list`] at `now`.
     fn list_at(&mut self, now: Now, panes: &[&str], terms: &[String]) -> Vec<Effect> {
+        self.list_as(now, &["S $0 moa", "S $1 _moa"], panes, terms, &[])
+    }
+
+    /// [`Rig::list_at`] with these `sessions` and user `clients` (`LIST_CLIENTS` lines).
+    fn list_as(
+        &mut self,
+        now: Now,
+        sessions: &[&str],
+        panes: &[&str],
+        terms: &[String],
+        clients: &[&str],
+    ) -> Vec<Effect> {
+        let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
         let mut results = lists(panes, terms);
-        results[2] = Ok(Vec::new());
+        results[0] = lines(sessions);
+        results[2] = lines(clients);
         refresh_answered(&mut self.st, now, results)
+    }
+
+    /// tmux tells of `n` at `now`.
+    fn notify(&mut self, now: Now, n: Notification) -> Vec<Effect> {
+        handle_checked(&mut self.st, Input::Tmux(TmuxIn::Notification(n)), now)
     }
 
     /// The start drain, then reconcile's listing answered with `info` (`PANE_INFO` lines).
@@ -1039,4 +1060,728 @@ fn a_renamed_session_renames_its_terminals_row() {
         "{fx:?}"
     );
     assert_eq!(term_rows(&r.st)["%5"]["session"], "harbor");
+}
+
+/// `%5` (in the tab `@2`) and `%6` (in `@3`) are shells in the session `moa`, whose current
+/// tab is `@2`.
+fn terms56() -> [String; 2] {
+    [plain("%5", "/r/a"), plain("%6", "/r/b")]
+}
+
+/// A user client `/dev/ttys1` attached to the session `moa`, at `now`.
+fn look(r: &mut Rig, now: Now) -> Vec<Effect> {
+    r.list_as(
+        now,
+        &["S $0 moa", "S $1 _moa"],
+        &[P5, P6],
+        &terms56(),
+        &["C 0 $0 /dev/ttys1"],
+    )
+}
+
+/// The user switches the session `moa` to the tab `@3`, where `%6` is.
+fn switch_to_6(r: &mut Rig, now: Now) -> Vec<Effect> {
+    r.notify(
+        now,
+        Notification::SessionWindowChanged {
+            session: TmuxSessionId(0),
+            window: WindowId(3),
+        },
+    )
+}
+
+/// Looking at a terminal stamps it when you arrive, and the one you leave when you go.
+#[test]
+fn switching_to_a_terminal_stamps_it() {
+    let mut r = Rig::found();
+    assert_eq!(r.open(5).unwrap().touched_at, None);
+    let at = later(&r.b, 1_000);
+    look(&mut r, at.clone());
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+    assert_eq!(r.open(6).unwrap().touched_at, None);
+
+    let at = later(&r.b, 2_000);
+    let fx = switch_to_6(&mut r, at.clone());
+    assert_eq!(r.open(6).unwrap().touched_at, Some(at.wall));
+    assert!(records(&fx).iter().any(|t| t.pane_id == "%6"), "{fx:?}");
+}
+
+#[test]
+fn leaving_a_terminal_stamps_it_again() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at);
+    let at = later(&r.b, 2_000);
+    let fx = switch_to_6(&mut r, at.clone());
+    let left: Vec<_> = records(&fx)
+        .into_iter()
+        .filter(|t| t.pane_id == "%5")
+        .collect();
+    assert_eq!(left.len(), 1, "{fx:?}");
+    assert_eq!(left[0].touched_at, Some(at.wall));
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+}
+
+/// Events that move nothing a user looks at write nothing.
+#[test]
+fn staying_on_a_terminal_writes_nothing() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at);
+    for i in 0..10 {
+        let at = later(&r.b, 2_000 + i);
+        let fx = r.notify(
+            at,
+            Notification::WindowPaneChanged {
+                window: WindowId(3),
+                pane: PaneId(6),
+            },
+        );
+        assert!(records(&fx).is_empty(), "{fx:?}");
+    }
+}
+
+#[test]
+fn a_detach_stamps_the_terminal_you_were_on() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at);
+    let at = later(&r.b, 2_000);
+    let fx = r.notify(
+        at.clone(),
+        Notification::ClientDetached {
+            client: ClientName("/dev/ttys1".into()),
+        },
+    );
+    assert_eq!(records(&fx).len(), 1, "{fx:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+}
+
+/// Two users, each on a terminal of their own session, are both looking.
+#[test]
+fn two_clients_on_two_terminals_stamp_both() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    let p8 = "P %8 @6 $2 1 1 0 0  0 ";
+    let mut terms = terms56().to_vec();
+    terms.push(plain("%8", "/r/c"));
+    r.list_as(
+        at.clone(),
+        &["S $0 moa", "S $1 _moa", "S $2 kite"],
+        &[P5, P6, p8],
+        &terms,
+        &["C 0 $0 /dev/ttys1", "C 0 $2 /dev/ttys2"],
+    );
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+    assert_eq!(r.open(8).unwrap().touched_at, Some(at.wall));
+    assert_eq!(r.open(6).unwrap().touched_at, None);
+    assert_eq!(term_rows(&r.st)["%5"]["active"], true);
+    assert_eq!(term_rows(&r.st)["%8"]["active"], true);
+    assert_eq!(term_rows(&r.st)["%6"]["active"], false);
+}
+
+/// The link's own control client looks at nothing.
+#[test]
+fn a_control_client_touches_nothing() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    let fx = r.list_as(
+        at,
+        &["S $0 moa", "S $1 _moa"],
+        &[P5, P6],
+        &terms56(),
+        &["C 1 $0 client-9"],
+    );
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, None);
+    assert_eq!(term_rows(&r.st)["%5"]["active"], false);
+}
+
+// `term ls`, `name` and `note` (T5).
+
+/// 5d p2 rulings: a long name's `@moa_label` is cut as the tab's is, one rule for both.
+#[test]
+fn a_long_names_label_is_cut_like_the_tab() {
+    let mut r = Rig::found();
+    let long = "y".repeat(40);
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        5,
+        Op::TermName {
+            target: "%5".into(),
+            name: long.clone(),
+        },
+    );
+    let sent = sent(&fx);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent[0].argv()[3], "@moa_label");
+    assert_eq!(sent[0].argv()[4], sent[1].argv()[3], "{sent:?}");
+    assert_ne!(sent[0].argv()[4], format!("⌨ {long}"));
+}
+
+/// Renaming waits for tmux: with the link down nothing changes.
+#[test]
+fn naming_with_the_link_down_is_refused() {
+    let mut r = Rig::found();
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let before = r.open(5).unwrap().name.clone();
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        5,
+        Op::TermName {
+            target: "%5".into(),
+            name: "Kite".into(),
+        },
+    );
+    assert_eq!(
+        refusal(&fx),
+        "moa isn't open in a terminal yet; run moa first"
+    );
+    assert!(records(&fx).is_empty() && sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.open(5).unwrap().name, before);
+}
+
+/// Losing tmux isn't leaving a terminal: a dropped link stamps nothing, and neither does
+/// the reconnect that finds the same terminal looked at.
+#[test]
+fn a_dropped_link_is_not_leaving_a_terminal() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at.clone());
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+    let fx = feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    link_up(&r.b, &mut r.st);
+    let at2 = later(&r.b, 5_000);
+    let fx = r.list_as(
+        at2,
+        &["S $0 moa", "S $1 _moa"],
+        &[P5, P6],
+        &terms56(),
+        &["C 0 $0 /dev/ttys1"],
+    );
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    let seen = reconciled_again(&mut r);
+    assert!(r.st.tmux().reconciled(), "{seen:?}");
+    assert!(records(&seen).is_empty(), "{seen:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+}
+
+/// Answers the listing a connection waits on after the start drain already ran, with `%5`
+/// and `%6` as they are; the effects.
+fn reconciled_again(r: &mut Rig) -> Vec<Effect> {
+    let conn = r.conn();
+    let asked: Vec<u64> = r.st.tmux().queries().collect();
+    let mut seen = Vec::new();
+    for n in asked {
+        let lines = |l: &[String]| Ok(l.to_vec());
+        seen.extend(feed(
+            &r.b,
+            &mut r.st,
+            TmuxIn::Replies {
+                conn,
+                token: TmuxToken::Query(n),
+                results: vec![lines(&[info("%5"), info("%6")]), lines(&[])],
+            },
+        ));
+    }
+    seen
+}
+
+/// A stamp the store refused is tried again by the next input, not lost.
+#[test]
+fn a_refused_stamp_is_tried_again() {
+    // `%5`'s row is one this build doesn't know, so a write to it is refused.
+    let known = Rig::found();
+    let open = vec![
+        known.open(5).unwrap().clone(),
+        known.open(6).unwrap().clone(),
+    ];
+    let snapshot = |r: &Rig, unknown: bool| {
+        let mut snap = r.b.snapshot();
+        snap.sessions.push(session_s(&r.b));
+        snap.next_ids.terminal = 3;
+        snap.terminals = open.clone();
+        if unknown {
+            snap.unknown.push(LoadNote {
+                table: "terminals",
+                key: "#1".into(),
+                reason: "a state this build doesn't know",
+            });
+        }
+        snap
+    };
+    let mut r = Rig::linked(Vec::new());
+    let snap = snapshot(&r, true);
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    r.list(&[P5, P6], &terms56());
+    r.reconcile(&[&info("%5"), &info("%6")]);
+    let at = later(&r.b, 1_000);
+    let fx = look(&mut r, at);
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, None);
+
+    // The row is known again; the next input stamps what was refused.
+    let at = later(&r.b, 2_000);
+    let snap = snapshot(&r, false);
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        at.clone(),
+    );
+    let fx = r.reconcile(&[&info("%5"), &info("%6")]);
+    assert_eq!(records(&fx).len(), 1, "{fx:?}");
+    assert!(r.open(5).unwrap().touched_at.is_some());
+}
+
+const MIN: i64 = 60_000;
+const HOUR: i64 = 60 * MIN;
+const LS_DOWN: &str = "moa isn't connected to tmux right now; this list may be out of date";
+
+/// The typical brain's moment, which a rig's first `now` is.
+fn t0() -> UtcMs {
+    TypicalBrain::new().now().wall
+}
+
+/// `t` as `ls` lists it: `zsh` the shell, `command` in front, in `cwd`.
+fn shown(mut t: Terminal, cwd: &str, command: &str) -> Terminal {
+    t.cwd = cwd.into();
+    t.shell = "zsh".into();
+    t.command = command.into();
+    t
+}
+
+/// `%5` is Kite and `%6` is Beacon, whose records are as they list. Both are reconciled.
+fn kite_and_beacon(a: Terminal, b: Terminal) -> Rig {
+    let mut r = Rig::linked(vec![a, b]);
+    let tabs = [
+        pane_line("%5", "1", "zsh", "/r/a", "⌨ Kite"),
+        pane_line("%6", "1", "node", "/r/b", "⌨ Beacon"),
+    ];
+    r.list(&[P5, P6], &tabs);
+    r.reconcile(&[&info("%5"), &info("%6")]);
+    r
+}
+
+/// The listing of `%5` and `%6` as [`kite_and_beacon`] has them.
+fn tabs56() -> [String; 2] {
+    [
+        pane_line("%5", "1", "zsh", "/r/a", "⌨ Kite"),
+        pane_line("%6", "1", "node", "/r/b", "⌨ Beacon"),
+    ]
+}
+
+fn ls(r: &mut Rig, req: u64) -> Vec<Effect> {
+    send(&r.b, &mut r.st, req, Op::TermLs(NoParams))
+}
+
+/// The one reply in `fx`: its text and data.
+fn the_reply(fx: &[Effect]) -> (String, serde_json::Value) {
+    match &replies(fx)[..] {
+        [(_, Ok(done))] => (done.text.clone(), done.data.clone()),
+        other => panic!("one reply: {other:?}"),
+    }
+}
+
+fn refusal(fx: &[Effect]) -> String {
+    match &replies(fx)[..] {
+        [(_, Err(OpError(why)))] => why.clone(),
+        other => panic!("one refusal: {other:?}"),
+    }
+}
+
+/// The commands `fx` sends tmux.
+fn sent(fx: &[Effect]) -> Vec<Cmd> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Tmux { cmds, .. } => Some(cmds.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn find_takes_a_number_a_pane_or_a_name() {
+    let r = Rig::linked(vec![record(7, "%5", "Kite"), record(8, "%12", "Beacon")]);
+    let id = |t: &str| find(&r.st, t).map(|t| t.id.0);
+    assert_eq!(id("7"), Ok(7));
+    assert_eq!(id("#7"), Ok(7));
+    assert_eq!(id("%12"), Ok(8));
+    assert_eq!(id("Beacon"), Ok(8));
+    assert_eq!(id("beacon"), Ok(8));
+    assert_eq!(id(" KITE "), Ok(7));
+}
+
+#[test]
+fn find_refuses_unknown_and_ambiguous() {
+    let mut gone_server = record(10, "%10", "Lantern");
+    gone_server.server_pid += 1;
+    let r = Rig::linked(vec![
+        record(1, "%5", "Kite"),
+        record(2, "%6", "kite"),
+        record(3, "%7", "Beacon"),
+        gone_server,
+    ]);
+    let why = |t: &str| find(&r.st, t).map(|t| t.id.0).unwrap_err().0;
+    assert_eq!(why("KITE"), "2 terminals are named KITE; use its number");
+    assert_eq!(why("9"), "no terminal 9");
+    assert_eq!(why("#10"), "no terminal #10");
+    assert_eq!(why("%11"), "no terminal %11");
+    assert_eq!(why("%x"), "no terminal %x");
+    assert_eq!(why("Lantern"), "no terminal Lantern");
+    assert_eq!(why("nobody"), "no terminal nobody");
+    // A number names a record whatever its name; a pane or a number picks one of two.
+    assert_eq!(find(&r.st, "1").map(|t| t.id.0), Ok(1));
+    assert_eq!(find(&r.st, "%6").map(|t| t.id.0), Ok(2));
+}
+
+#[test]
+fn ls_asks_a_fresh_listing_first() {
+    let mut r = Rig::found();
+    let fx = ls(&mut r, 9);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let listing: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Tmux {
+                cmds,
+                token: Some(TmuxToken::Refresh),
+                ..
+            } => Some(cmds.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(listing, vec![refresh_cmds()], "{fx:?}");
+    // A second request meanwhile asks for no listing of its own; the one that lands, and
+    // the one asked behind it for a request that came during it, answer them in turn.
+    let fx = ls(&mut r, 10);
+    assert!(sent(&fx).is_empty() && replies(&fx).is_empty(), "{fx:?}");
+    let fx = r.list(&[P5, P6], &terms56());
+    assert!(
+        replies(&fx).is_empty(),
+        "the listing asked behind it is out: {fx:?}"
+    );
+    let fx = r.list(&[P5, P6], &terms56());
+    let got: Vec<u64> = replies(&fx).iter().map(|(req, _)| req.0).collect();
+    assert_eq!(got, vec![9, 10], "{fx:?}");
+    // Nothing waits any more: a listing nobody asked for answers nobody.
+    assert!(replies(&r.list(&[P5, P6], &terms56())).is_empty());
+}
+
+#[test]
+fn ls_lists_open_terminals_in_text_and_data() {
+    let now = t0();
+    let mut kite = shown(record(1, "%5", "Kite"), "/r/a", "zsh");
+    kite.opened_at = UtcMs(now.0 - 5 * HOUR);
+    kite.touched_at = Some(UtcMs(now.0 - 3 * HOUR));
+    let mut beacon = shown(record(2, "%6", "Beacon"), "/r/b", "node");
+    beacon.opened_at = UtcMs(now.0 - 4 * HOUR);
+    beacon.touched_at = Some(UtcMs(now.0 - 5 * MIN));
+    beacon.command_since = UtcMs(now.0 - 2 * HOUR);
+    beacon.timeout_at = Some(UtcMs(now.0 + 3 * HOUR));
+    beacon.note = Some("dev server".into());
+    let mut r = kite_and_beacon(kite, beacon);
+    ls(&mut r, 9);
+    let (text, data) = the_reply(&r.list(&[P5, P6], &tabs56()));
+    assert_eq!(
+        text,
+        "#1  Kite  /r/a  shell  touched 3h  open 5h  idle\n\
+         #2  Beacon  /r/b  node (2h)  touched 5m  open 4h  closes in 3h  — dev server"
+    );
+    let rows = data.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (rows[0]["id"].clone(), rows[0]["pane"].clone()),
+        (json!(1), json!("%5"))
+    );
+    assert_eq!(rows[0]["idle"], true);
+    assert_eq!(rows[0]["name"], "Kite");
+    assert_eq!(rows[1]["idle"], false);
+    assert_eq!(rows[1]["note"], "dev server");
+    assert_eq!(rows[1]["running"], true);
+    assert_eq!(rows[1]["timeout_at"], now.0 + 3 * HOUR);
+    assert_eq!(rows[1]["active"], false);
+}
+
+#[test]
+fn ls_writes_the_home_as_a_tilde_and_a_never_touched_terminal_so() {
+    let mut r = Rig::linked(Vec::new());
+    let cwd = format!("{}/work/lantern", r.b.home.display());
+    let tabs = [plain("%5", &cwd)];
+    r.list(&[P5], &tabs);
+    r.reconcile(&[&info("%5")]);
+    ls(&mut r, 9);
+    let (text, _) = the_reply(&r.list(&[P5], &tabs));
+    assert_eq!(
+        text,
+        "#1  shell  ~/work/lantern  shell  touched never  open now"
+    );
+}
+
+#[test]
+fn ls_with_none_says_so() {
+    let mut r = Rig::linked(Vec::new());
+    // The connection's first listing is still out: the request waits for a later one.
+    ls(&mut r, 9);
+    assert!(replies(&r.list(&[], &[])).is_empty());
+    let (text, data) = the_reply(&r.list(&[], &[]));
+    assert_eq!(text, "no terminals open");
+    assert_eq!(data, json!([]));
+}
+
+#[test]
+fn ls_with_the_link_down_says_so() {
+    let mut r = Rig::found();
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let fx = ls(&mut r, 9);
+    assert!(sent(&fx).is_empty(), "nothing can be asked: {fx:?}");
+    let (text, data) = the_reply(&fx);
+    assert!(text.starts_with(&format!("{LS_DOWN}\n#1  ")), "{text}");
+    assert_eq!(data.as_array().unwrap().len(), 2);
+
+    // A request waiting when the link goes is answered then, as the records say.
+    let mut r = Rig::found();
+    assert!(replies(&ls(&mut r, 9)).is_empty());
+    let fx = feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let (text, _) = the_reply(&fx);
+    assert!(text.starts_with(LS_DOWN), "{text}");
+}
+
+#[test]
+fn ls_shows_how_long_a_program_has_run() {
+    let now = t0();
+    let mut kite = shown(record(1, "%5", "Kite"), "/r/a", "zsh");
+    kite.command_since = UtcMs(now.0 - 3 * HOUR);
+    let mut beacon = shown(record(2, "%6", "Beacon"), "/r/b", "node");
+    beacon.command_since = UtcMs(now.0 - 2 * HOUR - 30 * MIN);
+    let mut r = kite_and_beacon(kite, beacon);
+    ls(&mut r, 9);
+    let (text, _) = the_reply(&r.list(&[P5, P6], &tabs56()));
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].contains("  shell  "), "{text}");
+    assert!(lines[1].contains("  node (2h)  "), "{text}");
+}
+
+#[test]
+fn is_idle_counts_from_last_touch_or_open_and_never_while_looked_at() {
+    let now = UtcMs(10 * HOUR);
+    let two = 2 * HOUR;
+    assert!(is_idle(UtcMs(now.0 - two), false, two, now));
+    assert!(!is_idle(UtcMs(now.0 - two + 1), false, two, now));
+    // Looked at: never idle, however long ago it was touched.
+    assert!(!is_idle(UtcMs(0), true, two, now));
+    // 0 turns the mark off.
+    assert!(!is_idle(UtcMs(0), false, 0, now));
+}
+
+#[test]
+fn an_active_terminal_is_never_idle_in_ls() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at);
+    ls(&mut r, 9);
+    // 5 hours on: %6 went untouched; %5, looked at since, did not.
+    let at = later(&r.b, 5 * HOUR);
+    let (text, data) = the_reply(&r.list_as(
+        at,
+        &["S $0 moa", "S $1 _moa"],
+        &[P5, P6],
+        &terms56(),
+        &["C 0 $0 /dev/ttys1"],
+    ));
+    let rows = data.as_array().unwrap();
+    assert_eq!(
+        (rows[0]["active"].clone(), rows[0]["idle"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(
+        (rows[1]["active"].clone(), rows[1]["idle"].clone()),
+        (json!(false), json!(true))
+    );
+    assert!(
+        text.lines().next().unwrap().contains("touched now"),
+        "{text}"
+    );
+}
+
+#[test]
+fn naming_sets_the_record_label_and_tab() {
+    let mut r = Rig::found();
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        5,
+        Op::TermName {
+            target: "%5".into(),
+            name: "  Kite server  ".into(),
+        },
+    );
+    assert_eq!(the_reply(&fx).0, "named it Kite server");
+    assert_eq!(records(&fx).len(), 1, "{fx:?}");
+    assert_eq!(r.open(5).unwrap().name, "Kite server");
+    assert_eq!(
+        sent(&fx),
+        vec![
+            Cmd::new("set-option").args(["-p", "-t", "%5", "@moa_label", "⌨ Kite server"]),
+            Cmd::new("rename-window").args(["-t", "%5", "--", "⌨ Kite server"]),
+        ]
+    );
+    assert_eq!(term_rows(&r.st)["%5"]["name"], "Kite server");
+    assert_eq!(
+        r.st.tmux().topology.term_name(PaneId(5)),
+        Some("Kite server")
+    );
+    // By number, by name; a `#` stays literal; the tab's name is cut, the label's is not.
+    let long = "Harbor #1 build server with a long name";
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        6,
+        Op::TermName {
+            target: "kite server".into(),
+            name: long.into(),
+        },
+    );
+    assert_eq!(the_reply(&fx).0, format!("named it {long}"));
+    assert_eq!(
+        sent(&fx),
+        vec![
+            Cmd::new("set-option").args([
+                "-p",
+                "-t",
+                "%5",
+                "@moa_label",
+                "⌨ Harbor ##1 build server"
+            ]),
+            Cmd::new("rename-window").args(["-t", "%5", "--", "⌨ Harbor ##1 build server"]),
+        ]
+    );
+}
+
+#[test]
+fn naming_a_split_leaves_the_agents_tab() {
+    let mut r = Rig::linked(Vec::new());
+    let split = "P %8 @2 $0 1 0 0 0  0 ";
+    let tabs = [plain("%5", "/r/a"), plain("%8", "/r/b")];
+    r.list(&[P5, split], &tabs);
+    r.reconcile(&[&info("%5"), &info("%8")]);
+    assert!(r.open(8).is_some());
+    for target in ["%5", "%8"] {
+        let fx = send(
+            &r.b,
+            &mut r.st,
+            5,
+            Op::TermName {
+                target: target.into(),
+                name: "Beacon".into(),
+            },
+        );
+        let sent = sent(&fx);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].name(), "set-option");
+    }
+}
+
+#[test]
+fn a_name_is_1_to_40_characters() {
+    let mut r = Rig::found();
+    let name = |r: &mut Rig, n: &str| {
+        send(
+            &r.b,
+            &mut r.st,
+            5,
+            Op::TermName {
+                target: "%5".into(),
+                name: n.into(),
+            },
+        )
+    };
+    let refused = "a terminal's name is 1 to 40 characters";
+    for bad in ["", "   ", "\n", &"x".repeat(41), &"é".repeat(41)] {
+        let fx = name(&mut r, bad);
+        assert_eq!(refusal(&fx), refused, "{bad:?}");
+        assert!(records(&fx).is_empty() && sent(&fx).is_empty(), "{fx:?}");
+    }
+    for ok in ["x", &"x".repeat(40), &"é".repeat(40)] {
+        assert_eq!(the_reply(&name(&mut r, ok)).0, format!("named it {ok}"));
+    }
+    // A name `find` would read as a number or a tab could never be used.
+    for bad in ["42", "#7", "%3", "-1"] {
+        let fx = name(&mut r, bad);
+        assert_eq!(
+            refusal(&fx),
+            "a terminal's name can't be a number or start with %",
+            "{bad:?}"
+        );
+        assert!(records(&fx).is_empty() && sent(&fx).is_empty(), "{fx:?}");
+    }
+    // A newline in a name is a space, so the list stays a line a terminal.
+    assert_eq!(the_reply(&name(&mut r, "a\nb")).0, "named it a b");
+    assert_eq!(r.open(5).unwrap().name, "a b");
+    // An unknown terminal is the lookup's refusal.
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        5,
+        Op::TermName {
+            target: "9".into(),
+            name: "x".into(),
+        },
+    );
+    assert_eq!(refusal(&fx), "no terminal 9");
+}
+
+#[test]
+fn a_note_is_cut_at_200_and_empty_clears() {
+    let mut r = Rig::found();
+    let note = |r: &mut Rig, n: &str| {
+        send(
+            &r.b,
+            &mut r.st,
+            5,
+            Op::TermNote {
+                target: "1".into(),
+                note: n.into(),
+            },
+        )
+    };
+    let fx = note(&mut r, "  waiting on Harbor  ");
+    assert_eq!(the_reply(&fx).0, "noted");
+    assert_eq!(
+        r.open(5).unwrap().note.as_deref(),
+        Some("waiting on Harbor")
+    );
+    assert!(sent(&fx).is_empty(), "a note is the record's alone: {fx:?}");
+    assert_eq!(term_rows(&r.st)["%5"]["note"], "waiting on Harbor");
+
+    let fx = note(&mut r, &"n".repeat(201));
+    assert_eq!(the_reply(&fx).0, "noted");
+    let kept = r.open(5).unwrap().note.clone().unwrap();
+    assert_eq!(kept.chars().count(), 200);
+    assert_eq!(kept, format!("{}…", "n".repeat(199)));
+    let exact = "é".repeat(200);
+    note(&mut r, &exact);
+    assert_eq!(r.open(5).unwrap().note.as_deref(), Some(exact.as_str()));
+
+    for empty in ["", "  \n "] {
+        note(&mut r, "again");
+        assert_eq!(the_reply(&note(&mut r, empty)).0, "note cleared");
+        assert_eq!(r.open(5).unwrap().note, None);
+    }
+    // A note may start with a dash, and holds one line.
+    note(&mut r, "- next\nstep");
+    assert_eq!(r.open(5).unwrap().note.as_deref(), Some("- next step"));
 }

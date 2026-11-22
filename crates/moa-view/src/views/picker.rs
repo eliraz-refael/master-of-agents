@@ -87,6 +87,10 @@ pub struct PickRow {
     pub since: Option<UtcMs>,
     /// A live session's line of context, cleaned.
     pub why: String,
+    /// A terminal's folder and the program in front, as published; empty for a session. Its
+    /// `why` is made from them when drawn, as the home folder is the context's.
+    pub folder: String,
+    pub command: String,
     /// What the query matches: the title, the group, the word, the folder's last part, the
     /// handle and the id's first 8 characters, lowercased and joined by spaces.
     pub hay: String,
@@ -100,6 +104,17 @@ fn term_title(pane: &str, row: &TermRow) -> String {
         &row.name
     };
     clean(name)
+}
+
+/// A terminal's why: `~/folder · node`, or the one of them it has (a row from before moa
+/// knew its folder shows none).
+fn term_why(row: &PickRow, ctx: &Ctx) -> String {
+    let folder = clean(&text::short_path(&row.folder, &ctx.home));
+    [folder, clean(&row.command)]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// What a pick says it is opening: the row's title.
@@ -141,6 +156,8 @@ fn session_row(row: &SessionRow, kind: Kind, since: Option<UtcMs>, why: String) 
         group,
         since,
         why,
+        folder: String::new(),
+        command: String::new(),
         hay,
     }
 }
@@ -169,9 +186,20 @@ pub fn rows(data: &Data) -> Vec<PickRow> {
     terms.sort_by_key(|(pane, _)| (tab_number(pane), *pane));
     out.extend(terms.into_iter().map(|(pane, t)| {
         let title = term_title(pane, t);
-        let hay = [title.as_str(), Kind::Term.word(), pane.as_str()]
-            .join(" ")
-            .to_lowercase();
+        // Found by its folder's last part and its program too, as the row shows them.
+        let folder = t.folder.rsplit('/').next().unwrap_or("");
+        let hay = [
+            title.as_str(),
+            Kind::Term.word(),
+            folder,
+            t.command.as_str(),
+            pane.as_str(),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
         PickRow {
             item: Item::Term { pane: pane.clone() },
             kind: Kind::Term,
@@ -179,6 +207,8 @@ pub fn rows(data: &Data) -> Vec<PickRow> {
             group: String::new(),
             since: None,
             why: String::new(),
+            folder: t.folder.clone(),
+            command: t.command.clone(),
             hay,
         }
     }));
@@ -356,9 +386,14 @@ fn row_line(row: &PickRow, terms: &[String], ctx: &Ctx, width: usize) -> Line {
         fit(row.kind.word(), 10),
         fit_right(&text::ago(row.since, ctx.now), 4)
     );
-    if !row.why.trim().is_empty() {
+    let why = if row.kind == Kind::Term {
+        term_why(row, ctx)
+    } else {
+        row.why.clone()
+    };
+    if !why.trim().is_empty() {
         rest.push_str("  ");
-        rest.push_str(&row.why);
+        rest.push_str(&why);
     }
     let mut spans = vec![Span::styled(lead, tone, bold)];
     spans.extend(highlighted(&named, terms, tone, bold));

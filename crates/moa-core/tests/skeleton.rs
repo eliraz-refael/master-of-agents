@@ -462,6 +462,15 @@ fn op_methods_match_the_variants() {
             title: Some("t".into()),
         },
         Op::TermShow { pane: "%5".into() },
+        Op::TermLs(NoParams),
+        Op::TermName {
+            target: "#7".into(),
+            name: "Kite server".into(),
+        },
+        Op::TermNote {
+            target: "%5".into(),
+            note: "waiting on Harbor".into(),
+        },
         Op::Brief(NoParams),
         Op::Attention(NoParams),
         Op::Suggest {
@@ -540,6 +549,8 @@ const WRITES: &[&str] = &[
     "session.sleep",
     "session.adopt",
     "session.restart",
+    "term.name",
+    "term.note",
     "task.add",
     "task.set",
     "note.add",
