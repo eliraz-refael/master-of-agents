@@ -295,6 +295,9 @@ pub struct State {
     next_ids: NextIds,
     unknown: Vec<LoadNote>,
     pub(crate) tmux: TmuxState,
+    /// The panes a user was looking at after the last tmux input ([`crate::terminals::touched`]
+    /// compares it with the next). Kept in memory: a daemon restart forgets it.
+    pub(crate) looked_at: BTreeSet<PaneId>,
     /// The sleep deadline the timer is armed at, if any (R19): `SetTimer` and `CancelTimer`
     /// go out only when it changes.
     pub(crate) sleep_at: Option<UtcMs>,
@@ -381,6 +384,7 @@ impl State {
             next_ids: NextIds::default(),
             unknown: Vec::new(),
             tmux: TmuxState::default(),
+            looked_at: BTreeSet::new(),
             sleep_at: None,
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),

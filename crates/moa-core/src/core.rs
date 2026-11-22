@@ -346,6 +346,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fold_in(&mut fx, more);
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
+            touched_into(state, now, &mut fx);
             fx
         }
         Input::Hook { reply, envelope } => {
@@ -664,6 +665,19 @@ pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>)
     }
     let more = post_commit(state, tx);
     fold_in(fx, more);
+}
+
+/// Runs `terminals::touched` and adds what it changed to `fx` ([`fold_in`]).
+fn touched_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    let changes = terminals::touched(state, now.wall);
+    if changes.is_empty() {
+        return;
+    }
+    let mut tx = Tx::new(now);
+    if tx.commit(state, changes).is_ok() {
+        let more = post_commit(state, tx);
+        fold_in(fx, more);
+    }
 }
 
 /// Adds a later commit's effects to `fx`: each `Persist` after any `Persist` already there

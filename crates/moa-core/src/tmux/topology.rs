@@ -595,6 +595,15 @@ impl Topology {
         let w = self.current.get(session)?;
         self.windows.get(w)?.active
     }
+
+    /// The active pane of the window each attached user client looks at (control clients
+    /// aren't listed in `clients`).
+    pub fn looked_at(&self) -> BTreeSet<PaneId> {
+        self.clients
+            .keys()
+            .filter_map(|c| self.client_pane(c))
+            .collect()
+    }
 }
 
 #[cfg(test)]

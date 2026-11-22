@@ -20,8 +20,9 @@ use moa_core::panel::View;
 use moa_core::state::{Deps, Snapshot, State};
 use moa_core::terminals::open_for;
 use moa_core::tmux::cmd::Cmd;
-use moa_core::tmux::ids::{ClientName, PaneId};
+use moa_core::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::link::Link;
+use moa_core::tmux::notify::Notification;
 use moa_core::{Now, UtcMs};
 use moa_testkit::brain::TypicalBrain;
 use serde_json::json;
@@ -239,9 +240,28 @@ impl Rig {
 
     /// [`Rig::list`] at `now`.
     fn list_at(&mut self, now: Now, panes: &[&str], terms: &[String]) -> Vec<Effect> {
+        self.list_as(now, &["S $0 moa", "S $1 _moa"], panes, terms, &[])
+    }
+
+    /// [`Rig::list_at`] with these `sessions` and user `clients` (`LIST_CLIENTS` lines).
+    fn list_as(
+        &mut self,
+        now: Now,
+        sessions: &[&str],
+        panes: &[&str],
+        terms: &[String],
+        clients: &[&str],
+    ) -> Vec<Effect> {
+        let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
         let mut results = lists(panes, terms);
-        results[2] = Ok(Vec::new());
+        results[0] = lines(sessions);
+        results[2] = lines(clients);
         refresh_answered(&mut self.st, now, results)
+    }
+
+    /// tmux tells of `n` at `now`.
+    fn notify(&mut self, now: Now, n: Notification) -> Vec<Effect> {
+        handle_checked(&mut self.st, Input::Tmux(TmuxIn::Notification(n)), now)
     }
 
     /// The start drain, then reconcile's listing answered with `info` (`PANE_INFO` lines).
@@ -1039,4 +1059,139 @@ fn a_renamed_session_renames_its_terminals_row() {
         "{fx:?}"
     );
     assert_eq!(term_rows(&r.st)["%5"]["session"], "harbor");
+}
+
+/// `%5` (in the tab `@2`) and `%6` (in `@3`) are shells in the session `moa`, whose current
+/// tab is `@2`.
+fn terms56() -> [String; 2] {
+    [plain("%5", "/r/a"), plain("%6", "/r/b")]
+}
+
+/// A user client `/dev/ttys1` attached to the session `moa`, at `now`.
+fn look(r: &mut Rig, now: Now) -> Vec<Effect> {
+    r.list_as(
+        now,
+        &["S $0 moa", "S $1 _moa"],
+        &[P5, P6],
+        &terms56(),
+        &["C 0 $0 /dev/ttys1"],
+    )
+}
+
+/// The user switches the session `moa` to the tab `@3`, where `%6` is.
+fn switch_to_6(r: &mut Rig, now: Now) -> Vec<Effect> {
+    r.notify(
+        now,
+        Notification::SessionWindowChanged {
+            session: TmuxSessionId(0),
+            window: WindowId(3),
+        },
+    )
+}
+
+/// Looking at a terminal stamps it when you arrive, and the one you leave when you go.
+#[test]
+fn switching_to_a_terminal_stamps_it() {
+    let mut r = Rig::found();
+    assert_eq!(r.open(5).unwrap().touched_at, None);
+    let at = later(&r.b, 1_000);
+    look(&mut r, at.clone());
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+    assert_eq!(r.open(6).unwrap().touched_at, None);
+
+    let at = later(&r.b, 2_000);
+    let fx = switch_to_6(&mut r, at.clone());
+    assert_eq!(r.open(6).unwrap().touched_at, Some(at.wall));
+    assert!(records(&fx).iter().any(|t| t.pane_id == "%6"), "{fx:?}");
+}
+
+#[test]
+fn leaving_a_terminal_stamps_it_again() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at);
+    let at = later(&r.b, 2_000);
+    let fx = switch_to_6(&mut r, at.clone());
+    let left: Vec<_> = records(&fx)
+        .into_iter()
+        .filter(|t| t.pane_id == "%5")
+        .collect();
+    assert_eq!(left.len(), 1, "{fx:?}");
+    assert_eq!(left[0].touched_at, Some(at.wall));
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+}
+
+/// Events that move nothing a user looks at write nothing.
+#[test]
+fn staying_on_a_terminal_writes_nothing() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at);
+    for i in 0..10 {
+        let at = later(&r.b, 2_000 + i);
+        let fx = r.notify(
+            at,
+            Notification::WindowPaneChanged {
+                window: WindowId(3),
+                pane: PaneId(6),
+            },
+        );
+        assert!(records(&fx).is_empty(), "{fx:?}");
+    }
+}
+
+#[test]
+fn a_detach_stamps_the_terminal_you_were_on() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at);
+    let at = later(&r.b, 2_000);
+    let fx = r.notify(
+        at.clone(),
+        Notification::ClientDetached {
+            client: ClientName("/dev/ttys1".into()),
+        },
+    );
+    assert_eq!(records(&fx).len(), 1, "{fx:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+}
+
+/// Two users, each on a terminal of their own session, are both looking.
+#[test]
+fn two_clients_on_two_terminals_stamp_both() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    let p8 = "P %8 @6 $2 1 1 0 0  0 ";
+    let mut terms = terms56().to_vec();
+    terms.push(plain("%8", "/r/c"));
+    r.list_as(
+        at.clone(),
+        &["S $0 moa", "S $1 _moa", "S $2 kite"],
+        &[P5, P6, p8],
+        &terms,
+        &["C 0 $0 /dev/ttys1", "C 0 $2 /dev/ttys2"],
+    );
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+    assert_eq!(r.open(8).unwrap().touched_at, Some(at.wall));
+    assert_eq!(r.open(6).unwrap().touched_at, None);
+    assert_eq!(term_rows(&r.st)["%5"]["active"], true);
+    assert_eq!(term_rows(&r.st)["%8"]["active"], true);
+    assert_eq!(term_rows(&r.st)["%6"]["active"], false);
+}
+
+/// The link's own control client looks at nothing.
+#[test]
+fn a_control_client_touches_nothing() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    let fx = r.list_as(
+        at,
+        &["S $0 moa", "S $1 _moa"],
+        &[P5, P6],
+        &terms56(),
+        &["C 1 $0 client-9"],
+    );
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, None);
+    assert_eq!(term_rows(&r.st)["%5"]["active"], false);
 }

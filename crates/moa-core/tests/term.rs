@@ -395,8 +395,13 @@ fn a_listing_older_than_the_tag_keeps_the_terminal() {
     );
     let with_7 = ["P %7 @4 $0 1 1 0 0  0 "];
     let fx = refreshed(&b, &mut st, &with_7, &[]);
-    assert!(published_terms(&fx).is_empty(), "{fx:?}");
-    assert_eq!(terms(&st), BTreeMap::from([row("%7", "beacon")]));
+    // The user looking at it is the only change: it keeps its name.
+    let want = BTreeMap::from([row("%7", "beacon")]);
+    assert!(
+        published_terms(&fx).iter().all(|rows| *rows == want),
+        "{fx:?}"
+    );
+    assert_eq!(terms(&st), want);
 
     // Closed: a listing without its pane drops it.
     feed(

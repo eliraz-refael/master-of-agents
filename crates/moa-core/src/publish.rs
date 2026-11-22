@@ -364,7 +364,10 @@ impl State {
             since: t.command_since.0,
             opened_at: t.opened_at.0,
             touched_at: t.touched_at.map(|at| at.0),
-            active: false,
+            active: t
+                .pane_id
+                .parse()
+                .is_ok_and(|pane| self.looked_at.contains(&pane)),
             opened_by: t.opened_by.as_str().to_string(),
             session: t
                 .session_id

@@ -239,6 +239,29 @@ fn updated(t: &Terminal, topology: &Topology, pane: PaneId, now: UtcMs) -> Optio
     Some(Change::Terminal(t))
 }
 
+/// The open terminals a user started or stopped looking at since the last tmux input, each
+/// stamped `touched_at` `now`: one write when you switch to a terminal and one when you leave
+/// it, never one per event. Typing on it counts, as it is on screen. The set looked at is
+/// kept in `state` for the next input, and drives a row's `active`.
+pub(crate) fn touched(state: &mut State, now: UtcMs) -> Vec<Change> {
+    let current = state.tmux().topology.looked_at();
+    let moved: Vec<PaneId> = current
+        .symmetric_difference(&state.looked_at)
+        .copied()
+        .collect();
+    state.looked_at = current;
+    moved
+        .into_iter()
+        .filter_map(|pane| open_for(state, &pane))
+        .map(|t| {
+            Change::Terminal(Terminal {
+                touched_at: Some(now),
+                ..t.clone()
+            })
+        })
+        .collect()
+}
+
 /// The records after a listing, or at the end of this connection's reconcile ([`listed`]),
 /// in one commit. A shell newly recorded without a terminal mark is marked `⌨ shell` once
 /// the commit is saved, so the picker lists it. The connection's first look is over once it
