@@ -27,7 +27,7 @@ use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
 use crate::model::{FeedEntry, MoaThread, ThreadKind};
 use crate::op::{ConnId, Done, OpError, ReqId};
-use crate::publish::{CoreEvent, MoaRow, Topic};
+use crate::publish::{CoreEvent, MoaRow};
 use crate::state::State;
 use crate::tmux::link::log;
 
@@ -556,11 +556,11 @@ fn answer(waiter: Option<Waiter>, result: Result<Done, OpError>) -> Vec<Effect> 
         .collect()
 }
 
-/// The `feed` topic again, when moa's `state` row (or any row) changed since it was last
-/// published.
+/// The `feed` topic again, when moa's `state` row changed since it was last published (its
+/// other rows were published with their commit).
 fn said(state: &mut State) -> Option<Effect> {
     state
-        .publish_changed(Topic::Feed)
+        .publish_moa_state()
         .map(|m| Effect::Publish(Publish::Model(m)))
 }
 

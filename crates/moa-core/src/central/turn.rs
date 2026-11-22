@@ -20,7 +20,8 @@ use crate::op::{Done, OpError};
 use crate::state::{State, Table};
 use crate::tmux::link::log;
 
-/// What a tool call's row says while it runs; a cancelled turn's end makes it `cancelled`.
+/// What a tool call's row says while it runs; a turn's end that isn't `end_turn`, or moa's
+/// agent going, makes it `cancelled`.
 const RUNNING: [&str; 2] = ["pending", "in_progress"];
 
 /// moa's agent said `update` in `thread`. While a load replays a thread, only rows whose
@@ -167,9 +168,10 @@ pub(super) fn permission(
 }
 
 /// Turn `prompt` ended, as `result` says: whoever waits hears moa's words, or why it ended
-/// early (a `system` line, and an `error` line when it failed). A cancelled turn's running
-/// tool calls are cancelled with it. An end that comes after moa's agent went away says
-/// nothing more: the agent's going said it.
+/// early (a `system` line, and an `error` line when it failed). A turn that didn't end
+/// normally (cancelled, stopped early, failed) cancels its running tool calls. An end that
+/// comes after moa's agent went away says nothing more, the agent's going said it, but
+/// cancels the tool calls late updates started.
 pub(super) fn ended(
     state: &mut State,
     now: &Now,
@@ -185,7 +187,12 @@ pub(super) fn ended(
     }
     let mut fx: Vec<Effect> = unsaved(moa).into_iter().collect();
     if turn.exited.is_some() {
-        moa.written.clear();
+        // Late updates after the exit may have started tool calls the exit didn't see.
+        let rows = cancelled_tools(&state.central);
+        if !rows.is_empty() {
+            fx.extend(write(state, Tx::new(now), rows).unwrap_or_default());
+        }
+        state.central.written.clear();
         return fx;
     }
     let data = json!({
@@ -213,9 +220,10 @@ pub(super) fn ended(
             (Some((kind::ERROR, text.clone())), Err(OpError(text)))
         }
     };
+    // A turn that ended early or failed leaves nothing running.
     let mut rows = match result {
-        Ok(StopReason::Cancelled) => cancelled_tools(moa),
-        _ => Vec::new(),
+        Ok(StopReason::EndTurn) => Vec::new(),
+        _ => cancelled_tools(moa),
     };
     let mut tx = Tx::new(now);
     if let Some((line_kind, text)) = line {

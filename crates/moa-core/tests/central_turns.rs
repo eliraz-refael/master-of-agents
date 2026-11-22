@@ -586,6 +586,39 @@ fn a_failed_turn_says_why() {
 }
 
 #[test]
+fn a_failed_turn_cancels_its_running_tools() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, true);
+    say(&b, &mut st, tool("t1", "in_progress", None));
+    say(&b, &mut st, tool("t2", "completed", None));
+    end(&b, &mut st, Err("Internal error: overloaded".into()));
+    let states: Vec<Option<String>> = rows_of_kind(&st, "tool")
+        .into_iter()
+        .map(|r| r.state)
+        .collect();
+    assert_eq!(states, [Some("cancelled".into()), Some("completed".into())]);
+}
+
+#[test]
+fn a_tool_started_after_an_exit_is_cancelled_by_the_late_end() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    hear(
+        &b,
+        &mut st,
+        AcpIn::Exited {
+            generation: 1,
+            why: "it crashed".into(),
+        },
+    );
+    // The run's last words, overtaken by its exit.
+    say(&b, &mut st, tool("t1", "pending", None));
+    end(&b, &mut st, Ok(StopReason::Cancelled));
+    let tools = rows_of_kind(&st, "tool");
+    assert_eq!(tools[0].state.as_deref(), Some("cancelled"));
+}
+
+#[test]
 fn a_client_gone_mid_turn_leaves_the_turn() {
     let b = TypicalBrain::new();
     let mut st = turn(&b, true);

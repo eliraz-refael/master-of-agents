@@ -473,6 +473,24 @@ impl State {
         Some(self.put(vec![(topic, rows)]))
     }
 
+    /// Publishes the `feed` topic when moa's `state` row differs from the one last published.
+    /// Its other rows change only with a commit, which publishes them, or a load, which
+    /// publishes everything: only the `state` row is compared, and the topic is built only
+    /// when it moved.
+    pub(crate) fn publish_moa_state(&mut self) -> Option<Arc<Model>> {
+        let row = keyed("state", &self.central.row());
+        let last = self
+            .model
+            .topics
+            .get(&Topic::Feed)
+            .and_then(|t| t.get("state"));
+        if last == Some(&row) {
+            return None;
+        }
+        let rows = self.feed_rows();
+        Some(self.put(vec![(Topic::Feed, rows)]))
+    }
+
     /// Replaces these topics' rows and bumps `rev`.
     fn put(&mut self, built: Vec<(Topic, BTreeMap<String, Value>)>) -> Arc<Model> {
         let mut next = (*self.model).clone();
