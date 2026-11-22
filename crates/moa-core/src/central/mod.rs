@@ -24,11 +24,12 @@ use crate::Now;
 use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, post_commit};
-use crate::effect::{Effect, LogLevel, LogLine, Publish};
+use crate::effect::{Effect, LogLevel, Publish};
 use crate::model::{FeedEntry, MoaThread, ThreadKind};
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::publish::{CoreEvent, MoaRow, Topic};
 use crate::state::State;
+use crate::tmux::link::log;
 
 /// The longest prompt, in characters.
 pub const PROMPT_MAX: usize = 100_000;
@@ -215,7 +216,7 @@ pub fn send(
             });
             let mut fx = Vec::new();
             if let Some((w, why)) = left {
-                fx.extend(answer(Some(w), Err(OpError(stopped(&why)))));
+                fx.extend(answer(Some(w), Err(OpError(stopped_text(&why)))));
             }
             moa.generation += 1;
             moa.phase = Phase::Starting;
@@ -498,7 +499,8 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
 
 /// moa's agent is gone: a start that failed leaves moa `Failed`, any other exit `Off`. The
 /// prompt waiting for it is refused; the next prompt starts it again. A turn under way says
-/// so in an `error` line, and whoever waits for it hears the same at once; the turn itself
+/// so in an `error` line, its running tool calls cancelled, and whoever waits for it hears
+/// the same at once; the turn itself
 /// stays until its end, which may still come with the run's last words: the exit can
 /// overtake them.
 fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
@@ -510,7 +512,7 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
             format!("moa's agent couldn't start: {why}"),
             "moa's agent couldn't start",
         ),
-        Phase::Ready | Phase::Thinking => (Phase::Off, stopped(&why), "moa's agent stopped"),
+        Phase::Ready | Phase::Thinking => (Phase::Off, stopped_text(&why), "moa's agent stopped"),
     };
     moa.phase = phase;
     moa.caps = None;
@@ -529,7 +531,7 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
         turn.exited = Some(why);
         waiters.extend(turn.waiter.take());
         let thread = turn.thread.clone();
-        fx.extend(turn::stopped(state, now, &thread, &told));
+        fx.extend(turn::cut_short(state, now, &thread, &told));
     }
     for w in waiters {
         fx.extend(answer(Some(w), Err(OpError(told.clone()))));
@@ -538,7 +540,7 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
 }
 
 /// What whoever waits hears when moa's agent stops.
-fn stopped(why: &str) -> String {
+fn stopped_text(why: &str) -> String {
     format!("moa's agent stopped: {why}; your next prompt starts it again")
 }
 
@@ -563,12 +565,5 @@ fn said(state: &mut State) -> Option<Effect> {
 }
 
 fn warn(message: impl Into<String>) -> Effect {
-    log(LogLevel::Warn, message)
-}
-
-fn log(level: LogLevel, message: impl Into<String>) -> Effect {
-    Effect::Log(LogLine {
-        level,
-        message: message.into(),
-    })
+    log(LogLevel::Warn, message.into())
 }

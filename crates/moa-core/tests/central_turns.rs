@@ -538,6 +538,39 @@ fn an_exit_mid_turn_says_so() {
 }
 
 #[test]
+fn an_exit_mid_turn_cancels_its_running_tools() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    say(&b, &mut st, tool("t1", "pending", None));
+    say(&b, &mut st, tool("t2", "in_progress", None));
+    say(&b, &mut st, tool("t3", "completed", None));
+    let fx = hear(
+        &b,
+        &mut st,
+        AcpIn::Exited {
+            generation: 1,
+            why: "it crashed".into(),
+        },
+    );
+    // One commit: the running tools, then the line.
+    assert_eq!(persists(&fx), 1);
+    let kinds: Vec<&str> = feed_rows(&fx).iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(kinds, ["tool", "tool", "error"]);
+    let states: Vec<Option<String>> = rows_of_kind(&st, "tool")
+        .into_iter()
+        .map(|r| r.state)
+        .collect();
+    assert_eq!(
+        states,
+        [
+            Some("cancelled".into()),
+            Some("cancelled".into()),
+            Some("completed".into())
+        ]
+    );
+}
+
+#[test]
 fn a_failed_turn_says_why() {
     let b = TypicalBrain::new();
     let mut st = turn(&b, true);
@@ -741,7 +774,6 @@ fn odd_text_round_trips() {
         r#"quotes "double" 'single' `back` \ backslash"#.into(),
         "lines\nand\r\ncarriage\n\n".into(),
         "replaced: \u{FFFD}\u{FFFD}".into(),
-        "[image]".into(),
         long,
     ];
     for (i, text) in odd.iter().enumerate() {

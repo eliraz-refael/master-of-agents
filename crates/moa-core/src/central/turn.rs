@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::feed::{self, body_text, kind, plan_body, text_body, tool_body};
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
-use super::{Moa, Phase, answer, log, warn};
+use super::{Moa, Phase, answer, warn};
 use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
@@ -18,6 +18,7 @@ use crate::effect::{Effect, LogLevel};
 use crate::model::FeedEntry;
 use crate::op::{Done, OpError};
 use crate::state::{State, Table};
+use crate::tmux::link::log;
 
 /// What a tool call's row says while it runs; a cancelled turn's end makes it `cancelled`.
 const RUNNING: [&str; 2] = ["pending", "in_progress"];
@@ -32,10 +33,8 @@ pub(super) fn update(state: &mut State, now: &Now, thread: &str, update: Update)
     }
     let moa = &state.central;
     if !in_turn(moa, thread) && !(moa.replaying && state.thread(thread).is_some()) {
-        return vec![log(
-            LogLevel::Debug,
-            "an update outside moa's turn isn't kept",
-        )];
+        let line = "an update outside moa's turn isn't kept";
+        return vec![log(LogLevel::Debug, line.into())];
     }
     let mut tx = Tx::new(now);
     let row = match update {
@@ -214,16 +213,10 @@ pub(super) fn ended(
             (Some((kind::ERROR, text.clone())), Err(OpError(text)))
         }
     };
-    let mut rows: Vec<FeedEntry> = Vec::new();
-    if result == Ok(StopReason::Cancelled) {
-        let running = moa.written.values().filter(|r| {
-            r.kind == kind::TOOL && r.state.as_deref().is_some_and(|s| RUNNING.contains(&s))
-        });
-        rows.extend(running.map(|r| FeedEntry {
-            state: Some("cancelled".into()),
-            ..r.clone()
-        }));
-    }
+    let mut rows = match result {
+        Ok(StopReason::Cancelled) => cancelled_tools(moa),
+        _ => Vec::new(),
+    };
     let mut tx = Tx::new(now);
     if let Some((line_kind, text)) = line {
         let body = text_body(&text);
@@ -238,20 +231,49 @@ pub(super) fn ended(
     fx
 }
 
-/// moa's agent went away during the turn in `thread`: an `error` line says so with
-/// `told`, the reason the waiter hears.
-pub(super) fn stopped(state: &mut State, now: &Now, thread: &str, told: &str) -> Vec<Effect> {
+/// moa's agent went away during the turn in `thread`, cutting it short: its running tool
+/// calls are cancelled, and an `error` line says so with `told`, the reason the waiter
+/// hears.
+pub(super) fn cut_short(state: &mut State, now: &Now, thread: &str, told: &str) -> Vec<Effect> {
+    let mut rows = cancelled_tools(&state.central);
     let mut tx = Tx::new(now);
     let body = text_body(told);
-    let row = new_row(state, &mut tx, thread, kind::ERROR, None, body, None);
+    rows.push(new_row(
+        state,
+        &mut tx,
+        thread,
+        kind::ERROR,
+        None,
+        body,
+        None,
+    ));
     let mut fx: Vec<Effect> = unsaved(&mut state.central).into_iter().collect();
-    fx.extend(write(state, tx, vec![row]).unwrap_or_default());
+    fx.extend(write(state, tx, rows).unwrap_or_default());
     fx
+}
+
+/// The turn's tool calls still running, as cancelled: their turn ended without them.
+fn cancelled_tools(moa: &Moa) -> Vec<FeedEntry> {
+    let running = moa.written.values().filter(|r| {
+        r.kind == kind::TOOL && r.state.as_deref().is_some_and(|s| RUNNING.contains(&s))
+    });
+    running
+        .map(|r| FeedEntry {
+            state: Some("cancelled".into()),
+            ..r.clone()
+        })
+        .collect()
 }
 
 /// After a reload the rows are the store's. A row the reloaded tail holds is taken from it;
 /// a new row a failed commit lost (its id not yet the store's) is forgotten, so the updates
-/// stepped again after the reload write it once. An older row is kept as written.
+/// stepped again after the reload write it once.
+///
+/// An older row, gone from the tail, is kept as written: the snapshot carries only the
+/// newest [`crate::publish::FEED_SHOWN`] rows, and the core reads nothing else, so the store's
+/// version of it can't be known here. Stepping again is exact for every update but a chunk
+/// that extended such a row in the lost commit, which would be added twice; that takes a
+/// message whose pieces are more than a tail's worth of rows apart.
 pub(super) fn reloaded(state: &mut State) {
     let next = state.next_id(Table::Feed);
     let written = std::mem::take(&mut state.central.written);
