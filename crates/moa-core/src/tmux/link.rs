@@ -951,6 +951,11 @@ impl TmuxState {
         self.topology.unset_term(pane);
     }
 
+    /// Whether a refresh of the lists is out.
+    pub(crate) fn refreshing(&self) -> bool {
+        self.refresh != Refresh::Idle
+    }
+
     /// Reads the lists again, at most one in flight and one more after it.
     pub(crate) fn refresh(&mut self) -> Vec<Effect> {
         let Some(conn) = self.conn() else {

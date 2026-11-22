@@ -18,7 +18,7 @@ use crate::config::{AccountName, BrainName, Config, caller_store};
 use crate::effect::RefuseWrites;
 use crate::layout::{self, Layouts};
 use crate::model::*;
-use crate::op::{ConnId, Op};
+use crate::op::{ConnId, Op, ReqId};
 use crate::panel::{PanelReg, View};
 use crate::prompt::Asking;
 use crate::publish::{ACTIVITY_SHOWN, Model};
@@ -298,6 +298,8 @@ pub struct State {
     /// The panes a user was looking at after the last tmux input ([`crate::terminals::touched`]
     /// compares it with the next). Kept in memory: a daemon restart forgets it.
     pub(crate) looked_at: BTreeSet<PaneId>,
+    /// The `term.ls` requests waiting for a listing of the tabs ([`crate::ops::term::start_ls`]).
+    pub(crate) term_ls: Vec<(ConnId, ReqId)>,
     /// The sleep deadline the timer is armed at, if any (R19): `SetTimer` and `CancelTimer`
     /// go out only when it changes.
     pub(crate) sleep_at: Option<UtcMs>,
@@ -385,6 +387,7 @@ impl State {
             unknown: Vec::new(),
             tmux: TmuxState::default(),
             looked_at: BTreeSet::new(),
+            term_ls: Vec::new(),
             sleep_at: None,
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),

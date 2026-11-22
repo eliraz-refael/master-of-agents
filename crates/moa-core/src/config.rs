@@ -164,21 +164,27 @@ impl SleepAfter {
         (self.0 > 0).then_some(self.0)
     }
 
-    /// `sleep_after_hours`: a whole or fractional number of hours, 0 or more. A positive
-    /// value too small for a millisecond is one.
+    /// `sleep_after_hours`: a number of hours, 0 or more ([`hours_ms`]).
     fn parse(v: &toml::Value) -> Option<SleepAfter> {
-        let hours = match v {
-            toml::Value::Integer(n) => *n as f64,
-            toml::Value::Float(f) => *f,
-            _ => return None,
-        };
-        if !hours.is_finite() || hours < 0.0 {
-            return None;
-        }
-        // `as` saturates: an absurd number of hours is as good as never waking.
-        let ms = (hours * 3_600_000.0).round() as i64;
-        Some(SleepAfter(if hours > 0.0 { ms.max(1) } else { 0 }))
+        hours_ms(v).map(SleepAfter)
     }
+}
+
+/// A TOML number of hours, whole or fractional, 0 or more, as milliseconds (`0` stays `0`: a
+/// setting's "never" or "off"). A positive value too small for a millisecond is one. `None`
+/// for anything else.
+pub fn hours_ms(v: &toml::Value) -> Option<i64> {
+    let hours = match v {
+        toml::Value::Integer(n) => *n as f64,
+        toml::Value::Float(f) => *f,
+        _ => return None,
+    };
+    if !hours.is_finite() || hours < 0.0 {
+        return None;
+    }
+    // `as` saturates: an absurd number of hours is as good as never waking.
+    let ms = (hours * 3_600_000.0).round() as i64;
+    Some(if hours > 0.0 { ms.max(1) } else { 0 })
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -204,6 +210,9 @@ pub struct UiConfig {
     pub mouse: bool,
     /// The form of the session picker `Ctrl-a /` opens; `s` opens the other one (S8).
     pub picker: Form,
+    /// How long a terminal you aren't looking at goes untouched before `term ls` marks it
+    /// idle (`terminal_idle_hours`), in milliseconds; `0` turns the mark off.
+    pub terminal_idle_ms: i64,
 }
 
 impl Default for UiConfig {
@@ -211,6 +220,7 @@ impl Default for UiConfig {
         UiConfig {
             mouse: true,
             picker: Form::Popup,
+            terminal_idle_ms: 2 * 3_600_000,
         }
     }
 }
@@ -254,6 +264,8 @@ struct RawUi {
     mouse: Option<toml::Value>,
     /// The same.
     picker: Option<toml::Value>,
+    /// The same.
+    terminal_idle_hours: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -498,6 +510,12 @@ impl Config {
             Some(toml::Value::String(s)) if s == "popup" => Form::Popup,
             Some(toml::Value::String(s)) if s == "tab" => Form::Tab,
             Some(_) => return Err(problem(r#"picker in [ui] must be "popup" or "tab""#)),
+        };
+        config.ui.terminal_idle_ms = match &raw.ui.terminal_idle_hours {
+            None => UiConfig::default().terminal_idle_ms,
+            Some(v) => hours_ms(v).ok_or_else(|| {
+                problem("terminal_idle_hours in [ui] must be a number of hours, 0 or more")
+            })?,
         };
         config.setup.skipped = raw
             .setup

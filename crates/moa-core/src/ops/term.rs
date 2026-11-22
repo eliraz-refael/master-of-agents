@@ -16,14 +16,21 @@ use crate::model::{OpenedBy, Terminal};
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::state::{State, Table};
 use crate::terminals;
+use crate::time::{span, until};
 use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
-use crate::tmux::link::{Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane};
+use crate::tmux::link::{
+    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, set_pane_option,
+};
 
 const TERM_NOT_FULL: &str = "term needs a full path";
 const NO_SHELL: &str = "couldn't open a terminal; see moa's log";
 const TERM_GONE: &str = "that terminal is gone";
+const NAME_LENGTH: &str = "a terminal's name is 1 to 40 characters";
+const NOTE_CUT: usize = 200;
+/// What `term ls` says first while its answer is only what moa last recorded.
+const OUT_OF_DATE: &str = "moa isn't connected to tmux right now; this list may be out of date";
 
 /// Whom a terminal's tab is told about: the `term` op's caller, by its reply, or the client
 /// whose `Ctrl-a $` asked for it, by a notice.
@@ -322,6 +329,183 @@ pub(crate) fn show(state: &State, conn: ConnId, req: ReqId, pane: &str) -> Vec<E
             data: json!({ "pane": pane.to_string(), "name": name }),
         })),
     ]
+}
+
+/// `term.ls`: the open terminals, once one fresh listing of the tabs has landed, so "what's
+/// running" is current when you ask: that is one listing per request, however many
+/// terminals there are. [`ls_answers`] answers it. With the link down nothing can be
+/// asked, and the records answer at once, saying they may be out of date.
+pub(crate) fn start_ls(state: &mut State, now: &Now, conn: ConnId, req: ReqId) -> Vec<Effect> {
+    if state.tmux().conn().is_none() {
+        return vec![Effect::Reply {
+            conn,
+            req,
+            result: Ok(ls(state, now)),
+        }];
+    }
+    state.term_ls.push((conn, req));
+    state.tmux.refresh()
+}
+
+/// The `term.ls` requests that wait are answered once a listing that began after them
+/// has landed (`listed`, with none more asked behind it), or at once when the link is
+/// down: nothing will land then.
+pub(crate) fn ls_answers(state: &mut State, now: &Now, listed: bool) -> Vec<Effect> {
+    let down = state.tmux().conn().is_none();
+    if state.term_ls.is_empty() || !(down || (listed && !state.tmux.refreshing())) {
+        return Vec::new();
+    }
+    let done = ls(state, now);
+    std::mem::take(&mut state.term_ls)
+        .into_iter()
+        .map(|(conn, req)| Effect::Reply {
+            conn,
+            req,
+            result: Ok(done.clone()),
+        })
+        .collect()
+}
+
+/// The open terminals as `term.ls` tells them: a line each, and each one's row (the `terms`
+/// topic's) with its pane and whether it is idle. As recorded: the listing, when there was
+/// one, has been taken in.
+fn ls(state: &State, now: &Now) -> Done {
+    let deps = state.deps();
+    let idle_ms = state.config().ui.terminal_idle_ms;
+    let mut lines = Vec::new();
+    let mut data = Vec::new();
+    for t in terminals::open_records(state) {
+        let row = state.term_row(t);
+        let idle = terminals::is_idle(
+            t.touched_at.unwrap_or(t.opened_at),
+            row.active,
+            idle_ms,
+            now.wall,
+        );
+        let program = if t.command == t.shell {
+            "shell".to_string()
+        } else {
+            format!("{} ({})", t.command, span(now.wall.0 - t.command_since.0))
+        };
+        let touched = match t.touched_at {
+            _ if row.active => "now".to_string(),
+            Some(at) => span(now.wall.0 - at.0),
+            None => "never".to_string(),
+        };
+        let mut line = format!(
+            "#{}  {}  {}  {program}  touched {touched}  open {}",
+            t.id.0,
+            t.name,
+            with_tilde(&t.cwd, &deps.home, deps.canonical),
+            span(now.wall.0 - t.opened_at.0),
+        );
+        if idle {
+            line.push_str("  idle");
+        }
+        if let Some(at) = t.timeout_at {
+            line.push_str(&format!("  closes in {}", until(at, now.wall)));
+        }
+        if let Some(note) = &t.note {
+            line.push_str(&format!("  — {note}"));
+        }
+        lines.push(line);
+        let mut row = json!(row);
+        row["pane"] = json!(t.pane_id);
+        row["idle"] = json!(idle);
+        data.push(row);
+    }
+    if lines.is_empty() {
+        lines.push("no terminals open".to_string());
+    }
+    if state.tmux().conn().is_none() {
+        lines.insert(0, OUT_OF_DATE.to_string());
+    }
+    Done {
+        text: lines.join("\n"),
+        data: json!(data),
+    }
+}
+
+/// `term.name`: terminal `target`'s name, on its record, its `@moa_label` and, when it is
+/// alone in its tab, the tab, as a new terminal's is named. Naming a split leaves the tab to
+/// the agent it belongs to.
+pub(crate) fn name(
+    state: &mut State,
+    tx: &mut Tx,
+    target: &str,
+    name: &str,
+) -> Result<Done, OpError> {
+    let name = one_line(name);
+    let name = name.trim();
+    if !(1..=40).contains(&name.chars().count()) {
+        return Err(OpError(NAME_LENGTH.into()));
+    }
+    let t = terminals::find(state, target)?.clone();
+    let pane: PaneId = t.pane_id.parse().map_err(|_| OpError(TERM_GONE.into()))?;
+    let id = t.id.0;
+    tx.commit(
+        state,
+        vec![Change::Terminal(Terminal {
+            name: name.to_string(),
+            ..t
+        })],
+    )?;
+    let label = format!("⌨ {name}");
+    tx.tmux(set_pane_option(pane, "@moa_label", &literal_format(&label)));
+    let topology = &state.tmux().topology;
+    let alone = topology
+        .window_of(pane)
+        .is_some_and(|w| topology.panes_in(w).count() == 1);
+    if alone {
+        tx.tmux(Cmd::new("rename-window").args([
+            "-t",
+            &pane.to_string(),
+            "--",
+            &literal_format(&tab_label(name)),
+        ]));
+    }
+    if state.tmux().conn().is_some() {
+        state.tmux.term_sent(pane, &label);
+    }
+    Ok(Done {
+        text: format!("named it {name}"),
+        data: json!({ "id": id, "name": name }),
+    })
+}
+
+/// `term.note`: terminal `target`'s note, cut at 200 characters with `…`; an empty one
+/// clears it.
+pub(crate) fn note(
+    state: &mut State,
+    tx: &mut Tx,
+    target: &str,
+    note: &str,
+) -> Result<Done, OpError> {
+    let note = one_line(note);
+    let note = note.trim();
+    let t = terminals::find(state, target)?.clone();
+    let id = t.id.0;
+    let note = match note {
+        "" => None,
+        n if n.chars().count() > NOTE_CUT => Some(format!("{}…", cut(n, NOTE_CUT - 1))),
+        n => Some(n.to_string()),
+    };
+    let text = if note.is_some() {
+        "noted"
+    } else {
+        "note cleared"
+    };
+    tx.commit(
+        state,
+        vec![Change::Terminal(Terminal {
+            note: note.clone(),
+            ..t
+        })],
+    )?;
+    Ok(Done {
+        text: text.into(),
+        data: json!({ "id": id, "note": note }),
+    })
 }
 
 /// `path` with `home` (as given, or `canonical`) written `~`.

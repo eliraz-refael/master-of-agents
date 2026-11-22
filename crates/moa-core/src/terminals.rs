@@ -9,6 +9,7 @@ use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::model::{OpenedBy, SessionId, TermId, Terminal};
+use crate::op::OpError;
 use crate::state::{State, Table};
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_session, trusted_panes};
@@ -58,8 +59,45 @@ pub(crate) fn open_by_pane(state: &State) -> BTreeMap<&str, &Terminal> {
         .collect()
 }
 
+/// The open terminal a `term.*` op's `target` names: its number (`7` or `#7`), its pane
+/// (`%12`), or its name exactly, whatever the case. The one lookup every `term.*` op uses.
+pub fn find<'a>(state: &'a State, target: &str) -> Result<&'a Terminal, OpError> {
+    let target = target.trim();
+    let none = || OpError(format!("no terminal {target}"));
+    if target.starts_with('%') {
+        return open_for(state, &target.parse().map_err(|_| none())?).ok_or_else(none);
+    }
+    let number = target.strip_prefix('#').unwrap_or(target);
+    if let Ok(id) = number.parse::<i64>() {
+        return open_records(state).find(|t| t.id.0 == id).ok_or_else(none);
+    }
+    let lower = target.to_lowercase();
+    let mut named = open_records(state).filter(|t| t.name.to_lowercase() == lower);
+    match (named.next(), named.next()) {
+        (Some(t), None) => Ok(t),
+        (None, _) => Err(none()),
+        (Some(_), Some(_)) => Err(OpError(format!(
+            "{} terminals are named {target}; use its number",
+            2 + named.count()
+        ))),
+    }
+}
+
+/// Whether a terminal last touched at `last` (its open, when never touched) is idle: nobody
+/// is looking at it (`active`) and it has gone `idle_ms` untouched at `now`. `0` never is.
+pub fn is_idle(last: UtcMs, active: bool, idle_ms: i64, now: UtcMs) -> bool {
+    idle_ms > 0 && !active && now.0.saturating_sub(last.0) >= idle_ms
+}
+
+/// Whether a user is looking at open record `t` now.
+pub(crate) fn is_active(state: &State, t: &Terminal) -> bool {
+    t.pane_id
+        .parse()
+        .is_ok_and(|pane| state.looked_at.contains(&pane))
+}
+
 /// The records of the server the link last connected to (none before it connected).
-fn open_records(state: &State) -> impl Iterator<Item = &Terminal> {
+pub(crate) fn open_records(state: &State) -> impl Iterator<Item = &Terminal> {
     let generation = state.tmux().generation();
     state
         .terminals

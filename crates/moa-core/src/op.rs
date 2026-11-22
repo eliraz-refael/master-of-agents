@@ -116,6 +116,15 @@ pub enum Op {
     /// Brings terminal `pane` (`%N`), a tab `term.open` or `Ctrl-a $` opened, to the screen.
     #[serde(rename = "term.show")]
     TermShow { pane: String },
+    /// The open terminals, from one fresh listing of the tabs.
+    #[serde(rename = "term.ls")]
+    TermLs(NoParams),
+    /// Names terminal `target` (its number `7` or `#7`, its tab `%12`, or its name) `name`.
+    #[serde(rename = "term.name")]
+    TermName { target: String, name: String },
+    /// Notes terminal `target` with `note`; an empty one clears it.
+    #[serde(rename = "term.note")]
+    TermNote { target: String, note: String },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -355,6 +364,9 @@ impl Op {
         "session.restart",
         "term.open",
         "term.show",
+        "term.ls",
+        "term.name",
+        "term.note",
         "task.ls",
         "task.add",
         "task.set",
@@ -395,6 +407,8 @@ impl Op {
             | Op::SessionSleep { .. }
             | Op::SessionAdopt { .. }
             | Op::SessionRestart { .. }
+            | Op::TermName { .. }
+            | Op::TermNote { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -413,6 +427,7 @@ impl Op {
             | Op::TmuxEnsure { .. }
             | Op::TermOpen { .. }
             | Op::TermShow { .. }
+            | Op::TermLs(_)
             | Op::UiPanel { .. }
             | Op::UiHere { .. }
             | Op::UiClose(_)
@@ -444,6 +459,9 @@ impl Op {
             Op::SessionRestart { .. } => "session.restart",
             Op::TermOpen { .. } => "term.open",
             Op::TermShow { .. } => "term.show",
+            Op::TermLs(_) => "term.ls",
+            Op::TermName { .. } => "term.name",
+            Op::TermNote { .. } => "term.note",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",

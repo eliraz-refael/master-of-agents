@@ -347,6 +347,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // Whatever moved, a session a user can now see becomes seen.
             mark_seen_into(state, now, &mut fx);
             touched_into(state, now, &mut fx);
+            // After every record this input changed: `term ls` tells them as they now are.
+            fold_in(&mut fx, ops::term::ls_answers(state, now, link_listed));
             fx
         }
         Input::Hook { reply, envelope } => {
@@ -388,6 +390,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 .get(&conn)
                 .is_some_and(|r| r.placed && r.pane.is_some());
             state.tmux.client_gone(conn);
+            state.term_ls.retain(|(c, _)| *c != conn);
             cockpit::run::client_gone(state, conn);
             let mut fx = panel::gone(state, conn);
             if ended {
@@ -520,6 +523,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::TermOpen { path, title },
             ..
         } => ops::term::term(state, Tell::Reply(conn, req), &path, title.as_deref()),
+        // Answered once a fresh listing of the tabs lands, or at once with the link down.
+        Input::Client {
+            conn,
+            req,
+            op: Op::TermLs(_),
+            ..
+        } => ops::term::start_ls(state, now, conn, req),
         // Answered at once, from the topology: nothing is saved.
         Input::Client {
             conn,

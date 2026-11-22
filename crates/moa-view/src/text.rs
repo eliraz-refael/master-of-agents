@@ -235,26 +235,16 @@ pub fn wrap(s: &str, w: usize) -> Vec<String> {
     }
 }
 
-const MINUTE: i64 = 60_000;
-const HOUR: i64 = 60 * MINUTE;
 /// A day, in milliseconds.
-pub const DAY: i64 = 24 * HOUR;
+pub use moa_core::time::DAY;
+use moa_core::time::{HOUR, MINUTE, span};
 
 /// How long ago `from` was, as the spike's picture said it: `""` for none, `now` under a
 /// minute (and for the future), then `{m}m`, `{h}h`, `{d}d`.
 pub fn ago(from: Option<UtcMs>, now: UtcMs) -> String {
-    let Some(from) = from else {
-        return String::new();
-    };
-    let ms = now.0.saturating_sub(from.0);
-    if ms < MINUTE {
-        "now".to_string()
-    } else if ms < HOUR {
-        format!("{}m", ms / MINUTE)
-    } else if ms < DAY {
-        format!("{}h", ms / HOUR)
-    } else {
-        format!("{}d", ms / DAY)
+    match from {
+        Some(from) => span(now.0.saturating_sub(from.0)),
+        None => String::new(),
     }
 }
 

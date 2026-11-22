@@ -188,8 +188,11 @@ pub enum Verb {
         idle: Option<f64>,
     },
     /// A plain shell in a new tab.
+    #[command(override_usage = TERM_USAGE)]
     Term {
-        path: Option<String>,
+        /// `[FOLDER]`, or `ls`, `name`, `note`, `close` or `timeout` and what it takes.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
@@ -302,8 +305,40 @@ const GROUP_USAGE: &str = "moactl group add PATH | group rename OLD NEW | group 
 const TASK_ADD_USAGE: &str = "moactl task add PROJECT TITLE… [--who you|agent|other] [--due DATE] [--session ID] [--status S]";
 const TASK_SET_USAGE: &str = "moactl task set ID [--status S] [--title T] [--who W] [--due D] [--priority P] [--session ID] [--note N]";
 
+const TERM_USAGE: &str = "moactl term [FOLDER] [--title T] | term ls | term name N NAME… | term note N NOTE… | term close N… | term timeout N DURATION";
+
 fn usage<T>(s: &str) -> Result<T, VerbError> {
     Err(VerbError::Usage(s.to_string()))
+}
+
+/// The words of `term FOLDER` with its `--title` and `--pane` taken out, and the title (the
+/// parsed one, unless the words name another). `--pane` is ignored, as it always was.
+fn term_flags<'a>(args: &'a [String], parsed: &Option<String>) -> (Vec<&'a str>, Option<String>) {
+    let mut title = parsed.clone();
+    let mut words = Vec::new();
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        match arg {
+            "--title" => title = args.next().map(str::to_string).or(title),
+            "--pane" => {
+                args.next();
+            }
+            _ => match arg.strip_prefix("--title=") {
+                Some(t) => title = Some(t.to_string()),
+                None if arg.starts_with("--pane=") => {}
+                None => words.push(arg),
+            },
+        }
+    }
+    (words, title)
+}
+
+/// `term [FOLDER]`: a shell in `folder`, else where it was typed.
+fn term_open(folder: Option<&str>, title: &Option<String>, ctx: &VerbCtx) -> Result<Op, VerbError> {
+    Ok(Op::TermOpen {
+        path: resolve_path(folder.unwrap_or("."), ctx)?,
+        title: title.clone(),
+    })
 }
 
 /// `~` and `~/x` expand with home; a relative path joins cwd; `.` and `..` are resolved
@@ -525,9 +560,32 @@ impl Verb {
             }
             // `--pane` is for slice 5's "here"; until then a terminal opens where it was
             // typed.
-            Verb::Term { path, title, .. } => Op::TermOpen {
-                path: resolve_path(path.as_deref().unwrap_or("."), ctx)?,
-                title: title.clone(),
+            Verb::Term { args, title, .. } => match args.split_first() {
+                None => term_open(None, title, ctx)?,
+                Some((word, rest)) => match word.as_str() {
+                    "ls" if rest.is_empty() => Op::TermLs(NoParams),
+                    "name" | "note" => match rest.split_first() {
+                        Some((target, words)) if word == "note" => Op::TermNote {
+                            target: target.clone(),
+                            note: words.join(" "),
+                        },
+                        Some((target, words)) if !words.is_empty() => Op::TermName {
+                            target: target.clone(),
+                            name: words.join(" "),
+                        },
+                        _ => return usage(TERM_USAGE),
+                    },
+                    "ls" | "close" | "timeout" => return usage(TERM_USAGE),
+                    // The words after a folder may carry its flags: the trailing arguments
+                    // took them in, so a note can hold anything.
+                    _ => {
+                        let (words, title) = term_flags(args, title);
+                        match words[..] {
+                            [folder] => term_open(Some(folder), &title, ctx)?,
+                            _ => return usage(TERM_USAGE),
+                        }
+                    }
+                },
             },
             Verb::Adopt {
                 pane,

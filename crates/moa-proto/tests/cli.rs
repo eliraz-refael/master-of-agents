@@ -506,6 +506,110 @@ fn close_and_term_parse() {
     assert!(line.ends_with("A plain shell in a new tab"), "{line}");
 }
 
+/// `term FOLDER` still opens a shell there, with `--title` and `--pane` where they were.
+#[test]
+fn term_keeps_its_folder_form() {
+    let open = |path: &str, title: Option<&str>| Op::TermOpen {
+        path: PathBuf::from(path),
+        title: title.map(Into::into),
+    };
+    assert_eq!(op(&["term"]), open("/h/private/lantern", None));
+    assert_eq!(op(&["term", "~"]), open("/h", None));
+    assert_eq!(op(&["term", "../web"]), open("/h/private/web", None));
+    for argv in [
+        &["term", "../web", "--title", "dev"][..],
+        &["term", "--title", "dev", "../web"],
+        &["term", "../web", "--title", "dev", "--pane", "%3"],
+        &["term", "--pane", "%3", "--title", "dev", "../web"],
+    ] {
+        assert_eq!(op(argv), open("/h/private/web", Some("dev")), "{argv:?}");
+    }
+    assert_eq!(
+        op(&["term", "--title", "dev"]),
+        open("/h/private/lantern", Some("dev"))
+    );
+    // More than a folder, and a sub-command with nothing to act on, are usage errors.
+    assert!(err(&["term", "a", "b"]).contains("moactl term [FOLDER]"));
+}
+
+/// `term ls`, `name` and `note` are sub-commands; the rest of the words are the name or the
+/// note, so a note may start with a dash.
+#[test]
+fn term_ls_and_friends_parse() {
+    assert_eq!(op(&["term", "ls"]), Op::TermLs(NoParams));
+    assert_eq!(
+        op(&["term", "name", "7", "Kite", "server"]),
+        Op::TermName {
+            target: "7".into(),
+            name: "Kite server".into()
+        }
+    );
+    assert_eq!(
+        op(&["term", "name", "%12", "Beacon"]),
+        Op::TermName {
+            target: "%12".into(),
+            name: "Beacon".into()
+        }
+    );
+    assert_eq!(
+        op(&["term", "note", "#7", "-", "waiting", "on", "--Harbor"]),
+        Op::TermNote {
+            target: "#7".into(),
+            note: "- waiting on --Harbor".into()
+        }
+    );
+    // No words clears a note.
+    assert_eq!(
+        op(&["term", "note", "7"]),
+        Op::TermNote {
+            target: "7".into(),
+            note: String::new()
+        }
+    );
+    for argv in [
+        &["term", "name"][..],
+        &["term", "name", "7"],
+        &["term", "note"],
+        &["term", "ls", "7"],
+    ] {
+        assert!(err(argv).contains("moactl term [FOLDER]"), "{argv:?}");
+    }
+    use clap::CommandFactory;
+    let help = Moactl::command()
+        .find_subcommand_mut("term")
+        .unwrap()
+        .render_help()
+        .to_string();
+    for word in [
+        "term ls",
+        "term name",
+        "term note",
+        "term close",
+        "term timeout",
+    ] {
+        assert!(help.contains(word), "{word}: {help}");
+    }
+}
+
+/// A folder called `ls` is still a folder when it is written as one.
+#[test]
+fn term_dot_ls_is_a_folder() {
+    assert_eq!(
+        op(&["term", "./ls"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h/private/lantern/ls"),
+            title: None
+        }
+    );
+    assert_eq!(
+        op(&["term", "ls/"]),
+        Op::TermOpen {
+            path: PathBuf::from("/h/private/lantern/ls"),
+            title: None
+        }
+    );
+}
+
 /// `adopt %N` takes a tab's id, its flags pass through as they are, and anything that isn't
 /// a tab id is refused before the daemon hears of it; the help says "tab" (R30).
 #[test]
