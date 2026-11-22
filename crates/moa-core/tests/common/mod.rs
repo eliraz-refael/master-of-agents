@@ -2,19 +2,23 @@
 //! the ops on tabs are tested against.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use moa_core::Now;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{Effect, Input, Publish, TmuxIn, TmuxToken, handle_checked};
 use moa_core::model::SessionId;
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
+use moa_core::publish::Topic;
 use moa_core::state::{CallerInfo, Deps, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::link::Link;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_testkit::brain::TypicalBrain;
+use serde_json::Value;
 
 /// The plugin sessions are started with.
 pub const PLUGIN: &str = "/opt/moa/plugin/session";
@@ -163,6 +167,77 @@ pub fn listed(st: &mut State, b: &TypicalBrain, info: &[&str], start: &[&str]) -
             results: vec![lines(info), lines(start)],
         },
     )
+}
+
+/// `pane`'s line in the refresh's fourth list (`LIST_TERMS`): its process (pid `1000 + N`),
+/// its terminal mark `mark` (`""` for none), `command` in front in folder `cwd`, and its
+/// label as tmux prints it.
+pub fn pane_line(pane: &str, mark: &str, command: &str, cwd: &str, label: &str) -> String {
+    let pid = 1000 + pane.trim_start_matches('%').parse::<u32>().unwrap_or(0);
+    format!("T\t{pane}\t{pid}\t{mark}\t{command}\t{cwd}\t{label}")
+}
+
+/// A terminal's line in the refresh's fourth list (`LIST_TERMS`): `pane` (`%N`), marked
+/// `@moa_term` and labelled `label` as tmux prints it, its shell `sh` (pid `1000 + N`) at
+/// its prompt in `/r`.
+pub fn term_line(pane: &str, label: &str) -> String {
+    pane_line(pane, "1", "sh", "/r", label)
+}
+
+/// The link's lists: the sessions `moa` (`$0`) and `_moa` (`$1`), these `panes`
+/// (`LIST_PANES` lines), a user attached to `moa`, and `terms` as the fourth query
+/// (`LIST_TERMS`) answers.
+pub fn lists(panes: &[&str], terms: &[String]) -> Vec<Result<Vec<String>, String>> {
+    let lines = |l: &[&str]| Ok(l.iter().map(|s| s.to_string()).collect());
+    vec![
+        lines(&["S $0 moa", "S $1 _moa"]),
+        lines(panes),
+        lines(&["C 0 $0 /dev/ttys1"]),
+        Ok(terms.to_vec()),
+    ]
+}
+
+/// tmux answers a refresh on the link's connection with [`lists`].
+pub fn refreshed(
+    b: &TypicalBrain,
+    st: &mut State,
+    panes: &[&str],
+    terms: &[String],
+) -> Vec<Effect> {
+    refresh_answered(st, b.now(), lists(panes, terms))
+}
+
+/// tmux answers a refresh on the link's connection, at `now`, with `results`.
+pub fn refresh_answered(
+    st: &mut State,
+    now: Now,
+    results: Vec<Result<Vec<String>, String>>,
+) -> Vec<Effect> {
+    let Link::Up { conn, .. } = st.tmux().link else {
+        panic!("the link isn't up");
+    };
+    let input = TmuxIn::Replies {
+        conn,
+        token: TmuxToken::Refresh,
+        results,
+    };
+    handle_checked(st, Input::Tmux(input), now)
+}
+
+/// The `terms` topic's rows, as published.
+pub fn term_rows(st: &State) -> BTreeMap<String, Value> {
+    (*st.model().topics[&Topic::Terms]).clone()
+}
+
+/// The `terms` rows each publish in `fx` carried.
+pub fn published_term_rows(fx: &[Effect]) -> Vec<BTreeMap<String, Value>> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Publish(Publish::Model(m)) => m.topics.get(&Topic::Terms),
+            _ => None,
+        })
+        .map(|t| (**t).clone())
+        .collect()
 }
 
 /// `set-option -p -u -t <pane> <name>`: one of moa's options taken off a tab.

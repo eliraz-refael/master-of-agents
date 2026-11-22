@@ -116,10 +116,11 @@ if -F "#{==:#{prefix2},C-a}" "set -g prefix2 None"
 bind -n C-a switch-client -T moa
 {{DAEMON_KEYS}}
 # | and -: split the pane you're on (a shell beside or below an agent, in its folder);
-# its border says it's a shell; `exit` closes it. Not in the cockpit, where panes belong to the layout,
-# nor in the picker's or help's full tab, which waits parked for its next open.
-bind -T moa '|'     if -F "{{SPLIT_REFUSED}}" "display 'split an agent or terminal tab; {{SPLIT_WHY}}'" "split-window -h -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
-bind -T moa -       if -F "{{SPLIT_REFUSED}}" "display 'split an agent or terminal tab; {{SPLIT_WHY}}'" "split-window -v -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell'"
+# its border says it's a shell, and its mark (@moa_term) lists it with moa's terminals;
+# `exit` closes it. Not in the cockpit, where panes belong to the layout, nor in the
+# picker's or help's full tab, which waits parked for its next open.
+bind -T moa '|'     if -F "{{SPLIT_REFUSED}}" "display 'split an agent or terminal tab; {{SPLIT_WHY}}'" "split-window -h -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell' ; set -p @moa_term 1"
+bind -T moa -       if -F "{{SPLIT_REFUSED}}" "display 'split an agent or terminal tab; {{SPLIT_WHY}}'" "split-window -v -c '#{pane_current_path}' ; set -p @moa_label '⌨ shell' ; set -p @moa_term 1"
 bind -T moa m       select-window -t moa:moa
 bind -T moa z       resize-pane -Z
 bind -T moa [       previous-window

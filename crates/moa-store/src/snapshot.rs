@@ -24,14 +24,15 @@ fn store_error(e: ImportError) -> StoreError {
 
 impl Store {
     /// Every row of every table except `events` and `feed` (the core doesn't hold them), the
-    /// newest 300 activity rows, and the next id of each integer-id table. Text this build
-    /// doesn't know loads as the import's default and is listed in `unknown`.
+    /// newest 300 activity rows, the open terminals, and the next id of each integer-id table
+    /// (closed terminals' ids included). Text this build doesn't know loads as the import's
+    /// default and is listed in `unknown`.
     pub fn load_snapshot(&self) -> Result<Snapshot, StoreError> {
         // One read transaction, so the rows and the next ids are one moment of the file.
         let read = self.conn().unchecked_transaction()?;
         let src = Src { conn: &read };
         let rows_of = |table: &str, cols: &'static [&'static str], order: &str| {
-            src.rows(table, cols, order).map_err(store_error)
+            src.rows(table, cols, None, order).map_err(store_error)
         };
         let mut unknown: Vec<LoadNote> = Vec::new();
         let n = &mut unknown;
@@ -88,6 +89,18 @@ impl Store {
             .iter()
             .filter_map(|r| rows::nag(r, n))
             .collect();
+        // Open terminals only: a closed one's row is history, and history keeps growing.
+        let terminals = src
+            .rows(
+                "terminals",
+                rows::TERMINALS,
+                Some("closed_at IS NULL"),
+                "id",
+            )
+            .map_err(store_error)?
+            .iter()
+            .map(|r| rows::terminal(r, n))
+            .collect();
         let mut activity_tail: Vec<_> = rows_of(
             "activity",
             rows::ACTIVITY,
@@ -116,6 +129,7 @@ impl Store {
             spike_panes,
             threads,
             nags,
+            terminals,
             activity_tail,
             meta,
             next_ids: self.next_ids()?,
@@ -140,6 +154,7 @@ impl Store {
             event: next("events")?,
             activity: next("activity")?,
             feed: next("feed")?,
+            terminal: next("terminals")?,
         })
     }
 

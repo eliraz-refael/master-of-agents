@@ -234,6 +234,15 @@ fn scan_children(parent: u32) -> Option<Vec<u32>> {
     Some(kids)
 }
 
+/// `pid`'s name as tmux reads it (`osdep-linux.c`): its argv0, the first string of
+/// `/proc/<pid>/cmdline`.
+pub(crate) fn proc_name(pid: u32) -> Option<String> {
+    let pid = proc_pid(pid)?;
+    let mut buf = Vec::new();
+    read_into(&format!("/proc/{pid}/cmdline"), &mut buf)?;
+    crate::proc::strings(&buf).next()
+}
+
 /// `pid`'s real and effective user ids, from `/proc/<pid>/status`, which any user may read.
 pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
     let pid = proc_pid(pid)?;

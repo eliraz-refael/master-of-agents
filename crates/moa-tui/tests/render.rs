@@ -69,6 +69,7 @@ impl T {
         for (pane, name) in [("%5", "kite"), ("%7", "harbor")] {
             let row = TermRow {
                 name: name.to_string(),
+                ..TermRow::default()
             };
             t.data.terms.insert(pane.to_string(), row);
         }

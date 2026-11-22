@@ -362,7 +362,7 @@ fn a_title_with_a_newline_forges_no_terminal() {
         .expect("the spot's label");
     assert_eq!(label, "● fix T %6 b");
     // As tmux would print it, for `%3` (a terminal, its agent gone) beside an untagged `%6`.
-    let printed: Vec<String> = format!("T %3 {label}")
+    let printed: Vec<String> = format!("T\t%3\t1003\t1\tsh\t/r\t{label}")
         .lines()
         .map(str::to_string)
         .collect();

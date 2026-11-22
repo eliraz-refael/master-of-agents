@@ -36,6 +36,7 @@ const R_ACTIVITY_WHO: &str = "who isn't a known one; loaded as brain";
 const R_ASK_TARGET: &str = "a session isn't moa or a session id; loaded as none";
 const R_ASK_STATUS: &str = "status isn't a known one; loaded as failed";
 const R_THREAD_KIND: &str = "kind isn't a known one; loaded as manual";
+const R_OPENED_BY: &str = "opened_by isn't a known one; loaded as found";
 const R_BAD_KEY: &str = "key isn't usable; row not loaded";
 
 /// Parses `text` only when printing the result gives `text` back. `Uuid::parse_str` also takes
@@ -454,6 +455,53 @@ pub(crate) fn pane_binding(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Pane
     };
     Flags::new(r).finish(notes, || Change::PaneBinding(p.clone()));
     Some(p)
+}
+
+pub(crate) const TERMINALS: &[&str] = &[
+    "id",
+    "server_pid",
+    "server_start",
+    "pane_id",
+    "opened_by",
+    "cwd",
+    "session_id",
+    "opened_at",
+    "touched_at",
+    "name",
+    "note",
+    "timeout_at",
+    "shell",
+    "command",
+    "command_since",
+    "closed_at",
+];
+
+pub(crate) fn terminal(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Terminal {
+    let mut f = Flags::new(r);
+    let t = Terminal {
+        id: TermId(r.int("id").unwrap_or(0)),
+        server_pid: r.int("server_pid").unwrap_or(0),
+        server_start: r.int("server_start").unwrap_or(0),
+        pane_id: txt_or_empty(r, "pane_id"),
+        opened_by: f.closed(
+            r.text_cow("opened_by").as_deref(),
+            OpenedBy::Found,
+            R_OPENED_BY,
+        ),
+        cwd: txt_or_empty(r, "cwd"),
+        session_id: f.session(r.text_cow("session_id").as_deref()),
+        opened_at: ms(r, "opened_at"),
+        touched_at: ms_opt(r, "touched_at"),
+        name: txt_or_empty(r, "name"),
+        note: txt(r, "note"),
+        timeout_at: ms_opt(r, "timeout_at"),
+        shell: txt_or_empty(r, "shell"),
+        command: txt_or_empty(r, "command"),
+        command_since: ms(r, "command_since"),
+        closed_at: ms_opt(r, "closed_at"),
+    };
+    f.finish(notes, || Change::Terminal(t.clone()));
+    t
 }
 
 pub(crate) const SPIKE_PANES: &[&str] = &["session_id", "pane_id", "tmux", "imported_at"];
@@ -877,6 +925,27 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
         Change::Nag(n) => {
             tx.prepare_cached(&upsert("nags", NAGS, &["task_id", "due", "day"]))?
                 .execute(params![n.task_id.0, n.due.to_string(), n.day.to_string()])?;
+        }
+        Change::Terminal(t) => {
+            tx.prepare_cached(&upsert("terminals", TERMINALS, &["id"]))?
+                .execute(params![
+                    t.id.0,
+                    t.server_pid,
+                    t.server_start,
+                    t.pane_id,
+                    t.opened_by.as_str(),
+                    t.cwd,
+                    t.session_id.map(|s| s.to_string()),
+                    t.opened_at.0,
+                    ms_n(t.touched_at),
+                    t.name,
+                    t.note,
+                    ms_n(t.timeout_at),
+                    t.shell,
+                    t.command,
+                    t.command_since.0,
+                    ms_n(t.closed_at)
+                ])?;
         }
         Change::Meta {
             key,

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# The pure crates stay free of IO crates: moa-core, moa-proto and moa-view must not depend,
+# even through another crate, on the ones listed. A check, not a test: the Nix build sandbox
+# can't run `cargo tree`. CI and scripts/verify both run this.
+set -euo pipefail
+
+# `if`, not `! grep`: bash -e ignores a `!` command, so a line appended after it would
+# silently disable the check.
+check() {
+  local crate=$1 banned=$2 out
+  out=$(cargo tree -p "$crate" -e normal --prefix none --target all)
+  if grep -E "^($banned) " <<<"$out"; then
+    echo "$crate depends on an IO crate (listed above)"
+    return 1
+  fi
+  echo "$crate stays free of IO crates"
+}
+
+status=0
+check moa-core 'tokio|rusqlite|libc' || status=1
+check moa-proto 'tokio|rusqlite' || status=1
+check moa-view 'tokio|rusqlite|libc|crossterm|ratatui' || status=1
+exit $status

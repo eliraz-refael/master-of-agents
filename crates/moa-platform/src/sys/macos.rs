@@ -326,10 +326,25 @@ pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
     std::time::UNIX_EPOCH.checked_add(at)
 }
 
-/// `pid`'s real and effective user ids, from `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`, which
-/// answers for any user's process, the system's own daemons among them (the full
-/// `PROC_PIDTBSDINFO` is refused for many of those).
+/// `pid`'s name as tmux reads it (`osdep-darwin.c`): `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`'s
+/// `pbsi_comm`, which the kernel cuts to 15 bytes; `None` when it is empty, as tmux then has
+/// none either.
+pub(crate) fn proc_name(pid: u32) -> Option<String> {
+    let comm = short_info(pid)?.pbsi_comm.map(|c| c as u8);
+    crate::proc::strings(&comm).next().filter(|s| !s.is_empty())
+}
+
+/// `pid`'s real and effective user ids, from `short_info`, which answers for any user's
+/// process.
 pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
+    let info = short_info(pid)?;
+    Some((info.pbsi_ruid, info.pbsi_uid))
+}
+
+/// `pid`'s `proc_bsdshortinfo` (`proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`), or `None` when
+/// libproc doesn't answer it whole. It answers for any user's process, the system's own
+/// daemons among them (the full `PROC_PIDTBSDINFO` is refused for many of those).
+fn short_info(pid: u32) -> Option<libc::proc_bsdshortinfo> {
     let pid = proc_pid(pid)?;
     // SAFETY: `proc_bsdshortinfo` is a plain C struct of integers and byte arrays; all-zero
     // is valid.
@@ -346,7 +361,7 @@ pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
             size,
         )
     };
-    (n == size).then_some((info.pbsi_ruid, info.pbsi_uid))
+    (n == size).then_some(info)
 }
 
 /// `pid`'s `proc_bsdinfo`, or `None` when libproc doesn't answer it whole.

@@ -34,6 +34,7 @@ fn tasks(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
             "created_at",
             "updated_at",
         ],
+        None,
         "id",
     )?;
     let (now, tz) = (run.env.now, run.env.tz.clone());
@@ -153,6 +154,7 @@ fn suggestions(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
             "created_at",
             "resolved_at",
         ],
+        None,
         "id",
     )?;
     let (now, tz) = (run.env.now, run.env.tz.clone());
@@ -239,6 +241,7 @@ fn asks(run: &mut Run, tx: &Transaction) -> Result<(), ImportError> {
             "reply",
             "answered_at",
         ],
+        None,
         "id",
     )?;
     let (now, tz) = (run.env.now, run.env.tz.clone());

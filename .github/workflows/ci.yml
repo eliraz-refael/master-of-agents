@@ -34,29 +34,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # A CI step, not a test: the Nix build sandbox can't run `cargo tree`.
-      - name: moa-core stays free of IO crates
-        run: |
-          # `if`, not `! grep`: bash -e ignores a `!` command, so a line appended after
-          # it would silently disable this check.
-          out=$(cargo tree -p moa-core -e normal --prefix none --target all)
-          if grep -E '^(tokio|rusqlite|libc) ' <<<"$out"; then
-            echo "moa-core depends on an IO crate (listed above)"
-            exit 1
-          fi
-      - name: moa-proto stays free of IO crates
-        run: |
-          out=$(cargo tree -p moa-proto -e normal --prefix none --target all)
-          if grep -E '^(tokio|rusqlite) ' <<<"$out"; then
-            echo "moa-proto depends on an IO crate (listed above)"
-            exit 1
-          fi
-      - name: moa-view stays free of IO crates
-        run: |
-          out=$(cargo tree -p moa-view -e normal --prefix none --target all)
-          if grep -E '^(tokio|rusqlite|libc|crossterm|ratatui) ' <<<"$out"; then
-            echo "moa-view depends on an IO crate (listed above)"
-            exit 1
-          fi
+      - name: The pure crates stay free of IO crates
+        run: scripts/io-crates
       - run: cargo nextest run --workspace
 
   macos:

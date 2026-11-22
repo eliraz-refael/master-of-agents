@@ -137,6 +137,9 @@ pub struct TmuxState {
     pub(crate) unfinished_reconciles: u32,
     /// This connection's reconciles were given up on, and the log said so.
     pub(crate) reconcile_given_up: bool,
+    /// This connection's first look at its terminals is still to come: the shells it records
+    /// were open before moa saw them (`found`, T3).
+    pub(crate) terms_unseen: bool,
     /// Moa's tags that no listing has shown yet.
     sent: Sent,
 }
@@ -331,6 +334,7 @@ impl Default for TmuxState {
             reconciled: false,
             unfinished_reconciles: 0,
             reconcile_given_up: false,
+            terms_unseen: true,
             sent: Sent::default(),
         }
     }
@@ -751,6 +755,11 @@ impl TmuxState {
         self.queries.keys().copied()
     }
 
+    /// What each pane query waiting for its answer was asked for.
+    pub(crate) fn asked(&self) -> impl Iterator<Item = &Asked> + '_ {
+        self.queries.values()
+    }
+
     /// The events waiting with the look at the tabs asked for session `id`, while one is.
     pub(crate) fn looking(&mut self, id: SessionId) -> Option<&mut Vec<HookEnvelope>> {
         self.queries.values_mut().find_map(|a| match a {
@@ -982,6 +991,7 @@ impl TmuxState {
             self.sent.clear();
             self.unfinished_reconciles = 0;
             self.reconcile_given_up = false;
+            self.terms_unseen = true;
         }
         if self.generation.is_some_and(|g| g != generation) {
             self.restarts += 1;
@@ -1099,10 +1109,11 @@ impl TmuxState {
     }
 
     /// The topology from the four lists `refresh_cmds` asks for, keeping the tags sent that
-    /// they don't show yet, and what the log is told of it. The terminals' list failing alone
-    /// leaves the other three good: the topology has no terminals then (but those moa just
-    /// tagged), and the log says so. `None`, with what was known kept, when the other three
-    /// aren't there.
+    /// they don't show yet, and what the log is told of it. The fourth list (the panes'
+    /// programs and terminals) failing alone leaves the other three good: the topology has
+    /// no terminals then (but those moa just tagged) and no pane's program or folder
+    /// (`panes_listed` is false), and the log says so. `None`, with what was known kept,
+    /// when the other three aren't there.
     fn rebuild(&mut self, results: &[Result<Vec<String>, String>]) -> Option<Vec<Effect>> {
         let [Ok(sessions), Ok(panes), Ok(clients), terms] = results else {
             // No information: what was known stays.

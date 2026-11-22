@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# moa's PR checks, printing one line per step and an excerpt for each failure. Everything
+# a step prints goes to target/verify/<step>.log, so a run costs a few lines to read.
+#
+#   scripts/verify quick                 fmt, clippy, nextest once (before a commit)
+#   scripts/verify [--runs N] [--no-flake]   quick, then the rest of a PR's checks
+#
+# Steps run one at a time: never run cargo while an e2e test runs.
+set -euo pipefail
+
+# Logs are read by an agent: no colour codes.
+export NO_COLOR=1 CARGO_TERM_COLOR=never
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+
+# One dev shell for the whole run, not one `nix develop` per step.
+if [[ -z ${MOA_VERIFY_IN_SHELL:-} ]]; then
+  export MOA_VERIFY_IN_SHELL=1
+  exec nix develop --command "$root/scripts/verify" "$@"
+fi
+
+mode=full
+runs=3
+flake=1
+while (($#)); do
+  case $1 in
+    quick) mode=quick ;;
+    --runs) runs=${2:?--runs needs a number}; shift ;;
+    --no-flake) flake=0 ;;
+    *) echo "usage: scripts/verify [quick | [--runs N] [--no-flake]]" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# The crates whose tests drive a real tmux (through moa_testkit's Sandbox, TempBrain or
+# Terminal): the tmux layer, the core that talks to it, the daemon, the testkit, and the
+# `moa` binary's e2e. The other crates never start tmux.
+tmux_crates=(moa-tmux moa-core moa-daemon moa-testkit moa)
+# tmux 3.4 is the minimum moa supports; the dev shell's is newer.
+tmux_pkgs=()
+for c in "${tmux_crates[@]}"; do tmux_pkgs+=(-p "$c"); done
+tmux34=${MOA_TMUX34:-/nix/store/3994kd3490zp24hs3d3rjq08h58g2xh7-tmux-3.4/bin}
+
+logs=target/verify
+mkdir -p "$logs"
+passed=0 failed=0 skipped=0
+start=$SECONDS
+
+# excerpt KIND LOG: what's worth reading from a failed step's log.
+excerpt() {
+  if [[ $1 == nextest ]]; then
+    # nextest's closing summary: which tests failed, then the panic messages.
+    {
+      sed -n '/^ *Summary \[/,$p' "$2"
+      grep -E -A3 'panicked at' "$2" | grep -v '^--$' || true
+    } | head -40
+  elif [[ $1 == flake ]]; then
+    # The failing check's output is in its build log, not in nix's own: fetch it, and read
+    # it as a nextest log. Anything else (an evaluation error) shows the last lines.
+    local drv build=${2%.log}-build.log
+    drv=$(grep -oE '/nix/store/[a-z0-9]+-[^ ]*\.drv' "$2" | tail -1 || true)
+    if [[ -n $drv ]] && nix log "$drv" 2>&1 | sed $'s/\x1b\\[[0-9;]*m//g' >"$build" && grep -q 'panicked at' "$build"; then
+      excerpt nextest "$build"
+    else
+      tail -30 "$2"
+    fi
+  else
+    tail -30 "$2"
+  fi
+}
+
+# step NAME KIND CMD...: run it, log it, print one line, and carry on if it fails.
+step() {
+  local name=$1 kind=$2 log="$logs/$1.log" t=$SECONDS
+  shift 2
+  if "$@" >"$log" 2>&1; then
+    printf '✓ %s (%ss)\n' "$name" $((SECONDS - t))
+    passed=$((passed + 1))
+  else
+    printf '✗ %s (%ss) %s\n' "$name" $((SECONDS - t)) "$log"
+    # An excerpt cut short (head closing its pipe) must not end the run under `set -e`.
+    excerpt "$kind" "$log" | sed 's/^/    /' || true
+    failed=$((failed + 1))
+  fi
+}
+
+skip() {
+  printf 'skip %s: %s\n' "$1" "$2"
+  skipped=$((skipped + 1))
+}
+
+# --no-fail-fast, so one run lists every failing test.
+nextest=(cargo nextest run --no-fail-fast)
+
+step fmt plain cargo fmt --all --check -- --color never
+step clippy plain cargo clippy --workspace --all-targets -- -D warnings
+step nextest nextest "${nextest[@]}" --workspace
+
+if [[ $mode == full ]]; then
+  step clippy-linux plain cargo clippy -p moa-platform -p moa-tmux --target x86_64-unknown-linux-gnu -- -D warnings
+  step io-crates plain scripts/io-crates
+  for ((i = 2; i <= runs; i++)); do
+    step "nextest-run$i" nextest "${nextest[@]}" --workspace
+  done
+  if [[ -d $tmux34 ]]; then
+    # shellcheck disable=SC2016  # expanded by the inner shell
+    step tmux-3.4 nextest env PATH="$tmux34:$PATH" bash -c \
+      'tmux -V && exec "$@"' _ "${nextest[@]}" "${tmux_pkgs[@]}"
+  else
+    echo "warning: tmux 3.4 not found at $tmux34 (set MOA_TMUX34 to its bin dir)"
+    skip tmux-3.4 "no tmux 3.4"
+  fi
+  if ((flake)); then
+    step flake-check flake nix flake check
+  else
+    skip flake-check "--no-flake"
+  fi
+fi
+
+echo "verify: $passed passed, $failed failed, $skipped skipped (total $((SECONDS - start))s)"
+((failed == 0))

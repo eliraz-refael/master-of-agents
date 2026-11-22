@@ -55,7 +55,8 @@ fn new_db_is_at_the_current_version_with_every_table() {
             "sessions",
             "spike_panes",
             "suggestions",
-            "tasks"
+            "tasks",
+            "terminals"
         ]
     );
 

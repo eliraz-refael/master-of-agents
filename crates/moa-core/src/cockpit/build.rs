@@ -11,6 +11,7 @@ use crate::model::SessionId;
 use crate::panel::View;
 use crate::reconcile::untag_cmds;
 use crate::sleep::kill_pane;
+use crate::terminals::{SHELL, mark};
 use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{set_pane_option, unset_pane_option};
@@ -18,8 +19,6 @@ use crate::tmux::topology::AGENT_MARK;
 
 /// The spike's cut for a title on a tab or a frame.
 const TITLE_CHARS: usize = 24;
-/// The tab a stranger leaving the cockpit gets, and its frame's label.
-const SHELL: &str = "⌨ shell";
 /// A framed panel's frame colour, idle and focused (the spike's `FRAME_IDLE`/`FRAME_ACTIVE`).
 const FRAME_IDLE: &str = "fg=#4c566a";
 const FRAME_ACTIVE: &str = "fg=#88c0d0";
@@ -164,11 +163,8 @@ fn go_home(at: &PaneAt, title: &dyn Fn(SessionId) -> String) -> Vec<Cmd> {
         cmds.extend(untag_agent(p));
         return cmds;
     }
-    let mut cmds = vec![
-        break_to(p, MOA, Some(SHELL)),
-        set_pane_option(p, "@moa_term", "1"),
-        set_pane_option(p, "@moa_label", &literal_format(SHELL)),
-    ];
+    let mut cmds = vec![break_to(p, MOA, Some(SHELL))];
+    cmds.extend(mark(p, SHELL));
     // A pane moa once tagged loses the tag and any frame with it, so it draws as a terminal.
     if at.tagged {
         cmds.push(unset_pane_option(p, "@moa_view"));

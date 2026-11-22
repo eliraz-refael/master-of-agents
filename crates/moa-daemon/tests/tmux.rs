@@ -477,30 +477,9 @@ fn the_cockpit_flag_names_the_moa_window() {
     }
 }
 
-/// The refresh's queries on a real server: only the tab tagged `@moa_term` is a terminal,
-/// with its label read as moa set it, a run of `#`s halved and not collapsed (S6b).
-#[test]
-fn the_terminals_query_lists_only_terminals() {
-    let tb = TempBrain::new(None);
-    let tmux = |args: &[&str]| {
-        tb.tmux(B, args)
-            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
-    };
-    tmux(&["new-session", "-d", "-s", "moa", "/bin/sh"]);
-    let shell = tmux(&[
-        "new-window",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-t",
-        "=moa:",
-        "/bin/sh",
-    ]);
-    tmux(&["set-option", "-p", "-t", &shell, "@moa_term", "1"]);
-    let label = literal_format("⌨ kite ##x #[fg=red]");
-    tmux(&["set-option", "-p", "-t", &shell, "@moa_label", &label]);
-    // Each of the refresh's queries, as the link sends them.
+/// The refresh's queries on a real server, as the link sends them, and the topology they
+/// build, with the raw lists for a failure message.
+fn listed_topology(tmux: &impl Fn(&[&str]) -> String) -> (Topology, Vec<Vec<String>>) {
     let lists: Vec<Vec<String>> = topology::refresh_cmds()
         .iter()
         .map(|query| {
@@ -515,12 +494,177 @@ fn the_terminals_query_lists_only_terminals() {
     };
     let mut t = Topology::from_lists(sessions, panes, clients);
     t.terms_listed(terms);
-    let shell: PaneId = shell.parse().expect("a pane id");
+    (t, lists)
+}
+
+/// The refresh's queries on a real server. Every tab is listed with its process, the
+/// program in front and that program's folder, word for word (a space and a `#` in it);
+/// only the tab tagged `@moa_term` is a terminal, with its label read as moa set it, a run
+/// of `#`s halved and not collapsed (S6b). A shell at its prompt lists as its process's own
+/// name (`process_name`, what a terminal's record keeps as its shell), whatever
+/// `default-shell` is called: macOS runs `/bin/sh` as `bash`. A program typed into it
+/// lists as something else; its name isn't checked, as a nix `sleep` lists as
+/// `coreutils`.
+#[test]
+fn the_pane_query_lists_programs_and_folders() {
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    let folder = tb.root().join("a b").join("#x");
+    std::fs::create_dir_all(&folder).unwrap();
+    // tmux lists a folder as the system resolves it (`/tmp` is `/private/tmp` on macOS).
+    let folder = std::fs::canonicalize(&folder)
+        .unwrap()
+        .display()
+        .to_string();
+    tmux(&["new-session", "-d", "-s", "moa", "/bin/sh"]);
+    // A tab running `default-shell`, as a terminal moa opens does.
+    let new_shell = |cwd: &str| -> PaneId {
+        let id = tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-c",
+            &literal_format(cwd),
+            "-t",
+            "=moa:",
+        ]);
+        id.parse().expect("a pane id")
+    };
+    let shell = new_shell(&folder);
+    let target = shell.to_string();
+    tmux(&["set-option", "-p", "-t", &target, "@moa_term", "1"]);
+    let label = literal_format("⌨ kite ##x #[fg=red]");
+    tmux(&["set-option", "-p", "-t", &target, "@moa_label", &label]);
+    let busy = new_shell(&tb.root().display().to_string());
+    let busy_target = busy.to_string();
+    tmux(&["send-keys", "-t", &busy_target, "sleep 100", "Enter"]);
+
+    // Each of the refresh's queries, as the link sends them.
+    let listed = || listed_topology(&tmux);
+    // Whether `p` lists its own process's name: its shell is in front.
+    let at_its_prompt = |t: &Topology, p: PaneId| {
+        let name = t.pid_of(&p).and_then(moa_platform::proc::name);
+        name.is_some() && t.command_of(&p) == name.as_deref()
+    };
+
+    let seen = wait_for(Duration::from_secs(10), || {
+        let (t, lists) = listed();
+        let busy_in_front = t.command_of(&busy).is_some() && !at_its_prompt(&t, busy);
+        (at_its_prompt(&t, shell) && busy_in_front).then_some((t, lists))
+    });
+    let Some((t, lists)) = seen else {
+        panic!(
+            "the shell never listed as itself, or the sleep as other: {:?}",
+            listed().1
+        );
+    };
+    assert!(t.panes_listed());
+    assert_eq!(t.cwd_of(&shell), Some(folder.as_str()), "{lists:?}");
     assert_eq!(
         t.terms().collect::<Vec<_>>(),
         [(shell, "kite ##x #[fg=red]")],
         "{lists:?}"
     );
+
+    // Stopped, the program leaves its shell in front again.
+    tmux(&["send-keys", "-t", &busy_target, "C-c"]);
+    let back = wait_for(Duration::from_secs(10), || {
+        at_its_prompt(&listed().0, busy).then_some(())
+    });
+    assert!(
+        back.is_some(),
+        "the shell never came back: {:?}",
+        listed().1
+    );
+}
+
+/// A program named with 16 bytes or more lists as tmux cuts its name (15 bytes on macOS),
+/// and `process_name` cuts it the same way: the two are equal, which is what a terminal's
+/// stored shell needs to be compared with its listed program. The program is a copy of
+/// `sleep` under a long name (a symlink would show its target's name), signed again on macOS.
+#[test]
+fn a_long_program_name_lists_as_process_name_reads_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let tb = TempBrain::new(None);
+    let tmux = |args: &[&str]| {
+        tb.tmux(B, args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"))
+    };
+    // `/bin/sleep` is a plain binary on macOS; elsewhere `sleep` may be a multicall
+    // `coreutils`, which picks its tool from argv[0] and refuses an unknown name, so a
+    // renamed copy is told the tool with `--coreutils-prog=sleep`.
+    let sleep = std::fs::canonicalize(if cfg!(target_os = "macos") {
+        PathBuf::from("/bin/sleep")
+    } else {
+        which_sleep()
+    })
+    .unwrap();
+    let multicall = sleep.file_name().is_some_and(|n| n == "coreutils");
+    let dir = tb.root().join("long");
+    std::fs::create_dir_all(&dir).unwrap();
+    let long = dir.join("a-long-program-name-for-sleep");
+    std::fs::copy(&sleep, &long).unwrap();
+    std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if cfg!(target_os = "macos") {
+        // A copy of a system binary is killed on launch until it is signed again.
+        let signed = std::process::Command::new("/usr/bin/codesign")
+            .args(["-f", "-s", "-"])
+            .arg(&long)
+            .output()
+            .unwrap();
+        assert!(signed.status.success(), "{signed:?}");
+    }
+    let mut cmd = format!("exec '{}'", long.display());
+    if multicall {
+        cmd.push_str(" --coreutils-prog=sleep");
+    }
+    cmd.push_str(" 100");
+    tmux(&["new-session", "-d", "-s", "moa", "/bin/sh"]);
+    let pane: PaneId = tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "=moa:",
+        &cmd,
+    ])
+    .parse()
+    .expect("a pane id");
+    let listed = || listed_topology(&tmux).0;
+    // The sh the program is exec'd from lists first; wait for the program itself.
+    let seen = wait_for(Duration::from_secs(10), || {
+        let t = listed();
+        let name = t.pid_of(&pane).and_then(moa_platform::proc::name)?;
+        name.starts_with("a-long-program")
+            .then(|| (t.command_of(&pane).map(str::to_string), name))
+    });
+    let Some((command, name)) = seen else {
+        panic!(
+            "the long-named program never listed: {:?}",
+            listed().command_of(&pane)
+        );
+    };
+    assert_eq!(command.as_deref(), Some(name.as_str()));
+    // macOS cuts a name to 15 bytes; Linux's argv0 isn't cut.
+    if cfg!(target_os = "macos") {
+        assert_eq!(name, "a-long-program-");
+    }
+}
+
+fn which_sleep() -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|d| d.join("sleep"))
+        .find(|p| p.exists())
+        .expect("a sleep on PATH")
 }
 
 /// L7 on a real server: a panel starts parked in `_moa`, in a window named by its view, in

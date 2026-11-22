@@ -26,7 +26,7 @@ use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
 use moa_core::{Now, UtcMs};
 
-use common::{queries, the_listing};
+use common::{queries, term_line, the_listing};
 
 const TTY: &str = "/dev/ttys1";
 const LOST: &str = "moa lost its terminal; try again";
@@ -1710,7 +1710,7 @@ fn a_vacate_drops_the_terminal_mark_at_once() {
     let fx = handle_checked(&mut st, Input::Timer(TimerKey::Sleep), hours_later());
     let n = committed_then_listed(&fx);
     let mut listing = lists(&lantern_in_the_spot(false), false);
-    listing[3] = Ok(vec!["T %9 ● lantern".into()]);
+    listing[3] = Ok(vec![term_line("%9", "● lantern")]);
     let fx = feed(&mut st, answer(n, listing));
     let terms = |st: &State| st.model().topics[&Topic::Terms].clone();
     assert!(terms(&st).is_empty(), "the session's, not a terminal");

@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use jiff::tz::TimeZone;
 use moa_agents::claude::find_transcript;
 use moa_core::UtcMs;
+use moa_core::change::Change;
+use moa_core::model::{OpenedBy, TermId, Terminal};
 use moa_store::Store;
 use moa_store::accounts::AccountMap;
 use moa_store::export::{ExportEnv, ExportError, ExportReport, export_spike};
@@ -249,6 +251,43 @@ proptest! {
         let rig = rig_with(|spike, home| b.write(spike, home));
         assert_round_trip(&rig);
     }
+}
+
+/// The spike has no terminals: they stay behind, and the report says so once.
+#[test]
+fn terminals_are_not_exported() {
+    let mut rig = typical();
+    rig.store
+        .apply(&[Change::Terminal(Terminal {
+            id: TermId(1),
+            server_pid: 1,
+            server_start: 2,
+            pane_id: "%7".into(),
+            opened_by: OpenedBy::Found,
+            cwd: "/tmp/lantern".into(),
+            session_id: None,
+            opened_at: NOW,
+            touched_at: None,
+            name: "zsh".into(),
+            note: None,
+            timeout_at: None,
+            shell: "zsh".into(),
+            command: "zsh".into(),
+            command_since: NOW,
+            closed_at: None,
+        })])
+        .unwrap();
+    let report = rig.export().unwrap();
+    let notes: Vec<_> = report
+        .notes
+        .iter()
+        .filter(|n| n.table == "terminals")
+        .map(|n| (n.level, n.key.as_str(), n.reason))
+        .collect();
+    assert_eq!(notes, [(Level::Info, "all", "terminals are not exported")]);
+    // The rest of the brain still comes back whole.
+    let excluded = common::assert_round_trip(&rig.spike, &rig.out, &rig.notes, &TimeMode::Text);
+    assert_eq!(excluded, 0);
 }
 
 #[test]
