@@ -192,6 +192,9 @@ pub struct AccountConfig {
     pub kind: AgentKind,
     pub store: PathBuf,
     pub launcher: Option<PathBuf>,
+    /// The program that runs moa's agent for this account (`acp`), over the one moa was
+    /// built with.
+    pub acp: Option<PathBuf>,
     pub brain: Option<BrainName>,
     pub except: Vec<PathBuf>,
     pub only: Vec<PathBuf>,
@@ -286,6 +289,7 @@ struct RawAccount {
     kind: Option<String>,
     store: Option<String>,
     launcher: Option<String>,
+    acp: Option<String>,
     brain: Option<String>,
     #[serde(default)]
     except: Vec<String>,
@@ -488,6 +492,11 @@ impl Config {
                         .launcher
                         .as_deref()
                         .map(|s| expand_one(s, "launcher", &place, home))
+                        .transpose()?,
+                    acp: a
+                        .acp
+                        .as_deref()
+                        .map(|s| expand_one(s, "acp", &place, home))
                         .transpose()?,
                     brain,
                     except: expand_all(&a.except, "folder", &format!("{place}.except"), home)?,

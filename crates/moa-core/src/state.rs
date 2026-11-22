@@ -201,6 +201,17 @@ pub struct Deps {
     pub layouts_file: PathBuf,
     /// How a panel is started (L7).
     pub panel: PanelLaunch,
+    /// The program that runs moa's agent when its account names none: the one moa was
+    /// built with (`moa_agents::acp::BUILT_IN_ADAPTER`), `None` in a build without it.
+    pub acp_adapter: Option<PathBuf>,
+    /// moa's agent's folder (`Paths::agent_dir`): it runs there, with its settings and
+    /// `bin/moactl`.
+    pub agent_dir: PathBuf,
+    /// The brain's scope file, `~/.config/moa/<brain>.md`: what this brain is for, told to
+    /// moa's agent after its constitution.
+    pub scope_file: PathBuf,
+    /// `~/.config/moa/constitution.md`, which replaces the constitution moa was built with.
+    pub constitution_file: PathBuf,
 }
 
 /// How moa starts a panel (L7): its own program, and what each panel's environment gets
@@ -246,6 +257,10 @@ impl Default for Deps {
             read_text: |_| Ok(None),
             layouts_file: PathBuf::new(),
             panel: PanelLaunch::default(),
+            acp_adapter: None,
+            agent_dir: PathBuf::from("/tmp/moa-test-brain/agent"),
+            scope_file: PathBuf::from("/tmp/moa-test-config/default.md"),
+            constitution_file: PathBuf::from("/tmp/moa-test-config/constitution.md"),
         }
     }
 }

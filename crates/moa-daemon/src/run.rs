@@ -269,6 +269,11 @@ async fn bring_up(
             read_text,
             layouts_file: paths.config_dir().join("layouts.json"),
             panel: launch,
+            // The daemon doesn't host moa's agent yet, so it knows no built-in one.
+            acp_adapter: None,
+            agent_dir: paths.agent_dir(b),
+            scope_file: paths.config_dir().join(format!("{b}.md")),
+            constitution_file: paths.config_dir().join("constitution.md"),
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),

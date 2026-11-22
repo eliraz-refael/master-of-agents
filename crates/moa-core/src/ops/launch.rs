@@ -93,27 +93,38 @@ pub(crate) enum ConfigDirMode {
 /// R11, the human's ruling: Claude's own default store runs without the variable.
 pub(crate) const CONFIG_DIR_MODE: ConfigDirMode = ConfigDirMode::UnsetForDefault;
 
-/// The `-e` arguments that give a launch its store, and the words that go before the
-/// launcher: none, or `env -u CLAUDE_CONFIG_DIR` for the default store, unset explicitly
-/// because the terminal server's own environment may hold a value. `canonical` spells both
+/// The value of `CLAUDE_CONFIG_DIR` that gives a launch its store, or `None` when the
+/// variable must be unset: Claude's own default store under `mode`. `canonical` spells both
 /// folders the one way (`Deps::canonical`) before they are compared.
+pub(crate) fn store_var(
+    store: &Path,
+    home: &Path,
+    mode: ConfigDirMode,
+    canonical: fn(&Path) -> PathBuf,
+) -> Option<String> {
+    let default = mode == ConfigDirMode::UnsetForDefault
+        && canonical(store) == canonical(&home.join(".claude"));
+    (!default).then(|| store.display().to_string())
+}
+
+/// The `-e` arguments that give a launch its store ([`store_var`]), and the words that go
+/// before the launcher: none, or `env -u CLAUDE_CONFIG_DIR` for the default store, unset
+/// explicitly because the terminal server's own environment may hold a value.
 pub(crate) fn launch_env(
     store: &Path,
     home: &Path,
     mode: ConfigDirMode,
     canonical: fn(&Path) -> PathBuf,
 ) -> (Vec<String>, Vec<String>) {
-    let default = mode == ConfigDirMode::UnsetForDefault
-        && canonical(store) == canonical(&home.join(".claude"));
-    if default {
-        let prefix = ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR"];
-        (Vec::new(), prefix.map(str::to_string).to_vec())
-    } else {
-        let env = vec![
-            "-e".to_string(),
-            format!("CLAUDE_CONFIG_DIR={}", store.display()),
-        ];
-        (env, Vec::new())
+    match store_var(store, home, mode, canonical) {
+        Some(store) => {
+            let env = vec!["-e".to_string(), format!("CLAUDE_CONFIG_DIR={store}")];
+            (env, Vec::new())
+        }
+        None => {
+            let prefix = ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR"];
+            (Vec::new(), prefix.map(str::to_string).to_vec())
+        }
     }
 }
 
@@ -329,7 +340,7 @@ pub(crate) fn open_told(
 }
 
 /// The launcher of a Claude account (rule 6), or why it has none.
-fn launcher_of(name: &str, acct: &AccountConfig) -> Result<PathBuf, OpError> {
+pub(crate) fn launcher_of(name: &str, acct: &AccountConfig) -> Result<PathBuf, OpError> {
     if acct.kind != AgentKind::Claude {
         return Err(OpError(ONLY_CLAUDE.into()));
     }

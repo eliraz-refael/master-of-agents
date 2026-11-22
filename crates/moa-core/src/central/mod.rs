@@ -1,6 +1,8 @@
 //! moa's own agent, the central one: the core's side of its conversation. No IO.
 
 pub mod feed;
+pub mod launch;
+pub mod prompt;
 pub mod wire;
 
 use crate::publish::MoaRow;
