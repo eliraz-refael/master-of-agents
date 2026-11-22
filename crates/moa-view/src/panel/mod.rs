@@ -21,6 +21,7 @@ use crate::views::{self, ViewUi, picker, picture, tree};
 
 mod ask;
 mod pick_keys;
+mod term_keys;
 mod tree_keys;
 
 use ask::Ask;
@@ -327,7 +328,7 @@ impl Panel {
             self.say(CANCELLED);
             return None;
         }
-        if self.view.is_sheet() {
+        if self.view.is_sheet() || self.view == View::Terms {
             return Some(Out::Close);
         }
         self.quit()
@@ -812,10 +813,14 @@ impl Panel {
                 self.list
                     .page(&self.lines, body, action == Action::PageDown);
             }
-            // Help's `q` and Esc close it, as Ctrl-c does (S10).
-            Action::Quit if self.view == View::Help => return Some(vec![Out::Close]),
+            // Help's and the terminals view's `q` and Esc close them, as Ctrl-c does (S10).
+            Action::Quit if matches!(self.view, View::Help | View::Terms) => {
+                return Some(vec![Out::Close]);
+            }
             Action::Quit => return Some(self.quit().into_iter().collect()),
-            Action::Activate if self.view == View::Picker => return Some(self.pick(data)),
+            Action::Activate if matches!(self.view, View::Picker | View::Terms) => {
+                return Some(self.pick(data));
+            }
             Action::Activate => {
                 return match selected? {
                     Item::Session(id) => {
@@ -845,6 +850,11 @@ impl Panel {
                     Item::Suggestion(_) | Item::Term { .. } => None,
                 };
             }
+            Action::Close | Action::Rename | Action::Note | Action::Timeout
+                if self.view == View::Terms =>
+            {
+                return self.term_key(action, data);
+            }
             Action::NewSession if self.shown() == View::Tree => {
                 return self.tree_key(action, data, ctx);
             }
@@ -872,6 +882,8 @@ impl Panel {
                 let q = row.session.id.to_string();
                 return Some(self.confirm(question, Op::SessionRestart { q }));
             }
+            // Only the terminals view's keys: it takes them before this.
+            Action::Note | Action::Timeout => return None,
             Action::Done | Action::Drop => {
                 let Item::Task(id) = selected? else {
                     return None;

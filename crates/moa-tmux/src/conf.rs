@@ -76,6 +76,7 @@ impl Popups<'_> {
         let popup = |size: &str, title: &str| self.popup(view, size, title, menu);
         let body = match view {
             View::Picker => popup("-w 80% -h 70%", "⌕ find a session"),
+            View::Terms => popup("-w 80% -h 70%", "⌨ terminals"),
             View::Help => format!(
                 "if -F '#{{e|<:#{{client_width}},{HELP_WIDTH}}}' {{ {} }} {{ {} }}",
                 popup("-w 100% -h 90%", "keys and help"),
@@ -189,7 +190,8 @@ fn display_menu(items: &[String]) -> String {
 /// The menu. tmux 3.4 never opens a menu taller than the terminal, and later versions draw
 /// the status line over its end, so a terminal shorter than the tall menu (its lines and
 /// the border) and the status line gets the short one. The short one's items all show
-/// down to 24 rows (on 3.8, its bottom border is under the status line's blank line).
+/// down to 25 rows (on 3.8, its bottom border is under the status line's blank line; at 24 the
+/// last item is under the status line).
 fn menu(form: Form, popups: Popups) -> String {
     let tall = menu_items(true, form, popups);
     let rows = tall.len() + 2 + STATUS_LINES;

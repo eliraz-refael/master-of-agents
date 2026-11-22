@@ -36,6 +36,8 @@ pub enum View {
     Projects,
     Picture,
     Picker,
+    // Every terminal: what's running, when you last touched it (5d).
+    Terms,
     EmptySlot,
     Help,
     Setup,
@@ -52,6 +54,7 @@ impl View {
         View::Projects,
         View::Picture,
         View::Picker,
+        View::Terms,
         View::EmptySlot,
         View::Help,
         View::Setup,
@@ -69,6 +72,7 @@ impl View {
             View::Projects => "projects",
             View::Picture => "picture",
             View::Picker => "picker",
+            View::Terms => "terms",
             View::EmptySlot => "empty-slot",
             View::Help => "help",
             View::Setup => "setup",
@@ -89,6 +93,7 @@ impl View {
             View::Picture => "◫ picture",
             View::EmptySlot => "○ agent spot",
             View::Picker => "find a session",
+            View::Terms => "⌨ terminals",
             View::Help => "keys and help",
             View::Setup => self.word(),
         }
@@ -113,6 +118,7 @@ impl View {
                 | View::Projects
                 | View::Status
                 | View::Picker
+                | View::Terms
                 | View::Help
                 | View::Setup
         )
@@ -210,6 +216,10 @@ pub(crate) fn register(
     let (view, managed) = (reg.view, reg.managed);
     state.panels.insert(conn, reg);
     fx.extend(publish_panels(state));
+    // The terminals view shows what is running now: one listing as it opens.
+    if view == View::Terms {
+        fx.extend(state.tmux.refresh());
+    }
     fx.push(reply(
         conn,
         req,

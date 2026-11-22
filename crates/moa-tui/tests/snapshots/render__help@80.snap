@@ -13,8 +13,8 @@ expression: text
 │   n      start a new session                                                 │
 │   $      a plain terminal in a new tab (for a dev server…), in the folder of │
 │          the agent or session you're on; `exit` closes it                    │
-│   |      split the agent or terminal tab you're on: a shell beside it, in the│
-│          same folder; `exit` closes it                                       │
+│   T      every terminal: what's running, when you last touched it; close,    │
+│          name, note, timeout                                                 │
 │                                                                              │
 │ j/k scroll · q close                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯

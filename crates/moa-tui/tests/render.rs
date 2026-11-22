@@ -8,7 +8,7 @@ use moa_tui::draw::draw;
 use moa_tui::theme::{ColorMode, Theme};
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
-use moa_view::fixture::lantern;
+use moa_view::fixture::{lantern, terminals};
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
 use moa_view::panel::{Mark, Mouse, Panel, Screen};
@@ -73,6 +73,13 @@ impl T {
             };
             t.data.terms.insert(pane.to_string(), row);
         }
+        t
+    }
+
+    /// The terminals view on the fixture with its four terminals.
+    fn terms() -> T {
+        let mut t = T::new(View::Terms);
+        terminals(&mut t.data, &t.ctx);
         t
     }
 
@@ -180,6 +187,31 @@ fn the_picker_at_every_width() {
         let buf = t.drawn(width, HEIGHT);
         insta::assert_snapshot!(format!("picker-kite@{width}"), screen_text(&buf));
     }
+}
+
+/// The terminals view, framed and titled: its count, a row each (the one in front first, the
+/// idle ones dim), the folder from 70 columns, and its keys.
+#[test]
+fn the_terminals_at_every_width() {
+    for width in WIDTHS {
+        let buf = T::terms().drawn(width, HEIGHT);
+        let text = screen_text(&buf);
+        assert!(text.contains("⌨ terminals"), "{text}");
+        insta::assert_snapshot!(format!("terms@{width}"), text);
+    }
+}
+
+/// Idle rows are drawn dim, the others (but the selected one) in the text colour.
+#[test]
+fn idle_terminals_are_dim() {
+    let buf = T::terms().drawn(120, HEIGHT);
+    let fg = |needle: &str| {
+        let (x, y) = find(&buf, needle);
+        buf[(x, y)].fg
+    };
+    assert_eq!(fg("kite"), TEXT);
+    assert_eq!(fg("scratch"), DIM);
+    assert_eq!(fg("harbor logs"), DIM);
 }
 
 /// Help, framed and titled, from its top, its long keys wrapped under their words (S10).
@@ -409,12 +441,16 @@ fn tiny_sizes_draw_without_panicking() {
     let more = [
         ("empty-slot", View::EmptySlot),
         ("picker", View::Picker),
+        ("terms", View::Terms),
         ("help", View::Help),
     ];
     for (name, view) in VIEWS.into_iter().chain(more) {
         for w in 0..=12 {
             for h in 0..=4 {
-                let screen = T::new(view).screen(w, h);
+                let screen = match view {
+                    View::Terms => T::terms().screen(w, h),
+                    _ => T::new(view).screen(w, h),
+                };
                 let mut buf = Buffer::filled(Rect::new(0, 0, 30, 12), filled.clone());
                 let area = Rect::new(5, 3, w, h);
                 draw(&mut buf, area, &screen, &theme());

@@ -1374,6 +1374,62 @@ fn popup() -> Op {
     }
 }
 
+/// 5d: a terminals panel shows what is running now, so registering one asks one listing; a
+/// panel of any other view asks none, and a listing already out is not asked twice.
+#[test]
+fn registering_a_terms_panel_asks_one_listing() {
+    let (b, mut st) = loaded(TOML);
+    link_up(&b, &mut st);
+    link_listed(&b, &mut st, &[]);
+    let listings = |fx: &[Effect]| {
+        fx.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Effect::Tmux {
+                        token: Some(TmuxToken::Refresh),
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let fx = send_on(&b, &mut st, 6, 1, popup());
+    assert_eq!(listings(&fx), 0);
+    let terms = Op::UiPanel {
+        pane: None,
+        view: Some(View::Terms),
+        placed: false,
+        once: true,
+    };
+    let fx = send_on(&b, &mut st, 7, 1, terms.clone());
+    assert_eq!(listings(&fx), 1);
+    assert_eq!(the_reply(&fx).unwrap().data["view"], "terms");
+    // The listing is still out: a second panel queues one more behind it, not two.
+    let fx = send_on(&b, &mut st, 8, 1, terms);
+    assert_eq!(listings(&fx), 0);
+    // With the link down there is nothing to ask.
+    feed(&b, &mut st, TmuxIn::Down(Down::Lost));
+    let fx = send_on(&b, &mut st, 9, 1, popup());
+    assert_eq!(listings(&fx), 0);
+}
+
+/// 5d: the `brain` row carries `[ui] terminal_idle_hours` as milliseconds, for the terminals
+/// view's idle mark; an older daemon's row without it reads as the default, 2 hours.
+#[test]
+fn the_brain_row_carries_the_terminal_idle_setting() {
+    let (_, st) = loaded(TOML);
+    assert_eq!(brain_row(&st).terminal_idle_ms, 2 * 3_600_000);
+    let (_, st) = loaded(&format!("{TOML}\n[ui]\nterminal_idle_hours = 0.5\n"));
+    assert_eq!(brain_row(&st).terminal_idle_ms, 1_800_000);
+    let (_, st) = loaded(&format!("{TOML}\n[ui]\nterminal_idle_hours = 0\n"));
+    assert_eq!(brain_row(&st).terminal_idle_ms, 0);
+    let old =
+        json!({"name": "d", "folders": [], "accounts": [], "open_account": null, "folded": []});
+    let row: BrainRow = serde_json::from_value(old).unwrap();
+    assert_eq!(row.terminal_idle_ms, 2 * 3_600_000);
+}
+
 /// The `run-shell true` nudges in `fx`, which make tmux reap what it hasn't.
 fn nudges(fx: &[Effect]) -> usize {
     fx.iter()

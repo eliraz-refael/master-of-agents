@@ -514,3 +514,44 @@ pub fn lantern() -> (Data, Ctx) {
     let ctx = Ctx::at(now, tz(), 3, PathBuf::from("/h"), |_| true);
     (data, ctx)
 }
+
+/// Four terminals for the terminals view, as the daemon publishes them, as of the fixture's
+/// `now`: `dev server` (in front of you, `node` for 2 hours, with a note and a timeout 90
+/// minutes away), `kite` (a shell touched 10 minutes ago), `harbor logs` (`tail` in a session's
+/// tab, untouched for 5 hours: idle) and `scratch` (a shell never touched, open for 3 hours:
+/// idle). Their rows are in neither the picker's nor any other view's fixture.
+pub fn terminals(data: &mut Data, ctx: &Ctx) {
+    let at = |ago: i64| ctx.now.0 - ago;
+    let term = |pane: &str, id: i64, name: &str, folder: &str| {
+        json!({
+            "key": pane, "name": name, "id": id, "folder": folder,
+            "command": "zsh", "running": false, "since": at(0), "opened_at": at(HOUR),
+            "touched_at": null, "active": false, "opened_by": "you",
+            "session": null, "note": null, "timeout_at": null,
+        })
+    };
+    let mut dev = term("%5", 1, "dev server", "/h/private/lantern");
+    dev["command"] = json!("node");
+    dev["running"] = json!(true);
+    dev["since"] = json!(at(2 * HOUR));
+    dev["opened_at"] = json!(at(5 * HOUR));
+    dev["touched_at"] = json!(at(3 * MINUTE));
+    dev["active"] = json!(true);
+    dev["note"] = json!("port 3000");
+    dev["timeout_at"] = json!(ctx.now.0 + 90 * MINUTE);
+    let mut kite = term("%7", 2, "kite", "/h/private/kite");
+    kite["opened_at"] = json!(at(24 * HOUR));
+    kite["touched_at"] = json!(at(10 * MINUTE));
+    let mut harbor = term("%9", 3, "harbor logs", "/h/private/harbor");
+    harbor["command"] = json!("tail");
+    harbor["running"] = json!(true);
+    harbor["since"] = json!(at(6 * HOUR));
+    harbor["opened_at"] = json!(at(48 * HOUR));
+    harbor["touched_at"] = json!(at(5 * HOUR));
+    harbor["opened_by"] = json!("moa");
+    harbor["session"] = json!("Fix login");
+    harbor["note"] = json!("watching the deploy");
+    let mut scratch = term("%11", 4, "scratch", "/h/private/beacon");
+    scratch["opened_at"] = json!(at(3 * HOUR));
+    data.upsert(Topic::Terms, vec![dev, kite, harbor, scratch]);
+}

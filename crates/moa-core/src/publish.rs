@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::config::Form;
+use crate::config::{Form, UiConfig};
 use crate::layout::{current_layout, leaves};
 use crate::live::{DisplayState, display_state};
 use crate::model::Terminal;
@@ -76,6 +76,14 @@ pub struct BrainRow {
     /// Absent from an older daemon's rows: the popup, the default.
     #[serde(default)]
     pub picker: Form,
+    /// `[ui] terminal_idle_hours` in milliseconds, `0` for never (5d). Absent from an older
+    /// daemon's rows: the default, 2 hours.
+    #[serde(default = "default_idle_ms")]
+    pub terminal_idle_ms: i64,
+}
+
+pub fn default_idle_ms() -> i64 {
+    UiConfig::default().terminal_idle_ms
 }
 
 /// A `panels` row (key `c<conn>`): one connected panel, its tab and its view, and whether
@@ -273,6 +281,7 @@ impl State {
             open_account: brain.open_account.map(|a| a.as_str().to_string()),
             folded: folded(self),
             picker: config.ui.picker,
+            terminal_idle_ms: config.ui.terminal_idle_ms,
         };
         BTreeMap::from([("brain".to_string(), keyed("brain", &row))])
     }

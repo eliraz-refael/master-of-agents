@@ -97,7 +97,7 @@ pub struct PickRow {
 }
 
 /// What a terminal is called: its name, else its tab id; cleaned.
-fn term_title(pane: &str, row: &TermRow) -> String {
+pub(crate) fn term_title(pane: &str, row: &TermRow) -> String {
     let name = if row.name.trim().is_empty() {
         pane
     } else {
@@ -106,10 +106,15 @@ fn term_title(pane: &str, row: &TermRow) -> String {
     clean(name)
 }
 
+/// A terminal's folder as a row shows it: `~/folder`, cleaned.
+pub(crate) fn term_folder(folder: &str, ctx: &Ctx) -> String {
+    clean(&text::short_path(folder, &ctx.home))
+}
+
 /// A terminal's why: `~/folder · node`, or the one of them it has (a row from before moa
 /// knew its folder shows none).
 fn term_why(row: &PickRow, ctx: &Ctx) -> String {
-    let folder = clean(&text::short_path(&row.folder, &ctx.home));
+    let folder = term_folder(&row.folder, ctx);
     [folder, clean(&row.command)]
         .into_iter()
         .filter(|part| !part.is_empty())
@@ -230,7 +235,7 @@ pub fn rows(data: &Data) -> Vec<PickRow> {
 }
 
 /// A tab id's number (`%12` is 12); one that isn't a number sorts last.
-fn tab_number(pane: &str) -> u64 {
+pub(crate) fn tab_number(pane: &str) -> u64 {
     pane.trim_start_matches('%').parse().unwrap_or(u64::MAX)
 }
 
@@ -452,7 +457,7 @@ fn hits(text: &str, terms: &[String]) -> Vec<bool> {
 }
 
 /// The spans that fit `width` cells: the one that crosses the edge is cut, the rest go.
-fn cut_spans(spans: Vec<Span>, width: usize) -> Vec<Span> {
+pub(crate) fn cut_spans(spans: Vec<Span>, width: usize) -> Vec<Span> {
     let mut left = width;
     let mut out = Vec::new();
     for mut span in spans {

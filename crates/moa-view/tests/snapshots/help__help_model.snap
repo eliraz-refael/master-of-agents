@@ -12,6 +12,8 @@ expression: "debug_lines(&help::build(&data, &ctx, 80))"
 [head]  n      [text]start a new session
 [head]  $      [text]a plain terminal in a new tab (for a dev server…), in the folder of the
 [text]         [text]agent or session you're on; `exit` closes it
+[head]  T      [text]every terminal: what's running, when you last touched it; close, name,
+[text]         [text]note, timeout
 [head]  |      [text]split the agent or terminal tab you're on: a shell beside it, in the
 [text]         [text]same folder; `exit` closes it
 [head]  -      [text]split the agent or terminal tab you're on: a shell below it, in the
@@ -43,6 +45,7 @@ expression: "debug_lines(&help::build(&data, &ctx, 80))"
 [dim]
 [head*]Each panel's own keys
 [head]  find a session: [text]type part of a name · ↵ jump · ↑↓ move · esc close
+[head]  ⌨ terminals: [text]↵ jump · x close · r name · n note · t timeout · esc close
 [head]  ▤ sessions: [text]⏎/click open · n new · + group · m move · r rename · D del group ·
 [text]              [text]a archive · x close
 [head]  ◷ big picture: [text]⏎/click jump · d done · x drop · a archive · n/N new

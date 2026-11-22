@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: text
+---
+╭─ ⌨ terminals ────────────────────────╮
+│ 4 terminals · 2 idle                 │
+│  ⌨ dev ser node 2h                now│
+│  ⌨ kite    shell                  10m│
+│  ⌨ scratch shell                    -│
+│  ⌨ harbor  tail 6h · Fix login     5h│
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│ ↵ jump · x close · r name · n note · │
+╰──────────────────────────────────────╯

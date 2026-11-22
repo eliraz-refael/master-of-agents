@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: text
+---
+╭─ ⌨ terminals ────────────────────────────────────────────────────────────────╮
+│ 4 terminals · 2 idle                                                         │
+│  ⌨ dev server     ~/private/lant node 2h                now   5h  ⏱1h  port 3│
+│  ⌨ kite           ~/private/kite shell                  10m   1d             │
+│  ⌨ scratch        ~/private/beac shell                    -   3h  idle       │
+│  ⌨ harbor logs    ~/private/harb tail 6h · Fix login     5h   2d  idle  watch│
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ ↵ jump · x close · r name · n note · t timeout · esc close                   │
+╰──────────────────────────────────────────────────────────────────────────────╯

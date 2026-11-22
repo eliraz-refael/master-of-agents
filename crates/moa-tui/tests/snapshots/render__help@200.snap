@@ -12,9 +12,9 @@ expression: text
 │   s      find a session in a full tab: type part of its name, Enter jumps                                                                                                                            │
 │   n      start a new session                                                                                                                                                                         │
 │   $      a plain terminal in a new tab (for a dev server…), in the folder of the agent or session you're on; `exit` closes it                                                                        │
+│   T      every terminal: what's running, when you last touched it; close, name, note, timeout                                                                                                        │
 │   |      split the agent or terminal tab you're on: a shell beside it, in the same folder; `exit` closes it                                                                                          │
 │   -      split the agent or terminal tab you're on: a shell below it, in the same folder; `exit` closes it                                                                                           │
-│   m      back to moa's cockpit, from an agent's own tab                                                                                                                                              │
 │                                                                                                                                                                                                      │
 │ j/k scroll · q close                                                                                                                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

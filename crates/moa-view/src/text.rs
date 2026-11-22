@@ -268,6 +268,29 @@ pub fn next_ago_change(from: UtcMs, now: UtcMs) -> UtcMs {
     UtcMs(i64::try_from(next).unwrap_or(i64::MAX))
 }
 
+/// The first moment after `now` when `moa_core::time::until(at, now)` reads differently: the
+/// same unit steps as [`next_ago_change`], counted down. Under a minute it is `at` itself
+/// (then it says `now`); `None` once `at` is here, when it never changes again.
+pub fn next_until_change(at: UtcMs, now: UtcMs) -> Option<UtcMs> {
+    let left = i128::from(at.0) - i128::from(now.0);
+    if left <= 0 {
+        return None;
+    }
+    let step = i128::from(if left < i128::from(MINUTE) {
+        return Some(at);
+    } else if left < i128::from(HOUR) {
+        MINUTE
+    } else if left < i128::from(DAY) {
+        HOUR
+    } else {
+        DAY
+    });
+    // It reads `k` units while `k * step <= left < (k + 1) * step`: one more unit gone, at
+    // the first moment `left` is under `k * step`.
+    let next = i128::from(at.0) - left / step * step + 1;
+    Some(UtcMs(i64::try_from(next).unwrap_or(i64::MAX)))
+}
+
 /// Days from `today` to `due`: negative when it is overdue.
 pub fn days_left(due: Date, today: Date) -> i64 {
     today

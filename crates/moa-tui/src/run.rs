@@ -167,6 +167,7 @@ pub fn topics(view: View, once: bool) -> &'static [Topic] {
             Topic::Terms,
             Topic::Brain,
         ],
+        (true, View::Terms) => &[Topic::Terms, Topic::Brain],
         (true, View::Help) => &[Topic::Brain, Topic::Layouts],
         _ => TOPICS,
     }

@@ -14,7 +14,7 @@ use moa_core::model::{
     SuggestionStatus, Task, TaskId, TaskStatus, Who,
 };
 use moa_core::panel::View;
-use moa_core::publish::{BrainRow, LayoutRow};
+use moa_core::publish::{BrainRow, LayoutRow, TermRow};
 use moa_view::ctx::Ctx;
 use moa_view::data::{Data, SessionRow};
 use moa_view::geometry::Size;
@@ -330,15 +330,17 @@ fn brain() -> impl Strategy<Value = BrainRow> {
         option::of(text()),
         vec(group_path(), 0..3),
         any::<bool>(),
+        prop_oneof![select(vec![0, 7_200_000, i64::MAX, -1]), any::<i64>()],
     )
         .prop_map(
-            |(name, folders, accounts, open_account, folded, tab)| BrainRow {
+            |(name, folders, accounts, open_account, folded, tab, terminal_idle_ms)| BrainRow {
                 name,
                 folders,
                 accounts,
                 open_account,
                 folded,
                 picker: if tab { Form::Tab } else { Form::Popup },
+                terminal_idle_ms,
             },
         )
 }
@@ -466,7 +468,7 @@ fn key() -> impl Strategy<Value = Key> {
             Key::Ctrl('u'),
             Key::Ctrl('w'),
         ]),
-        6 => select("jkgGnN+mrDaxRdyq123456hl /~ ".chars().collect::<Vec<_>>()).prop_map(Key::Char),
+        6 => select("jkgGnN+mrDaxRdyqt123456hl /~ ".chars().collect::<Vec<_>>()).prop_map(Key::Char),
         1 => any::<char>().prop_map(Key::Char),
         1 => any::<char>().prop_map(Key::Ctrl),
     ]
@@ -560,8 +562,84 @@ fn check(screen: &Screen, now: UtcMs) -> Result<(), TestCaseError> {
     check_span(&screen.footer, "the footer")
 }
 
+/// A `terms` row: odd names, folders and notes, any moments, any flags.
+fn term_row() -> impl Strategy<Value = TermRow> {
+    let words = (
+        text(),
+        folder(),
+        text(),
+        option::of(text()),
+        option::of(text()),
+    );
+    let when = (at(), at(), option::of(at()), option::of(at()));
+    let flags = (any::<bool>(), any::<bool>(), 0i64..6);
+    (words, when, flags).prop_map(|(words, when, flags)| {
+        let (name, folder, command, session, note) = words;
+        let (since, opened_at, touched_at, timeout_at) = when;
+        let (running, active, id) = flags;
+        TermRow {
+            name,
+            id,
+            folder,
+            command,
+            running,
+            since: since.0,
+            opened_at: opened_at.0,
+            touched_at: touched_at.map(|t| t.0),
+            active,
+            opened_by: s("you"),
+            session,
+            note,
+            timeout_at: timeout_at.map(|t| t.0),
+        }
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The terminals view, for 0 to 60 terminals with odd names at any width from 20 to 200:
+    /// no panic, no control character, no line over the width, and a wake-up never in the
+    /// past; its keys never panic either.
+    #[test]
+    fn terms_view_never_panics_or_overflows(
+        rows in vec(term_row(), 0..60),
+        brain in option::of(brain()),
+        ctx in ctx(),
+        size in (20u16..200, 4u16..40).prop_map(|(w, h)| Size { w, h }),
+        inputs in vec(input(), 12),
+    ) {
+        let mut data = Data::default();
+        for (n, row) in (0u32..).zip(rows) {
+            data.terms.insert(format!("%{n}"), row);
+        }
+        data.brain = brain;
+        data.touch();
+        let mut panel = Panel::new(View::Terms);
+        check(&panel.screen(&data, &ctx, size), ctx.now)?;
+        for input in &inputs {
+            match input {
+                Input::Key(k) => {
+                    panel.key(*k, &data, &ctx, size);
+                }
+                Input::Mouse(m) => {
+                    panel.mouse(*m, &data, &ctx, size);
+                }
+                Input::Blur => {
+                    panel.blur();
+                }
+                Input::Paste(text) => panel.paste(text),
+                Input::Reply(text) => {
+                    panel.replied(Err(text.clone()));
+                }
+            }
+            check(&panel.screen(&data, &ctx, size), ctx.now)?;
+        }
+        // The lines themselves, at the build width.
+        for line in moa_view::views::terms::lines(&data, &ctx, size.w) {
+            check_line(&line, usize::from(size.w), "a terminals line")?;
+        }
+    }
 
     #[test]
     fn views_never_panic_or_leak_control_characters(

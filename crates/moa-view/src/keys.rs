@@ -45,6 +45,9 @@ pub enum Action {
     DeleteGroup,
     Archive,
     Close,
+    /// The terminals view's `n` and `t`: a note, and a timeout.
+    Note,
+    Timeout,
     Restart,
     Done,
     Drop,
@@ -110,8 +113,13 @@ fn rows(view: View, key: Key) -> &'static [Action] {
         (View::Plan | View::Status | View::Projects | View::Today, Key::Char('N')) => {
             &[Action::ChooseAccount]
         }
-        // Help closes, as Ctrl-c closes it (S10).
-        (View::Help, Key::Char('q') | Key::Esc) => &[Action::Quit],
+        // The terminals view's own keys (5d): close, name, note, timeout.
+        (View::Terms, Key::Char('x')) => &[Action::Close],
+        (View::Terms, Key::Char('r')) => &[Action::Rename],
+        (View::Terms, Key::Char('n')) => &[Action::Note],
+        (View::Terms, Key::Char('t')) => &[Action::Timeout],
+        // Help and the terminals view close, as Ctrl-c closes them (S10).
+        (View::Help | View::Terms, Key::Char('q') | Key::Esc) => &[Action::Quit],
         _ => &[],
     }
 }
@@ -157,6 +165,7 @@ pub fn hint(view: View, adopted_selected: bool) -> &'static str {
             "1-6/tab · j/k · ⏎ open · n/N new · a archive · x close · y/n suggestion · q quit"
         }
         View::Picker => "↵ jump · ↑↓ move · esc close",
+        View::Terms => "↵ jump · x close · r name · n note · t timeout · esc close",
         View::Help => "j/k scroll · q close",
         View::Console | View::EmptySlot | View::Setup => "",
     }
@@ -177,6 +186,7 @@ pub fn picture_hint(tab: View, adopted_selected: bool) -> &'static str {
         View::Picture
         | View::Console
         | View::Picker
+        | View::Terms
         | View::EmptySlot
         | View::Help
         | View::Setup => hint(View::Picture, adopted_selected),
