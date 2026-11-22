@@ -574,7 +574,6 @@ const WRITES: &[&str] = &[
     "layout.set",
     "layout.apply",
     "console.prompt",
-    "console.cancel",
 ];
 
 #[test]

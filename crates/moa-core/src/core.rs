@@ -126,9 +126,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.extend(ops::launch::lost_opens(state));
             // The reload may have dropped a reconcile's changes: the panes are looked at again.
             fx.extend(reconcile::ask_if_due(state, now));
-            // moa's prompt whose row it lost was never sent; its thread's row is saved again.
-            let moa = central::reload(state, now);
-            fold_in(&mut fx, moa);
+            // moa's prompt whose row it lost was never sent.
+            fx.extend(central::reload(state));
             fx
         }
         Input::Tmux(t) => {

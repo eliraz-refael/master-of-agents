@@ -13,7 +13,7 @@ use moa_core::central::wire::{AcpCmd, AcpIn, Caps, Opened, StopReason, ThreadHow
 use moa_core::central::{Phase, Waiter};
 use moa_core::change::Change;
 use moa_core::config::AccountName;
-use moa_core::effect::{Effect, Input, Publish, check_order, handle_checked};
+use moa_core::effect::{Effect, Input, Publish, RefuseWrites, check_order, handle_checked};
 use moa_core::model::{FeedEntry, MoaThread, ThreadKind};
 use moa_core::op::{ConnId, NoParams, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Topic};
@@ -276,7 +276,7 @@ fn a_first_prompt_starts_the_agent_then_a_thread() {
         }]
     );
     let prompt_at = fx.iter().position(|e| matches!(e, Effect::Acp(_)));
-    assert!(changes_at < prompt_at);
+    assert!(changes_at.unwrap() < prompt_at.unwrap());
     assert_eq!(*phase(&st), Phase::Thinking);
     let turn = st.central().turn.as_ref().unwrap();
     assert_eq!((turn.prompt, turn.message_id.as_str()), (1, &*message_id));
@@ -775,11 +775,15 @@ fn a_reload_resaves_an_unsaved_thread_and_forgets_an_unsent_prompt() {
     let now = b.now();
     let before = b.snapshot();
     prompt_at(&mut st, now.clone(), 1, "hello", true);
-    hear(&b, &mut st, started(1, caps(false, false, true)));
-    hear(&b, &mut st, opened(1, "th-1", Opened::New));
+    // No system prompt: the brief rides the thread's first prompt.
+    hear(&b, &mut st, started(1, caps(false, false, false)));
+    let fx = hear(&b, &mut st, opened(1, "th-1", Opened::New));
+    assert_eq!(thread_rows(&fx).len(), 1);
+    assert!(prompts_sent(&fx)[0].starts_with("# Brief ("));
     assert_eq!(*phase(&st), Phase::Thinking);
 
-    // The commit carrying the thread, the prompt's row (and the held prompt) failed.
+    // The commit carrying the thread and the prompt's row failed, and the held prompt with
+    // it: the store has neither row. A reload saves nothing (the daemon drops its writes).
     let fx = handle_checked(
         &mut st,
         Input::Reload {
@@ -788,11 +792,7 @@ fn a_reload_resaves_an_unsaved_thread_and_forgets_an_unsent_prompt() {
         },
         now.clone(),
     );
-    assert_eq!(
-        thread_rows(&fx),
-        [&thread("th-1", "acct-a", now.local_day, now.wall.0)]
-    );
-    assert!(feed_rows(&fx).is_empty());
+    assert!(changes(&fx).is_empty(), "{fx:?}");
     assert_eq!(
         replies(&fx),
         [(
@@ -805,11 +805,114 @@ fn a_reload_resaves_an_unsaved_thread_and_forgets_an_unsent_prompt() {
     assert!(acps(&fx).is_empty());
     assert_eq!(*phase(&st), Phase::Ready);
     assert!(st.central().turn.is_none());
+    assert!(st.thread("th-1").is_none());
 
-    // The thread is open and saved: the next prompt goes to it.
+    // The thread is still open, unsaved: the next prompt saves it with its own row, in one
+    // commit, and is its first, carrying the brief.
     let fx = prompt(&b, &mut st, 2, "again");
+    let persists: Vec<_> = fx
+        .iter()
+        .filter(|e| matches!(e, Effect::Persist(_)))
+        .collect();
+    assert_eq!(persists.len(), 1, "{fx:?}");
+    assert_eq!(
+        thread_rows(&fx),
+        [&thread("th-1", "acct-a", now.local_day, now.wall.0)]
+    );
+    let rows = feed_rows(&fx);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].kind.as_str(), text_of(rows[0])),
+        ("you", json!("again"))
+    );
+    let sent = prompts_sent(&fx);
+    assert!(sent[0].starts_with("# Brief (") && sent[0].ends_with("\n\n---\n\nagain"));
+
+    // Once saved, the thread's later prompts carry only themselves.
+    hear(&b, &mut st, ended(1, 2));
+    let fx = prompt(&b, &mut st, 3, "third");
     assert!(thread_rows(&fx).is_empty());
+    assert_eq!(prompts_sent(&fx), ["third"]);
+}
+
+#[test]
+fn a_refused_first_prompt_keeps_the_reopen_line() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let threads = vec![thread("th-0", "acct-a", now.local_day, now.wall.0 - 60_000)];
+    let mut st = moa_with(&b, "acct-a", threads.clone());
+    prompt_at(&mut st, now.clone(), 1, "hello", false);
+    hear(&b, &mut st, started(1, caps(true, true, true)));
+    // The store refuses writes for a minute.
+    let until = UtcMs(now.wall.0 + 60_000);
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(Snapshot {
+                threads,
+                ..b.snapshot()
+            }),
+            refuse_writes: Some(RefuseWrites {
+                until,
+                reason: "the disk is full".into(),
+            }),
+        },
+        now.clone(),
+    );
+    hear(
+        &b,
+        &mut st,
+        AcpIn::Opened {
+            generation: 1,
+            result: Err("no such session".into()),
+        },
+    );
+    let fx = hear(&b, &mut st, opened(1, "th-1", Opened::New));
+    assert!(changes(&fx).is_empty());
+    assert!(acps(&fx).is_empty());
+    assert!(matches!(&replies(&fx)[..], [(ReqId(1), Err(_))]));
+    assert_eq!(*phase(&st), Phase::Ready);
+
+    // Writes are back: the next prompt is the new thread's first, with the line before it.
+    let later = at(UtcMs(until.0 + 1));
+    let fx = prompt_at(&mut st, later.clone(), 2, "again", false);
+    assert_eq!(thread_rows(&fx).len(), 1);
+    let rows = feed_rows(&fx);
+    let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(kinds, ["system", "you"]);
+    assert_eq!(text_of(rows[0]), REOPEN_FAILED);
     assert_eq!(prompts_sent(&fx), ["again"]);
+}
+
+#[test]
+fn a_restart_after_an_exit_mid_turn_answers_the_old_waiter() {
+    let b = TypicalBrain::new();
+    let mut st = moa(&b);
+    prompt_at(&mut st, b.now(), 1, "hello", true);
+    hear(&b, &mut st, started(1, caps(false, false, true)));
+    hear(&b, &mut st, opened(1, "th-1", Opened::New));
+    hear(
+        &b,
+        &mut st,
+        AcpIn::Exited {
+            generation: 1,
+            why: "it crashed".into(),
+        },
+    );
+    // Its turn's end never came: the next prompt starts a new run, and the old waiter hears.
+    let fx = prompt(&b, &mut st, 2, "again");
+    assert!(matches!(
+        acps(&fx)[..],
+        [AcpCmd::Start { generation: 2, .. }]
+    ));
+    assert_eq!(
+        replies(&fx),
+        [(
+            ReqId(1),
+            Err(OpError("moa's turn ended early: it crashed".into()))
+        )]
+    );
+    assert!(st.central().turn.is_none());
 }
 
 #[test]

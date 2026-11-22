@@ -445,8 +445,7 @@ impl Op {
             | Op::SuggestionAnswer { .. }
             | Op::LayoutSet { .. }
             | Op::LayoutApply { .. }
-            | Op::ConsolePrompt { .. }
-            | Op::ConsoleCancel(_) => true,
+            | Op::ConsolePrompt { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -465,6 +464,7 @@ impl Op {
             | Op::LayoutList(_)
             | Op::LayoutShow { .. }
             | Op::Goto { .. }
+            | Op::ConsoleCancel(_)
             | Op::DebugPanic => false,
         }
     }

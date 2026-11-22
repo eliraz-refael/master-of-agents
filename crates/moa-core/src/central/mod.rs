@@ -56,14 +56,18 @@ pub struct Waiter {
     pub wait: bool,
 }
 
-/// The thread moa's agent has open in this run.
+/// The thread moa's agent has open in this run. Its row is saved with its first prompt:
+/// whatever commit carries the row carries what goes first with it, so a commit that is
+/// refused, or lost and reloaded, leaves them all to the next prompt.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Open {
-    /// Its `moa_threads` row: saved with its first prompt, and again when a reload lost it.
+    /// Its `moa_threads` row. It is saved when the state has it, as the store does.
     pub row: MoaThread,
-    /// The brief, until the thread's first prompt carries it: a new thread opened without a
-    /// system prompt.
+    /// The brief its first prompt carries: a new thread opened without a system prompt.
     pub brief: Option<String>,
+    /// It was opened because today's earlier thread couldn't be reopened: its first row says
+    /// so.
+    pub reopen_failed: bool,
 }
 
 /// A prompt taken while moa's agent starts or its thread opens. Nothing of it is saved yet.
@@ -94,9 +98,8 @@ pub struct Turn {
     /// Who waits for moa's answer. A prompt sent without `wait` was answered once its row
     /// was saved.
     pub waiter: Option<Waiter>,
-    /// The brief this prompt carried: the thread's again if a reload finds the prompt
-    /// unsent.
-    pub brief: Option<String>,
+    /// Why moa's agent went away during the turn. Its end may still come after.
+    pub exited: Option<String>,
 }
 
 /// The core's state for moa's agent: its phase, which run of it (`generation`) the core is
@@ -194,18 +197,28 @@ pub fn send(
     });
     let mut fx = match start {
         Some((account, spec)) => {
-            // A new run: nothing of the last one carries over.
+            // A new run: nothing of the last one carries over. A turn its agent left
+            // unended is over, and whoever waits for it is told.
+            let left = moa.turn.take().and_then(|t| {
+                let why = t.exited.unwrap_or_else(|| "moa's agent stopped".into());
+                t.waiter.map(|w| (w, why))
+            });
+            let mut fx = Vec::new();
+            if let Some((w, why)) = left {
+                let ended = format!("moa's turn ended early: {why}");
+                fx.extend(answer(Some(w), Err(OpError(ended))));
+            }
             moa.generation += 1;
             moa.phase = Phase::Starting;
             moa.account = Some(account);
             moa.caps = None;
             moa.thread = None;
-            moa.turn = None;
             moa.replaying = false;
-            vec![Effect::Acp(AcpCmd::Start {
+            fx.push(Effect::Acp(AcpCmd::Start {
                 generation: moa.generation,
                 spec,
-            })]
+            }));
+            fx
         }
         None => open(state, now),
     };
@@ -253,40 +266,22 @@ pub fn cancel(state: &State, conn: ConnId, req: ReqId) -> Vec<Effect> {
 
 /// After a failed commit the rows are the store's again. A turn whose prompt's row was lost
 /// is forgotten: its prompt, held behind that commit, was never sent. An open thread whose
-/// row was lost is saved again (or with the next prompt, while writes are refused). A
+/// row was lost is unsaved again, and its next prompt saves it (a reload saves nothing). A
 /// prompt still waiting for its thread has saved nothing, and goes on.
-pub fn reload(state: &mut State, now: &Now) -> Vec<Effect> {
+pub fn reload(state: &mut State) -> Vec<Effect> {
     let unsent = state
         .central
         .turn
         .as_ref()
         .is_some_and(|t| !saved(state, &t.thread, &t.message_id));
     let moa = &mut state.central;
-    let mut told = None;
+    let mut fx = Vec::new();
     if unsent && let Some(turn) = moa.turn.take() {
         if moa.phase == Phase::Thinking {
             moa.phase = Phase::Ready;
         }
-        if let Some(open) = moa
-            .thread
-            .as_mut()
-            .filter(|o| o.row.thread_id == turn.thread)
-        {
-            open.brief = turn.brief;
-        }
-        told = turn.waiter;
+        fx.extend(answer(turn.waiter, Err(OpError(UNSAVED.into()))));
     }
-    let mut fx = Vec::new();
-    if let Some(open) = &state.central.thread
-        && state.thread(&open.row.thread_id).is_none()
-    {
-        let row = open.row.clone();
-        let mut tx = Tx::new(now);
-        if tx.commit(state, vec![Change::Thread(row)]).is_ok() {
-            fx = post_commit(state, tx);
-        }
-    }
-    fx.extend(answer(told, Err(OpError(UNSAVED.into()))));
     fx.extend(said(state));
     fx
 }
@@ -324,11 +319,11 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     };
     let (how, brief, mut fx) = match how {
         How::Use(_) => {
-            let row = moa.thread.as_ref().map(|o| o.row.clone());
-            let (Some(p), Some(row)) = (state.central.pending.take(), row) else {
+            let open = moa.thread.clone();
+            let (Some(p), Some(open)) = (state.central.pending.take(), open) else {
                 return Vec::new();
             };
-            return prompt(state, now, p, row);
+            return prompt(state, now, p, open);
         }
         How::Resume(thread) => (ThreadHow::Resume { thread }, None, Vec::new()),
         How::Load(thread) => (ThreadHow::Load { thread }, None, Vec::new()),
@@ -369,11 +364,13 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
                     started_at: now.wall,
                 },
             };
-            state.central.thread = Some(Open {
-                row: row.clone(),
+            let open = Open {
+                row,
                 brief: p.brief.take(),
-            });
-            prompt(state, now, p, row)
+                reopen_failed: p.reopen_failed,
+            };
+            state.central.thread = Some(open.clone());
+            prompt(state, now, p, open)
         }
         Err(_) if p.reopening => {
             p.reopening = false;
@@ -400,28 +397,30 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
     }
 }
 
-/// Saves prompt `p`'s `you` row in thread `row` (and `row`, when it isn't saved), then sends
-/// it. While writes are refused the prompt is refused too: nothing is sent.
-fn prompt(state: &mut State, now: &Now, p: Pending, row: MoaThread) -> Vec<Effect> {
-    let thread = row.thread_id.clone();
+/// Saves prompt `p`'s `you` row in the open thread, then sends it. The thread's first prompt
+/// (the one that saves its row) also saves the line a failed reopen leaves, and carries the
+/// brief. While writes are refused the prompt is refused too: nothing is sent.
+fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
+    let thread = open.row.thread_id.clone();
+    let first = state.thread(&thread).is_none();
     let mut tx = Tx::new(now);
     let mut changes = Vec::new();
-    if state.thread(&thread).is_none() {
-        changes.push(Change::Thread(row));
-    }
-    if p.reopen_failed {
-        let line = text_body(REOPEN_FAILED);
-        let line = feed::row(
-            state,
-            &mut tx,
-            now.wall,
-            &thread,
-            kind::SYSTEM,
-            None,
-            line,
-            None,
-        );
-        changes.push(Change::Feed(line));
+    if first {
+        changes.push(Change::Thread(open.row));
+        if open.reopen_failed {
+            let line = text_body(REOPEN_FAILED);
+            let line = feed::row(
+                state,
+                &mut tx,
+                now.wall,
+                &thread,
+                kind::SYSTEM,
+                None,
+                line,
+                None,
+            );
+            changes.push(Change::Feed(line));
+        }
     }
     let body = text_body(&p.text);
     let id = Some(p.message_id.clone());
@@ -431,16 +430,11 @@ fn prompt(state: &mut State, now: &Now, p: Pending, row: MoaThread) -> Vec<Effec
     if let Err(e) = tx.commit(state, changes) {
         return answer(p.waiter, Err(e));
     }
-    let moa = &mut state.central;
-    let brief = moa
-        .thread
-        .as_mut()
-        .and_then(|o| o.brief.take())
-        .filter(|b| !b.is_empty());
-    let text = match &brief {
+    let text = match open.brief.filter(|b| first && !b.is_empty()) {
         Some(brief) => format!("{brief}\n\n---\n\n{}", p.text),
         None => p.text,
     };
+    let moa = &mut state.central;
     moa.phase = Phase::Thinking;
     moa.turn = Some(Turn {
         prompt: p.prompt,
@@ -448,7 +442,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, row: MoaThread) -> Vec<Effec
         thread: thread.clone(),
         automatic: p.automatic,
         waiter: p.waiter.filter(|w| w.wait),
-        brief,
+        exited: None,
     });
     let generation = moa.generation;
     let mut fx = post_commit(state, tx);
@@ -503,6 +497,9 @@ fn exited(state: &mut State, why: String) -> Vec<Effect> {
     moa.caps = None;
     moa.thread = None;
     moa.replaying = false;
+    if let Some(turn) = &mut moa.turn {
+        turn.exited = Some(why);
+    }
     let waiter = moa.pending.take().and_then(|p| p.waiter);
     let mut fx = vec![warn(logged)];
     fx.extend(answer(waiter, Err(OpError(told))));
