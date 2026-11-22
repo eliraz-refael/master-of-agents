@@ -642,3 +642,10 @@ async fn resume_and_load_report_how_they_opened() {
     );
     adapter.stop().await;
 }
+
+/// A guard, not a red/green step: no test build is given `MOA_ACP_ADAPTER` (only the flake's
+/// `packages.default` is), so no test can reach the real adapter.
+#[test]
+fn a_test_build_knows_no_adapter() {
+    assert_eq!(moa_agents::acp::BUILT_IN_ADAPTER, None);
+}

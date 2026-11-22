@@ -53,13 +53,24 @@
         in
         { inherit pkgs craneLib withArtifacts cargoArtifacts; };
       builds = forAllSystems buildFor;
+
+      # moa's agent: nixpkgs' adapter without its wrapper, which would pull in the unfree
+      # `claude-code`. moa launches the user's own `claude`, never one from the store.
+      adapterFor = system: (pkgsFor system).claude-agent-acp.overrideAttrs (_: { postInstall = ""; });
     in
     {
       packages = forAllSystems (system:
-        let b = builds.${system}; in
+        let
+          b = builds.${system};
+          claude-agent-acp = adapterFor system;
+        in
         {
+          inherit claude-agent-acp;
           default = b.craneLib.buildPackage (b.withArtifacts // {
             cargoExtraArgs = "--locked -p moa";
+            # Read at compile time by `moa_agents::acp::BUILT_IN_ADAPTER`. Only this package
+            # gets it: checks and the dev shell build without, so no test can reach the adapter.
+            MOA_ACP_ADAPTER = "${claude-agent-acp}/bin/claude-agent-acp";
             doCheck = false;
             # `moactl` is `moa` under another name: the binary dispatches on argv[0].
             postInstall = "ln -s moa $out/bin/moactl";
@@ -101,6 +112,7 @@
               b.pkgs.tmux
               b.pkgs.cargo-nextest
               b.pkgs.cargo-insta
+              (adapterFor system)
             ] ++ b.pkgs.lib.optionals b.pkgs.stdenv.hostPlatform.isDarwin [ b.pkgs.libiconv ];
           };
         });
