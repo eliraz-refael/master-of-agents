@@ -105,6 +105,8 @@ pub struct Turn {
     pub waiter: Option<Waiter>,
     /// Why moa's agent went away during the turn. Its end may still come after.
     pub exited: Option<String>,
+    /// A permission request cancelled the turn, and said so: its cancelled end adds no line.
+    pub cancelled_for_permission: bool,
 }
 
 /// The core's state for moa's agent: its phase, which run of it (`generation`) the core is
@@ -121,8 +123,9 @@ pub struct Moa {
     pub thread: Option<Open>,
     pub pending: Option<Pending>,
     pub turn: Option<Turn>,
-    /// A load's replay is under way: its updates are checked against the feed's keys.
-    pub replaying: bool,
+    /// The thread a load is replaying, while its replay is under way: that thread's updates
+    /// are checked against the feed's keys.
+    pub replaying: Option<String>,
     /// The last prompt's number.
     pub prompts: u64,
     /// The rows the turn under way (or a load's replay) has written, by id, as written,
@@ -223,7 +226,7 @@ pub fn send(
             moa.account = Some(account);
             moa.caps = None;
             moa.thread = None;
-            moa.replaying = false;
+            moa.replaying = None;
             fx.push(Effect::Acp(AcpCmd::Start {
                 generation: moa.generation,
                 spec,
@@ -362,8 +365,11 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     };
     let cwd = state.deps().agent_dir.clone();
     let moa = &mut state.central;
-    moa.replaying = matches!(how, ThreadHow::Load { .. });
-    if moa.replaying {
+    moa.replaying = match &how {
+        ThreadHow::Load { thread } => Some(thread.clone()),
+        _ => None,
+    };
+    if moa.replaying.is_some() {
         moa.written.clear();
     }
     if let Some(p) = &mut moa.pending {
@@ -382,7 +388,7 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
 /// is opened new; a new one that couldn't be opened refuses the prompt.
 fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>) -> Vec<Effect> {
     let moa = &mut state.central;
-    moa.replaying = false;
+    moa.replaying = None;
     let (Some(mut p), Some(account)) = (moa.pending.take(), moa.account.clone()) else {
         return Vec::new();
     };
@@ -478,6 +484,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         automatic: p.automatic,
         waiter: p.waiter.filter(|w| w.wait),
         exited: None,
+        cancelled_for_permission: false,
     });
     let generation = moa.generation;
     let mut fx = post_commit(state, tx);
@@ -517,7 +524,7 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     moa.phase = phase;
     moa.caps = None;
     moa.thread = None;
-    moa.replaying = false;
+    moa.replaying = None;
     let mut waiters: Vec<Waiter> = moa
         .pending
         .take()

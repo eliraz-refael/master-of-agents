@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use moa_core::config::{AccountName, BrainName, Config, Form, RESERVED_BRAIN_NAMES, caller_store};
+use moa_core::config::{AccountName, BrainName, Config, Form, caller_store};
 use moa_core::model::AgentKind;
 
 const HOME: &str = "/h";
@@ -495,7 +495,6 @@ fn a_brain_named_like_a_verb_is_refused() {
 /// Its scope file, `constitution.md`, would be moa's constitution file.
 #[test]
 fn a_brain_named_constitution_is_refused() {
-    assert!(RESERVED_BRAIN_NAMES.contains(&"constitution"));
     assert_eq!(
         err("[brains.constitution]\n"),
         "moa.toml: a brain can't be called constitution; moa's constitution file has that name"

@@ -33,7 +33,7 @@ pub(super) fn update(state: &mut State, now: &Now, thread: &str, update: Update)
         _ => {}
     }
     let moa = &state.central;
-    if !in_turn(moa, thread) && !(moa.replaying && state.thread(thread).is_some()) {
+    if !in_turn(moa, thread) && moa.replaying.as_deref() != Some(thread) {
         let line = "an update outside moa's turn isn't kept";
         return vec![log(LogLevel::Debug, line.into())];
     }
@@ -84,7 +84,7 @@ pub(super) fn update(state: &mut State, now: &Now, thread: &str, update: Update)
             })
         }
         // One plan row a turn; a replay's is the feed's already.
-        Update::Plan { entries } if !state.central.replaying => {
+        Update::Plan { entries } if state.central.replaying.is_none() => {
             let body = plan_body(&entries);
             let plan = state
                 .central
@@ -151,6 +151,11 @@ pub(super) fn permission(
     };
     let mut fx = Vec::new();
     if in_turn(&state.central, &thread) {
+        if reject.is_none()
+            && let Some(turn) = &mut state.central.turn
+        {
+            turn.cancelled_for_permission = true;
+        }
         let mut tx = Tx::new(now);
         let row = new_row(
             state,
@@ -213,7 +218,9 @@ pub(super) fn ended(
         }
         Ok(stop) => {
             let text = format!("moa's turn ended early: {}", stop.name());
-            (Some((kind::SYSTEM, text.clone())), Ok(Done { text, data }))
+            // A permission cancel has said so already.
+            let line = (!turn.cancelled_for_permission).then(|| (kind::SYSTEM, text.clone()));
+            (line, Ok(Done { text, data }))
         }
         Err(why) => {
             let text = format!("moa's turn failed: {why}");
@@ -310,7 +317,7 @@ fn chunk(
     let found = match &id {
         Some(key) => keyed(moa, of, key),
         // A replay's pieces without an id can't be told from the feed's.
-        None if moa.replaying => return None,
+        None if moa.replaying.is_some() => return None,
         None => moa
             .written
             .values()
@@ -337,7 +344,7 @@ fn keyed<'a>(moa: &'a Moa, of: &str, key: &str) -> Option<&'a FeedEntry> {
 
 /// A load replays `thread`, and the feed has the row with `key` already.
 fn known(state: &State, thread: &str, key: &str) -> bool {
-    state.central.replaying
+    state.central.replaying.as_deref() == Some(thread)
         && state
             .feed_keys(thread)
             .is_some_and(|keys| keys.contains(key))

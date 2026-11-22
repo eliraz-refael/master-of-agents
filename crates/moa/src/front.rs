@@ -10,7 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use moa_client::{Client, ClientOptions, OnMismatch, own_exe};
-use moa_core::config::{BrainName, CONSTITUTION_NAME, RESERVED_BRAIN_NAMES};
+use moa_core::config::{BrainName, RESERVED_BRAIN_NAMES};
 use moa_core::op::Op;
 use moa_core::state::CallerInfo;
 use moa_daemon::{DaemonError, load_config};
@@ -95,8 +95,7 @@ fn paths(sandbox: bool) -> Result<Paths, String> {
 /// status`: after a flag clap takes it as a brain) gets a pointer to the command instead.
 fn pick_brain(paths: &Paths, name: Option<&str>) -> Result<BrainName, String> {
     let name = name.unwrap_or("default");
-    // `constitution` names a file, not a command: no brain has it, as the check below says.
-    if RESERVED_BRAIN_NAMES.contains(&name) && name != CONSTITUTION_NAME {
+    if RESERVED_BRAIN_NAMES.contains(&name) {
         return Err(format!(
             "moa --sandbox opens a brain; run moa {name} from a moa terminal"
         ));

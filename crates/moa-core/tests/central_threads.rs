@@ -160,7 +160,7 @@ fn a_restart_the_same_day_resumes() {
             cwd: st.deps().agent_dir.clone(),
         }]
     );
-    assert!(!st.central().replaying);
+    assert!(st.central().replaying.is_none());
     let fx = hear(&b, &mut st, opened(1, "th-0", Opened::Resumed));
     assert!(thread_rows(&fx).is_empty(), "{fx:?}");
     let rows = feed_rows(&fx);
@@ -189,9 +189,9 @@ fn without_resume_it_loads() {
         [AcpCmd::Open { how: ThreadHow::Load { thread }, .. }] if thread == "th-0"
     ));
     // The load's replay comes before its answer: it is checked against the feed's keys.
-    assert!(st.central().replaying);
+    assert!(st.central().replaying.is_some());
     let fx = hear(&b, &mut st, opened(1, "th-0", Opened::Loaded));
-    assert!(!st.central().replaying);
+    assert!(st.central().replaying.is_none());
     assert!(thread_rows(&fx).is_empty());
     assert_eq!(prompts_sent(&fx), ["hello"]);
 }

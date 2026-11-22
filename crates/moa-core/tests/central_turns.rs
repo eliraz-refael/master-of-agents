@@ -4,8 +4,8 @@
 mod common;
 
 use common::central::{
-    acps, caps, ended, feed_rows, first_turn, hear, moa, moa_from, opened, phase, prompt_at,
-    published_state, saved, started, text_of, thread,
+    acps, caps, ended, feed_rows, first_turn, hear, moa, moa_from, moa_with, opened, phase,
+    prompt_at, published_state, saved, started, text_of, thread,
 };
 use common::{changes, replies, send, send_on};
 use moa_core::UtcMs;
@@ -458,7 +458,7 @@ fn a_permission_is_refused_by_kind() {
 #[test]
 fn no_reject_once_cancels_the_turn() {
     let b = TypicalBrain::new();
-    let mut st = turn(&b, false);
+    let mut st = turn(&b, true);
     let options = vec![
         option("allow-1", PermKind::AllowOnce),
         option("allow-all", PermKind::AllowAlways),
@@ -484,6 +484,11 @@ fn no_reject_once_cancels_the_turn() {
         text_of(rows[0]),
         format!("moa wanted to Edit notes.md, {REFUSED}; its turn was cancelled")
     );
+
+    // The cancelled end adds no second line, and the waiter still hears why.
+    let fx = end(&b, &mut st, Ok(StopReason::Cancelled));
+    assert_eq!(rows_of_kind(&st, "system").len(), 1);
+    assert_eq!(done(&fx).text, "moa's turn ended early: cancelled");
 }
 
 #[test]
@@ -654,6 +659,27 @@ fn earlier(id: i64, kind: &str, key: Option<&str>, body: Value) -> FeedEntry {
 }
 
 #[test]
+fn a_replay_writes_only_the_loaded_thread() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let mut st = moa_with(
+        &b,
+        "acct-a",
+        vec![
+            thread("th-0", "acct-a", now.local_day, now.wall.0 - 60_000),
+            thread("th-1", "acct-a", now.local_day, now.wall.0 - 120_000),
+        ],
+    );
+    prompt_at(&mut st, now.clone(), 1, "again", false);
+    hear(&b, &mut st, started(1, caps(true, false, true)));
+    assert_eq!(st.central().replaying.as_deref(), Some("th-0"));
+    let other = say_in(&b, &mut st, "th-1", message(Some("m-1"), "another thread"));
+    assert!(feed_rows(&other).is_empty(), "{other:?}");
+    let loaded = say_in(&b, &mut st, "th-0", message(Some("m-1"), "this thread"));
+    assert_eq!(feed_rows(&loaded).len(), 1);
+}
+
+#[test]
 fn load_never_duplicates_rows() {
     let b = TypicalBrain::new();
     let now = b.now();
@@ -687,7 +713,7 @@ fn load_never_duplicates_rows() {
             ..
         }]
     ));
-    assert!(st.central().replaying);
+    assert!(st.central().replaying.is_some());
 
     let replay = [
         Update::UserEcho,
@@ -711,7 +737,7 @@ fn load_never_duplicates_rows() {
     assert_eq!(written, [4, 5], "only the new keys are written");
 
     let fx = hear(&b, &mut st, opened(1, "th-0", Opened::Loaded));
-    assert!(!st.central().replaying);
+    assert!(st.central().replaying.is_none());
     assert_eq!(feed_rows(&fx).len(), 1, "only the prompt's row");
 
     let all: Vec<FeedEntry> = st
