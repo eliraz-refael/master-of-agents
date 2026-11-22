@@ -366,6 +366,58 @@ fn the_first_run_finds_open_terminals() {
     assert_eq!(marks(&fx), want);
 }
 
+/// A first look held back by a launch in flight isn't the last: the shells it skipped are
+/// still `found`, not `you`, when the next listing's run goes through.
+#[test]
+fn a_held_back_first_run_still_finds_open_terminals() {
+    let mut r = Rig::linked(Vec::new());
+    let open = Op::SessionOpen {
+        path: r.b.home.join("private/lantern"),
+        account: None,
+        title: None,
+        group: None,
+        prompt: None,
+        bg: true,
+    };
+    let (id, _) = the_open(&send(&r.b, &mut r.st, 1, open));
+    r.list(
+        &[P5, P6],
+        &[
+            pane_line("%5", "", "bash", "/r/a", ""),
+            pane_line("%6", "", "bash", "/r/b", ""),
+        ],
+    );
+    let fx = r.reconcile(&[&info("%5"), &info("%6")]);
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    assert!(r.open(5).is_none());
+
+    let conn = r.conn();
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn,
+            token: TmuxToken::Open(id),
+            results: vec![Ok(vec!["P %9 1009".into()])],
+        },
+    );
+    let fx = r.list(
+        &[P5, P6, "P %9 @6 $0 1 0 0 0  0 "],
+        &[
+            plain("%5", "/r/a"),
+            plain("%6", "/r/b"),
+            pane_line("%9", "", "claude", "/r", ""),
+        ],
+    );
+    let made = records(&fx);
+    assert_eq!(made.len(), 2, "{made:?}");
+    assert!(
+        made.iter().all(|t| t.opened_by == OpenedBy::Found),
+        "{made:?}"
+    );
+    assert!(r.open(9).is_none());
+}
+
 /// After the first look, a split (marked `@moa_term` by its key) is yours, and needs no
 /// mark.
 #[test]
