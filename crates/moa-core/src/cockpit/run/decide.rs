@@ -34,7 +34,7 @@ pub(super) enum Step {
     Spawning,
     /// Repair's respawns of these panes.
     Respawning(Vec<PaneId>),
-    Chain(Then),
+    Chain(Box<Then>),
 }
 
 /// What a chain's `Ok` records and says.
@@ -516,7 +516,7 @@ pub(super) fn act(state: &mut State, seq: u64, next: Next) -> Vec<Effect> {
             }
         }
         Next::Chain(cmds, then) => {
-            state.cockpit.step = Step::Chain(then);
+            state.cockpit.step = Step::Chain(Box::new(then));
             match state.tmux.ask(Asked::Chain { seq }, vec![Cmd::chain(cmds)]) {
                 Some(e) => vec![e],
                 None => lost_now(state),
