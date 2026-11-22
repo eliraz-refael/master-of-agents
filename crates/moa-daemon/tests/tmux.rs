@@ -1013,16 +1013,19 @@ async fn naming_round_trips_odd_names() {
         .as_str()
         .unwrap_or_else(|| panic!("{opened}"))
         .to_string();
+    // `term ls`'s row for this terminal: the server's own first shell may be listed too.
+    let row_of = |ls: &Value| -> Option<Value> {
+        ls["result"]["data"]
+            .as_array()?
+            .iter()
+            .find(|r| r["pane"] == json!(pane))
+            .cloned()
+    };
     // The terminal is recorded once tmux's listing shows it.
-    let listed = wait_for(Duration::from_secs(10), || {
-        let ls = c.call("term.ls", json!({}));
-        (ls["result"]["data"]
-            .as_array()
-            .is_some_and(|rows| !rows.is_empty()))
-        .then_some(ls)
+    wait_for(Duration::from_secs(10), || {
+        row_of(&c.call("term.ls", json!({})))
     })
     .expect("the terminal is listed within 10 s");
-    assert_eq!(listed["result"]["data"][0]["pane"], json!(pane), "{listed}");
 
     for name in [
         "#(echo hi)",
@@ -1065,6 +1068,7 @@ async fn naming_round_trips_odd_names() {
         );
         // moa's own listing gives back the name it was given, whole.
         let ls = c.call("term.ls", json!({}));
-        assert_eq!(ls["result"]["data"][0]["name"], json!(name), "{ls}");
+        let row = row_of(&ls).unwrap_or_else(|| panic!("{ls}"));
+        assert_eq!(row["name"], json!(name), "{ls}");
     }
 }
