@@ -51,6 +51,8 @@ fn text_of(block: &ContentBlock) -> String {
 struct Seen {
     new_session: Mutex<Option<Value>>,
     chosen_option: Mutex<Option<String>>,
+    /// Signalled when a `hang` prompt is in flight.
+    started: Notify,
     cancelled: Notify,
 }
 
@@ -110,6 +112,7 @@ fn spawn_agent(stream: DuplexStream, seen: Arc<Seen>) -> JoinHandle<Result<(), E
                 cx.spawn(async move {
                     let sid = req.session_id;
                     if text_of(&req.prompt[0]) == "hang" {
+                        seen.started.notify_one();
                         seen.cancelled.notified().await;
                         return responder.respond(PromptResponse::new(StopReason::Cancelled));
                     }
@@ -209,8 +212,13 @@ async fn run_client<R>(
         .expect("the client ran")
 }
 
-/// Sends a prompt the ordered way and reports its stop reason, logging `end` when it arrives.
-async fn prompt(cx: &ConnectionTo<Agent>, log: &Log, said: &str) -> Result<StopReason, Error> {
+/// Sends a prompt the ordered way, at once, and returns the receiver of its stop reason. Logs
+/// `end` when the answer arrives.
+fn prompt(
+    cx: &ConnectionTo<Agent>,
+    log: &Log,
+    said: &str,
+) -> Result<oneshot::Receiver<Result<StopReason, Error>>, Error> {
     let (tx, rx) = oneshot::channel();
     let log = log.clone();
     cx.prepare_request(PromptRequest::new("s1", vec![text(said)]))
@@ -219,7 +227,7 @@ async fn prompt(cx: &ConnectionTo<Agent>, log: &Log, said: &str) -> Result<StopR
             let _ = tx.send(result.map(|r| r.stop_reason));
             Ok(())
         })?;
-    rx.await.expect("the prompt was answered")
+    Ok(rx)
 }
 
 async fn initialize(cx: &ConnectionTo<Agent>) -> Result<InitializeResponse, Error> {
@@ -277,7 +285,7 @@ async fn a_turns_updates_arrive_before_its_end() {
     let (log, mut rx) = mpsc::unbounded_channel();
     let stop = run_client(client_end, log.clone(), async |cx| {
         initialize(&cx).await?;
-        prompt(&cx, &log, "turn").await
+        prompt(&cx, &log, "turn")?.await.expect("answered")
     })
     .await;
     assert_eq!(stop, StopReason::EndTurn);
@@ -333,13 +341,16 @@ async fn resume_and_load() {
 #[tokio::test]
 async fn cancel_ends_the_turn_cancelled() {
     let (client_end, agent_end) = tokio::io::duplex(1 << 20);
-    let agent = spawn_agent(agent_end, Arc::new(Seen::default()));
+    let seen = Arc::new(Seen::default());
+    let agent = spawn_agent(agent_end, seen.clone());
     let (log, _rx) = mpsc::unbounded_channel();
     let stop = run_client(client_end, log.clone(), async |cx| {
         initialize(&cx).await?;
-        let turn = prompt(&cx, &log, "hang");
+        let turn = prompt(&cx, &log, "hang")?;
+        // The prompt is in flight in the agent; only now does the cancel go out.
+        seen.started.notified().await;
         cx.send_notification(CancelNotification::new("s1"))?;
-        turn.await
+        turn.await.expect("answered")
     })
     .await;
     assert_eq!(stop, StopReason::Cancelled);
@@ -349,7 +360,7 @@ async fn cancel_ends_the_turn_cancelled() {
 #[tokio::test]
 async fn invalid_utf8_is_replaced_not_fatal() {
     let (client_end, raw_end) = tokio::io::duplex(1 << 20);
-    let (raw_read, mut raw_write) = tokio::io::split(raw_end);
+    let (_raw_read, mut raw_write) = tokio::io::split(raw_end);
     let update = |bytes: &[u8]| {
         let mut line = br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":""#.to_vec();
         line.extend_from_slice(bytes);
@@ -365,7 +376,6 @@ async fn invalid_utf8_is_replaced_not_fatal() {
             got.push(rx.recv().await.expect("the connection lives"));
         }
         assert_eq!(got, ["chunk m1 a\u{FFFD}b", "chunk m1 still here"]);
-        drop(raw_read);
         Ok(())
     })
     .await;

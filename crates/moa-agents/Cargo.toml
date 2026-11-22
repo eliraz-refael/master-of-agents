@@ -20,7 +20,6 @@ acp = ["dep:agent-client-protocol", "dep:tokio", "dep:tokio-util"]
 insta.workspace = true
 tempfile.workspace = true
 
-
 [[test]]
 name = "acp_check"
 required-features = ["acp"]
