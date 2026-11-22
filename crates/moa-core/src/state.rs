@@ -615,6 +615,21 @@ impl State {
             .any(|n| n.table == table && n.key == key)
     }
 
+    /// moa's threads (`moa_threads`).
+    pub fn threads(&self) -> impl Iterator<Item = &MoaThread> {
+        self.threads.values()
+    }
+
+    /// moa's thread `id`, when its row is saved.
+    pub fn thread(&self, id: &str) -> Option<&MoaThread> {
+        self.threads.get(id)
+    }
+
+    /// moa's own agent, as the core knows it.
+    pub fn central(&self) -> &Moa {
+        &self.central
+    }
+
     /// The newest feed rows, oldest first.
     pub fn feed_tail(&self) -> impl Iterator<Item = &FeedEntry> {
         self.feed_tail.values()

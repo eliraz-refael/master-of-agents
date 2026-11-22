@@ -129,6 +129,20 @@ pub enum AcpIn {
     },
 }
 
+impl AcpIn {
+    /// The run of the agent that said it.
+    pub fn generation(&self) -> u64 {
+        match self {
+            AcpIn::Started { generation, .. }
+            | AcpIn::Opened { generation, .. }
+            | AcpIn::Update { generation, .. }
+            | AcpIn::Permission { generation, .. }
+            | AcpIn::TurnEnded { generation, .. }
+            | AcpIn::Exited { generation, .. } => *generation,
+        }
+    }
+}
+
 /// One update from the agent, in a thread.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Update {

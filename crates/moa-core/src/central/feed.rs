@@ -26,7 +26,6 @@ pub fn text_body(text: &str) -> String {
 /// A new row of `thread`, with the next id of the table (counting this transaction's). The
 /// caller commits it as `Change::Feed`.
 #[allow(clippy::too_many_arguments)]
-#[expect(dead_code, reason = "the feed writer that calls it comes next")]
 pub(crate) fn row(
     state: &State,
     tx: &mut Tx,
