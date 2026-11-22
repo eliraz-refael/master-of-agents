@@ -326,6 +326,12 @@ pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
     std::time::UNIX_EPOCH.checked_add(at)
 }
 
+/// Never: libproc doesn't answer for a zombie, so there is no state to read, and launchd
+/// reaps orphans anyway.
+pub(crate) fn zombie(_pid: u32) -> bool {
+    false
+}
+
 /// `pid`'s name as tmux reads it (`osdep-darwin.c`): `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`'s
 /// `pbsi_comm`, which the kernel cuts to 15 bytes; `None` when it is empty, as tmux then has
 /// none either.

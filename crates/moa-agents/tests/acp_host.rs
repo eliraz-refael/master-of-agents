@@ -527,10 +527,17 @@ fn child_pid(dir: &Path) -> u32 {
     .expect("the stub started its child")
 }
 
+/// Waits for orphans `pids` to exit. Not `pid_alive`: orphans stay zombies where pid 1
+/// doesn't reap (the Nix sandbox).
 fn gone(pids: &[u32]) {
-    // Not `pid_alive`: orphans stay zombies where pid 1 doesn't reap (the Nix sandbox).
     wait_for(LIMIT, || pids.iter().all(|&p| !running(p)).then_some(()))
         .unwrap_or_else(|| panic!("{pids:?} are still there"));
+}
+
+/// Waits for our own child `pid` to exit and be reaped: its reaper's job, so a zombie fails.
+fn reaped(pid: u32) {
+    wait_for(LIMIT, || (!pid_alive(pid)).then_some(()))
+        .unwrap_or_else(|| panic!("{pid} is not reaped"));
 }
 
 /// The stub's children: one that leaves on `SIGTERM`, and one that ignores it.
@@ -550,7 +557,8 @@ async fn stop_ends_the_group() {
         tokio::time::timeout(LIMIT, adapter.stop())
             .await
             .expect("stop returns");
-        gone(&[stub, child]);
+        reaped(stub);
+        gone(&[child]);
     }
 }
 

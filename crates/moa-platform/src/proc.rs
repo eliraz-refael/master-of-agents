@@ -108,21 +108,10 @@ fn why_unread(alive: bool, owner: Option<(u32, u32)>, me: u32) -> Unread {
 /// Whether `pid` exists and isn't a zombie. A zombie has exited and only waits for its
 /// parent to reap it, which [`pid_alive`](crate::pid_alive) still counts as alive. Where
 /// nothing adopts orphans (a Nix build sandbox's pid 1) they stay zombies for good. macOS
-/// has no cheap state read, and launchd reaps orphans, so there it is `pid_alive`.
+/// can't tell a zombie (libproc doesn't answer for one), and launchd reaps orphans, so
+/// there it is `pid_alive`.
 pub fn running(pid: u32) -> bool {
-    sys::pid_alive(pid) && !zombie(pid)
-}
-
-/// Whether `/proc/<pid>/stat` says `pid` has exited (`Z`) or is dead (`X`).
-#[cfg(target_os = "linux")]
-fn zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .is_ok_and(|stat| matches!(stat_state(&stat), Some('Z' | 'X')))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn zombie(_pid: u32) -> bool {
-    false
+    sys::pid_alive(pid) && !sys::zombie(pid)
 }
 
 /// When `pid` started, or `None` when it is gone.
