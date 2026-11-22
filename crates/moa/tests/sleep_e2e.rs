@@ -25,17 +25,6 @@ fn panes(tb: &TempBrain) -> Vec<(String, String)> {
     .collect()
 }
 
-/// The newest activity rows' text.
-fn activity(tb: &TempBrain) -> String {
-    let o = run(
-        tb,
-        &["sql", "select text from activity order by id desc limit 20"],
-        &[],
-    );
-    assert!(o.status.success(), "{}{}", out(&o), err(&o));
-    out(&o)
-}
-
 #[test]
 fn an_idle_session_goes_to_sleep_on_its_own() {
     let tb = TempBrain::new(None);
