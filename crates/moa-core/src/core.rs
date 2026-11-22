@@ -36,6 +36,7 @@ use crate::{Now, UtcMs};
 pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     state.set_now(now.wall);
     let sleep_fired = matches!(input, Input::Timer(TimerKey::Sleep));
+    let terminals_fired = matches!(input, Input::Timer(TimerKey::Terminals));
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
@@ -44,6 +45,8 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     fold_in(&mut fx, released);
     // Whatever this input changed, a session it left due and eligible goes to sleep (R19).
     sleep::run(state, &now, sleep_fired, &mut fx);
+    // So does a terminal's kill or timeout, once moa may act on its tab (T8).
+    terminals::run(state, &now, terminals_fired, &mut fx);
     // The terminals are the topology's: a listing's, a terminal's own tag, a session's tag
     // (a terminal running an agent is its session). The views hear of them when they changed.
     fx.extend(
@@ -110,8 +113,11 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.load(*snapshot);
             state.forget_hooks();
             state.refuse_writes = refuse_writes;
-            // The timer this input armed may have been lost with it: it is armed again.
+            // The timers this input armed may have been lost with it: they are armed again.
             state.sleep_at = None;
+            state.terminals_at = None;
+            // The closes under way may have been half-changed: they are forgotten.
+            state.closing.clear();
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
             fx.extend(publish_all(state));
             fx.extend(state.tmux.reload());
@@ -192,6 +198,10 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 state.prompts.clear();
             }
             let mut unpaned = None;
+            // A close under way is for a tab of the link it was asked on: never sent on another.
+            if lost || another_server {
+                state.closing.clear();
+            }
             if another_server {
                 state.pane_views.clear();
                 state.sheets.clear();
@@ -208,7 +218,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // terminal its new tab or a key its folder, once the link is as the input left it.
             let (mut reconciles, mut resumes, mut terms) = (Vec::new(), Vec::new(), Vec::new());
             let (mut adopts, mut lists, mut looks) = (Vec::new(), Vec::new(), Vec::new());
-            let (mut heres, mut spawns) = (Vec::new(), Vec::new());
+            let (mut heres, mut spawns, mut closes) = (Vec::new(), Vec::new(), Vec::new());
             let (mut scenes, mut chains) = (Vec::new(), Vec::new());
             for (asked, answers) in answers {
                 // A panel spawn reads each command's answer (L18); the rest read them as one.
@@ -223,6 +233,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     }
                     Asked::Term { tell, name, path } => {
                         terms.push((tell, name, path, link::all_lines(answers)))
+                    }
+                    Asked::TermClose { tell, id } => {
+                        closes.push((tell, id, link::all_lines(answers)))
                     }
                     Asked::Here { client } => heres.push((client, link::all_lines(answers))),
                     Asked::Look { id, events } => {
@@ -274,6 +287,11 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             for (client, answer) in heres {
                 more.extend(ops::term::here_answered(state, client, answer, replied));
             }
+            for (tell, id, answer) in closes {
+                more.extend(ops::term::close_answered(
+                    state, now, tell, id, answer, replied,
+                ));
+            }
             for (id, events, answer) in looks {
                 more.extend(wake::looked(state, now, id, &events, panes_of(answer)));
             }
@@ -321,6 +339,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             // with its name, not as a stranger, and only once when both happen here.
             if link_listed || just_reconciled {
                 more.extend(terminals::register(state, now));
+            }
+            if link_listed {
+                terminals::closes_listed(state);
             }
             match mailbox {
                 Some(Mailbox::Hook(HookMsg::ClientAttached(_))) => {
@@ -377,8 +398,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.push(quiet_timer(state, now.wall));
             fx
         }
-        // The check at the end of every input does the work.
-        Input::Timer(TimerKey::Sleep) => Vec::new(),
+        // The checks at the end of every input do the work.
+        Input::Timer(TimerKey::Sleep | TimerKey::Terminals) => Vec::new(),
         // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
         // gets its tags (R26). A panel on it goes, and `panels` says so; a popup's going may
         // nudge tmux to reap it.
@@ -537,6 +558,13 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::TermShow { pane },
             ..
         } => ops::term::show(state, conn, req, &pane),
+        // Answered once tmux says what runs in the terminal's tab, or at once.
+        Input::Client {
+            conn,
+            req,
+            op: Op::TermClose { target },
+            ..
+        } => ops::term::close(state, conn, req, &target),
         // Answered at once, or after one pane query and the new tab (C11).
         Input::Client {
             conn,

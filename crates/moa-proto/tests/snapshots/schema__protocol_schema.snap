@@ -677,6 +677,64 @@ expression: all
             "type": "object"
           },
           {
+            "description": "Closes terminal `target`, gently: a program running there gets Ctrl-c first, and the\nterminal closes 3 seconds later.",
+            "properties": {
+              "method": {
+                "const": "term.close",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Closes terminal `target` `after_ms` from now; none clears its timeout.",
+            "properties": {
+              "method": {
+                "const": "term.timeout",
+                "type": "string"
+              },
+              "params": {
+                "properties": {
+                  "after_ms": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "method": {
                 "const": "task.ls",

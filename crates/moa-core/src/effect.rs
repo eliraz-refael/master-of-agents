@@ -33,6 +33,28 @@ pub enum TimerKey {
     Quiet,
     /// The earliest moment an idle session could go to sleep (R19).
     Sleep,
+    /// The earliest moment a terminal is due: a close's kill, or a timeout (5d, T8).
+    Terminals,
+}
+
+/// Timer `key`, armed at `armed`, at its next deadline `next`: set, or cancelled when there
+/// is none, but only when that changed or when this input is the timer firing (`fired`: the
+/// scheduler has forgotten it). `armed` becomes `next`. Sleep's and the terminals' timers
+/// are kept this way.
+pub(crate) fn rearm(
+    armed: &mut Option<UtcMs>,
+    key: TimerKey,
+    next: Option<UtcMs>,
+    fired: bool,
+) -> Option<Effect> {
+    if next == *armed && !fired {
+        return None;
+    }
+    *armed = next;
+    Some(match next {
+        Some(at) => Effect::SetTimer { key, at },
+        None => Effect::CancelTimer(key),
+    })
 }
 
 // `Client` carries a whole `Op`; one is built per request, so boxing it buys nothing.

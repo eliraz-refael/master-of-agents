@@ -4,11 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use moa_core::Now;
+use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, Publish, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{Effect, Input, Publish, TimerKey, TmuxIn, TmuxToken, handle_checked};
 use moa_core::model::SessionId;
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::Topic;
@@ -17,7 +18,8 @@ use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::link::Link;
 use moa_core::tmux::topology::refresh_cmds;
-use moa_testkit::brain::TypicalBrain;
+use moa_core::{Now, UtcMs};
+use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
 use serde_json::Value;
 
 /// The plugin sessions are started with.
@@ -42,6 +44,25 @@ pub fn loaded_with(b: &TypicalBrain, toml: &str, deps: Deps, snapshot: Snapshot)
     let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
     handle_checked(&mut st, Input::Startup(Box::new(snapshot)), b.now());
     st
+}
+
+/// The typical brain's time zone.
+pub fn tz() -> TimeZone {
+    TimeZone::posix(TYPICAL_TZ).unwrap()
+}
+
+/// The moment `wall` in the typical brain's time zone.
+pub fn at(wall: UtcMs) -> Now {
+    Now::at(wall, Duration::ZERO, tz())
+}
+
+/// The effects in `fx` that arm or cancel timer `key`.
+pub fn timers(fx: &[Effect], key: TimerKey) -> Vec<&Effect> {
+    fx.iter()
+        .filter(
+            |e| matches!(e, Effect::SetTimer { key: k, .. } | Effect::CancelTimer(k) if *k == key),
+        )
+        .collect()
 }
 
 pub fn generation() -> Generation {

@@ -709,3 +709,69 @@ fn restart_parses() {
         "{line}"
     );
 }
+
+/// `term close` takes the rest of the words as its terminal; `term timeout` takes the last
+/// word as how long, the words before it as the terminal, and `off` clears it.
+#[test]
+fn term_close_and_timeout_parse() {
+    const HOUR: i64 = 3_600_000;
+    assert_eq!(
+        op(&["term", "close", "7"]),
+        Op::TermClose { target: "7".into() }
+    );
+    assert_eq!(
+        op(&["term", "close", "Kite", "server"]),
+        Op::TermClose {
+            target: "Kite server".into()
+        }
+    );
+    assert_eq!(
+        op(&["term", "timeout", "%12", "3h"]),
+        Op::TermTimeout {
+            target: "%12".into(),
+            after_ms: Some(3 * HOUR)
+        }
+    );
+    assert_eq!(
+        op(&["term", "timeout", "Kite", "server", "2h30m"]),
+        Op::TermTimeout {
+            target: "Kite server".into(),
+            after_ms: Some(5 * HOUR / 2)
+        }
+    );
+    assert_eq!(
+        op(&["term", "timeout", "7", "off"]),
+        Op::TermTimeout {
+            target: "7".into(),
+            after_ms: None
+        }
+    );
+    assert_eq!(
+        err(&["term", "timeout", "7", "soon"]),
+        "a timeout is like 3h or 90m, up to 7 days"
+    );
+    for argv in [
+        &["term", "close"][..],
+        &["term", "timeout"],
+        &["term", "timeout", "7"],
+        &["term", "--title", "x", "close", "7"],
+    ] {
+        assert!(err(argv).contains("moactl term [FOLDER]"), "{argv:?}");
+    }
+    // The global `--json` still works after their words.
+    let p = parse(&["term", "close", "7", "--json"]);
+    assert!(p.json);
+    assert_eq!(
+        p.verb.to_op(&ctx()).unwrap(),
+        Op::TermClose { target: "7".into() }
+    );
+    let p = parse(&["term", "timeout", "7", "90m", "--json"]);
+    assert!(p.json);
+    assert_eq!(
+        p.verb.to_op(&ctx()).unwrap(),
+        Op::TermTimeout {
+            target: "7".into(),
+            after_ms: Some(HOUR * 3 / 2)
+        }
+    );
+}

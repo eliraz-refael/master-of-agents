@@ -125,6 +125,17 @@ pub enum Op {
     /// Notes terminal `target` with `note`; an empty one clears it.
     #[serde(rename = "term.note")]
     TermNote { target: String, note: String },
+    /// Closes terminal `target`, gently: a program running there gets Ctrl-c first, and the
+    /// terminal closes 3 seconds later.
+    #[serde(rename = "term.close")]
+    TermClose { target: String },
+    /// Closes terminal `target` `after_ms` from now; none clears its timeout.
+    #[serde(rename = "term.timeout")]
+    TermTimeout {
+        target: String,
+        #[serde(default)]
+        after_ms: Option<i64>,
+    },
     #[serde(rename = "task.ls")]
     TaskLs {
         #[serde(default)]
@@ -367,6 +378,8 @@ impl Op {
         "term.ls",
         "term.name",
         "term.note",
+        "term.close",
+        "term.timeout",
         "task.ls",
         "task.add",
         "task.set",
@@ -409,6 +422,8 @@ impl Op {
             | Op::SessionRestart { .. }
             | Op::TermName { .. }
             | Op::TermNote { .. }
+            | Op::TermClose { .. }
+            | Op::TermTimeout { .. }
             | Op::TaskAdd(_)
             | Op::TaskSet(_)
             | Op::NoteAdd { .. }
@@ -462,6 +477,8 @@ impl Op {
             Op::TermLs(_) => "term.ls",
             Op::TermName { .. } => "term.name",
             Op::TermNote { .. } => "term.note",
+            Op::TermClose { .. } => "term.close",
+            Op::TermTimeout { .. } => "term.timeout",
             Op::TaskLs { .. } => "task.ls",
             Op::TaskAdd(_) => "task.add",
             Op::TaskSet(_) => "task.set",

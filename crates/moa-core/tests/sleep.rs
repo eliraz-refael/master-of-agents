@@ -6,9 +6,8 @@ mod common;
 
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::time::Duration;
 
-use jiff::tz::TimeZone;
+use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
@@ -28,8 +27,7 @@ use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
-use moa_core::{Now, UtcMs};
-use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
+use moa_testkit::brain::TypicalBrain;
 use proptest::prelude::*;
 use serde_json::json;
 
@@ -63,14 +61,6 @@ fn s_id() -> SessionId {
 
 fn shown(p: &std::path::Path) -> String {
     p.display().to_string()
-}
-
-fn tz() -> TimeZone {
-    TimeZone::posix(TYPICAL_TZ).unwrap()
-}
-
-fn at(wall: UtcMs) -> Now {
-    Now::at(wall, Duration::ZERO, tz())
 }
 
 thread_local! {
@@ -449,20 +439,6 @@ fn kills(fx: &[Effect]) -> Vec<&Cmd> {
         .collect()
 }
 
-fn sleep_timers(fx: &[Effect]) -> Vec<&Effect> {
-    fx.iter()
-        .filter(|e| {
-            matches!(
-                e,
-                Effect::SetTimer {
-                    key: TimerKey::Sleep,
-                    ..
-                } | Effect::CancelTimer(TimerKey::Sleep)
-            )
-        })
-        .collect()
-}
-
 /// The sessions an input put to sleep.
 fn slept(fx: &[Effect]) -> Vec<SessionId> {
     changes(fx)
@@ -671,7 +647,7 @@ fn an_idle_session_sleeps_at_its_deadline() {
     let mut r = World::new().up();
     let due = r.due;
     assert_eq!(
-        sleep_timers(&r.setup).last(),
+        timers(&r.setup, TimerKey::Sleep).last(),
         Some(&&Effect::SetTimer {
             key: TimerKey::Sleep,
             at: due
@@ -736,7 +712,10 @@ fn an_idle_session_sleeps_at_its_deadline() {
     // Nothing more happens later; a fired timer is never taken for an armed one.
     let fx = r.input(UtcMs(due.0 + HOUR), Input::Timer(TimerKey::Sleep));
     assert!(changes(&fx).is_empty(), "{fx:?}");
-    assert_eq!(sleep_timers(&fx), [&Effect::CancelTimer(TimerKey::Sleep)]);
+    assert_eq!(
+        timers(&fx, TimerKey::Sleep),
+        [&Effect::CancelTimer(TimerKey::Sleep)]
+    );
 }
 
 /// The scheduler forgets a deadline when it fires. Should the core's clock read earlier than
@@ -748,7 +727,7 @@ fn a_timer_that_fires_early_is_armed_again() {
     let fx = r.input(UtcMs(due.0 - 60_000), Input::Timer(TimerKey::Sleep));
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert_eq!(
-        sleep_timers(&fx),
+        timers(&fx, TimerKey::Sleep),
         [&Effect::SetTimer {
             key: TimerKey::Sleep,
             at: due
@@ -756,7 +735,7 @@ fn a_timer_that_fires_early_is_armed_again() {
     );
     // Any other input leaves an unchanged deadline alone.
     let fx = r.input(UtcMs(due.0 - 30_000), Input::Timer(TimerKey::Clock));
-    assert!(sleep_timers(&fx).is_empty(), "{fx:?}");
+    assert!(timers(&fx, TimerKey::Sleep).is_empty(), "{fx:?}");
 }
 
 /// R19: due while on screen, it doesn't sleep, and no timer is armed for it. The input that
@@ -774,7 +753,7 @@ fn an_overdue_session_on_screen_sleeps_when_it_leaves_the_screen() {
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert!(kills(&fx).is_empty(), "{fx:?}");
     assert_eq!(
-        sleep_timers(&fx),
+        timers(&fx, TimerKey::Sleep),
         [&Effect::CancelTimer(TimerKey::Sleep)],
         "no timer for S"
     );
@@ -786,7 +765,7 @@ fn an_overdue_session_on_screen_sleeps_when_it_leaves_the_screen() {
     assert_eq!(slept(&fx), [s_id()], "{fx:?}");
     assert_eq!(kills(&fx), [&kill("%1")]);
     assert_eq!(r.s().asleep_at, Some(later));
-    assert!(sleep_timers(&fx).is_empty(), "{fx:?}");
+    assert!(timers(&fx, TimerKey::Sleep).is_empty(), "{fx:?}");
 }
 
 #[test]
@@ -797,11 +776,15 @@ fn zero_means_never() {
         "open_account = \"acct-a\"\nsleep_after_hours = 0\n",
     );
     let mut r = w.up();
-    assert!(sleep_timers(&r.setup).is_empty(), "{:?}", r.setup);
+    assert!(
+        timers(&r.setup, TimerKey::Sleep).is_empty(),
+        "{:?}",
+        r.setup
+    );
     let fx = r.input(UtcMs(r.due.0 + 100 * HOUR), Input::Timer(TimerKey::Sleep));
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert!(kills(&fx).is_empty(), "{fx:?}");
-    assert!(sleep_timers(&fx).is_empty(), "{fx:?}");
+    assert!(timers(&fx, TimerKey::Sleep).is_empty(), "{fx:?}");
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
 }
 
