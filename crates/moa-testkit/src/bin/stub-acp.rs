@@ -219,7 +219,7 @@ impl Stub {
                 }
                 StubStep::Spawn => {
                     let child = self.spawn_child(CHILD)?;
-                    fs::write(self.path(CHILD_PID), child.id().to_string()).map_err(fail)?;
+                    publish_pid(&self.dir, child.id()).map_err(fail)?;
                 }
                 StubStep::Wait { file } => {
                     while !self.path(&file).exists() {
@@ -271,6 +271,14 @@ fn launch_facts() -> Value {
     })
 }
 
+/// Writes `pid` to `<dir>/CHILD_PID` by an atomic rename, so a test never reads it
+/// half-written.
+fn publish_pid(dir: &Path, pid: u32) -> std::io::Result<()> {
+    let new = dir.join(format!("{CHILD_PID}.new"));
+    fs::write(&new, pid.to_string())?;
+    fs::rename(&new, dir.join(CHILD_PID))
+}
+
 /// What a child does: nothing, until the test's group kill ends it.
 async fn sleep_for_good() -> Result<(), Error> {
     tokio::time::sleep(Duration::from_secs(1000)).await;
@@ -282,16 +290,13 @@ async fn main() -> Result<(), Error> {
     match std::env::args().nth(1).as_deref() {
         Some(CHILD) => return sleep_for_good().await,
         Some(CHILD_STUBBORN) => {
-            // Handling SIGTERM (and never acting on it) is ignoring it. The pid is written
-            // by an atomic rename, so the file is never read half-written, and only once
-            // the signal is handled.
-            let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("handle SIGTERM");
-            let new = format!("{CHILD_PID}.new");
-            fs::write(&new, std::process::id().to_string()).expect("write the pid");
-            fs::rename(&new, CHILD_PID).expect("publish the pid");
-            tokio::spawn(async move { while term.recv().await.is_some() {} });
+            // Handling SIGTERM (and never acting on it) is ignoring it: tokio's handler stays
+            // installed for the life of the process, so nothing needs to drain it. The pid is
+            // published only once the signal is handled.
+            let _term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("handle SIGTERM");
+            let cwd = std::env::current_dir().expect("cwd");
+            publish_pid(&cwd, std::process::id()).expect("publish the pid");
             return sleep_for_good().await;
         }
         _ => {}

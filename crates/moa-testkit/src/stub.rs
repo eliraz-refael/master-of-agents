@@ -46,7 +46,8 @@ pub enum StubStep {
     Burst { n: u32 },
     /// A line on stderr.
     Stderr { line: String },
-    /// Start `/bin/sleep 1000` and write its pid to `<cwd>/.stub-acp.child`.
+    /// Start a child (the stub itself, in a mode that only sleeps) and write its pid to
+    /// `<cwd>/.stub-acp.child`.
     Spawn,
     /// Like `Spawn`, but the child ignores `SIGTERM`. Its pid is written by the child itself,
     /// once it ignores the signal, so a test that has read the pid can signal it at once.
