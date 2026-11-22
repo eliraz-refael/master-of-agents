@@ -19,7 +19,7 @@ rustix = { version = "1", features = ["pty", "termios", "fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "io-std", "io-util", "process", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "io-std", "io-util", "process", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["compat"] }
 
 [[bin]]

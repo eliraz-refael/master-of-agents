@@ -27,6 +27,13 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+/// The argument that makes the stub a child that sleeps, for `Spawn`.
+const CHILD: &str = "--child";
+/// Like `CHILD`, but it ignores `SIGTERM` and says its pid once it does, for `SpawnStubborn`.
+const CHILD_STUBBORN: &str = "--child-stubborn";
+/// The file in the stub's cwd that holds its child's pid.
+const CHILD_PID: &str = ".stub-acp.child";
+
 /// What the stub keeps between handlers; everything else is on disk, inside `dir`.
 struct Stub {
     dir: PathBuf,
@@ -54,6 +61,22 @@ fn parse<T: DeserializeOwned>(s: &str) -> Result<T, Error> {
 impl Stub {
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
+    }
+
+    /// Starts this binary again in a child mode (`CHILD` or `CHILD_STUBBORN`), which only
+    /// sleeps: no system `sleep` or shell is needed, so it runs wherever the stub does. A
+    /// failure to start goes to the log, then to the caller.
+    fn spawn_child(&self, mode: &str) -> Result<std::process::Child, Error> {
+        let exe = std::env::current_exe().map_err(fail)?;
+        std::process::Command::new(exe)
+            .arg(mode)
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .inspect_err(|e| self.log("spawn.failed", &mode, json!({"error": e.to_string()})))
+            .map_err(fail)
     }
 
     /// Appends one `{"method", "params"}` line to the log, with `extra` merged in.
@@ -192,29 +215,11 @@ impl Stub {
                 }
                 StubStep::Stderr { line } => eprintln!("{line}"),
                 StubStep::SpawnStubborn => {
-                    // The shell ignores SIGTERM, says its pid (an atomic rename, so the file is
-                    // never read half-written), then becomes `sleep`, which keeps the ignore.
-                    let script = "trap '' TERM; echo $$ > .stub-acp.child.new; \
-                                  mv .stub-acp.child.new .stub-acp.child; exec /bin/sleep 1000";
-                    std::process::Command::new("/bin/sh")
-                        .args(["-c", script])
-                        .current_dir(&self.dir)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .map_err(fail)?;
+                    self.spawn_child(CHILD_STUBBORN)?;
                 }
                 StubStep::Spawn => {
-                    let child = std::process::Command::new("/bin/sleep")
-                        .arg("1000")
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .map_err(fail)?;
-                    fs::write(self.path(".stub-acp.child"), child.id().to_string())
-                        .map_err(fail)?;
+                    let child = self.spawn_child(CHILD)?;
+                    fs::write(self.path(CHILD_PID), child.id().to_string()).map_err(fail)?;
                 }
                 StubStep::Wait { file } => {
                     while !self.path(&file).exists() {
@@ -266,8 +271,31 @@ fn launch_facts() -> Value {
     })
 }
 
+/// What a child does: nothing, until the test's group kill ends it.
+async fn sleep_for_good() -> Result<(), Error> {
+    tokio::time::sleep(Duration::from_secs(1000)).await;
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
+    match std::env::args().nth(1).as_deref() {
+        Some(CHILD) => return sleep_for_good().await,
+        Some(CHILD_STUBBORN) => {
+            // Handling SIGTERM (and never acting on it) is ignoring it. The pid is written
+            // by an atomic rename, so the file is never read half-written, and only once
+            // the signal is handled.
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("handle SIGTERM");
+            let new = format!("{CHILD_PID}.new");
+            fs::write(&new, std::process::id().to_string()).expect("write the pid");
+            fs::rename(&new, CHILD_PID).expect("publish the pid");
+            tokio::spawn(async move { while term.recv().await.is_some() {} });
+            return sleep_for_good().await;
+        }
+        _ => {}
+    }
     let stub = Arc::new(Stub {
         dir: std::env::current_dir().expect("cwd"),
         cancelled: Notify::new(),
