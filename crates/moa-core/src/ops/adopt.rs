@@ -28,7 +28,7 @@ use crate::tmux::link::{Asked, Link, NO_TERMINAL, ready};
 use crate::tmux::panes::{PaneInfo, kept_bindings, list_panes, listed, of_server};
 use crate::{Now, UtcMs};
 
-const WENT_AWAY: &str = "moa's terminal went away; try again";
+pub(super) const WENT_AWAY: &str = "moa's terminal went away; try again";
 const TERMINAL: &str = "that tab is a terminal, not an agent";
 const NOT_AN_AGENT: &str = "that tab isn't running an agent moa recognizes";
 const NO_ACCOUNT: &str = "moa doesn't know the account that agent runs under; add it to moa.toml";

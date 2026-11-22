@@ -67,6 +67,7 @@ pub(crate) fn run(
         Op::SuggestionLs(_) => suggestions::ls(state),
         Op::TermName { target, name } => term::name(state, tx, &target, &name),
         Op::TermNote { target, note } => term::note(state, tx, &target, &note),
+        Op::TermTimeout { target, after_ms } => term::timeout(state, tx, now, &target, after_ms),
         // `handle` answers these with the link; they are never run as ops.
         Op::TmuxEnsure { .. }
         | Op::SessionOpen { .. }
@@ -77,6 +78,7 @@ pub(crate) fn run(
         | Op::TermOpen { .. }
         | Op::TermShow { .. }
         | Op::TermLs(_)
+        | Op::TermClose { .. }
         | Op::UiPanel { .. }
         | Op::UiHere { .. }
         | Op::UiClose(_)

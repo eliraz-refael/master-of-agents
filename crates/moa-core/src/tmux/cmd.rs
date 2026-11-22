@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::ids::ClientName;
+use super::ids::{ClientName, PaneId};
 
 /// The commands moa sends, by canonical name (an alias like `set` is refused).
 pub const ALLOWED: &[&str] = &[
@@ -30,6 +30,7 @@ pub const ALLOWED: &[&str] = &[
     "run-shell",
     "link-window",
     "unlink-window",
+    "send-keys",
 ];
 
 /// A command that must not be sent, with the reason.
@@ -59,6 +60,7 @@ const WINDOW_SIZE: &str = "window-size is only unset, on a tab id's window";
 const REAP: &str = "run-shell only runs true";
 const LINK: &str = "link-window needs -s and a tab id, then -t and a session id with a colon";
 const UNLINK: &str = "unlink-window needs -t and a session id with a window id";
+const SEND_KEYS: &str = "send-keys sends only Ctrl-c to one pane";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
 /// What a chain is called where a name is asked for (a log line). It is no tmux command.
@@ -119,6 +121,12 @@ impl Cmd {
                 "display-message -c {} -l \"moa:prompt {token} %%%\"",
                 ctl.0
             ))
+    }
+
+    /// The one `send-keys` moa sends (T7): Ctrl-c to `pane`, which closing a terminal gently
+    /// needs. Nothing else is ever typed into a pane.
+    pub fn interrupt(pane: PaneId) -> Cmd {
+        Cmd::new("send-keys").args(["-t".to_string(), pane.to_string(), "C-c".to_string()])
     }
 
     /// A chain's commands; a plain command is its own one part.
@@ -309,6 +317,11 @@ impl Cmd {
             "run-shell" => match self.args.as_slice() {
                 [t] if t == "true" => Ok(()),
                 _ => Err(Refused(REAP)),
+            },
+            // Only Ctrl-c, to one pane by its id: no other key, no `-l` (literal text).
+            "send-keys" => match self.args.as_slice() {
+                [t, pane, key] if t == "-t" && is_pane_id(pane) && key == "C-c" => Ok(()),
+                _ => Err(Refused(SEND_KEYS)),
             },
             _ => Ok(()),
         }
@@ -655,5 +668,37 @@ mod tests {
         assert_eq!(cmd.check(), Ok(()));
         let cmd = Cmd::new("new-window").args(["-d", "-P", "-c", "/w", "-t", "=moa:"]);
         assert_eq!(cmd.check(), Ok(()));
+    }
+
+    #[test]
+    fn interrupt_is_send_keys_c_c_to_one_pane() {
+        let cmd = Cmd::interrupt(PaneId(7));
+        assert_eq!(cmd.name(), "send-keys");
+        assert_eq!(cmd.argv(), ["-t", "%7", "C-c"]);
+        assert_eq!(cmd.line(), "send-keys -t %7 C-c");
+        assert_eq!(cmd.check(), Ok(()));
+    }
+
+    #[test]
+    fn send_keys_refuses_any_other_shape() {
+        let text = "send-keys sends only Ctrl-c to one pane";
+        let send = |args: &[&str]| Cmd::new("send-keys").args(args.iter().copied()).check();
+        for args in [
+            &["-t", "%7", "C-d"][..],
+            &["-t", "%7", "Enter"],
+            &["-t", "%7", "-l", "C-c"],
+            &["-l", "-t", "%7", "C-c"],
+            &["-t", "%7", "%8", "C-c"],
+            &["-t", "%7", "-t", "%8", "C-c"],
+            &["-t", "=moa:", "C-c"],
+            &["-t", "$1", "C-c"],
+            &["-t", "%7", "C-c", "C-c"],
+            &["-t", "%7", "C-c", "x"],
+            &["-t", "%7"],
+            &["C-c"],
+            &[],
+        ] {
+            assert_eq!(send(args), Err(Refused(text)), "{args:?}");
+        }
     }
 }

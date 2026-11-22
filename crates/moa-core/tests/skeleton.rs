@@ -471,6 +471,13 @@ fn op_methods_match_the_variants() {
             target: "%5".into(),
             note: "waiting on Harbor".into(),
         },
+        Op::TermClose {
+            target: "Kite".into(),
+        },
+        Op::TermTimeout {
+            target: "7".into(),
+            after_ms: Some(3_600_000),
+        },
         Op::Brief(NoParams),
         Op::Attention(NoParams),
         Op::Suggest {
@@ -551,6 +558,8 @@ const WRITES: &[&str] = &[
     "session.restart",
     "term.name",
     "term.note",
+    "term.close",
+    "term.timeout",
     "task.add",
     "task.set",
     "note.add",

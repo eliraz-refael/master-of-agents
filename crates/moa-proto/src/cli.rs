@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use moa_core::layout::{LEAVES, Leaf};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
 use moa_core::op::{ADOPT_USAGE, Answer, NoParams, Op, SLEEP_USAGE, TaskAdd, TaskSet};
+use moa_core::terminals::parse_after;
 use moa_core::tmux::ids::PaneId;
 
 /// What `moactl` parses: a global `--json` and one verb.
@@ -601,7 +602,18 @@ impl Verb {
                         },
                         _ => return usage(TERM_USAGE),
                     },
-                    "ls" | "close" | "timeout" => return usage(TERM_USAGE),
+                    "close" if !rest.is_empty() => Op::TermClose {
+                        target: rest.join(" "),
+                    },
+                    // The last word is how long; the words before it, the terminal.
+                    "timeout" => match rest.split_last() {
+                        Some((after, target)) if !target.is_empty() => Op::TermTimeout {
+                            target: target.join(" "),
+                            after_ms: parse_after(after).map_err(VerbError::Usage)?,
+                        },
+                        _ => return usage(TERM_USAGE),
+                    },
+                    "ls" | "close" => return usage(TERM_USAGE),
                     // The words after a folder may carry its flags: the trailing arguments
                     // took them in, so a note can hold anything.
                     _ => {

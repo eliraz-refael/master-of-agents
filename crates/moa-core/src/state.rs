@@ -22,6 +22,7 @@ use crate::op::{ConnId, Op, ReqId};
 use crate::panel::{PanelReg, View};
 use crate::prompt::Asking;
 use crate::publish::{ACTIVITY_SHOWN, Model};
+use crate::terminals::Closing;
 use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Link, TmuxState};
 
@@ -303,6 +304,12 @@ pub struct State {
     /// The sleep deadline the timer is armed at, if any (R19): `SetTimer` and `CancelTimer`
     /// go out only when it changes.
     pub(crate) sleep_at: Option<UtcMs>,
+    /// The closes moa started, by record, until a listing no longer shows their tab
+    /// ([`crate::terminals::Closing`]). Kept in memory, and forgotten when the link is lost,
+    /// another server comes, or the core reloads.
+    pub(crate) closing: BTreeMap<TermId, Closing>,
+    /// The terminals' deadline the timer is armed at, if any, as `sleep_at` is.
+    pub(crate) terminals_at: Option<UtcMs>,
     /// The keys of the last [`RECENT_HOOKS`] hook events applied, oldest first, and the same
     /// keys for lookup: a hook that arrives twice is applied once.
     pub(crate) recent_hooks: VecDeque<(u32, u32, i64)>,
@@ -389,6 +396,8 @@ impl State {
             looked_at: BTreeSet::new(),
             term_ls: Vec::new(),
             sleep_at: None,
+            closing: BTreeMap::new(),
+            terminals_at: None,
             recent_hooks: VecDeque::new(),
             recent_hook_set: HashSet::new(),
             restarted: BTreeMap::new(),

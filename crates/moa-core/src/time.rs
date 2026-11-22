@@ -151,9 +151,14 @@ pub fn age(from: Option<UtcMs>, now: UtcMs) -> String {
     }
 }
 
-/// How long from `now` until `at`, as [`span`] writes it (`now` once it is here).
+/// How long from `now` until `at`, as [`span`] writes it, except that under a minute still
+/// to go is `<1m` (`now` once it is here).
 pub fn until(at: UtcMs, now: UtcMs) -> String {
-    span(at.0.saturating_sub(now.0))
+    match at.0.saturating_sub(now.0) {
+        ms if ms <= 0 => "now".to_string(),
+        ms if ms < MINUTE => "<1m".to_string(),
+        ms => span(ms),
+    }
 }
 
 /// `YYYY-MM-DD HH:MM:SS` in `tz`, as the spike printed it.
@@ -291,9 +296,21 @@ mod tests {
                 span(ms)
             };
             assert_eq!(age(Some(UtcMs(now.0 - ms)), now), want, "{ms}");
-            assert_eq!(until(UtcMs(now.0 + ms), now), span(ms), "{ms}");
+            if ms >= MINUTE {
+                assert_eq!(until(UtcMs(now.0 + ms), now), span(ms), "{ms}");
+            }
         }
         assert_eq!(until(UtcMs(now.0 - HOUR), now), "now");
+    }
+    #[test]
+    fn until_under_a_minute_is_under_a_minute() {
+        let now = utc("2026-11-15T12:00:00Z");
+        assert_eq!(until(UtcMs(now.0 + 1), now), "<1m");
+        assert_eq!(until(UtcMs(now.0 + 45_000), now), "<1m");
+        assert_eq!(until(UtcMs(now.0 + MINUTE - 1), now), "<1m");
+        assert_eq!(until(UtcMs(now.0 + MINUTE), now), "1m");
+        assert_eq!(until(now, now), "now");
+        assert_eq!(until(UtcMs(now.0 - 1), now), "now");
     }
     #[test]
     fn days_ago_keeps_the_local_wall_time_across_dst() {

@@ -7,7 +7,7 @@ use crate::change::Change;
 use crate::cockpit::run::through_queue;
 use crate::config::SleepAfter;
 use crate::core::{Tx, fold_in, post_commit};
-use crate::effect::{Effect, LogLevel, TimerKey};
+use crate::effect::{Effect, LogLevel, TimerKey, rearm};
 use crate::hooks::asleep;
 use crate::live::{DisplayState, display_state};
 use crate::model::{ActivityWho, AskStatus, AskTarget, Lifecycle, Location, Session, SessionId};
@@ -121,16 +121,7 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
         }
     }
     let next = deadline(state, now.wall);
-    if next != state.sleep_at || fired {
-        state.sleep_at = next;
-        fx.push(match next {
-            Some(at) => Effect::SetTimer {
-                key: TimerKey::Sleep,
-                at,
-            },
-            None => Effect::CancelTimer(TimerKey::Sleep),
-        });
-    }
+    fx.extend(rearm(&mut state.sleep_at, TimerKey::Sleep, next, fired));
 }
 
 fn sleep_due(state: &mut State, now: &Now, due: &[SessionId], fx: &mut Vec<Effect>) {

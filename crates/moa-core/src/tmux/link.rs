@@ -15,7 +15,7 @@ use super::topology::{AGENT_MARK, Applied, Topology, refresh_cmds};
 use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::hook::HookEnvelope;
-use crate::model::SessionId;
+use crate::model::{SessionId, TermId};
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::ops::adopt::AdoptArgs;
 use crate::ops::launch::ResumeAsk;
@@ -216,6 +216,12 @@ pub(crate) enum Asked {
         name: String,
         path: String,
     },
+    /// A close of terminal record `id` (T8): what runs in its tab now, which decides how it
+    /// closes. `tell` is whom to tell; none for moa's own close, when a timeout ran out.
+    TermClose {
+        tell: Option<Tell>,
+        id: TermId,
+    },
     /// `Ctrl-a $` from `client` in a pane that is neither a panel's nor an agent's: the
     /// folder tmux says it is in, where the terminal opens (V6).
     Here {
@@ -390,6 +396,16 @@ fn running(yes: bool) -> Result<Done, OpError> {
 /// The no-op a `Ping` sends: tmux prints the fixed text back.
 pub fn ping() -> Cmd {
     Cmd::new("display-message").args(["-p", "moa:ping"])
+}
+
+/// What tmux's `format` says of `pane`, printed back as one line (`display-message -p`).
+pub(crate) fn pane_query(pane: PaneId, format: &str) -> Cmd {
+    Cmd::new("display-message").args([
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        format.to_string(),
+    ])
 }
 
 /// A four-second notice on one client. `-l` keeps the text literal.
@@ -640,8 +656,11 @@ impl TmuxState {
         self.queries.retain(|_, a| match a {
             Asked::Resume(r) => r.conn != conn,
             Asked::Adopt { conn: c, .. } | Asked::Ls { conn: c, .. } => *c != conn,
+            // A close goes on, as its caller asked: it is saved as theirs, and its reply to
+            // the connection that went is dropped.
             Asked::Reconcile
             | Asked::Term { .. }
+            | Asked::TermClose { .. }
             | Asked::Here { .. }
             | Asked::Look { .. }
             | Asked::Spawn { .. }

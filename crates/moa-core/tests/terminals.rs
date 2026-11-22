@@ -10,15 +10,17 @@ use std::cell::Cell;
 use std::path::PathBuf;
 
 use moa_core::change::Change;
-use moa_core::effect::{Down, Effect, Input, RefuseWrites, TmuxIn, TmuxToken, handle_checked};
+use moa_core::effect::{
+    Down, Effect, Input, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked,
+};
 use moa_core::model::{
-    Activity, AgentKind, Inspected, Lifecycle, Location, OpenedBy, PaneAgent, PaneBinding, Session,
-    SessionId, TermId, Terminal,
+    Activity, ActivityWho, AgentKind, Inspected, Lifecycle, Location, OpenedBy, PaneAgent,
+    PaneBinding, Session, SessionId, TermId, Terminal,
 };
 use moa_core::op::{NoParams, Op, OpError};
 use moa_core::panel::View;
 use moa_core::state::{Deps, LoadNote, Snapshot, State};
-use moa_core::terminals::{find, is_idle, open_for};
+use moa_core::terminals::{find, is_idle, open_for, parse_after};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::link::Link;
@@ -188,6 +190,12 @@ fn later(b: &TypicalBrain, ms: i64) -> Now {
     now
 }
 
+/// `snap` with `open` its open records.
+fn hold(snap: &mut Snapshot, open: Vec<Terminal>) {
+    snap.next_ids.terminal = open.iter().map(|t| t.id.0 + 1).max().unwrap_or(1);
+    snap.terminals = open;
+}
+
 struct Rig {
     b: TypicalBrain,
     st: State,
@@ -197,10 +205,7 @@ impl Rig {
     /// The typical brain with S live and `open` the open records, linked on connection 1;
     /// its first listing asked, the start drain not yet run.
     fn linked(open: Vec<Terminal>) -> Rig {
-        Rig::linked_with(|snap| {
-            snap.next_ids.terminal = open.iter().map(|t| t.id.0 + 1).max().unwrap_or(1);
-            snap.terminals = open;
-        })
+        Rig::linked_with(|snap| hold(snap, open))
     }
 
     /// [`Rig::linked`] with no records, its snapshot changed by `f`.
@@ -359,6 +364,58 @@ fn the_first_run_finds_open_terminals() {
     let mut want = marked("%5");
     want.extend(marked("%6"));
     assert_eq!(marks(&fx), want);
+}
+
+/// A first look held back by a launch in flight isn't the last: the shells it skipped are
+/// still `found`, not `you`, when the next listing's run goes through.
+#[test]
+fn a_held_back_first_run_still_finds_open_terminals() {
+    let mut r = Rig::linked(Vec::new());
+    let open = Op::SessionOpen {
+        path: r.b.home.join("private/lantern"),
+        account: None,
+        title: None,
+        group: None,
+        prompt: None,
+        bg: true,
+    };
+    let (id, _) = the_open(&send(&r.b, &mut r.st, 1, open));
+    r.list(
+        &[P5, P6],
+        &[
+            pane_line("%5", "", "bash", "/r/a", ""),
+            pane_line("%6", "", "bash", "/r/b", ""),
+        ],
+    );
+    let fx = r.reconcile(&[&info("%5"), &info("%6")]);
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    assert!(r.open(5).is_none());
+
+    let conn = r.conn();
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn,
+            token: TmuxToken::Open(id),
+            results: vec![Ok(vec!["P %9 1009".into()])],
+        },
+    );
+    let fx = r.list(
+        &[P5, P6, "P %9 @6 $0 1 0 0 0  0 "],
+        &[
+            plain("%5", "/r/a"),
+            plain("%6", "/r/b"),
+            pane_line("%9", "", "claude", "/r", ""),
+        ],
+    );
+    let made = records(&fx);
+    assert_eq!(made.len(), 2, "{made:?}");
+    assert!(
+        made.iter().all(|t| t.opened_by == OpenedBy::Found),
+        "{made:?}"
+    );
+    assert!(r.open(9).is_none());
 }
 
 /// After the first look, a split (marked `@moa_term` by its key) is yours, and needs no
@@ -1784,4 +1841,637 @@ fn a_note_is_cut_at_200_and_empty_clears() {
     // A note may start with a dash, and holds one line.
     note(&mut r, "- next\nstep");
     assert_eq!(r.open(5).unwrap().note.as_deref(), Some("- next step"));
+}
+
+// Closing, and timeouts (T8).
+
+const DAY: i64 = 24 * HOUR;
+const TIMEOUT_FORM: &str = "a timeout is like 3h or 90m, up to 7 days";
+
+/// `%5`'s record: Kite, its shell at its prompt in `/r/a`.
+fn kite() -> Terminal {
+    shown(record(1, "%5", "Kite"), "/r/a", "zsh")
+}
+
+/// `%6`'s record: Beacon, running `node` in `/r/b`.
+fn beacon() -> Terminal {
+    shown(record(2, "%6", "Beacon"), "/r/b", "node")
+}
+
+/// Kite and Beacon, listed and reconciled at [`t0`].
+fn closable() -> Rig {
+    kite_and_beacon(kite(), beacon())
+}
+
+/// The one question a close asks tmux: what runs in `pane` now.
+fn what_runs(pane: &str) -> Cmd {
+    Cmd::new("display-message").args(["-p", "-t", pane, "#{pane_current_command}"])
+}
+
+fn kill(pane: &str) -> Cmd {
+    Cmd::new("kill-pane").args(["-t", pane])
+}
+
+fn close(r: &mut Rig, req: u64, target: &str) -> Vec<Effect> {
+    let op = Op::TermClose {
+        target: target.into(),
+    };
+    send(&r.b, &mut r.st, req, op)
+}
+
+fn timeout(r: &mut Rig, req: u64, target: &str, after_ms: Option<i64>) -> Vec<Effect> {
+    let op = Op::TermTimeout {
+        target: target.into(),
+        after_ms,
+    };
+    send(&r.b, &mut r.st, req, op)
+}
+
+/// The number of the query `fx` asks about what runs in `pane`: there is one.
+fn close_query(fx: &[Effect], pane: &str) -> u64 {
+    let asked: Vec<u64> = queries(fx)
+        .into_iter()
+        .filter(|(_, cmds)| *cmds == [what_runs(pane)])
+        .map(|(n, _)| n)
+        .collect();
+    let [n] = asked[..] else {
+        panic!("one question about {pane}: {fx:?}");
+    };
+    n
+}
+
+/// tmux answers close query `n`: `Ok` with the program in front, or `Err` with its refusal.
+fn runs(r: &mut Rig, n: u64, answer: Result<&str, &str>) -> Vec<Effect> {
+    let conn = r.conn();
+    let result = answer
+        .map(|line| vec![line.to_string()])
+        .map_err(str::to_string);
+    feed(
+        &r.b,
+        &mut r.st,
+        TmuxIn::Replies {
+            conn,
+            token: TmuxToken::Query(n),
+            results: vec![result],
+        },
+    )
+}
+
+/// The terminals' timer fires at `wall`.
+fn fire(r: &mut Rig, wall: i64) -> Vec<Effect> {
+    handle_checked(
+        &mut r.st,
+        Input::Timer(TimerKey::Terminals),
+        at(UtcMs(wall)),
+    )
+}
+
+/// The activity lines `fx` saves, and who each is by.
+fn lines(fx: &[Effect]) -> Vec<(ActivityWho, String)> {
+    changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Activity(a) => Some((a.who, a.text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `fx` sends anything a close sends: its question, Ctrl-c, or a kill.
+fn closes_any(fx: &[Effect]) -> bool {
+    sent(fx).iter().any(|c| {
+        matches!(c.name(), "send-keys" | "kill-pane")
+            || c.argv().iter().any(|a| a == "#{pane_current_command}")
+    })
+}
+
+fn set_at(wall: i64) -> Effect {
+    Effect::SetTimer {
+        key: TimerKey::Terminals,
+        at: UtcMs(wall),
+    }
+}
+
+impl Rig {
+    /// The core reloads from S and `open`, at [`t0`]; writes are refused until `refused`
+    /// when there is one.
+    fn reload(&mut self, open: Vec<Terminal>, refused: Option<i64>) -> Vec<Effect> {
+        let mut snap = self.b.snapshot();
+        snap.sessions.push(session_s(&self.b));
+        hold(&mut snap, open);
+        let refuse_writes = refused.map(|until| RefuseWrites {
+            until: UtcMs(until),
+            reason: "disk full".into(),
+        });
+        handle_checked(
+            &mut self.st,
+            Input::Reload {
+                snapshot: Box::new(snap),
+                refuse_writes,
+            },
+            self.b.now(),
+        )
+    }
+}
+
+/// tmux doesn't say when a program starts, so a close decides on a fresh answer: the first
+/// thing it does is ask what runs there, and nothing else.
+#[test]
+fn a_close_asks_tmux_first() {
+    let mut r = closable();
+    let fx = close(&mut r, 5, "Kite");
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    let n = close_query(&fx, "%5");
+    assert_eq!(queries(&fx), [(n, vec![what_runs("%5")])]);
+    assert_eq!(sent(&fx), [what_runs("%5")]);
+}
+
+/// A shell at its prompt (the answer is the record's shell) closes at once.
+#[test]
+fn a_shell_terminal_closes_at_once() {
+    let mut r = closable();
+    let n = close_query(&close(&mut r, 5, "Kite"), "%5");
+    let fx = runs(&mut r, n, Ok("zsh"));
+    assert_eq!(sent(&fx), [kill("%5")]);
+    assert_eq!(the_reply(&fx).0, "closed Kite");
+    assert_eq!(
+        lines(&fx),
+        [(ActivityWho::You, "closed terminal Kite".to_string())]
+    );
+    assert!(timers(&fx, TimerKey::Terminals).is_empty(), "{fx:?}");
+}
+
+/// The listing said Kite was at its prompt; a program started since: it gets Ctrl-c, not a
+/// kill.
+#[test]
+fn a_program_started_after_the_listing_is_still_interrupted() {
+    let mut r = closable();
+    assert_eq!(r.open(5).unwrap().command, "zsh");
+    let n = close_query(&close(&mut r, 5, "Kite"), "%5");
+    let fx = runs(&mut r, n, Ok("vim"));
+    assert_eq!(sent(&fx), [Cmd::interrupt(PaneId(5))]);
+    assert_eq!(the_reply(&fx).0, "stopping vim in Kite, then closing it");
+}
+
+/// A running program gets Ctrl-c, then its terminal is killed 3 seconds later, whether it
+/// stopped or not; the listing that no longer shows it closes its record.
+#[test]
+fn a_running_terminal_is_interrupted_then_killed() {
+    let t = t0().0;
+    let mut r = closable();
+    let n = close_query(&close(&mut r, 5, "Beacon"), "%6");
+    let fx = runs(&mut r, n, Ok("node"));
+    assert_eq!(sent(&fx), [Cmd::interrupt(PaneId(6))]);
+    assert_eq!(the_reply(&fx).0, "stopping node in Beacon, then closing it");
+    assert_eq!(
+        lines(&fx),
+        [(ActivityWho::You, "closed terminal Beacon".to_string())]
+    );
+    assert_eq!(timers(&fx, TimerKey::Terminals), [&set_at(t + 3_000)]);
+
+    // A timer that fires early kills nothing, and is armed again.
+    let fx = fire(&mut r, t + 2_999);
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(timers(&fx, TimerKey::Terminals), [&set_at(t + 3_000)]);
+
+    let fx = fire(&mut r, t + 3_000);
+    assert_eq!(sent(&fx), [kill("%6")]);
+    assert_eq!(
+        timers(&fx, TimerKey::Terminals),
+        [&Effect::CancelTimer(TimerKey::Terminals)]
+    );
+    let fx = r.list_at(at(UtcMs(t + 4_000)), &[P5], &tabs56()[..1]);
+    assert_eq!(records(&fx).len(), 1, "{fx:?}");
+    assert!(r.open(6).is_none());
+    assert_eq!(refusal(&close(&mut r, 6, "Beacon")), "no terminal Beacon");
+}
+
+/// A close already under way, at its prompt or running, is said so: no second question, no
+/// second Ctrl-c, no second kill.
+#[test]
+fn closing_twice_kills_once() {
+    let t = t0().0;
+    // At its prompt: a second close while the question is out, and after the kill.
+    let mut r = closable();
+    let n = close_query(&close(&mut r, 5, "Kite"), "%5");
+    let fx = close(&mut r, 6, "Kite");
+    assert_eq!(the_reply(&fx).0, "already closing Kite");
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(sent(&runs(&mut r, n, Ok("zsh"))), [kill("%5")]);
+    let fx = close(&mut r, 7, "%5");
+    assert_eq!(the_reply(&fx).0, "already closing Kite");
+    assert!(sent(&fx).is_empty() && changes(&fx).is_empty(), "{fx:?}");
+
+    // Running: a second close after the Ctrl-c, and after the kill.
+    let mut r = closable();
+    let n = close_query(&close(&mut r, 5, "Beacon"), "%6");
+    runs(&mut r, n, Ok("node"));
+    let fx = close(&mut r, 6, "Beacon");
+    assert_eq!(the_reply(&fx).0, "already closing Beacon");
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(sent(&fire(&mut r, t + 3_000)), [kill("%6")]);
+    let fx = close(&mut r, 7, "2");
+    assert_eq!(the_reply(&fx).0, "already closing Beacon");
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+    assert!(sent(&fire(&mut r, t + 6_000)).is_empty());
+}
+
+/// A terminal that went before tmux answered (tmux can't find it, or the listing between
+/// no longer shows it) is said to be gone, and nothing is sent.
+#[test]
+fn closing_a_gone_terminal_says_so() {
+    let mut r = closable();
+    let n = close_query(&close(&mut r, 5, "Kite"), "%5");
+    let fx = runs(&mut r, n, Err("can't find pane: %5"));
+    assert_eq!(refusal(&fx), "that terminal is gone");
+    assert!(sent(&fx).is_empty() && lines(&fx).is_empty(), "{fx:?}");
+
+    // That close is over: another asks again; the tab closes before tmux answers.
+    let n = close_query(&close(&mut r, 6, "Kite"), "%5");
+    r.list(&[P6], &tabs56()[1..]);
+    let fx = runs(&mut r, n, Ok("zsh"));
+    assert_eq!(refusal(&fx), "that terminal is gone");
+    assert!(sent(&fx).is_empty() && lines(&fx).is_empty(), "{fx:?}");
+    assert_eq!(refusal(&close(&mut r, 7, "Kite")), "no terminal Kite");
+}
+
+/// With the link down, or its tabs not yet reconciled, a close is refused in plain words;
+/// one whose question is out when the link goes is told so.
+#[test]
+fn closing_with_the_link_down_is_refused() {
+    let mut r = closable();
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let fx = close(&mut r, 5, "Kite");
+    assert_eq!(
+        refusal(&fx),
+        "moa isn't open in a terminal yet; run moa first"
+    );
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+
+    let mut r = Rig::linked(vec![kite(), beacon()]);
+    r.list(&[P5, P6], &tabs56());
+    let fx = close(&mut r, 5, "Kite");
+    assert_eq!(
+        refusal(&fx),
+        "moa is still looking at its tabs; try again in a moment"
+    );
+    assert!(sent(&fx).is_empty(), "{fx:?}");
+
+    let mut r = closable();
+    close_query(&close(&mut r, 5, "Kite"), "%5");
+    let fx = feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    assert_eq!(refusal(&fx), "moa's terminal went away; try again");
+    assert!(!closes_any(&fx), "{fx:?}");
+}
+
+/// You start an agent in a terminal moa is closing, and moa takes it on: the kill 3 seconds
+/// later never goes out.
+#[test]
+fn a_close_skips_a_pane_that_became_an_agent() {
+    let t = t0().0;
+    let mut r = closable();
+    let n = close_query(&close(&mut r, 5, "Beacon"), "%6");
+    runs(&mut r, n, Ok("node"));
+    let agent = format!("P %6 @3 $0 1 0 0 0 {S} 0 ");
+    let tabs = [
+        tabs56()[0].clone(),
+        pane_line("%6", "1", "claude", "/r/b", "⌨ Beacon"),
+    ];
+    r.list_at(at(UtcMs(t + 1_000)), &[P5, &agent], &tabs);
+    assert_eq!(r.st.tmux().topology.moa_session(PaneId(6)), Some(s_id()));
+    let fx = fire(&mut r, t + 3_000);
+    assert!(!closes_any(&fx), "{fx:?}");
+}
+
+/// A close under way is forgotten when the link goes, when another server comes, and on a
+/// reload: its kill never goes out, and a new close asks again.
+#[test]
+fn closing_is_cleared_by_a_new_server_a_lost_link_and_reload() {
+    let t = t0().0;
+    let interrupted = || {
+        let mut r = closable();
+        let n = close_query(&close(&mut r, 5, "Beacon"), "%6");
+        assert_eq!(
+            sent(&runs(&mut r, n, Ok("node"))),
+            [Cmd::interrupt(PaneId(6))]
+        );
+        r
+    };
+    let connected = |r: &mut Rig, generation| {
+        let input = TmuxIn::Connected {
+            conn: 2,
+            generation,
+            version: "3.5a".into(),
+            ctl: ClientName("client-9".into()),
+            socket: "moa".into(),
+        };
+        feed(&r.b, &mut r.st, input);
+    };
+    let relisted = |r: &mut Rig| {
+        r.list(&[P5, P6], &tabs56());
+        reconciled_again(r);
+        assert!(r.st.tmux().reconciled());
+    };
+
+    // The link is lost, and comes back to the same server.
+    let mut r = interrupted();
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    connected(&mut r, generation());
+    relisted(&mut r);
+    assert!(!closes_any(&fire(&mut r, t + 3_000)));
+    close_query(&close(&mut r, 6, "Beacon"), "%6");
+
+    // Another server, whose `%6` is another shell.
+    let mut r = interrupted();
+    let mut other = generation();
+    other.pid += 1;
+    connected(&mut r, other);
+    relisted(&mut r);
+    assert!(!closes_any(&fire(&mut r, t + 3_000)));
+
+    // A reload.
+    let mut r = interrupted();
+    r.reload(vec![kite(), beacon()], None);
+    relisted(&mut r);
+    assert!(!closes_any(&fire(&mut r, t + 3_000)));
+    close_query(&close(&mut r, 6, "Beacon"), "%6");
+}
+
+/// A timeout that runs out clears itself and says, as moa, that it closed the terminal, in
+/// one commit; then it closes it as a close does.
+#[test]
+fn a_timeout_closes_and_says_so() {
+    let t = t0().0;
+    let mut r = closable();
+    let fx = timeout(&mut r, 5, "Kite", Some(HOUR));
+    assert_eq!(the_reply(&fx).0, "closes in 1h");
+    assert_eq!(timers(&fx, TimerKey::Terminals), [&set_at(t + HOUR)]);
+
+    let fx = fire(&mut r, t + HOUR);
+    let saved: Vec<&Vec<Change>> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Persist(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(saved.len(), 1, "{fx:?}");
+    let cleared = Terminal {
+        timeout_at: None,
+        ..r.open(5).unwrap().clone()
+    };
+    assert!(saved[0].contains(&Change::Terminal(cleared)), "{fx:?}");
+    assert_eq!(
+        lines(&fx),
+        [(
+            ActivityWho::Brain,
+            "moa closed Kite: its timeout ran out".to_string()
+        )]
+    );
+    assert!(r.open(5).unwrap().timeout_at.is_none());
+    let n = close_query(&fx, "%5");
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+
+    let fx = runs(&mut r, n, Ok("zsh"));
+    assert_eq!(sent(&fx), [kill("%5")]);
+    assert!(replies(&fx).is_empty() && lines(&fx).is_empty(), "{fx:?}");
+}
+
+/// A timeout is set and cleared by `term.timeout`; one out of range is refused.
+#[test]
+fn a_timeout_can_be_cleared() {
+    let t = t0().0;
+    let mut r = closable();
+    let fx = timeout(&mut r, 5, "Kite", Some(3 * HOUR));
+    assert_eq!(the_reply(&fx).0, "closes in 3h");
+    assert_eq!(r.open(5).unwrap().timeout_at, Some(UtcMs(t + 3 * HOUR)));
+    assert_eq!(timers(&fx, TimerKey::Terminals), [&set_at(t + 3 * HOUR)]);
+
+    let fx = timeout(&mut r, 6, "%5", None);
+    assert_eq!(the_reply(&fx).0, "no timeout");
+    assert_eq!(r.open(5).unwrap().timeout_at, None);
+    assert_eq!(
+        timers(&fx, TimerKey::Terminals),
+        [&Effect::CancelTimer(TimerKey::Terminals)]
+    );
+    let fx = fire(&mut r, t + 3 * HOUR);
+    assert!(!closes_any(&fx) && changes(&fx).is_empty(), "{fx:?}");
+
+    for bad in [0, 999, 7 * DAY + 1, -HOUR] {
+        let fx = timeout(&mut r, 7, "Kite", Some(bad));
+        assert_eq!(refusal(&fx), TIMEOUT_FORM, "{bad}");
+        assert!(changes(&fx).is_empty(), "{fx:?}");
+    }
+    assert_eq!(refusal(&timeout(&mut r, 8, "9", None)), "no terminal 9");
+}
+
+/// A timeout that ran out while moa was down fires once the link is up and its tabs are
+/// reconciled, never before, and never arms a timer in the past.
+#[test]
+fn a_timeout_that_passed_while_down_fires_once_reconciled() {
+    let t = t0().0;
+    let mut late = kite();
+    late.timeout_at = Some(UtcMs(t - HOUR));
+    let mut r = Rig::linked(vec![late, beacon()]);
+    let fx = r.list(&[P5, P6], &tabs56());
+    assert!(!closes_any(&fx) && lines(&fx).is_empty(), "{fx:?}");
+    assert!(timers(&fx, TimerKey::Terminals).is_empty(), "{fx:?}");
+
+    let fx = r.reconcile(&[&info("%5"), &info("%6")]);
+    assert_eq!(
+        lines(&fx),
+        [(
+            ActivityWho::Brain,
+            "moa closed Kite: its timeout ran out".to_string()
+        )]
+    );
+    close_query(&fx, "%5");
+    assert!(r.open(5).unwrap().timeout_at.is_none());
+    // Once.
+    let fx = r.list(&[P5, P6], &tabs56());
+    assert!(!closes_any(&fx) && lines(&fx).is_empty(), "{fx:?}");
+}
+
+/// The old server's records with timeouts that ran out are closed by the new server's
+/// first listing; nothing is sent to the new server's tabs that reuse their ids.
+#[test]
+fn an_old_servers_timeout_never_touches_the_new_server() {
+    let t = t0().0;
+    let mut old = kite();
+    old.server_pid = 9;
+    old.server_start = 1;
+    old.timeout_at = Some(UtcMs(t - HOUR));
+    let mut r = Rig::linked(vec![old.clone()]);
+    let mut fxs = vec![r.list(&[P5], &tabs56()[..1])];
+    fxs.push(r.reconcile(&[&info("%5")]));
+    fxs.push(fire(&mut r, t + 1_000));
+    for fx in &fxs {
+        assert!(!closes_any(fx) && lines(fx).is_empty(), "{fx:?}");
+    }
+    assert_eq!(
+        records(&fxs[1])[0],
+        Terminal {
+            closed_at: Some(r.b.now().wall),
+            timeout_at: None,
+            ..old
+        }
+    );
+    assert_eq!(r.open(5).map(|t| t.id), Some(TermId(2)));
+}
+
+/// While writes are refused, no timeout fires and no close goes on: nothing is said, so
+/// nothing is done.
+#[test]
+fn writes_refused_close_nothing() {
+    let t = t0().0;
+    let mut due = kite();
+    due.timeout_at = Some(UtcMs(t - HOUR));
+
+    // A timeout that ran out.
+    let mut r = closable();
+    r.reload(vec![due.clone(), beacon()], Some(t + HOUR));
+    let mut fxs = vec![r.list(&[P5, P6], &tabs56())];
+    fxs.push(fire(&mut r, t + 1_000));
+    for fx in &fxs {
+        assert!(!closes_any(fx) && changes(fx).is_empty(), "{fx:?}");
+    }
+
+    // A close whose question was out when the store started refusing.
+    let mut r = closable();
+    let n = close_query(&close(&mut r, 5, "Beacon"), "%6");
+    r.reload(vec![kite(), beacon()], Some(t + HOUR));
+    let fx = runs(&mut r, n, Ok("node"));
+    assert!(replies(&fx).iter().all(|(_, r)| r.is_err()), "{fx:?}");
+    assert!(!closes_any(&fx) && changes(&fx).is_empty(), "{fx:?}");
+
+    // A record this build can't write: its timeout waits; the other's goes.
+    let mut other = beacon();
+    other.timeout_at = Some(UtcMs(t - HOUR));
+    let mut r = Rig::linked_with(|snap| {
+        hold(snap, vec![due.clone(), other]);
+        snap.unknown.push(LoadNote {
+            table: "terminals",
+            key: "#1".into(),
+            reason: "a state this build doesn't know",
+        });
+    });
+    r.list(&[P5, P6], &tabs56());
+    let fx = r.reconcile(&[&info("%5"), &info("%6")]);
+    close_query(&fx, "%6");
+    assert!(!sent(&fx).contains(&what_runs("%5")), "{fx:?}");
+    assert_eq!(r.open(5).unwrap().timeout_at, Some(UtcMs(t - HOUR)));
+}
+
+/// A timeout that can't run yet is retried by the inputs that follow, never by a timer
+/// armed at a time already past: each input arms at most one, always ahead.
+#[test]
+fn a_blocked_timeout_never_arms_a_past_timer() {
+    let t = t0().0;
+    let mut due = kite();
+    due.timeout_at = Some(UtcMs(t - HOUR));
+    let mut ahead = beacon();
+    ahead.timeout_at = Some(UtcMs(t + DAY));
+    // Writes refused, then a row this build can't write.
+    let mut r = closable();
+    let mut fxs = vec![r.reload(vec![due.clone(), ahead.clone()], Some(t + HOUR))];
+    let mut blocked = Rig::linked_with(|snap| {
+        hold(snap, vec![due.clone(), ahead.clone()]);
+        snap.unknown.push(LoadNote {
+            table: "terminals",
+            key: "#1".into(),
+            reason: "a state this build doesn't know",
+        });
+    });
+    for (i, rig) in [&mut r, &mut blocked].into_iter().enumerate() {
+        fxs.push(rig.list(&[P5, P6], &tabs56()));
+        if i == 1 {
+            fxs.push(rig.reconcile(&[&info("%5"), &info("%6")]));
+        }
+        for k in 1..=5 {
+            let wall = t + k * MIN;
+            let fx = fire(rig, wall);
+            for e in timers(&fx, TimerKey::Terminals) {
+                if let Effect::SetTimer { at, .. } = e {
+                    assert!(at.0 > wall, "{fx:?}");
+                }
+            }
+            fxs.push(fx);
+        }
+    }
+    for fx in &fxs {
+        let set = timers(fx, TimerKey::Terminals)
+            .into_iter()
+            .filter(|e| matches!(e, Effect::SetTimer { .. }))
+            .count();
+        assert!(set <= 1, "{fx:?}");
+        if let Some(Effect::SetTimer { at, .. }) = timers(fx, TimerKey::Terminals).first() {
+            assert!(at.0 > t, "{fx:?}");
+        }
+        assert!(!closes_any(fx), "{fx:?}");
+    }
+}
+
+/// Thirty terminals open, and ordinary activity: an hour of the status clock, the agent's
+/// tab changing its active pane, an unchanged listing. moa sends nothing for them, arms no
+/// timer, and saves nothing about them.
+#[test]
+fn thirty_idle_terminals_cost_nothing() {
+    let t = t0().0;
+    let mut r = Rig::linked(Vec::new());
+    let mut panes: Vec<String> = (10..40)
+        .map(|n| format!("P %{n} @{n} $0 1 0 0 0  0 "))
+        .collect();
+    panes.push("P %7 @4 $0 1 1 0 0  0 ".into());
+    let panes: Vec<&str> = panes.iter().map(String::as_str).collect();
+    let mut tabs: Vec<String> = (10..40).map(|n| plain(&format!("%{n}"), "/r")).collect();
+    tabs.push(pane_line("%7", "", "claude", "/r", ""));
+    r.list_at(at(UtcMs(t)), &panes, &tabs);
+    let mut infos: Vec<String> = (10..40).map(|n| info(&format!("%{n}"))).collect();
+    infos.push(info("%7"));
+    let infos: Vec<&str> = infos.iter().map(String::as_str).collect();
+    let fx = r.reconcile(&infos);
+    assert_eq!(records(&fx).len(), 30, "{fx:?}");
+    let terminals: Vec<String> = (10..40).map(|n| format!("%{n}")).collect();
+
+    let mut fxs = Vec::new();
+    for k in 1..=60 {
+        let now = at(UtcMs(t + k * MIN));
+        fxs.push(handle_checked(
+            &mut r.st,
+            Input::Timer(TimerKey::Clock),
+            now.clone(),
+        ));
+        if k % 10 == 0 {
+            let moved = Notification::WindowPaneChanged {
+                window: WindowId(4),
+                pane: PaneId(7),
+            };
+            fxs.push(r.notify(now, moved));
+        }
+    }
+    fxs.push(r.list_at(at(UtcMs(t + HOUR)), &panes, &tabs));
+    for fx in &fxs {
+        assert!(timers(fx, TimerKey::Terminals).is_empty(), "{fx:?}");
+        assert!(records(fx).is_empty(), "{fx:?}");
+        let named = sent(fx)
+            .into_iter()
+            .any(|c| c.argv().iter().any(|a| terminals.contains(a)));
+        assert!(!named, "{fx:?}");
+    }
+}
+
+#[test]
+fn parse_after_reads_3h_90m_2h30m_45s_and_off() {
+    assert_eq!(parse_after("3h"), Ok(Some(3 * HOUR)));
+    assert_eq!(parse_after("90m"), Ok(Some(90 * MIN)));
+    assert_eq!(parse_after("2h30m"), Ok(Some(150 * MIN)));
+    assert_eq!(parse_after("45s"), Ok(Some(45_000)));
+    assert_eq!(parse_after("1s"), Ok(Some(1_000)));
+    assert_eq!(parse_after("7d"), Ok(Some(7 * DAY)));
+    assert_eq!(parse_after(" 3h "), Ok(Some(3 * HOUR)));
+    assert_eq!(parse_after("off"), Ok(None));
+    for bad in ["0s", "8d", "soon", "-1h", "", "1y"] {
+        assert_eq!(parse_after(bad), Err(TIMEOUT_FORM.to_string()), "{bad:?}");
+    }
 }

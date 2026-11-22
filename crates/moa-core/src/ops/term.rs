@@ -4,25 +4,27 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::cut;
 use super::launch::{WENT_AWAY, WINDOW_NAME_CUT, focus_cmds, warn};
-use crate::Now;
+use super::{adopt, cut};
 use crate::change::Change;
 use crate::cockpit::Scene;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::folders::tilde;
-use crate::model::{OpenedBy, Terminal};
+use crate::model::{OpenedBy, TermId, Terminal};
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::sleep::kill_pane;
 use crate::state::{State, Table};
-use crate::terminals;
+use crate::terminals::{self, Closing, STOP_WAIT_MS, TIMEOUT_FORM, TIMEOUT_MS};
 use crate::time::{span, until};
 use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
 use crate::tmux::link::{
-    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, ready, set_pane_option,
+    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, pane_query, ready,
+    set_pane_option,
 };
+use crate::{Now, UtcMs};
 
 const TERM_NOT_FULL: &str = "term needs a full path";
 const NO_SHELL: &str = "couldn't open a terminal; see moa's log";
@@ -83,12 +85,7 @@ pub(crate) fn term_key(state: &mut State, pane: Option<PaneId>, client: ClientNa
     if let Some(cwd) = bound_session(state, pane).and_then(|id| state.session(id)?.cwd.clone()) {
         return term_here(state, client, Some(&cwd));
     }
-    let cmd = Cmd::new("display-message").args([
-        "-p".to_string(),
-        "-t".to_string(),
-        pane.to_string(),
-        "#{pane_current_path}".to_string(),
-    ]);
+    let cmd = pane_query(pane, "#{pane_current_path}");
     // A key comes over the link, so it is up.
     state
         .tmux
@@ -122,13 +119,14 @@ pub(crate) fn here_answered(
             "moa's terminal went away before it said where to open a terminal".into(),
         )];
     }
-    let folder = answer
-        .ok()
-        .and_then(|lists| match <[_; 1]>::try_from(lists) {
-            Ok([lines]) => <[_; 1]>::try_from(lines).ok().map(|[line]| line),
-            Err(_) => None,
-        });
-    term_here(state, client, folder.as_deref())
+    term_here(state, client, only_line(answer).as_deref())
+}
+
+/// The one line of an answer to one command, if that is what tmux answered.
+fn only_line(answer: Answer) -> Option<String> {
+    let [lines] = <[_; 1]>::try_from(answer.ok()?).ok()?;
+    let [line] = <[_; 1]>::try_from(lines).ok()?;
+    Some(line)
 }
 
 /// A key's terminal in `folder`: home when there is none, or it isn't a full path to a
@@ -218,13 +216,7 @@ pub(crate) fn term_opened(
         return fx;
     }
     let refused = answer.is_err();
-    let pane = answer.ok().and_then(|lists| match lists.as_slice() {
-        [lines] => match lines.as_slice() {
-            [line] => opened_pane(line),
-            _ => None,
-        },
-        _ => None,
-    });
+    let pane = only_line(answer).as_deref().and_then(opened_pane);
     let mut fx = Vec::new();
     let result = match (pane, state.tmux().conn()) {
         (Some((pane, pid)), Some(conn)) => {
@@ -512,6 +504,134 @@ pub(crate) fn note(
     Ok(Done {
         text: text.into(),
         data: json!({ "id": id, "note": note }),
+    })
+}
+
+/// `term.close`: closes terminal `target` gently (T8), once tmux says what runs in its tab
+/// ([`close_answered`]). A close already under way is said so, and nothing is sent.
+pub(crate) fn close(state: &mut State, conn: ConnId, req: ReqId, target: &str) -> Vec<Effect> {
+    let reply = |result| Effect::Reply { conn, req, result };
+    let t = match ready(state).and_then(|_| terminals::find(state, target)) {
+        Ok(t) => t.clone(),
+        Err(why) => return vec![reply(Err(why))],
+    };
+    if state.closing.contains_key(&t.id) {
+        return vec![reply(Ok(Done {
+            text: format!("already closing {}", t.name),
+            data: json!({ "id": t.id.0 }),
+        }))];
+    }
+    match terminals::close(state, Some(Tell::Reply(conn, req)), &t) {
+        Some(query) => vec![query],
+        None => vec![reply(Err(OpError(TERM_GONE.into())))],
+    }
+}
+
+/// tmux said what runs in record `id`'s tab, for a close: that decides it. A tab that went,
+/// or isn't a terminal any more, is gone. A shell at its prompt (the record's shell) is
+/// killed at once; a running program gets Ctrl-c, and the kill 3 seconds later
+/// ([`terminals::run`]). A close you asked for is saved as yours in the activity before
+/// anything is sent; moa's own (`tell` none) said so when its timeout ran out. `replied` is
+/// whether tmux answered: otherwise the link went first.
+pub(crate) fn close_answered(
+    state: &mut State,
+    now: &Now,
+    tell: Option<Tell>,
+    id: TermId,
+    answer: Answer,
+    replied: bool,
+) -> Vec<Effect> {
+    // moa's own close has nobody to tell, and its activity already said it closed: the log
+    // says it didn't.
+    let end = |state: &mut State, why: &str| {
+        state.closing.remove(&id);
+        match tell.clone() {
+            None => vec![log(
+                LogLevel::Warn,
+                format!(
+                    "terminal #{} wasn't closed when its timeout ran out: {why}",
+                    id.0
+                ),
+            )],
+            tell => told(state, tell, Err(OpError(why.into())))
+                .into_iter()
+                .collect(),
+        }
+    };
+    if !replied {
+        return end(state, adopt::WENT_AWAY);
+    }
+    if let Err(OpError(why)) = ready(state) {
+        return end(state, &why);
+    }
+    let found = state
+        .closing
+        .get(&id)
+        .copied()
+        .zip(state.terminals.get(&id));
+    let (Some((c, t)), Some(command), Some(conn)) = (found, only_line(answer), state.tmux().conn())
+    else {
+        return end(state, TERM_GONE);
+    };
+    let t = t.clone();
+    if !terminals::may_close(state, c.generation, c.pane) {
+        return end(state, TERM_GONE);
+    }
+    let mut fx = Vec::new();
+    if tell.is_some() {
+        let mut tx = Tx::new(now);
+        if let Err(OpError(why)) = tx.ui(state, Vec::new(), format!("closed terminal {}", t.name)) {
+            return end(state, &why);
+        }
+        fx = post_commit(state, tx);
+    }
+    let pane = c.pane;
+    let (cmd, kill_at, text) = if command == t.shell {
+        (kill_pane(pane), None, format!("closed {}", t.name))
+    } else {
+        (
+            Cmd::interrupt(pane),
+            Some(UtcMs(now.wall.0 + STOP_WAIT_MS)),
+            format!("stopping {command} in {}, then closing it", t.name),
+        )
+    };
+    state.closing.insert(id, Closing { kill_at, ..c });
+    fx.push(Effect::Tmux {
+        conn,
+        cmds: vec![cmd],
+        token: None,
+    });
+    let done = Done {
+        text,
+        data: json!({ "id": id.0, "pane": pane.to_string() }),
+    };
+    fx.extend(told(state, tell, Ok(done)));
+    fx
+}
+
+/// `term.timeout`: terminal `target` closes `after_ms` from now, and moa says so when it
+/// does ([`terminals::run`]); none clears its timeout.
+pub(crate) fn timeout(
+    state: &mut State,
+    tx: &mut Tx,
+    now: &Now,
+    target: &str,
+    after_ms: Option<i64>,
+) -> Result<Done, OpError> {
+    if after_ms.is_some_and(|ms| !TIMEOUT_MS.contains(&ms)) {
+        return Err(OpError(TIMEOUT_FORM.into()));
+    }
+    let t = terminals::find(state, target)?.clone();
+    let id = t.id.0;
+    let timeout_at = after_ms.map(|ms| UtcMs(now.wall.0 + ms));
+    tx.commit(state, vec![Change::Terminal(Terminal { timeout_at, ..t })])?;
+    let text = match timeout_at {
+        Some(at) => format!("closes in {}", until(at, now.wall)),
+        None => "no timeout".into(),
+    };
+    Ok(Done {
+        text,
+        data: json!({ "id": id, "timeout_at": timeout_at.map(|at| at.0) }),
     })
 }
 

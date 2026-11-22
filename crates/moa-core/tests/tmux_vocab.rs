@@ -102,6 +102,7 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             "run-shell",
             "link-window",
             "unlink-window",
+            "send-keys",
         ];
         if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");

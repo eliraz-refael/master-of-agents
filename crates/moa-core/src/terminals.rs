@@ -1,20 +1,27 @@
 //! The terminals moa records (5d): every shell in moa's tmux that isn't an agent or a panel.
 //! Each listing, once the link's tabs are reconciled, is compared with the open records
 //! ([`listed`], T3): a new shell gets a record, a gone one's record closes, and a changed
-//! program or folder is updated.
+//! program or folder is updated. moa closes one when you ask it to, or when the timeout you
+//! set runs out ([`close`], [`run`], T8).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
+
+use jiff::{Span, SpanTotal, Unit};
 
 use crate::change::Change;
-use crate::core::{Tx, post_commit};
-use crate::effect::{Effect, LogLevel};
-use crate::model::{OpenedBy, SessionId, TermId, Terminal};
+use crate::core::{Tx, fold_in, post_commit};
+use crate::effect::{Effect, LogLevel, TimerKey, rearm};
+use crate::model::{ActivityWho, OpenedBy, SessionId, TermId, Terminal};
 use crate::op::OpError;
+use crate::ops::term::Tell;
+use crate::sleep::kill_pane;
 use crate::state::{State, Table};
+use crate::time::DAY;
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_session, trusted_panes};
 use crate::tmux::ids::{Generation, PaneId};
-use crate::tmux::link::{Asked, Link, log, ready, set_pane_option};
+use crate::tmux::link::{Asked, Link, log, pane_query, ready, set_pane_option};
 use crate::tmux::topology::{HIDDEN, Topology, UNNAMED};
 use crate::{Now, UtcMs};
 
@@ -335,4 +342,193 @@ pub(crate) fn register(state: &mut State, now: &Now) -> Vec<Effect> {
         state.tmux.terms_unseen = false;
     }
     post_commit(state, tx)
+}
+
+/// How long a running program has after its Ctrl-c before its terminal is killed.
+pub(crate) const STOP_WAIT_MS: i64 = 3_000;
+/// The shortest and the longest timeout.
+pub(crate) const TIMEOUT_MS: RangeInclusive<i64> = 1_000..=7 * DAY;
+pub(crate) const TIMEOUT_FORM: &str = "a timeout is like 3h or 90m, up to 7 days";
+
+/// A close moa started (T8), kept until a listing no longer shows its tab: of `pane` on
+/// server `generation`, and when it is killed, while a running program has its 3 seconds
+/// after the Ctrl-c.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Closing {
+    pub generation: Generation,
+    pub pane: PaneId,
+    pub kill_at: Option<UtcMs>,
+}
+
+/// How long `text` asks a timeout to be (`3h`, `90m`, `2h30m`, `45s`, `7d`), in ms, from
+/// 1 second to 7 days; `off` is none. The CLI and the view both read one this way.
+pub fn parse_after(text: &str) -> Result<Option<i64>, String> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    let ms = text
+        .parse::<Span>()
+        .ok()
+        .and_then(|span| {
+            span.total(SpanTotal::from(Unit::Millisecond).days_are_24_hours())
+                .ok()
+        })
+        .filter(|ms| ms.fract() == 0.0)
+        .map(|ms| ms as i64);
+    match ms {
+        Some(ms) if TIMEOUT_MS.contains(&ms) => Ok(Some(ms)),
+        _ => Err(TIMEOUT_FORM.to_string()),
+    }
+}
+
+/// Starts closing open record `t` (T8): one fresh question of what runs in its tab, which
+/// decides how it closes once tmux answers ([`crate::ops::term::close_answered`]). The
+/// close is held in `state.closing` meanwhile, so a second one is said to be under way.
+/// `tell` is whom to tell; none for moa's own close. `None` while the link isn't up on
+/// the record's server, or its record names no tab.
+pub(crate) fn close(state: &mut State, tell: Option<Tell>, t: &Terminal) -> Option<Effect> {
+    let generation = state.tmux().generation()?;
+    let pane: PaneId = t.pane_id.parse().ok()?;
+    if !on(t, generation) {
+        return None;
+    }
+    let cmd = pane_query(pane, "#{pane_current_command}");
+    let query = state
+        .tmux
+        .ask(Asked::TermClose { tell, id: t.id }, vec![cmd])?;
+    state.closing.insert(
+        t.id,
+        Closing {
+            generation,
+            pane,
+            kill_at: None,
+        },
+    );
+    Some(query)
+}
+
+/// Whether moa may send `pane` of server `generation` a close's Ctrl-c or kill now: the
+/// link is up on that server with its tabs reconciled, and `pane` is still a terminal.
+/// Checked as each one is sent, so another server's tab or an agent's never gets one.
+pub(crate) fn may_close(state: &State, generation: Generation, pane: PaneId) -> bool {
+    ready(state).is_ok()
+        && state.tmux().generation() == Some(generation)
+        && is_terminal_pane(state, &pane)
+}
+
+/// The closes whose tab this listing no longer shows are over.
+pub(crate) fn closes_listed(state: &mut State) {
+    let topology = &state.tmux.topology;
+    if topology.panes_listed() {
+        state.closing.retain(|_, c| topology.has_pane(c.pane));
+    }
+}
+
+/// The earliest moment after `now` a terminal is due: a close's kill, or an open record's
+/// timeout. Times already past are left out, as `sleep::deadline` does: due work that
+/// can't run yet is tried again at the end of the next input.
+pub(crate) fn deadline(state: &State, now: UtcMs) -> Option<UtcMs> {
+    let kills = state.closing.values().filter_map(|c| c.kill_at);
+    let timeouts = open_records(state).filter_map(|t| t.timeout_at);
+    kills.chain(timeouts).filter(|at| *at > now).min()
+}
+
+/// Kills the terminals whose program had its 3 seconds, and closes those whose timeout ran
+/// out; then arms the timer at the next deadline, or cancels it, as sleep's is. `handle`
+/// runs it at the end of every input, beside `sleep::run`. Nothing is sent until the link
+/// is up with its tabs reconciled.
+pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect>) {
+    if ready(state).is_ok() {
+        kill_due(state, now.wall, fx);
+        if !state.writes_refused(now.wall) {
+            time_out(state, now, fx);
+        }
+    }
+    let next = deadline(state, now.wall);
+    fx.extend(rearm(
+        &mut state.terminals_at,
+        TimerKey::Terminals,
+        next,
+        fired,
+    ));
+}
+
+/// The closes whose kill is due get it, each while its tab is still a terminal of the
+/// server it was asked on; one that isn't any more is dropped, with nothing sent. A killed
+/// one stays until the listing no longer shows its tab.
+fn kill_due(state: &mut State, now: UtcMs, fx: &mut Vec<Effect>) {
+    let Some(conn) = state.tmux().conn() else {
+        return;
+    };
+    let due: Vec<(TermId, Closing)> = state
+        .closing
+        .iter()
+        .filter(|(_, c)| c.kill_at.is_some_and(|at| at <= now))
+        .map(|(id, c)| (*id, *c))
+        .collect();
+    let mut cmds = Vec::new();
+    for (id, c) in due {
+        if may_close(state, c.generation, c.pane) {
+            cmds.push(kill_pane(c.pane));
+            state.closing.insert(id, Closing { kill_at: None, ..c });
+        } else {
+            state.closing.remove(&id);
+        }
+    }
+    if !cmds.is_empty() {
+        fx.push(Effect::Tmux {
+            conn,
+            cmds,
+            token: None,
+        });
+    }
+}
+
+/// The open terminals whose timeout ran out: each one's timeout is cleared together with
+/// its line from moa, in one commit, then it closes as `term.close` closes it. One already
+/// closing, one whose tab isn't a terminal any more (the listing closes its record), and
+/// one whose row this build can't write wait.
+fn time_out(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    let due: Vec<(Terminal, Change)> = open_records(state)
+        .filter(|t| t.timeout_at.is_some_and(|at| at <= now.wall))
+        .filter(|t| !state.closing.contains_key(&t.id))
+        .filter(|t| {
+            t.pane_id
+                .parse()
+                .is_ok_and(|pane| is_terminal_pane(state, &pane))
+        })
+        .map(|t| {
+            let cleared = Terminal {
+                timeout_at: None,
+                ..t.clone()
+            };
+            (t.clone(), Change::Terminal(cleared))
+        })
+        .filter(|(_, c)| {
+            !c.row()
+                .is_some_and(|(table, key)| state.is_unknown(table, &key))
+        })
+        .collect();
+    if due.is_empty() {
+        return;
+    }
+    let mut tx = Tx::new(now);
+    let changes = due.iter().map(|(_, c)| c.clone()).collect();
+    let texts = due
+        .iter()
+        .map(|(t, _)| format!("moa closed {}: its timeout ran out", t.name))
+        .collect();
+    if tx.ui_by(state, changes, texts, ActivityWho::Brain).is_err() {
+        fx.push(log(
+            LogLevel::Warn,
+            "a terminal's timeout ran out but wasn't saved; moa tries again".into(),
+        ));
+        return;
+    }
+    let mut more = post_commit(state, tx);
+    for (t, _) in &due {
+        more.extend(close(state, None, t));
+    }
+    fold_in(fx, more);
 }
