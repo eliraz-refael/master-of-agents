@@ -10,7 +10,7 @@ use moa_agents::acp::Adapter;
 use moa_core::central::wire::{
     AcpIn, AdapterSpec, Caps, Opened, PermKind, PermOption, StopReason, ThreadHow, Update,
 };
-use moa_platform::pid_alive;
+use moa_platform::{pid_alive, proc::running};
 use moa_testkit::{StubStep, stub_acp, stub_log, wait_for, write_stub_script};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -528,7 +528,8 @@ fn child_pid(dir: &Path) -> u32 {
 }
 
 fn gone(pids: &[u32]) {
-    wait_for(LIMIT, || pids.iter().all(|&p| !pid_alive(p)).then_some(()))
+    // Not `pid_alive`: orphans stay zombies where pid 1 doesn't reap (the Nix sandbox).
+    wait_for(LIMIT, || pids.iter().all(|&p| !running(p)).then_some(()))
         .unwrap_or_else(|| panic!("{pids:?} are still there"));
 }
 
