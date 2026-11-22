@@ -30,44 +30,33 @@ file says where each item goes; the slice's own plan says how.
 **Decided (11-21):** searching by name is enough. Searching *inside* conversations is listed
 under 3 as an idea only, not a request.
 
-## 2. Goes into a later slice's plan
-
 ### Terminals: open, find and close them without the mess
 
 **Asked for:** other tools leave many terminals open for no clear reason, and you can't find
 the one you want. moa needs a better way to open a terminal, find it, and end it.
 
-**What moa has today:**
-- `moa term [PATH]`, `Ctrl-a $` or the console's `/term` opens a shell tab named `⌨ name`.
-  moa marks it as a terminal.
-- `Ctrl-a |` and `-` split an agent's tab with a shell in its folder.
-- The picker lists open terminals, and Enter jumps to one.
+**Status: built in slice 5d** (#80–#83).
+- **Every terminal is recorded:** who opened it (`you`, or `found` when it was already
+  there when moa first looked), its folder, its session, when it opened and what's running.
+  Splits count, and so do plain tmux windows.
+- **Last touched:** moa stamps a terminal when you switch to it and when you leave it.
+  Idle ones are marked (`terminal_idle_hours`).
+- **`moa term ls`, `name`, `note`, `close`, `timeout`.** A close checks what's running at
+  that moment. At a prompt, the terminal closes at once. Running a program, it gets one
+  Ctrl-c, and the pane is killed 3 s later.
+- **The terminals view, on `Ctrl-a T`:** one row per terminal, and keys to jump, close,
+  rename, note and set a timeout. The picker shows a terminal's folder and program.
 
-**What's missing:**
-- **Why it exists.** Record who opened each terminal (you, an agent, or moa) and for which
-  session or project, so no terminal is a mystery.
-- **Finding.** Terminals get a place of their own: a terminals view, not just rows mixed into
-  the picker. Each row shows:
-  - its folder;
-  - the session or project it belongs to;
-  - its age;
-  - when it was last used;
-  - **working or idle.**
-    - *Working:* a program other than the shell is running in it.
-    - *Idle:* just the shell prompt, or a program that has printed nothing for a while.
+**Still open, and where it goes:**
+- **Opened by moa** (`opened_by = moa`): slice 6, from moa's own connection.
+- **Asking about idle terminals** (an agent that looks every few hours and asks you), and
+  offering to close a session's terminals when it's closed or archived: slice 6 or 7,
+  through the `term.*` ops.
+- **Pruning closed records:** with the retention decision (Q1).
 
-    tmux already knows both: the pane's current command and its last activity.
-- **Ending.**
-  - A key to close a terminal from that list.
-  - When a session is closed or archived, offer to close its terminals.
-  - Idle terminals (only a shell, nothing running, unused for a while) are listed for
-    cleanup. moa never closes a terminal with something running in it without asking.
-- **Opening.** A new terminal opens in the folder of the agent you're on, already linked to
-  that session, as `Ctrl-a $` does today. The difference is that it's recorded, so all of the
-  above works.
+## 2. Goes into a later slice's plan
 
-**Where:** a small plan of its own, right after slice 5c and before slice 6 (decided 11-21).
-The user wants terminals to have their own place, and this is a daily pain.
+Nothing waiting here now. The terminals entry's open items above say which slice each goes to.
 
 ## 3. After parity (after slice 10)
 
