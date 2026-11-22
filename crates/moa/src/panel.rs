@@ -37,12 +37,17 @@ pub struct PickArgs {
     brain: Option<String>,
 }
 
-/// What `--once` says to a view other than the picker and help.
-const ONCE_VIEWS: &str = "moa panel: --once works only for the picker and help";
+/// What `--once` says to a view other than the picker, help and terminals.
+const ONCE_VIEWS: &str = "moa panel: --once works only for the picker, help and terminals";
 
 fn parse_view(word: &str) -> Result<View, String> {
     word.parse()
         .map_err(|_| format!("moa panel: no view called {word}; views: {VIEWS}"))
+}
+
+/// Whether `--once` can draw `view`: the views `Ctrl-a`'s popups open.
+fn once_view(view: Option<View>) -> bool {
+    view.is_some_and(View::is_popup)
 }
 
 /// Whether moa placed this panel itself: `MOA_NO_AUTOSTART` is exactly `1`, as moa sets it.
@@ -54,7 +59,7 @@ fn placed_by_moa(mark: Option<&std::ffi::OsStr>) -> bool {
 /// taken, as one line.
 pub fn panel(args: &PanelArgs) -> Result<(), String> {
     let view = args.view.as_deref().map(parse_view).transpose()?;
-    if args.once && !matches!(view, Some(View::Picker | View::Help)) {
+    if args.once && !once_view(view) {
         return Err(ONCE_VIEWS.to_string());
     }
     let here = Here::new()?;
@@ -131,7 +136,19 @@ pub fn pick(args: &PickArgs) -> Result<(), String> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::placed_by_moa;
+    use moa_core::panel::View;
+
+    use super::{once_view, placed_by_moa};
+
+    /// `--once` takes the picker, help and terminals, and no other view.
+    #[test]
+    fn once_accepts_terms() {
+        for view in View::ALL {
+            let popup = matches!(view, View::Picker | View::Help | View::Terms);
+            assert_eq!(once_view(Some(*view)), popup, "{view}");
+        }
+        assert!(!once_view(None));
+    }
 
     /// `MOA_NO_AUTOSTART` marks a panel moa placed only when it is exactly `1`.
     #[test]

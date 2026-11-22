@@ -167,6 +167,7 @@ pub fn topics(view: View, once: bool) -> &'static [Topic] {
             Topic::Terms,
             Topic::Brain,
         ],
+        (true, View::Terms) => &[Topic::Terms, Topic::Brain],
         (true, View::Help) => &[Topic::Brain, Topic::Layouts],
         _ => TOPICS,
     }
@@ -662,7 +663,7 @@ impl Loop {
 
     /// Clears the footer's message. It answers no pick, so it never closes the picker.
     fn hush(&mut self) {
-        let _ = self.panel.replied(Ok(Done {
+        self.panel.show(Ok(Done {
             text: String::new(),
             data: Default::default(),
         }));
@@ -684,7 +685,9 @@ impl Loop {
                 }
                 Out::Send(op) => match &mut self.link {
                     Link::Up { live, .. } => {
-                        self.asked.insert(live.send(op));
+                        let tag = live.send(op);
+                        self.asked.insert(tag);
+                        self.panel.sent(tag);
                     }
                     // Nothing is sent to another build; elsewhere the footer says why. A
                     // pick that wasn't sent waits for no reply.
@@ -841,7 +844,7 @@ impl Loop {
                 if !self.asked.remove(&tag) {
                     return false;
                 }
-                let out = self.panel.replied(result);
+                let out = self.panel.replied(tag, result);
                 self.closing |= self.act(out.into_iter().collect());
             }
             LiveMsg::Closed => {
@@ -919,7 +922,7 @@ impl Loop {
                 self.told_here = here;
                 match linked.refused {
                     Some(why) => {
-                        let _ = self.panel.replied(Err(why));
+                        self.panel.show(Err(why));
                     }
                     None => self.hush(),
                 }
@@ -1475,6 +1478,7 @@ mod tests {
         let outs = lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
         assert!(matches!(outs[..], [Out::Send(_)]), "{outs:?}");
         lp.asked.insert(1);
+        lp.panel.sent(1);
         lp.take(reply(1, Err("its folder ~/x is gone".to_string())));
         assert!(!lp.closing);
         let mut term = terminal();
@@ -1483,6 +1487,7 @@ mod tests {
 
         lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
         lp.asked.insert(2);
+        lp.panel.sent(2);
         let done = Done {
             text: "went to Fix login".to_string(),
             data: Default::default(),

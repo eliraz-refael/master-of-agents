@@ -20,8 +20,9 @@ use crate::views::{animates, live, state_glyph, status};
 pub const PREFIX: &str = "tmux's prefix (Ctrl-b unless you changed it)";
 
 /// The views whose own keys help lists, by their key hints, in this order.
-const VIEWS: [View; 8] = [
+const VIEWS: [View; 9] = [
     View::Picker,
+    View::Terms,
     View::Tree,
     View::Plan,
     View::Status,

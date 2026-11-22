@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use moa_core::folders::typed_folder;
 use moa_core::model::Project;
 use moa_core::op::Op;
+use moa_core::terminals;
 
 use super::{CANCELLED, Out, Panel};
 use crate::ctx::Ctx;
@@ -40,6 +41,16 @@ pub(super) enum Ask {
     },
     RenameGroup {
         old: String,
+    },
+    /// The terminals view's `r`, `n` and `t`: the terminal's tab id.
+    TermName {
+        target: String,
+    },
+    TermNote {
+        target: String,
+    },
+    TermTimeout {
+        target: String,
     },
 }
 
@@ -184,6 +195,19 @@ impl Panel {
                 };
                 send(Op::GroupRename { old, new })
             }
+            Ask::TermName { target } => {
+                if text.is_empty() {
+                    return self.say(CANCELLED);
+                }
+                send(Op::TermName { target, name: text })
+            }
+            // An empty note clears it.
+            Ask::TermNote { target } => send(Op::TermNote { target, note: text }),
+            // The CLI's parser: a bad answer says why in the footer.
+            Ask::TermTimeout { target } => match terminals::parse_after(&text) {
+                Ok(after_ms) => send(Op::TermTimeout { target, after_ms }),
+                Err(e) => self.say(&e),
+            },
         }
     }
 }

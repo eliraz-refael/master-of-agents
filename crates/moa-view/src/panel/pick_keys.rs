@@ -1,6 +1,7 @@
 //! The picker's own keys (S7): the query's editing, moving through the matches, and a pick.
 
 use moa_core::op::Op;
+use moa_core::panel::View;
 
 use super::{Out, Panel};
 use crate::data::Data;
@@ -69,7 +70,12 @@ impl Panel {
             return self.say(&line);
         }
         let Some(item) = self.selected().cloned() else {
-            return vec![Out::Close];
+            // The picker with nothing to pick is done; the terminals view stays.
+            return if self.view.is_popup() && self.view != View::Terms {
+                vec![Out::Close]
+            } else {
+                Vec::new()
+            };
         };
         let op = match &item {
             Item::Session(id) => Op::SessionFocus { q: id.to_string() },

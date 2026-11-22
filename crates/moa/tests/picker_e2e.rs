@@ -10,43 +10,15 @@ mod common;
 use std::fs;
 
 use moa_core::layout::{leaves, parse, presets};
-use moa_testkit::{FakeStep, TempBrain, Terminal, wait_for, write_script};
+use moa_testkit::{FakeStep, TempBrain, wait_for, write_script};
 use serde_json::{Map, Value};
 
 use common::screen::Screen;
 use common::*;
 
-/// The title tmux draws on the picker's popup's border.
-const PICKER_TITLE: &str = "⌕ find a session";
-/// Esc, Enter and Ctrl-u (which empties tmux's prompt), typed on a terminal.
-const ESC: &[u8] = b"\x1b";
-const ENTER: &[u8] = b"\r";
-const CTRL_U: &[u8] = b"\x15";
 /// A terminal tall enough for help to show its "In every panel" section unscrolled, as a
 /// popup (90% of it) and as a tab.
 const TALL: (u16, u16) = (120, 60);
-
-/// A root with the fake account, and `moa` on a terminal with the cockpit built.
-struct Rig {
-    // Dropped before `tb`, as a test's own terminal is.
-    term: Terminal,
-    tb: TempBrain,
-}
-
-fn rig() -> Rig {
-    rig_with(TERM_SIZE, "")
-}
-
-/// [`rig`] on a terminal of `size`, with `more` added to the root's `moa.toml`.
-fn rig_with(size: (u16, u16), more: &str) -> Rig {
-    let tb = TempBrain::new(None);
-    moa_toml_with_fake_account(&tb);
-    let file = tb.paths().config_file();
-    let toml = fs::read_to_string(&file).unwrap() + more;
-    fs::write(&file, toml).unwrap();
-    let term = cockpit_up_sized(&tb, size);
-    Rig { term, tb }
-}
 
 /// The query a picker shows on its query line (`› query   3/3 · 3 live`), the first line of
 /// `drawn` (a panel's screen, or the inside of its popup) that has a `›`: the words after
@@ -66,46 +38,6 @@ fn query_on(drawn: &str) -> Option<String> {
 }
 
 impl Rig {
-    /// Ctrl-a `key` on the terminal.
-    fn key(&self, key: &str) {
-        ctrl_a(&self.tb, &self.term);
-        self.term.press(key.as_bytes());
-    }
-
-    /// Waits until the terminal says `text`, since the last key.
-    #[track_caller]
-    fn says(&self, text: &str) {
-        assert!(
-            self.term.wait_for_text(text, SHOWS),
-            "the terminal never said {text:?}\n{}",
-            what_happened(&self.tb, &self.term)
-        );
-    }
-
-    /// Waits until the terminal's screen shows each of `texts`, or with `shown` false none.
-    #[track_caller]
-    fn on_screen(&self, texts: &[&str], shown: bool) {
-        screen_shows(&self.term, texts, shown);
-    }
-
-    /// The daemon's launches and its panel starts.
-    fn counts(&self) -> (u64, u64) {
-        let s = status_json(&self.tb);
-        let n = |k: &str| s[k].as_u64().unwrap_or_else(|| panic!("no {k}: {s}"));
-        (n("launches"), n("panel_starts"))
-    }
-
-    /// A session `moactl open --bg` started in `<root>/work/<name>`, titled `title`; its id.
-    #[track_caller]
-    fn session(&self, name: &str, title: &str) -> String {
-        open_session(&self.tb, &self.term, name, title, None).id
-    }
-
-    /// The pane the terminal shows.
-    fn client_pane(&self) -> Option<String> {
-        client_field(&self.tb, &self.term, "#{pane_id}")
-    }
-
     /// The picker panels parked in `_moa` (a linked one is listed there too).
     fn pickers(&self) -> Vec<PaneRow> {
         panes_of(&self.tb, "=_moa")
@@ -167,21 +99,6 @@ impl Rig {
             "the picker's query never became {want:?}\n{}",
             tab_shows(&self.tb, pane)
         );
-    }
-
-    /// `Ctrl-a /`: the picker's popup draws each of `shows` inside its border, and its panel
-    /// is connected to moa.
-    #[track_caller]
-    fn open_picker_popup(&self, shows: &[&str]) {
-        self.key("/");
-        let up = wait_for(SHOWS, || (popups(&self.tb, "picker") == 1).then_some(()));
-        assert!(
-            up.is_some(),
-            "the picker's popup never connected: {:?}\n{}",
-            panels(&self.tb),
-            what_happened(&self.tb, &self.term)
-        );
-        popup_shows(&self.term, PICKER_TITLE, shows);
     }
 
     /// The picker's popup is gone: its panel left moa, and tmux closed it, off the

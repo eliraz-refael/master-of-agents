@@ -134,6 +134,13 @@ pub fn ctrl_a(form: Form) -> Vec<Vec<Binding>> {
                  agent or session you're on; `exit` closes it",
             ),
             plain(
+                "T",
+                "Terminals…",
+                "every terminal: what's running, when you last touched it; close, name, note, \
+                 timeout",
+                Does::Popup(View::Terms),
+            ),
+            plain(
                 "|",
                 "Split: shell beside",
                 "split the agent or terminal tab you're on: a shell beside it, in the same \
@@ -296,6 +303,27 @@ mod tests {
                 };
                 assert_eq!((daemon, popups), want, "{form:?}: {a:?}");
             }
+        }
+    }
+
+    /// 5d: `T` opens the terminals view in a popup, is in the table once, in either form,
+    /// with help, and its menu item follows `Terminal here`.
+    #[test]
+    fn the_terminals_key_is_in_the_table_once() {
+        for form in FORMS {
+            let table: Vec<Binding> = ctrl_a(form).into_iter().flatten().collect();
+            let keys: Vec<&Binding> = table.iter().filter(|b| b.key == "T").collect();
+            assert_eq!(keys.len(), 1, "{form:?}");
+            assert_eq!(keys[0].does, Does::Popup(View::Terms));
+            assert_eq!(keys[0].label, "Terminals…");
+            assert!(keys[0].help.starts_with("every terminal: what's running"));
+            let popups = table
+                .iter()
+                .filter(|b| b.does == Does::Popup(View::Terms))
+                .count();
+            assert_eq!(popups, 1, "{form:?}");
+            let at = |key: &str| table.iter().position(|b| b.key == key).unwrap();
+            assert_eq!(at("T"), at("$") + 1, "{form:?}");
         }
     }
 

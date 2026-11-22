@@ -423,6 +423,7 @@ fn a_popup_registers_as_one_and_reads_its_views_topics() {
             Topic::Brain
         ]
     );
+    assert_eq!(topics(View::Terms, true), [Topic::Terms, Topic::Brain]);
     assert_eq!(topics(View::Help, true), [Topic::Brain, Topic::Layouts]);
     assert_eq!(topics(View::Picker, false), TOPICS);
     assert_eq!(topics(View::Tree, false), TOPICS);

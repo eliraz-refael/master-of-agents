@@ -66,6 +66,8 @@ struct T {
     panel: Panel,
     data: Data,
     ctx: Ctx,
+    /// The tag the last op sent went out under.
+    tag: u64,
 }
 
 impl T {
@@ -73,11 +75,26 @@ impl T {
         let (data, ctx) = fixture();
         let mut panel = Panel::new(View::Picker);
         panel.screen(&data, &ctx, SIZE);
-        T { panel, data, ctx }
+        T {
+            panel,
+            data,
+            ctx,
+            tag: 0,
+        }
     }
 
     fn key(&mut self, k: Key) -> Vec<Out> {
-        self.panel.key(k, &self.data, &self.ctx, SIZE)
+        let outs = self.panel.key(k, &self.data, &self.ctx, SIZE);
+        for _ in outs.iter().filter(|o| matches!(o, Out::Send(_))) {
+            self.tag += 1;
+            self.panel.sent(self.tag);
+        }
+        outs
+    }
+
+    /// The reply to the last op sent.
+    fn replied(&mut self, result: Result<Done, String>) -> Option<Out> {
+        self.panel.replied(self.tag, result)
     }
 
     fn typed(&mut self, text: &str) {
@@ -534,12 +551,9 @@ fn enter_on_a_session_focuses_it() {
         })]
     );
     assert_eq!(t.footer(), "opening Fix login…");
-    assert_eq!(
-        t.panel.replied(Ok(done("focused Fix login"))),
-        Some(Out::Close)
-    );
+    assert_eq!(t.replied(Ok(done("focused Fix login"))), Some(Out::Close));
     // Only the pick's reply closes it.
-    assert_eq!(t.panel.replied(Ok(done(""))), None);
+    assert_eq!(t.replied(Ok(done(""))), None);
 }
 
 #[test]
@@ -554,7 +568,7 @@ fn enter_on_a_terminal_shows_it() {
         })]
     );
     assert_eq!(t.footer(), "opening kite…");
-    assert_eq!(t.panel.replied(Ok(done("went to kite"))), Some(Out::Close));
+    assert_eq!(t.replied(Ok(done("went to kite"))), Some(Out::Close));
 }
 
 #[test]
@@ -588,14 +602,14 @@ fn a_pick_that_fails_keeps_the_picker_open() {
     let mut t = T::new();
     t.typed("fix");
     assert!(matches!(t.key(Key::Enter)[..], [Out::Send(_)]));
-    let reply = t.panel.replied(Err("its folder ~/x is gone".to_string()));
+    let reply = t.replied(Err("its folder ~/x is gone".to_string()));
     assert_eq!(reply, None);
     assert_eq!(t.footer(), "its folder ~/x is gone");
     assert_eq!(t.query_line(), "› fix");
     assert_eq!(t.panel.view(), View::Picker);
     // A pick after it still closes on its reply.
     t.key(Key::Enter);
-    assert_eq!(t.panel.replied(Ok(done(""))), Some(Out::Close));
+    assert_eq!(t.replied(Ok(done(""))), Some(Out::Close));
 }
 
 #[test]
@@ -631,7 +645,7 @@ fn a_second_pick_waits_for_the_first() {
     t.key(Key::Down);
     assert_eq!(t.key(Key::Enter), []);
     assert_eq!(t.footer(), "opening Fix login…");
-    assert_eq!(t.panel.replied(Err("its folder ~/x is gone".into())), None);
+    assert_eq!(t.replied(Err("its folder ~/x is gone".into())), None);
     // Release notes is still selected: it is picked now, and its `Ok` closes.
     assert_eq!(
         t.key(Key::Enter),
@@ -641,7 +655,7 @@ fn a_second_pick_waits_for_the_first() {
     );
     assert_eq!(t.footer(), "opening Release notes…");
     assert_eq!(
-        t.panel.replied(Ok(done("went to Release notes"))),
+        t.replied(Ok(done("went to Release notes"))),
         Some(Out::Close)
     );
     // A connection that ended takes the wait with it.
@@ -718,7 +732,7 @@ fn the_selection_follows_its_item_across_a_push() {
             q: session(6).to_string()
         })]
     );
-    t.panel.replied(Err("no".into()));
+    t.replied(Err("no".into()));
     // Migrate DB goes: the selection falls to the row now in its place, Done's 設計レビュー.
     t.data.delete(Topic::Sessions, &[session(6).to_string()]);
     assert_eq!(t.selected(), Some(on(4)));
@@ -734,7 +748,7 @@ fn the_selection_follows_its_item_across_a_push() {
         row["display_state"] = json!("waiting");
     });
     t.screen();
-    assert_eq!(t.panel.replied(Ok(done(""))), Some(Out::Close));
+    assert_eq!(t.replied(Ok(done(""))), Some(Out::Close));
 }
 
 #[test]
@@ -748,7 +762,7 @@ fn reset_pick_clears_the_query_and_selects_the_first_row() {
     assert_eq!(t.selected(), Some(on(1)));
     assert_eq!(t.footer(), "↵ jump · ↑↓ move · esc close");
     // The pick before it no longer closes the picker.
-    assert_eq!(t.panel.replied(Ok(done(""))), None);
+    assert_eq!(t.replied(Ok(done(""))), None);
 }
 
 // ---------- never panics (V9) ----------

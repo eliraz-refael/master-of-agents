@@ -407,23 +407,29 @@ fn esc_in_a_prompt_says_cancelled() {
 #[test]
 fn a_reply_shows_its_last_line_and_the_next_key_clears_it() {
     let mut t = T::new();
-    t.panel.replied(Ok(Done {
-        text: "opening\nopened Probe in a new tab\n\n".to_string(),
-        data: serde_json::Value::Null,
-    }));
+    t.panel.replied(
+        0,
+        Ok(Done {
+            text: "opening\nopened Probe in a new tab\n\n".to_string(),
+            data: serde_json::Value::Null,
+        }),
+    );
     assert_eq!(t.footer(), "opened Probe in a new tab");
     t.char('j');
     let hint = t.hint();
     assert_eq!(t.footer(), hint);
 
     t.panel
-        .replied(Err("no session matches\u{1b}[2J".to_string()));
+        .replied(0, Err("no session matches\u{1b}[2J".to_string()));
     assert_eq!(t.footer(), "no session matches [2J");
 
-    t.panel.replied(Ok(Done {
-        text: String::new(),
-        data: serde_json::Value::Null,
-    }));
+    t.panel.replied(
+        0,
+        Ok(Done {
+            text: String::new(),
+            data: serde_json::Value::Null,
+        }),
+    );
     assert_eq!(t.footer(), hint, "an empty text shows nothing");
 
     t.panel.note("moa went away; reconnecting");
@@ -466,7 +472,7 @@ fn an_error_stays_until_a_key() {
     let mut t = T::new();
     t.data = Data::default();
     let hint = t.hint();
-    t.panel.replied(Err("no group Kite".to_string()));
+    t.panel.replied(0, Err("no group Kite".to_string()));
     // Another panel's event doesn't hide it.
     t.panel.event("archived Fix login", t.ctx.now);
     let screen = t.panel.screen(&t.data, &t.ctx, SIZE);

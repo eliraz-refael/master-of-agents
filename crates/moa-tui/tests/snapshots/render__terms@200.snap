@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: text
+---
+╭─ ⌨ terminals ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ 4 terminals · 2 idle                                                                                                                                                                                 │
+│  ⌨ dev server              ~/private/lantern           node 2h                now   5h  ⏱1h  port 3000                                                                                               │
+│  ⌨ kite                    ~/private/kite              shell                  10m   1d                                                                                                               │
+│  ⌨ scratch                 ~/private/beacon            shell                    -   3h  idle                                                                                                         │
+│  ⌨ harbor logs             ~/private/harbor            tail 6h · Fix login     5h   2d  idle  watching the deploy                                                                                    │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│ ↵ jump · x close · r name · n note · t timeout · esc close                                                                                                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

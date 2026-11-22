@@ -1470,6 +1470,7 @@ expression: all
           "projects",
           "picture",
           "picker",
+          "terms",
           "empty-slot",
           "help",
           "setup"

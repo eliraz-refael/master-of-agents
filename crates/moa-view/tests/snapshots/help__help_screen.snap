@@ -12,6 +12,6 @@ expression: "debug_screen(&panel.screen(&data, &ctx, SIZE))"
   [head]  n      [text]start a new session
   [head]  $      [text]a plain terminal in a new tab (for a dev server…), in the folder of
   [text]         [text]the agent or session you're on; `exit` closes it
-  [head]  |      [text]split the agent or terminal tab you're on: a shell beside it, in the
-  [text]         [text]same folder; `exit` closes it
+  [head]  T      [text]every terminal: what's running, when you last touched it; close,
+  [text]         [text]name, note, timeout
 footer: [dim]j/k scroll · q close

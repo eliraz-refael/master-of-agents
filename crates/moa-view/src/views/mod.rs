@@ -20,6 +20,7 @@ pub mod picture;
 pub mod plan;
 pub mod projects;
 pub mod status;
+pub mod terms;
 pub mod today;
 pub mod tree;
 
@@ -44,6 +45,7 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Activity => activity::build(data, ctx, ui, width),
         View::Picture => picture::build(data, ctx, ui, width),
         View::Picker => picker::build(data, ctx, ui, width),
+        View::Terms => terms::lines(data, ctx, width),
         View::EmptySlot => empty_slot::build(width),
         View::Help => help::build(data, ctx, width),
         View::Console | View::Setup => {
@@ -68,6 +70,7 @@ pub fn not_yet(view: View) -> Option<&'static str> {
         | View::Projects
         | View::Picture
         | View::Picker
+        | View::Terms
         | View::Help => None,
     }
 }

@@ -126,6 +126,7 @@ bind -T moa /       if -F '#{@moa_ctl}' { display-popup -EE -w 80% -h 70% -d /r 
 bind -T moa s       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key find ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
 bind -T moa n       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key new ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
 bind -T moa '$'     if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key terminal ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
+bind -T moa T       if -F '#{@moa_ctl}' { display-popup -EE -w 80% -h 70% -d /r -T "#[fg=#88c0d0 bold] ⌨ terminals " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel terms --once --brain work } { display-message -d 4000 "moa isn't running: run moa" }
 bind -T moa 1       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key layout-1 ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
 bind -T moa 2       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key layout-2 ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
 bind -T moa 3       if -F '#{@moa_ctl}' { run -C "display-message -c '#{@moa_ctl}' 'moa:key layout-3 ##{pane_id} ##{session_id} ##{client_name}'" } { display-message -d 4000 "moa isn't running: run moa" }
@@ -153,7 +154,7 @@ bind -T moa k        select-pane -U
 bind -T moa j        select-pane -D
 # The full menu: Space, a second Ctrl-a, and tmux's own prefix (Ctrl-b) Space, so that
 # doesn't fall back to next-layout and scramble the cockpit.
-bind -T moa Space   if -F '#{e|<:#{client_height},28}' {
+bind -T moa Space   if -F '#{e|<:#{client_height},29}' {
   display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
     "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
@@ -186,6 +187,7 @@ bind -T moa Space   if -F '#{e|<:#{client_height},28}' {
     "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminals…" T 'if -F '\''#{@moa_ctl}'\'' { display-popup -EE -w 80% -h 70% -d /r -T "#[fg=#88c0d0 bold] ⌨ terminals " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel terms --once --brain work } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Split: shell beside" '|' 'if -F '\''#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}'\'' '\''display "split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell" ; set -p @moa_term 1'\''' \
     "Split: shell below" - 'if -F '\''#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}'\'' '\''display "split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell" ; set -p @moa_term 1'\''' \
     "Back to moa" m 'select-window -t moa:moa' \
@@ -203,7 +205,7 @@ bind -T moa Space   if -F '#{e|<:#{client_height},28}' {
     "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 }
-bind -T moa C-a     if -F '#{e|<:#{client_height},28}' {
+bind -T moa C-a     if -F '#{e|<:#{client_height},29}' {
   display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
     "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
@@ -236,6 +238,7 @@ bind -T moa C-a     if -F '#{e|<:#{client_height},28}' {
     "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminals…" T 'if -F '\''#{@moa_ctl}'\'' { display-popup -EE -w 80% -h 70% -d /r -T "#[fg=#88c0d0 bold] ⌨ terminals " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel terms --once --brain work } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Split: shell beside" '|' 'if -F '\''#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}'\'' '\''display "split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell" ; set -p @moa_term 1'\''' \
     "Split: shell below" - 'if -F '\''#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}'\'' '\''display "split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell" ; set -p @moa_term 1'\''' \
     "Back to moa" m 'select-window -t moa:moa' \
@@ -253,7 +256,7 @@ bind -T moa C-a     if -F '#{e|<:#{client_height},28}' {
     "Keys and help" '?' 'if -F '\''#{@moa_ctl}'\'' { if -F '\''#{e|<:#{client_width},84}'\'' { display-popup -EE -w 100% -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } { display-popup -EE -w 84 -h 90% -d /r -T "#[fg=#88c0d0 bold] keys and help " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel help --once --brain work } } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Send Ctrl-a to the app" a 'send-keys C-a'
 }
-bind Space if -F '#{e|<:#{client_height},28}' {
+bind Space if -F '#{e|<:#{client_height},29}' {
   display-menu -T "#[align=centre fg=#88c0d0 bold] moa " -x C -y C \
     "Console" c 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key console - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Sessions tree" t 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key tree - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
@@ -286,6 +289,7 @@ bind Space if -F '#{e|<:#{client_height},28}' {
     "Find a session, full tab…" s 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key find - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "New session…" n 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key new - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Terminal here" '$' 'if -F '\''#{@moa_ctl}'\'' { run -C "display-message -c '\''#{@moa_ctl}'\'' '\''moa:key terminal - ##{session_id} ##{client_name}'\''" } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
+    "Terminals…" T 'if -F '\''#{@moa_ctl}'\'' { display-popup -EE -w 80% -h 70% -d /r -T "#[fg=#88c0d0 bold] ⌨ terminals " -e MOA_BRAIN=work -e MOA_NO_AUTOSTART=1 -e MOA_ROOT=/r /opt/moa/bin/moa panel terms --once --brain work } { display-message -d 4000 "moa isn'\''t running: run moa" }' \
     "Split: shell beside" '|' 'if -F '\''#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}'\'' '\''display "split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}"'\'' '\''split-window -h -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell" ; set -p @moa_term 1'\''' \
     "Split: shell below" - 'if -F '\''#{||:#{==:#{window_name},moa},#{||:#{==:#{@moa_view},picker},#{==:#{@moa_view},help}}}'\'' '\''display "split an agent or terminal tab; #{?#{==:#{window_name},moa},the cockpit is a layout,the picker and help stay whole}"'\'' '\''split-window -v -c "##{pane_current_path}" ; set -p @moa_label "⌨ shell" ; set -p @moa_term 1'\''' \
     "Back to moa" m 'select-window -t moa:moa' \

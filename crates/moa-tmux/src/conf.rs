@@ -76,6 +76,7 @@ impl Popups<'_> {
         let popup = |size: &str, title: &str| self.popup(view, size, title, menu);
         let body = match view {
             View::Picker => popup("-w 80% -h 70%", "⌕ find a session"),
+            View::Terms => popup("-w 80% -h 70%", "⌨ terminals"),
             View::Help => format!(
                 "if -F '#{{e|<:#{{client_width}},{HELP_WIDTH}}}' {{ {} }} {{ {} }}",
                 popup("-w 100% -h 90%", "keys and help"),
@@ -145,7 +146,7 @@ fn menu_command(does: Does, popups: Popups) -> String {
 
 /// The menu's lines, written from the key table, without the menu's own key. `tall`: a
 /// separator between groups, and the greyed note on moving between splits; otherwise
-/// neither, for a short terminal.
+/// neither, and without `Terminals…`, for a short terminal.
 fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
     for (i, group) in ctrl_a(form).into_iter().enumerate() {
@@ -160,6 +161,8 @@ fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
                 }
                 // The menu doesn't list itself.
                 Does::Move | Does::Menu => continue,
+                // The short menu keeps to 24 rows: `Ctrl-a T` still opens the view.
+                Does::Popup(View::Terms) if !tall => continue,
                 _ => format!(
                     "\"{}\" {} {}",
                     b.label,

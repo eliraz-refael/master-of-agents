@@ -21,6 +21,7 @@ use crate::views::{self, ViewUi, picker, picture, tree};
 
 mod ask;
 mod pick_keys;
+mod term_keys;
 mod tree_keys;
 
 use ask::Ask;
@@ -193,6 +194,9 @@ pub struct Panel {
     /// The title of the pick the picker sent and waits on: its `Ok` closes the picker.
     /// Another Enter waits for it.
     picking: Option<String>,
+    /// The tag of that pick's send: only its reply closes the view. Other ops the view sends
+    /// (the terminals view's name, note, timeout and close) have replies of their own.
+    pick_tag: Option<u64>,
     /// The picker's matches, kept while the data's revision and the query stay.
     picks: Option<Picks>,
 }
@@ -253,6 +257,7 @@ impl Panel {
             in_tab: false,
             open: None,
             picking: None,
+            pick_tag: None,
             picks: None,
         }
     }
@@ -327,7 +332,7 @@ impl Panel {
             self.say(CANCELLED);
             return None;
         }
-        if self.view.is_sheet() {
+        if self.view.is_popup() {
             return Some(Out::Close);
         }
         self.quit()
@@ -340,12 +345,21 @@ impl Panel {
         self.list = ListState::default();
         self.hover = None;
         self.message = None;
-        self.picking = None;
+        self.forget_pick();
     }
 
     /// The connection ended: the pick's reply won't come, so another Enter may pick.
     pub fn forget_pick(&mut self) {
         self.picking = None;
+        self.pick_tag = None;
+    }
+
+    /// An op the panel asked to send went out under `tag`. The first one after a pick is the
+    /// pick's: its reply is the one that closes the view.
+    pub fn sent(&mut self, tag: u64) {
+        if self.picking.is_some() && self.pick_tag.is_none() {
+            self.pick_tag = Some(tag);
+        }
     }
 
     /// Quits a panel you started, and leaves one moa manages where it is, saying why
@@ -557,9 +571,21 @@ impl Panel {
     }
 
     /// An op's reply: the footer shows its text's last non-empty line, or nothing. The
-    /// picker's pick that went through closes it ([`Out::Close`]); one refused stays in its
-    /// footer, the picker still open (S7).
-    pub fn replied(&mut self, result: Result<Done, String>) -> Option<Out> {
+    /// pick that went through closes the view ([`Out::Close`]); one refused stays in its
+    /// footer, the view still open (S7). Only the reply to the pick's own send (`tag`, see
+    /// [`Panel::sent`]) counts: another op's reply neither closes nor frees the pick.
+    pub fn replied(&mut self, tag: u64, result: Result<Done, String>) -> Option<Out> {
+        let ok = self.show(result);
+        if self.picking.is_some() && self.pick_tag == Some(tag) {
+            self.forget_pick();
+            return ok.then_some(Out::Close);
+        }
+        None
+    }
+
+    /// The footer shows a result's last non-empty line, or nothing, and says whether it was
+    /// an `Ok`. It answers no pick, so it never closes the view.
+    pub fn show(&mut self, result: Result<Done, String>) -> bool {
         let ok = result.is_ok();
         let text = match result {
             Ok(done) => done.text,
@@ -571,7 +597,7 @@ impl Panel {
             .map(str::trim)
             .find(|l| !l.is_empty())
             .map(Message::sticky);
-        (self.picking.take().is_some() && ok).then_some(Out::Close)
+        ok
     }
 
     /// A line for the footer from the panel's loop (the connection, say, or an error event),
@@ -812,10 +838,14 @@ impl Panel {
                 self.list
                     .page(&self.lines, body, action == Action::PageDown);
             }
-            // Help's `q` and Esc close it, as Ctrl-c does (S10).
-            Action::Quit if self.view == View::Help => return Some(vec![Out::Close]),
+            // Help's and the terminals view's `q` and Esc close them, as Ctrl-c does (S10).
+            Action::Quit if self.view.is_popup() && self.view != View::Picker => {
+                return Some(vec![Out::Close]);
+            }
             Action::Quit => return Some(self.quit().into_iter().collect()),
-            Action::Activate if self.view == View::Picker => return Some(self.pick(data)),
+            Action::Activate if self.view.is_popup() && self.view != View::Help => {
+                return Some(self.pick(data));
+            }
             Action::Activate => {
                 return match selected? {
                     Item::Session(id) => {
@@ -845,6 +875,11 @@ impl Panel {
                     Item::Suggestion(_) | Item::Term { .. } => None,
                 };
             }
+            Action::Close | Action::Rename | Action::Note | Action::Timeout
+                if self.view == View::Terms =>
+            {
+                return self.term_key(action, data);
+            }
             Action::NewSession if self.shown() == View::Tree => {
                 return self.tree_key(action, data, ctx);
             }
@@ -872,6 +907,8 @@ impl Panel {
                 let q = row.session.id.to_string();
                 return Some(self.confirm(question, Op::SessionRestart { q }));
             }
+            // Only the terminals view's keys: it takes them before this.
+            Action::Note | Action::Timeout => return None,
             Action::Done | Action::Drop => {
                 let Item::Task(id) = selected? else {
                     return None;

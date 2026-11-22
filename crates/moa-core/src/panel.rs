@@ -36,6 +36,8 @@ pub enum View {
     Projects,
     Picture,
     Picker,
+    // Every terminal: what's running, when you last touched it (5d).
+    Terms,
     EmptySlot,
     Help,
     Setup,
@@ -52,6 +54,7 @@ impl View {
         View::Projects,
         View::Picture,
         View::Picker,
+        View::Terms,
         View::EmptySlot,
         View::Help,
         View::Setup,
@@ -69,6 +72,7 @@ impl View {
             View::Projects => "projects",
             View::Picture => "picture",
             View::Picker => "picker",
+            View::Terms => "terms",
             View::EmptySlot => "empty-slot",
             View::Help => "help",
             View::Setup => "setup",
@@ -89,6 +93,7 @@ impl View {
             View::Picture => "◫ picture",
             View::EmptySlot => "○ agent spot",
             View::Picker => "find a session",
+            View::Terms => "⌨ terminals",
             View::Help => "keys and help",
             View::Setup => self.word(),
         }
@@ -98,6 +103,11 @@ impl View {
     /// into your session while it is open. No layout holds one, and a build never takes one.
     pub fn is_sheet(self) -> bool {
         matches!(self, View::Picker | View::Help)
+    }
+
+    /// Whether the view opens in a tmux popup (S8): the picker, help and the terminals view.
+    pub fn is_popup(self) -> bool {
+        matches!(self, View::Picker | View::Help | View::Terms)
     }
 
     /// Whether the panel draws its own frame: the spike's `FRAMED`, plus the picker, help and
@@ -113,6 +123,7 @@ impl View {
                 | View::Projects
                 | View::Status
                 | View::Picker
+                | View::Terms
                 | View::Help
                 | View::Setup
         )
@@ -210,6 +221,10 @@ pub(crate) fn register(
     let (view, managed) = (reg.view, reg.managed);
     state.panels.insert(conn, reg);
     fx.extend(publish_panels(state));
+    // The terminals view shows what is running now: one listing as it opens.
+    if view == View::Terms {
+        fx.extend(state.tmux.refresh());
+    }
     fx.push(reply(
         conn,
         req,
@@ -346,4 +361,18 @@ pub(crate) fn publish_panels(state: &mut State) -> Option<Effect> {
 
 fn reply(conn: ConnId, req: ReqId, result: Result<Done, OpError>) -> Effect {
     Effect::Reply { conn, req, result }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::View;
+
+    /// The views that open in a popup: exactly the picker, help and terminals.
+    #[test]
+    fn popups_are_the_picker_help_and_terminals() {
+        for view in View::ALL {
+            let popup = matches!(view, View::Picker | View::Help | View::Terms);
+            assert_eq!(view.is_popup(), popup, "{view}");
+        }
+    }
 }

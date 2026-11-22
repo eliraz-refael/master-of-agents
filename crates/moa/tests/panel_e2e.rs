@@ -1028,7 +1028,7 @@ fn once_refuses_other_views() {
     let o = run(&tb, &["panel", "tree", "--once"], &[]);
     assert!(!o.status.success());
     assert!(
-        err(&o).contains("--once works only for the picker and help"),
+        err(&o).contains("--once works only for the picker, help and terminals"),
         "{}",
         err(&o)
     );

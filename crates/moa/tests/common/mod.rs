@@ -781,6 +781,12 @@ pub fn shows(tb: &TempBrain, pane: &str, texts: &[&str]) {
 
 /// Ctrl-c, typed on a terminal.
 pub const CTRL_C: &[u8] = b"\x03";
+/// The title tmux draws on the picker's popup's border.
+pub const PICKER_TITLE: &str = "⌕ find a session";
+/// Esc, Enter and Ctrl-u (which empties tmux's prompt), typed on a terminal.
+pub const ESC: &[u8] = b"\x1b";
+pub const ENTER: &[u8] = b"\r";
+pub const CTRL_U: &[u8] = b"\x15";
 /// What the picker's full tab shows: its footer hint.
 pub const PICKER_SHOWS: &str = "esc close";
 /// What help shows, as a popup or a tab: its first heading.
@@ -971,4 +977,94 @@ pub fn the_help_popup_opens_and_closes(
         ["started", "stopped: quit"]
     );
     assert_eq!(client_field(tb, term, "#{window_id}"), before);
+}
+
+/// A root with the fake account, and `moa` on a terminal with the cockpit built.
+pub struct Rig {
+    // Dropped before `tb`, as a test's own terminal is.
+    pub term: Terminal,
+    pub tb: TempBrain,
+}
+
+pub fn rig() -> Rig {
+    rig_with(TERM_SIZE, "")
+}
+
+/// [`rig`] on a terminal of `size`, with `more` added to the root's `moa.toml`.
+pub fn rig_with(size: (u16, u16), more: &str) -> Rig {
+    let tb = TempBrain::new(None);
+    moa_toml_with_fake_account(&tb);
+    let file = tb.paths().config_file();
+    let toml = std::fs::read_to_string(&file).unwrap() + more;
+    std::fs::write(&file, toml).unwrap();
+    let term = cockpit_up_sized(&tb, size);
+    Rig { term, tb }
+}
+
+impl Rig {
+    /// Ctrl-a `key` on the terminal.
+    pub fn key(&self, key: &str) {
+        ctrl_a(&self.tb, &self.term);
+        self.term.press(key.as_bytes());
+    }
+
+    /// Waits until the terminal says `text`, since the last key.
+    #[track_caller]
+    pub fn says(&self, text: &str) {
+        assert!(
+            self.term.wait_for_text(text, SHOWS),
+            "the terminal never said {text:?}\n{}",
+            what_happened(&self.tb, &self.term)
+        );
+    }
+
+    /// Waits until the terminal's screen shows each of `texts`, or with `shown` false none.
+    #[track_caller]
+    pub fn on_screen(&self, texts: &[&str], shown: bool) {
+        screen_shows(&self.term, texts, shown);
+    }
+
+    /// The daemon's launches and its panel starts.
+    pub fn counts(&self) -> (u64, u64) {
+        let s = status_json(&self.tb);
+        let n = |k: &str| s[k].as_u64().unwrap_or_else(|| panic!("no {k}: {s}"));
+        (n("launches"), n("panel_starts"))
+    }
+
+    /// A session `moactl open --bg` started in `<root>/work/<name>`, titled `title`; its id.
+    #[track_caller]
+    pub fn session(&self, name: &str, title: &str) -> String {
+        open_session(&self.tb, &self.term, name, title, None).id
+    }
+
+    /// The pane the terminal shows.
+    pub fn client_pane(&self) -> Option<String> {
+        client_field(&self.tb, &self.term, "#{pane_id}")
+    }
+
+    /// `Ctrl-a /`: the picker's popup draws each of `shows` inside its border, and its panel
+    /// is connected to moa.
+    #[track_caller]
+    pub fn open_picker_popup(&self, shows: &[&str]) {
+        self.key("/");
+        let up = wait_for(SHOWS, || (popups(&self.tb, "picker") == 1).then_some(()));
+        assert!(
+            up.is_some(),
+            "the picker's popup never connected: {:?}\n{}",
+            panels(&self.tb),
+            what_happened(&self.tb, &self.term)
+        );
+        popup_shows(&self.term, PICKER_TITLE, shows);
+    }
+}
+
+/// The newest activity rows' text.
+pub fn activity(tb: &TempBrain) -> String {
+    let o = run(
+        tb,
+        &["sql", "select text from activity order by id desc limit 20"],
+        &[],
+    );
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    out(&o)
 }
