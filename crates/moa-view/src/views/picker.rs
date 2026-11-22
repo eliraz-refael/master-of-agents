@@ -186,9 +186,20 @@ pub fn rows(data: &Data) -> Vec<PickRow> {
     terms.sort_by_key(|(pane, _)| (tab_number(pane), *pane));
     out.extend(terms.into_iter().map(|(pane, t)| {
         let title = term_title(pane, t);
-        let hay = [title.as_str(), Kind::Term.word(), pane.as_str()]
-            .join(" ")
-            .to_lowercase();
+        // Found by its folder's last part and its program too, as the row shows them.
+        let folder = t.folder.rsplit('/').next().unwrap_or("");
+        let hay = [
+            title.as_str(),
+            Kind::Term.word(),
+            folder,
+            t.command.as_str(),
+            pane.as_str(),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
         PickRow {
             item: Item::Term { pane: pane.clone() },
             kind: Kind::Term,

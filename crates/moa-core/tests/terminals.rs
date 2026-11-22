@@ -1571,6 +1571,16 @@ fn a_name_is_1_to_40_characters() {
     for ok in ["x", &"x".repeat(40), &"é".repeat(40)] {
         assert_eq!(the_reply(&name(&mut r, ok)).0, format!("named it {ok}"));
     }
+    // A name `find` would read as a number or a tab could never be used.
+    for bad in ["42", "#7", "%3", "-1"] {
+        let fx = name(&mut r, bad);
+        assert_eq!(
+            refusal(&fx),
+            "a terminal's name can't be a number or start with %",
+            "{bad:?}"
+        );
+        assert!(records(&fx).is_empty() && sent(&fx).is_empty(), "{fx:?}");
+    }
     // A newline in a name is a space, so the list stays a line a terminal.
     assert_eq!(the_reply(&name(&mut r, "a\nb")).0, "named it a b");
     assert_eq!(r.open(5).unwrap().name, "a b");

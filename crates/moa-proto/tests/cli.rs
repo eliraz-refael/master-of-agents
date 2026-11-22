@@ -15,7 +15,7 @@ fn ctx() -> VerbCtx {
 fn parse(argv: &[&str]) -> Moactl {
     let mut v = vec!["moactl"];
     v.extend_from_slice(argv);
-    Moactl::try_parse_from(v).unwrap()
+    Moactl::try_parse_from(v).unwrap().settled()
 }
 
 fn op(argv: &[&str]) -> Op {
@@ -589,6 +589,35 @@ fn term_ls_and_friends_parse() {
     ] {
         assert!(help.contains(word), "{word}: {help}");
     }
+}
+
+/// The global `--json` still works after `term`'s words; a note keeps it as a word.
+#[test]
+fn term_json_after_the_words() {
+    let p = parse(&["term", "ls", "--json"]);
+    assert!(p.json);
+    assert_eq!(p.verb.to_op(&ctx()).unwrap(), Op::TermLs(NoParams));
+    let p = parse(&["term", "../web", "--json"]);
+    assert!(p.json);
+    assert_eq!(
+        p.verb.to_op(&ctx()).unwrap(),
+        Op::TermOpen {
+            path: PathBuf::from("/h/private/web"),
+            title: None
+        }
+    );
+    let p = parse(&["term", "note", "7", "try", "--json"]);
+    assert!(!p.json);
+    assert_eq!(
+        p.verb.to_op(&ctx()).unwrap(),
+        Op::TermNote {
+            target: "7".into(),
+            note: "try --json".into()
+        }
+    );
+    // `--title` belongs to a new terminal.
+    assert!(err(&["term", "--title", "x", "ls"]).contains("moactl term [FOLDER]"));
+    assert!(err(&["term", "--title", "x", "name", "7", "y"]).contains("moactl term [FOLDER]"));
 }
 
 /// A folder called `ls` is still a folder when it is written as one.

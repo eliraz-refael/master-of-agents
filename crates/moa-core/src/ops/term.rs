@@ -28,6 +28,7 @@ const TERM_NOT_FULL: &str = "term needs a full path";
 const NO_SHELL: &str = "couldn't open a terminal; see moa's log";
 const TERM_GONE: &str = "that terminal is gone";
 const NAME_LENGTH: &str = "a terminal's name is 1 to 40 characters";
+const NAME_FORM: &str = "a terminal's name can't be a number or start with %";
 const NOTE_CUT: usize = 200;
 /// What `term ls` says first while its answer is only what moa last recorded.
 const OUT_OF_DATE: &str = "moa isn't connected to tmux right now; this list may be out of date";
@@ -439,6 +440,11 @@ pub(crate) fn name(
     let name = name.trim();
     if !(1..=40).contains(&name.chars().count()) {
         return Err(OpError(NAME_LENGTH.into()));
+    }
+    // `find` reads such a target as a number or a tab: the name could never be used.
+    let number = name.strip_prefix('#').unwrap_or(name);
+    if name.starts_with('%') || number.parse::<i64>().is_ok() {
+        return Err(OpError(NAME_FORM.into()));
     }
     let t = terminals::find(state, target)?.clone();
     let pane: PaneId = t.pane_id.parse().map_err(|_| OpError(TERM_GONE.into()))?;

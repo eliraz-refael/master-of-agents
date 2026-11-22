@@ -264,6 +264,14 @@ fn the_hay_holds_the_folder_handle_and_id() {
     );
     let kite = rows.iter().find(|r| r.item == term("%5")).unwrap();
     assert_eq!(kite.hay, "kite terminal %5");
+    // A terminal is found by its folder's last part and its program.
+    let mut data = data;
+    let row = data.terms.get_mut("%5").unwrap();
+    row.folder = "/h/private/harbor".into();
+    row.command = "node".into();
+    let again = moa_view::views::picker::rows(&data);
+    let kite = again.iter().find(|r| r.item == term("%5")).unwrap();
+    assert_eq!(kite.hay, "kite terminal harbor node %5");
 }
 
 // ---------- the screen ----------

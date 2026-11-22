@@ -23,6 +23,22 @@ pub struct Moactl {
     pub verb: Verb,
 }
 
+impl Moactl {
+    /// The parse with a `--json` that `term`'s trailing words took in (`term ls --json`,
+    /// `term FOLDER --json`) given back to the global flag. A name's or a note's words are
+    /// kept as they are: they may hold anything.
+    pub fn settled(mut self) -> Moactl {
+        if let Verb::Term { args, .. } = &mut self.verb {
+            let free_text = matches!(args.first().map(String::as_str), Some("name" | "note"));
+            if !free_text && args.iter().any(|a| a == "--json") {
+                args.retain(|a| a != "--json");
+                self.json = true;
+            }
+        }
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum GroupOp {
     Add,
@@ -562,6 +578,16 @@ impl Verb {
             // typed.
             Verb::Term { args, title, .. } => match args.split_first() {
                 None => term_open(None, title, ctx)?,
+                // `--title` names a new terminal; a sub-command has no use for it.
+                Some((word, _))
+                    if title.is_some()
+                        && matches!(
+                            word.as_str(),
+                            "ls" | "name" | "note" | "close" | "timeout"
+                        ) =>
+                {
+                    return usage(TERM_USAGE);
+                }
                 Some((word, rest)) => match word.as_str() {
                     "ls" if rest.is_empty() => Op::TermLs(NoParams),
                     "name" | "note" => match rest.split_first() {
@@ -651,20 +677,22 @@ pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Op, String> {
     let argv = ["moactl", a.verb.as_str()]
         .into_iter()
         .chain(a.args.iter().map(String::as_str));
-    let parsed = Moactl::try_parse_from(argv).map_err(|e| {
-        // `--help` is an `Err` whose text is the help page; its first line isn't a reason.
-        if matches!(
-            e.kind(),
-            clap::error::ErrorKind::DisplayHelp
-                | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-                | clap::error::ErrorKind::DisplayVersion
-        ) {
-            return "a suggestion action can't ask for help".to_string();
-        }
-        let text = e.render().to_string();
-        let first = text.lines().next().unwrap_or("");
-        first.strip_prefix("error: ").unwrap_or(first).to_string()
-    })?;
+    let parsed = Moactl::try_parse_from(argv)
+        .map(Moactl::settled)
+        .map_err(|e| {
+            // `--help` is an `Err` whose text is the help page; its first line isn't a reason.
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                    | clap::error::ErrorKind::DisplayVersion
+            ) {
+                return "a suggestion action can't ask for help".to_string();
+            }
+            let text = e.render().to_string();
+            let first = text.lines().next().unwrap_or("");
+            first.strip_prefix("error: ").unwrap_or(first).to_string()
+        })?;
     let ctx = VerbCtx {
         cwd: None,
         home: home.to_path_buf(),

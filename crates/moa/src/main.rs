@@ -73,9 +73,9 @@ fn main() -> ExitCode {
     if is_moactl(&args) {
         // `moa ls` is `moactl ls`: clap sees the name `moactl` either way.
         let rest = args.iter().skip(1).cloned();
-        return ctl::run(Moactl::parse_from(
-            std::iter::once(OsString::from("moactl")).chain(rest),
-        ));
+        return ctl::run(
+            Moactl::parse_from(std::iter::once(OsString::from("moactl")).chain(rest)).settled(),
+        );
     }
     let cli = Cli::parse();
     let result = match cli.command {
