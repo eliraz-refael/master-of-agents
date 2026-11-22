@@ -66,8 +66,9 @@ pub struct Adapter {
 }
 
 /// The agent's process and the task that reads it. Dropped without `stop`, it still sends the
-/// agent's process group `SIGTERM` (unless the agent has gone already); once the agent leaves,
-/// its reaper ends the rest of the group.
+/// agent's process group `SIGTERM` (unless the agent has gone already) and, if the agent is
+/// still there after `STOP_WAIT`, `SIGKILL`; once the agent leaves, its reaper ends the rest
+/// of the group.
 struct Process {
     reaper: Reaper,
     driver: Option<JoinHandle<()>>,
@@ -75,8 +76,19 @@ struct Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        self.reaper
-            .kill_unless_exited(|group| kill_group(group, libc::SIGTERM));
+        let mut signalled = false;
+        self.reaper.kill_unless_exited(|group| {
+            signalled = true;
+            kill_group(group, libc::SIGTERM);
+        });
+        if signalled {
+            // An agent that ignores `SIGTERM` would otherwise outlive its host.
+            let reaper = self.reaper.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(STOP_WAIT);
+                reaper.kill_unless_exited(|group| kill_group(group, libc::SIGKILL));
+            });
+        }
         if let Some(driver) = &self.driver {
             driver.abort();
         }
@@ -179,6 +191,7 @@ fn command(spec: &AdapterSpec) -> Command {
     cmd.envs(spec.env.iter().map(|(k, v)| (k, v)));
     let inherited = match spec.env.iter().find(|(k, _)| k == "PATH") {
         Some((_, path)) => Some(OsString::from(path)),
+        None if spec.unset.iter().any(|k| k == "PATH") => None,
         None => std::env::var_os("PATH"),
     };
     let mut path = spec.cwd.join("bin").into_os_string();

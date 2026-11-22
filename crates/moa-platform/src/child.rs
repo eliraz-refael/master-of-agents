@@ -4,7 +4,7 @@
 use std::io;
 use std::process::Child;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, BufReader};
 use tokio::process::ChildStderr;
 use tokio::sync::{oneshot, watch};
 
@@ -97,16 +97,21 @@ pub fn first_stderr_line(stderr: ChildStderr) -> oneshot::Receiver<String> {
     rx
 }
 
-/// Reads stderr to its end, handing `each` every line, without its line ending. Bytes that
-/// aren't UTF-8 become U+FFFD, so a bad byte never stops the reading (and so never leaves the
-/// child blocked on a full pipe).
+/// The most of one stderr line held at once, in bytes: a longer line is handed on in pieces
+/// of this size, so a child that never writes a newline can't grow the buffer without end.
+const STDERR_LINE_MAX: u64 = 64 * 1024;
+
+/// Reads stderr to its end, handing `each` every line, without its line ending (a line longer
+/// than [`STDERR_LINE_MAX`] comes in pieces). Bytes that aren't UTF-8 become U+FFFD, so a bad
+/// byte never stops the reading (and so never leaves the child blocked on a full pipe).
 pub fn each_stderr_line(stderr: ChildStderr, mut each: impl FnMut(String) + Send + 'static) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut buf = Vec::new();
         loop {
             buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
+            let mut piece = (&mut reader).take(STDERR_LINE_MAX);
+            match piece.read_until(b'\n', &mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
@@ -164,5 +169,27 @@ mod tests {
         }
         child.wait().unwrap();
         assert_eq!(lines, ["one", "t\u{FFFD}o", "last"]);
+    }
+
+    /// A line with no end in sight comes in bounded pieces, nothing lost.
+    #[tokio::test]
+    async fn a_long_stderr_line_comes_in_pieces() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "head -c 100000 /dev/zero | tr '\\0' x >&2"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = ChildStderr::from_std(child.stderr.take().unwrap()).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        each_stderr_line(stderr, move |line| {
+            let _ = tx.send(line.len());
+        });
+        let mut lens = Vec::new();
+        while let Some(len) = rx.recv().await {
+            lens.push(len);
+        }
+        child.wait().unwrap();
+        assert_eq!(lens, [65536, 100000 - 65536]);
     }
 }
