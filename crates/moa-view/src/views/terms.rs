@@ -62,7 +62,12 @@ pub fn lines(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
         .iter()
         .filter(|(_, t)| row_idle(t, idle_ms, ctx.now))
         .count();
-    let head = format!("{} terminals · {idle_count} idle", rows.len());
+    let noun = if rows.len() == 1 {
+        "terminal"
+    } else {
+        "terminals"
+    };
+    let head = format!("{} {noun} · {idle_count} idle", rows.len());
     let mut out = vec![Line::plain(cut(&head, width), Tone::Dim)];
     out.extend(
         rows.into_iter()

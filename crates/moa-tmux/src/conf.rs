@@ -146,7 +146,7 @@ fn menu_command(does: Does, popups: Popups) -> String {
 
 /// The menu's lines, written from the key table, without the menu's own key. `tall`: a
 /// separator between groups, and the greyed note on moving between splits; otherwise
-/// neither, for a short terminal.
+/// neither, and without `Terminals…`, for a short terminal.
 fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
     for (i, group) in ctrl_a(form).into_iter().enumerate() {
@@ -161,6 +161,8 @@ fn menu_items(tall: bool, form: Form, popups: Popups) -> Vec<String> {
                 }
                 // The menu doesn't list itself.
                 Does::Move | Does::Menu => continue,
+                // The short menu keeps to 24 rows: `Ctrl-a T` still opens the view.
+                Does::Popup(View::Terms) if !tall => continue,
                 _ => format!(
                     "\"{}\" {} {}",
                     b.label,
@@ -190,8 +192,7 @@ fn display_menu(items: &[String]) -> String {
 /// The menu. tmux 3.4 never opens a menu taller than the terminal, and later versions draw
 /// the status line over its end, so a terminal shorter than the tall menu (its lines and
 /// the border) and the status line gets the short one. The short one's items all show
-/// down to 25 rows (on 3.8, its bottom border is under the status line's blank line; at 24 the
-/// last item is under the status line).
+/// down to 24 rows (on 3.8, its bottom border is under the status line's blank line).
 fn menu(form: Form, popups: Popups) -> String {
     let tall = menu_items(true, form, popups);
     let rows = tall.len() + 2 + STATUS_LINES;

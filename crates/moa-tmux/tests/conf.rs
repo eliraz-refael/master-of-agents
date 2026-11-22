@@ -757,14 +757,19 @@ fn open_menu(term: &Terminal, open: &[u8]) {
     );
 }
 
-/// The menu fits the terminal, down to 80×25 (5d's `Terminals…` item made it a line taller:
-/// at 24 rows tmux 3.8 draws the status line over its last item). tmux 3.4 never opens a
-/// menu taller than the terminal and 3.8 draws the status line over its end, so below the
-/// tall menu's height (27 rows) and the status line's (2) the short one opens, without the
-/// separators and the note on moving between splits. At each height its last item is drawn.
+/// The menu fits the terminal, down to 80×24. tmux 3.4 never opens a menu taller than the
+/// terminal and 3.8 draws the status line over its end, so below the tall menu's height (27
+/// rows, `Terminals…` being in it only) and the status line's (2) the short one opens, without the separators and the
+/// note on moving between splits. At each height its last item is drawn.
 #[test]
 fn the_menu_fits_a_small_terminal() {
-    for (rows, tall) in [(25, false), (26, false), (28, false), (29, true)] {
+    for (rows, tall) in [
+        (24, false),
+        (26, false),
+        (27, false),
+        (28, false),
+        (29, true),
+    ] {
         let sb = Sandbox::start().unwrap();
         load(&sb);
         let term = attach_sized(&sb, 80, rows);

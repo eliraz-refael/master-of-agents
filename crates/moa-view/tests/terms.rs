@@ -136,6 +136,12 @@ fn terms_header_counts_idle() {
         })],
     );
     assert_eq!(head(&data).text(), "4 terminals · 0 idle");
+    // One is singular.
+    for pane in ["%7", "%9", "%11"] {
+        data.terms.remove(pane);
+    }
+    data.touch();
+    assert_eq!(head(&data).text(), "1 terminal · 0 idle");
 }
 
 /// `BrainRow.terminal_idle_ms` is what the view counts idle by: the brain's setting reaches
