@@ -27,7 +27,7 @@ const STOPPED: &str = "panel stopped · Ctrl-a r brings it back";
 
 /// A session's title, as a tab or a frame shows it: cut to 24 characters.
 fn cut(title: &str) -> String {
-    crate::ops::cut(title, TITLE_CHARS)
+    crate::text::cut(title, TITLE_CHARS)
 }
 
 /// An agent's tab name: its title, cut. Never `moa`, which in session `moa` would read as

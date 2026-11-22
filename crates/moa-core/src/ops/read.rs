@@ -9,13 +9,13 @@ use jiff::Span;
 use jiff::civil::Date;
 use serde_json::json;
 
-use super::cut;
 use crate::Now;
 use crate::live::spike_state;
 use crate::model::{NoteKind, ProjectId, Session, SuggestionStatus, TaskStatus};
 use crate::names::{is_live_spike, label, newest_first, place, title_or_prompt};
 use crate::op::{Done, OpError};
 use crate::state::State;
+use crate::text::cut;
 use crate::time::{age, days_ago, local_format, local_text};
 
 /// The label's cut, as the spike's `label` did.

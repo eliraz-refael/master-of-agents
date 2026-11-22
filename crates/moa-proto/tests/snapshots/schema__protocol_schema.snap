@@ -4,19 +4,124 @@ expression: all
 ---
 {
   "Call": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Call",
+    "anyOf": [
+      {
+        "type": "object",
+        "properties": {
+          "method": {
+            "const": "hello"
+          },
+          "params": {
+            "$ref": "#/$defs/Hello"
+          }
+        },
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      {
+        "type": "object",
+        "properties": {
+          "method": {
+            "const": "status"
+          },
+          "params": {
+            "$ref": "#/$defs/NoParams"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      {
+        "type": "object",
+        "properties": {
+          "method": {
+            "const": "shutdown"
+          },
+          "params": {
+            "$ref": "#/$defs/NoParams"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      {
+        "type": "object",
+        "properties": {
+          "method": {
+            "const": "upgrade"
+          },
+          "params": {
+            "$ref": "#/$defs/NoParams"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      {
+        "type": "object",
+        "properties": {
+          "method": {
+            "const": "subscribe"
+          },
+          "params": {
+            "$ref": "#/$defs/Subscribe"
+          }
+        },
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      {
+        "$ref": "#/$defs/Op"
+      }
+    ],
     "$defs": {
-      "Answer": {
-        "description": "How a suggestion is answered.",
-        "enum": [
-          "yes",
-          "no",
-          "later"
+      "NoParams": {
+        "type": [
+          "object",
+          "null"
         ],
-        "type": "string"
+        "properties": {},
+        "additionalProperties": false
+      },
+      "Hello": {
+        "description": "A client's greeting: who it is, which build, and what it says about its caller.",
+        "type": "object",
+        "properties": {
+          "client": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "caller": {
+            "$ref": "#/$defs/CallerInfo"
+          }
+        },
+        "required": [
+          "client",
+          "build",
+          "caller"
+        ]
       },
       "CallerInfo": {
         "description": "What a caller says about itself (the hook environment).",
+        "type": "object",
         "properties": {
+          "moa_session": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "claude_session": {
             "type": [
               "string",
@@ -28,1420 +133,36 @@ expression: all
               "string",
               "null"
             ]
-          },
-          "moa_session": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
-        },
-        "type": "object"
-      },
-      "Hello": {
-        "description": "A client's greeting: who it is, which build, and what it says about its caller.",
-        "properties": {
-          "build": {
-            "type": "string"
-          },
-          "caller": {
-            "$ref": "#/$defs/CallerInfo"
-          },
-          "client": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "client",
-          "build",
-          "caller"
-        ],
-        "type": "object"
-      },
-      "Leaf": {
-        "enum": [
-          "console",
-          "tree",
-          "today",
-          "activity",
-          "projects",
-          "plan",
-          "status",
-          "picture",
-          "agent"
-        ],
-        "type": "string"
-      },
-      "NoParams": {
-        "additionalProperties": false,
-        "properties": {},
-        "type": [
-          "object",
-          "null"
-        ]
-      },
-      "Op": {
-        "description": "One verb with its arguments. On the wire: `{\"method\": \"group.add\", \"params\": {...}}`.",
-        "oneOf": [
-          {
-            "properties": {
-              "method": {
-                "const": "group.add",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "path": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "path"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "group.rename",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "new": {
-                    "type": "string"
-                  },
-                  "old": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "old",
-                  "new"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "group.rm",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "path": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "path"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Folds or unfolds one tree path. Saved as one value; never a group.",
-            "properties": {
-              "method": {
-                "const": "group.fold",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "collapsed": {
-                    "type": "boolean"
-                  },
-                  "path": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "path",
-                  "collapsed"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "session.ls",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "all": {
-                    "default": false,
-                    "type": "boolean"
-                  }
-                },
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "session.set",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "group": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "q": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "q"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "session.archive",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "qs": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  }
-                },
-                "required": [
-                  "qs"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "session.find",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "q": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "q"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes\nonce tmux says which pane the tab has. The tab comes to the screen unless `bg`.",
-            "properties": {
-              "method": {
-                "const": "session.open",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "account": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "bg": {
-                    "default": false,
-                    "type": "boolean"
-                  },
-                  "group": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "prompt": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "title": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "path"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Brings a session's tab to the screen. A write: a session not running is resumed.",
-            "properties": {
-              "method": {
-                "const": "session.focus",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "q": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "q"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Relaunches a session's conversation in a new tab, under the account whose store it\nwas recorded in (C11); one that runs is only brought to the screen. The tab comes to\nthe screen unless `bg`.",
-            "properties": {
-              "method": {
-                "const": "session.resume",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "bg": {
-                    "default": false,
-                    "type": "boolean"
-                  },
-                  "q": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "q"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Ends a session and kills its tab, once moa can prove the tab is the session's.",
-            "properties": {
-              "method": {
-                "const": "session.close",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "q": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "q"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Puts sessions to sleep: their tabs close and they stay resumable. By name (`qs`), or\nevery one idle `idle_ms` that could sleep on its own. A `dry_run` only says which.",
-            "properties": {
-              "method": {
-                "const": "session.sleep",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "dry_run": {
-                    "default": false,
-                    "type": "boolean"
-                  },
-                  "idle_ms": {
-                    "default": null,
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "qs": {
-                    "default": [],
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  }
-                },
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Takes on the agent running in tab `pane` (`%N`), started outside moa, as a session moa\ndoesn't track: it shows alive or not, and never sleeps on its own. Its conversation is\n`id`, else the one its command names, else the newest it wrote.",
-            "properties": {
-              "method": {
-                "const": "session.adopt",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "group": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "id": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "pane": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "pane"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Restarts an adopted session under moa: its tab is closed and its conversation resumed\nin a new tab moa tracks.",
-            "properties": {
-              "method": {
-                "const": "session.restart",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "q": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "q"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is\nnamed after `title`, else the folder.",
-            "properties": {
-              "method": {
-                "const": "term.open",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "path": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "path"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Brings terminal `pane` (`%N`), a tab `term.open` or `Ctrl-a $` opened, to the screen.",
-            "properties": {
-              "method": {
-                "const": "term.show",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "pane": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "pane"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The open terminals, from one fresh listing of the tabs.",
-            "properties": {
-              "method": {
-                "const": "term.ls",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/NoParams"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Names terminal `target` (its number `7` or `#7`, its tab `%12`, or its name) `name`.",
-            "properties": {
-              "method": {
-                "const": "term.name",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "name": {
-                    "type": "string"
-                  },
-                  "target": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "target",
-                  "name"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Notes terminal `target` with `note`; an empty one clears it.",
-            "properties": {
-              "method": {
-                "const": "term.note",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "note": {
-                    "type": "string"
-                  },
-                  "target": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "target",
-                  "note"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Closes terminal `target`, gently: a program running there gets Ctrl-c first, and the\nterminal closes 3 seconds later.",
-            "properties": {
-              "method": {
-                "const": "term.close",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "target": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "target"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Closes terminal `target` `after_ms` from now; none clears its timeout.",
-            "properties": {
-              "method": {
-                "const": "term.timeout",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "after_ms": {
-                    "default": null,
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "target": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "target"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "task.ls",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "all": {
-                    "default": false,
-                    "type": "boolean"
-                  },
-                  "project": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "task.add",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/TaskAdd"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "task.set",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/TaskSet"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "note.add",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "kind": {
-                    "default": null,
-                    "description": "`None` is `fact`.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "project": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "text"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "project.show",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "name": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "name"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "project.add",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "name": {
-                    "type": "string"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "summary": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "name",
-                  "path"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "brief",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/NoParams"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "attention",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/NoParams"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "suggest",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "actions": {
-                    "default": [],
-                    "description": "Each is a moactl action, as typed: `task set 1 --status done`.",
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "text"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "suggestion.answer",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "answer": {
-                    "$ref": "#/$defs/Answer"
-                  },
-                  "id": {
-                    "default": null,
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "answer"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "method": {
-                "const": "suggestion.ls",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/NoParams"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The front door's handshake: answers `{\"running\": bool}` once moa's terminal server is\nlinked and has its `moa` session, or when there is no server. `tmux` is the\nabsolute path of the tmux program the front door found.",
-            "properties": {
-              "method": {
-                "const": "tmux.ensure",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "tmux": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`\nit shows, and whether moa `placed` it (it runs with `MOA_NO_AUTOSTART`). The view moa\ntagged the tab with wins over the one asked for; without either it gets the one this\npane last had, else the picture. Answers `{key, view, managed}`: `managed` when the\nview is moa's. `once`: a popup (`moa panel … --once`), which tmux ends when its\nprogram does.",
-            "properties": {
-              "method": {
-                "const": "ui.panel",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "once": {
-                    "default": false,
-                    "type": "boolean"
-                  },
-                  "pane": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "placed": {
-                    "default": false,
-                    "type": "boolean"
-                  },
-                  "view": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/View"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "default": null
-                  }
-                },
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Gives the panel in tab `pane` (`%N`) another view: its tag, its frame and its\n`panels` row. Answers `{pane, view}`.",
-            "properties": {
-              "method": {
-                "const": "ui.select_view",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "pane": {
-                    "type": "string"
-                  },
-                  "view": {
-                    "$ref": "#/$defs/View"
-                  }
-                },
-                "required": [
-                  "pane",
-                  "view"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The folder a panel's selection is in, for a terminal opened \"here\".",
-            "properties": {
-              "method": {
-                "const": "ui.here",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "folder": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "A sheet (the picker or help, linked into your session) is done: its tab is unlinked\nfrom every session but moa's hidden one. Only a sheet's own panel sends it.",
-            "properties": {
-              "method": {
-                "const": "ui.close",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/NoParams"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The layouts in `layouts.json` and the presets, the brain's current one marked.",
-            "properties": {
-              "method": {
-                "const": "layout.list",
-                "type": "string"
-              },
-              "params": {
-                "$ref": "#/$defs/NoParams"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "One layout's JSON.",
-            "properties": {
-              "method": {
-                "const": "layout.show",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "name": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "name"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Saves `layout` as `name` in `layouts.json`, once it validates.",
-            "properties": {
-              "method": {
-                "const": "layout.set",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "layout": true,
-                  "name": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "name",
-                  "layout"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Builds layout `name` in the cockpit (the current one when `None`), and makes it the\nbrain's current layout.",
-            "properties": {
-              "method": {
-                "const": "layout.apply",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "name": {
-                    "default": null,
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Selects a panel in the cockpit, putting the current layout back first when the panel\nis missing from it. `agent` is the agent spot.",
-            "properties": {
-              "method": {
-                "const": "goto",
-                "type": "string"
-              },
-              "params": {
-                "properties": {
-                  "panel": {
-                    "$ref": "#/$defs/Leaf"
-                  }
-                },
-                "required": [
-                  "panel"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "method",
-              "params"
-            ],
-            "type": "object"
-          }
-        ]
+        }
       },
       "Subscribe": {
         "description": "Which topics a connection follows. `since` is the rev the client already holds.",
+        "type": "object",
         "properties": {
+          "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Topic"
+            }
+          },
           "since": {
-            "default": null,
-            "format": "uint64",
-            "minimum": 0,
             "type": [
               "integer",
               "null"
-            ]
-          },
-          "topics": {
-            "items": {
-              "$ref": "#/$defs/Topic"
-            },
-            "type": "array"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "default": null
           }
         },
         "required": [
           "topics"
-        ],
-        "type": "object"
-      },
-      "TaskAdd": {
-        "description": "`task add`'s arguments, all the user's raw text.",
-        "properties": {
-          "blocked_on": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "due": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "note": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "priority": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "project": {
-            "type": "string"
-          },
-          "session": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "status": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title": {
-            "type": "string"
-          },
-          "today": {
-            "default": false,
-            "type": "boolean"
-          },
-          "who": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "project",
-          "title"
-        ],
-        "type": "object"
-      },
-      "TaskSet": {
-        "description": "`task set`'s arguments. `Some(\"\")` clears `due`, `priority`, `session`, `note` and\n`blocked_on`.",
-        "properties": {
-          "blocked_on": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "due": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "not_today": {
-            "default": false,
-            "type": "boolean"
-          },
-          "note": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "priority": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "session": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "status": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "today": {
-            "default": false,
-            "type": "boolean"
-          },
-          "who": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id"
-        ],
-        "type": "object"
+        ]
       },
       "Topic": {
         "description": "A named set of rows a view can subscribe to.",
+        "type": "string",
         "enum": [
           "sessions",
           "groups",
@@ -1455,11 +176,1356 @@ expression: all
           "panels",
           "layouts",
           "terms"
-        ],
-        "type": "string"
+        ]
+      },
+      "Op": {
+        "description": "One verb with its arguments. On the wire: `{\"method\": \"group.add\", \"params\": {...}}`.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "group.add"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "group.rename"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "old": {
+                    "type": "string"
+                  },
+                  "new": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "old",
+                  "new"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "group.rm"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Folds or unfolds one tree path. Saved as one value; never a group.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "group.fold"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "collapsed": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "path",
+                  "collapsed"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.ls"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "all": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.set"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "group": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "q"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.archive"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "qs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "qs"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.find"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "A fresh session in a new tab of moa's terminal. `path` is absolute; the reply comes\nonce tmux says which pane the tab has. The tab comes to the screen unless `bg`.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.open"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "group": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "prompt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "bg": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Brings a session's tab to the screen. A write: a session not running is resumed.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.focus"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Relaunches a session's conversation in a new tab, under the account whose store it\nwas recorded in (C11); one that runs is only brought to the screen. The tab comes to\nthe screen unless `bg`.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.resume"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  },
+                  "bg": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "q"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Ends a session and kills its tab, once moa can prove the tab is the session's.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.close"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Puts sessions to sleep: their tabs close and they stay resumable. By name (`qs`), or\nevery one idle `idle_ms` that could sleep on its own. A `dry_run` only says which.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.sleep"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "qs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  },
+                  "idle_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "default": null
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Takes on the agent running in tab `pane` (`%N`), started outside moa, as a session moa\ndoesn't track: it shows alive or not, and never sleeps on its own. Its conversation is\n`id`, else the one its command names, else the newest it wrote.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.adopt"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "pane": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "group": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "pane"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Restarts an adopted session under moa: its tab is closed and its conversation resumed\nin a new tab moa tracks.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "session.restart"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "q"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "A plain shell in a new tab of moa's terminal, in folder `path` (absolute). The tab is\nnamed after `title`, else the folder.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "term.open"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Brings terminal `pane` (`%N`), a tab `term.open` or `Ctrl-a $` opened, to the screen.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "term.show"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "pane": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "pane"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "The open terminals, from one fresh listing of the tabs.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "term.ls"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Names terminal `target` (its number `7` or `#7`, its tab `%12`, or its name) `name`.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "term.name"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target",
+                  "name"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Notes terminal `target` with `note`; an empty one clears it.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "term.note"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target",
+                  "note"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Closes terminal `target`, gently: a program running there gets Ctrl-c first, and the\nterminal closes 3 seconds later.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "term.close"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Closes terminal `target` `after_ms` from now; none clears its timeout.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "term.timeout"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  },
+                  "after_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "target"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "task.ls"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "all": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "task.add"
+              },
+              "params": {
+                "$ref": "#/$defs/TaskAdd"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "task.set"
+              },
+              "params": {
+                "$ref": "#/$defs/TaskSet"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "note.add"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "kind": {
+                    "description": "`None` is `fact`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "project.show"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "project.add"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "name",
+                  "path"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "brief"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "attention"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "suggest"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "actions": {
+                    "description": "Each is a moactl action, as typed: `task set 1 --status done`.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "suggestion.answer"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "default": null
+                  },
+                  "answer": {
+                    "$ref": "#/$defs/Answer"
+                  }
+                },
+                "required": [
+                  "answer"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "suggestion.ls"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "The front door's handshake: answers `{\"running\": bool}` once moa's terminal server is\nlinked and has its `moa` session, or when there is no server. `tmux` is the\nabsolute path of the tmux program the front door found.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "tmux.ensure"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "tmux": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "A panel says which it is: the tab `pane` (`%N`) it draws in, if any, and the `view`\nit shows, and whether moa `placed` it (it runs with `MOA_NO_AUTOSTART`). The view moa\ntagged the tab with wins over the one asked for; without either it gets the one this\npane last had, else the picture. Answers `{key, view, managed}`: `managed` when the\nview is moa's. `once`: a popup (`moa panel … --once`), which tmux ends when its\nprogram does.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "ui.panel"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "pane": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "view": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/View"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "placed": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "once": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Gives the panel in tab `pane` (`%N`) another view: its tag, its frame and its\n`panels` row. Answers `{pane, view}`.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "ui.select_view"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "pane": {
+                    "type": "string"
+                  },
+                  "view": {
+                    "$ref": "#/$defs/View"
+                  }
+                },
+                "required": [
+                  "pane",
+                  "view"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "The folder a panel's selection is in, for a terminal opened \"here\".",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "ui.here"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "folder": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "A sheet (the picker or help, linked into your session) is done: its tab is unlinked\nfrom every session but moa's hidden one. Only a sheet's own panel sends it.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "ui.close"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "The layouts in `layouts.json` and the presets, the brain's current one marked.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "layout.list"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "One layout's JSON.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "layout.show"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Saves `layout` as `name` in `layouts.json`, once it validates.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "layout.set"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "layout": true
+                },
+                "required": [
+                  "name",
+                  "layout"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Builds layout `name` in the cockpit (the current one when `None`), and makes it the\nbrain's current layout.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "layout.apply"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Selects a panel in the cockpit, putting the current layout back first when the panel\nis missing from it. `agent` is the agent spot.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "goto"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "panel": {
+                    "$ref": "#/$defs/Leaf"
+                  }
+                },
+                "required": [
+                  "panel"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          }
+        ]
+      },
+      "TaskAdd": {
+        "description": "`task add`'s arguments, all the user's raw text.",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "today": {
+            "type": "boolean",
+            "default": false
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "blocked_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "who": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "due": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "project",
+          "title"
+        ]
+      },
+      "TaskSet": {
+        "description": "`task set`'s arguments. `Some(\"\")` clears `due`, `priority`, `session`, `note` and\n`blocked_on`.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "who": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "due": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "blocked_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "today": {
+            "type": "boolean",
+            "default": false
+          },
+          "not_today": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "Answer": {
+        "description": "How a suggestion is answered.",
+        "type": "string",
+        "enum": [
+          "yes",
+          "no",
+          "later"
+        ]
       },
       "View": {
         "description": "What a panel shows.",
+        "type": "string",
         "enum": [
           "console",
           "tree",
@@ -1474,131 +1540,28 @@ expression: all
           "empty-slot",
           "help",
           "setup"
-        ],
-        "type": "string"
+        ]
+      },
+      "Leaf": {
+        "type": "string",
+        "enum": [
+          "console",
+          "tree",
+          "today",
+          "activity",
+          "projects",
+          "plan",
+          "status",
+          "picture",
+          "agent"
+        ]
       }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "anyOf": [
-      {
-        "properties": {
-          "method": {
-            "const": "hello"
-          },
-          "params": {
-            "$ref": "#/$defs/Hello"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "status"
-          },
-          "params": {
-            "$ref": "#/$defs/NoParams"
-          }
-        },
-        "required": [
-          "method"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "shutdown"
-          },
-          "params": {
-            "$ref": "#/$defs/NoParams"
-          }
-        },
-        "required": [
-          "method"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "upgrade"
-          },
-          "params": {
-            "$ref": "#/$defs/NoParams"
-          }
-        },
-        "required": [
-          "method"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "method": {
-            "const": "subscribe"
-          },
-          "params": {
-            "$ref": "#/$defs/Subscribe"
-          }
-        },
-        "required": [
-          "method",
-          "params"
-        ],
-        "type": "object"
-      },
-      {
-        "$ref": "#/$defs/Op"
-      }
-    ],
-    "title": "Call"
-  },
-  "CoreEvent": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Something the core tells its views that is not a row.",
-    "oneOf": [
-      {
-        "properties": {
-          "kind": {
-            "const": "error",
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind",
-          "message"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "kind": {
-            "const": "ui",
-            "type": "string"
-          },
-          "text": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind",
-          "text"
-        ],
-        "type": "object"
-      }
-    ],
-    "title": "CoreEvent"
+    }
   },
   "HelloOk": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HelloOk",
+    "type": "object",
     "properties": {
       "brain": {
         "type": "string"
@@ -1606,18 +1569,18 @@ expression: all
       "build": {
         "type": "string"
       },
+      "rev": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
       "matched": {
         "type": "boolean"
       },
       "pid": {
+        "type": "integer",
         "format": "uint32",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "rev": {
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
+        "minimum": 0
       }
     },
     "required": [
@@ -1626,257 +1589,12 @@ expression: all
       "rev",
       "matched",
       "pid"
-    ],
-    "title": "HelloOk",
-    "type": "object"
-  },
-  "Patch": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "What changed since the subscriber's last rev: rows to insert or replace (each carries its\n`\"key\"`) and keys to remove, by topic. A topic that did not change is absent.",
-    "properties": {
-      "delete": {
-        "additionalProperties": false,
-        "properties": {
-          "activity": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "asks": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "brain": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "groups": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "layouts": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "panels": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "projects": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "sessions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "status": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "suggestions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "tasks": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "terms": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "type": "object"
-      },
-      "rev": {
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "upsert": {
-        "additionalProperties": false,
-        "properties": {
-          "activity": {
-            "items": true,
-            "type": "array"
-          },
-          "asks": {
-            "items": true,
-            "type": "array"
-          },
-          "brain": {
-            "items": true,
-            "type": "array"
-          },
-          "groups": {
-            "items": true,
-            "type": "array"
-          },
-          "layouts": {
-            "items": true,
-            "type": "array"
-          },
-          "panels": {
-            "items": true,
-            "type": "array"
-          },
-          "projects": {
-            "items": true,
-            "type": "array"
-          },
-          "sessions": {
-            "items": true,
-            "type": "array"
-          },
-          "status": {
-            "items": true,
-            "type": "array"
-          },
-          "suggestions": {
-            "items": true,
-            "type": "array"
-          },
-          "tasks": {
-            "items": true,
-            "type": "array"
-          },
-          "terms": {
-            "items": true,
-            "type": "array"
-          }
-        },
-        "type": "object"
-      }
-    },
-    "required": [
-      "rev",
-      "upsert",
-      "delete"
-    ],
-    "title": "Patch",
-    "type": "object"
-  },
-  "SnapshotMsg": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "The full rows of the subscribed topics at one rev.",
-    "properties": {
-      "rev": {
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "topics": {
-        "additionalProperties": false,
-        "properties": {
-          "activity": {
-            "items": true,
-            "type": "array"
-          },
-          "asks": {
-            "items": true,
-            "type": "array"
-          },
-          "brain": {
-            "items": true,
-            "type": "array"
-          },
-          "groups": {
-            "items": true,
-            "type": "array"
-          },
-          "layouts": {
-            "items": true,
-            "type": "array"
-          },
-          "panels": {
-            "items": true,
-            "type": "array"
-          },
-          "projects": {
-            "items": true,
-            "type": "array"
-          },
-          "sessions": {
-            "items": true,
-            "type": "array"
-          },
-          "status": {
-            "items": true,
-            "type": "array"
-          },
-          "suggestions": {
-            "items": true,
-            "type": "array"
-          },
-          "tasks": {
-            "items": true,
-            "type": "array"
-          },
-          "terms": {
-            "items": true,
-            "type": "array"
-          }
-        },
-        "type": "object"
-      }
-    },
-    "required": [
-      "rev",
-      "topics"
-    ],
-    "title": "SnapshotMsg",
-    "type": "object"
+    ]
   },
   "StatusOk": {
-    "$defs": {
-      "TmuxLinkData": {
-        "description": "The terminal server the daemon is linked to: its tmux version and generation.",
-        "properties": {
-          "pid": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "start": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "version": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "version",
-          "pid",
-          "start"
-        ],
-        "type": "object"
-      }
-    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "StatusOk",
+    "type": "object",
     "properties": {
       "brain": {
         "type": "string"
@@ -1884,35 +1602,29 @@ expression: all
       "build": {
         "type": "string"
       },
+      "pid": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0
+      },
+      "launches": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
+      "sessions": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
       "caller": {
         "type": "string"
       },
-      "launches": {
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "panel_starts": {
-        "default": 0,
-        "description": "How many panels moa started or restarted while this daemon ran.",
-        "format": "uint32",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "pid": {
-        "format": "uint32",
-        "minimum": 0,
-        "type": "integer"
-      },
-      "sessions": {
-        "additionalProperties": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "type": "object"
-      },
       "tmux": {
+        "description": "The terminal server, while linked.",
         "anyOf": [
           {
             "$ref": "#/$defs/TmuxLinkData"
@@ -1921,14 +1633,20 @@ expression: all
             "type": "null"
           }
         ],
-        "default": null,
-        "description": "The terminal server, while linked."
+        "default": null
       },
       "tmux_restarts": {
-        "default": 0,
+        "type": "integer",
         "format": "uint32",
         "minimum": 0,
-        "type": "integer"
+        "default": 0
+      },
+      "panel_starts": {
+        "description": "How many panels moa started or restarted while this daemon ran.",
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0,
+        "default": 0
       }
     },
     "required": [
@@ -1939,7 +1657,289 @@ expression: all
       "sessions",
       "caller"
     ],
-    "title": "StatusOk",
-    "type": "object"
+    "$defs": {
+      "TmuxLinkData": {
+        "description": "The terminal server the daemon is linked to: its tmux version and generation.",
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "start": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "version",
+          "pid",
+          "start"
+        ]
+      }
+    }
+  },
+  "SnapshotMsg": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "SnapshotMsg",
+    "description": "The full rows of the subscribed topics at one rev.",
+    "type": "object",
+    "properties": {
+      "rev": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
+      "topics": {
+        "type": "object",
+        "properties": {
+          "activity": {
+            "type": "array",
+            "items": true
+          },
+          "asks": {
+            "type": "array",
+            "items": true
+          },
+          "brain": {
+            "type": "array",
+            "items": true
+          },
+          "groups": {
+            "type": "array",
+            "items": true
+          },
+          "layouts": {
+            "type": "array",
+            "items": true
+          },
+          "panels": {
+            "type": "array",
+            "items": true
+          },
+          "projects": {
+            "type": "array",
+            "items": true
+          },
+          "sessions": {
+            "type": "array",
+            "items": true
+          },
+          "status": {
+            "type": "array",
+            "items": true
+          },
+          "suggestions": {
+            "type": "array",
+            "items": true
+          },
+          "tasks": {
+            "type": "array",
+            "items": true
+          },
+          "terms": {
+            "type": "array",
+            "items": true
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "rev",
+      "topics"
+    ]
+  },
+  "Patch": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Patch",
+    "description": "What changed since the subscriber's last rev: rows to insert or replace (each carries its\n`\"key\"`) and keys to remove, by topic. A topic that did not change is absent.",
+    "type": "object",
+    "properties": {
+      "rev": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0
+      },
+      "upsert": {
+        "type": "object",
+        "properties": {
+          "activity": {
+            "type": "array",
+            "items": true
+          },
+          "asks": {
+            "type": "array",
+            "items": true
+          },
+          "brain": {
+            "type": "array",
+            "items": true
+          },
+          "groups": {
+            "type": "array",
+            "items": true
+          },
+          "layouts": {
+            "type": "array",
+            "items": true
+          },
+          "panels": {
+            "type": "array",
+            "items": true
+          },
+          "projects": {
+            "type": "array",
+            "items": true
+          },
+          "sessions": {
+            "type": "array",
+            "items": true
+          },
+          "status": {
+            "type": "array",
+            "items": true
+          },
+          "suggestions": {
+            "type": "array",
+            "items": true
+          },
+          "tasks": {
+            "type": "array",
+            "items": true
+          },
+          "terms": {
+            "type": "array",
+            "items": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "delete": {
+        "type": "object",
+        "properties": {
+          "activity": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "asks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "brain": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "layouts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "panels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "suggestions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "terms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "rev",
+      "upsert",
+      "delete"
+    ]
+  },
+  "CoreEvent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "CoreEvent",
+    "description": "Something the core tells its views that is not a row.",
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "error"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ]
+      },
+      {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "ui"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ]
+      }
+    ]
   }
 }

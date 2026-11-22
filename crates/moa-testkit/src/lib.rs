@@ -4,11 +4,13 @@ pub mod brain;
 mod sandbox;
 pub mod spike_fixture;
 pub mod spike_gen;
+pub mod stub;
 pub mod temp_brain;
 mod terminal;
 
 pub use sandbox::{Sandbox, TMUX_NOT_FOUND, tmux_path, wait_for};
 pub use spike_fixture::{OLD_SCHEMA_SQL, Scenario, SpikeBrain, SpikeFixture, ids};
+pub use stub::{StubStep, stub_log, write_stub_script};
 pub use temp_brain::TempBrain;
 pub use terminal::{Terminal, pty, without_terminal};
 
@@ -45,16 +47,27 @@ pub enum FakeStep {
     Hang,
 }
 
-/// The path of the `fake-claude` binary, built next to the test binaries by `--workspace`.
-pub fn fake_claude() -> PathBuf {
+/// The path of a test binary (`fake-claude`, `stub-acp`), built next to the test binaries by
+/// `--workspace`.
+pub fn test_bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     // Test binaries sit in `deps/` (or deeper, in a per-package build dir) under the profile
     // dir that holds the workspace's binaries, so look upward for it.
     exe.ancestors()
         .skip(1)
-        .map(|dir| dir.join("fake-claude"))
+        .map(|dir| dir.join(name))
         .find(|path| path.is_file())
-        .expect("fake-claude isn't built: run the tests with --workspace")
+        .unwrap_or_else(|| panic!("{name} isn't built: run the tests with --workspace"))
+}
+
+/// The path of the `fake-claude` binary.
+pub fn fake_claude() -> PathBuf {
+    test_bin("fake-claude")
+}
+
+/// The path of the `stub-acp` binary: a scripted stand-in for moa's agent.
+pub fn stub_acp() -> PathBuf {
+    test_bin("stub-acp")
 }
 
 /// `fake-claude` under the name `claude`: the symlink `<dir>/bin/claude`, so process reads

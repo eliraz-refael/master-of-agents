@@ -105,6 +105,15 @@ fn why_unread(alive: bool, owner: Option<(u32, u32)>, me: u32) -> Unread {
     }
 }
 
+/// Whether `pid` exists and isn't a zombie. A zombie has exited and only waits for its
+/// parent to reap it, which [`pid_alive`](crate::pid_alive) still counts as alive. Where
+/// nothing adopts orphans (a Nix build sandbox's pid 1) they stay zombies for good. macOS
+/// can't tell a zombie (libproc doesn't answer for one), and launchd reaps orphans, so
+/// there it is `pid_alive`.
+pub fn running(pid: u32) -> bool {
+    sys::pid_alive(pid) && !sys::zombie(pid)
+}
+
 /// When `pid` started, or `None` when it is gone.
 pub fn started(pid: u32) -> Option<SystemTime> {
     sys::start_time(pid)
@@ -210,6 +219,12 @@ fn stat_fields(stat: &str) -> Option<std::str::SplitWhitespace<'_>> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn stat_ppid(stat: &str) -> Option<u32> {
     stat_fields(stat)?.nth(1)?.parse().ok()
+}
+
+/// Field 3 of a `/proc/<pid>/stat` line: the state letter (`Z` a zombie, `X` dead).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn stat_state(stat: &str) -> Option<char> {
+    stat_fields(stat)?.next()?.chars().next()
 }
 
 /// Field 22 of a `/proc/<pid>/stat` line: the start time, in clock ticks since boot.
@@ -321,6 +336,23 @@ mod tests {
         assert_eq!(stat_start_ticks(stat), Some(98765));
         assert_eq!(stat_ppid("4242 (sleep"), None);
         assert_eq!(stat_start_ticks("4242 (sleep) S 1"), None);
+        assert_eq!(stat_state(stat), Some('S'));
+        assert_eq!(stat_state("4242 (a) (Z) Z 1"), Some('Z'));
+        assert_eq!(stat_state("4242 (sleep"), None);
+    }
+
+    #[test]
+    fn running_is_alive_and_not_a_zombie() {
+        assert!(running(std::process::id()));
+        assert!(!running(0));
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        crate::wait_exited(pid).unwrap();
+        // Exited, not reaped: a zombie is alive to `kill(pid, 0)`, and on Linux not running.
+        assert!(crate::pid_alive(pid));
+        assert_eq!(running(pid), cfg!(target_os = "macos"));
+        child.wait().unwrap();
+        assert!(!running(pid));
     }
 
     /// The rule the reads go by, with made-up owners: no process is gone; another user's,

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use super::adopt;
 use super::launch::{WENT_AWAY, WINDOW_NAME_CUT, focus_cmds, warn};
-use super::{adopt, cut};
 use crate::change::Change;
 use crate::cockpit::Scene;
 use crate::core::{Tx, post_commit};
@@ -16,6 +16,7 @@ use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::sleep::kill_pane;
 use crate::state::{State, Table};
 use crate::terminals::{self, Closing, STOP_WAIT_MS, TIMEOUT_FORM, TIMEOUT_MS};
+use crate::text::cut;
 use crate::time::{span, until};
 use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;

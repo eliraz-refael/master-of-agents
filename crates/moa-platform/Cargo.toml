@@ -8,13 +8,13 @@ publish = false
 
 [dependencies]
 libc.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "sync", "process", "io-util", "rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 
 [lints]
 workspace = true

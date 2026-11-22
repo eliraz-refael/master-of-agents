@@ -22,7 +22,7 @@ use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
 use moa_core::tmux::cmd::Cmd;
-use moa_platform::spool;
+use moa_platform::{lock, spool};
 use moa_store::actor::{Fault, StoreHandle};
 use moa_store::{Store, StoreError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -111,10 +111,6 @@ pub struct Stats {
 pub type ConnReply = (ReqId, Result<Done, OpError>);
 type ConnTx = mpsc::UnboundedSender<ConnReply>;
 type Conns = Arc<Mutex<HashMap<ConnId, ConnTx>>>;
-
-pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// What waits in the core's inbox. One `Input` per request, so boxing buys nothing.
 #[allow(clippy::large_enum_variant)]

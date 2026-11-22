@@ -249,6 +249,14 @@ pub(crate) fn uids(pid: u32) -> Option<(u32, u32)> {
     crate::proc::status_uids(&std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
 }
 
+/// Whether `/proc/<pid>/stat` says `pid` has exited (`Z`) or is dead (`X`); `false` when
+/// it can't be read.
+pub(crate) fn zombie(pid: u32) -> bool {
+    proc_pid(pid)
+        .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/stat")).ok())
+        .is_some_and(|stat| matches!(crate::proc::stat_state(&stat), Some('Z' | 'X')))
+}
+
 /// When `pid` started: field 22 of `/proc/<pid>/stat`, in clock ticks since boot, plus the
 /// boot time (`btime` in `/proc/stat`).
 pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {

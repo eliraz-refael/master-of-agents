@@ -23,8 +23,8 @@ use moa_tmux::conf::{hooks, unhooks};
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::core_task::lock;
 use crate::supervise::supervise;
+use moa_platform::lock;
 
 /// The waits before each reconnect, once the control client has dropped while the server
 /// is still there (T4). Then the link gives up until it is asked again.

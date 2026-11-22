@@ -416,6 +416,7 @@ fn layout_set_validates_writes_and_publishes() {
       "panel": "tree"
     },
     "cockpit": {
+      "split": "v",
       "children": [
         {
           "panel": "console"
@@ -423,10 +424,10 @@ fn layout_set_validates_writes_and_publishes() {
         {
           "panel": "plan"
         }
-      ],
-      "split": "v"
+      ]
     },
     "mine": {
+      "split": "h",
       "children": [
         {
           "panel": "tree",
@@ -435,8 +436,7 @@ fn layout_set_validates_writes_and_publishes() {
         {
           "panel": "agent"
         }
-      ],
-      "split": "h"
+      ]
     }
   },
   "theme": {
