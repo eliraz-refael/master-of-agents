@@ -17,7 +17,7 @@ use moa_core::model::{
 };
 use moa_core::op::{NoParams, Op, OpError};
 use moa_core::panel::View;
-use moa_core::state::{Deps, Snapshot, State};
+use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::terminals::{find, is_idle, open_for};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
@@ -1199,6 +1199,153 @@ fn a_control_client_touches_nothing() {
 
 // `term ls`, `name` and `note` (T5).
 
+/// 5d p2 rulings: a long name's `@moa_label` is cut as the tab's is, one rule for both.
+#[test]
+fn a_long_names_label_is_cut_like_the_tab() {
+    let mut r = Rig::found();
+    let long = "y".repeat(40);
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        5,
+        Op::TermName {
+            target: "%5".into(),
+            name: long.clone(),
+        },
+    );
+    let sent = sent(&fx);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent[0].argv()[3], "@moa_label");
+    assert_eq!(sent[0].argv()[4], sent[1].argv()[3], "{sent:?}");
+    assert_ne!(sent[0].argv()[4], format!("⌨ {long}"));
+}
+
+/// Renaming waits for tmux: with the link down nothing changes.
+#[test]
+fn naming_with_the_link_down_is_refused() {
+    let mut r = Rig::found();
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let before = r.open(5).unwrap().name.clone();
+    let fx = send(
+        &r.b,
+        &mut r.st,
+        5,
+        Op::TermName {
+            target: "%5".into(),
+            name: "Kite".into(),
+        },
+    );
+    assert_eq!(
+        refusal(&fx),
+        "moa isn't open in a terminal yet; run moa first"
+    );
+    assert!(records(&fx).is_empty() && sent(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.open(5).unwrap().name, before);
+}
+
+/// Losing tmux isn't leaving a terminal: a dropped link stamps nothing, and neither does
+/// the reconnect that finds the same terminal looked at.
+#[test]
+fn a_dropped_link_is_not_leaving_a_terminal() {
+    let mut r = Rig::found();
+    let at = later(&r.b, 1_000);
+    look(&mut r, at.clone());
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+    let fx = feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    link_up(&r.b, &mut r.st);
+    let at2 = later(&r.b, 5_000);
+    let fx = r.list_as(
+        at2,
+        &["S $0 moa", "S $1 _moa"],
+        &[P5, P6],
+        &terms56(),
+        &["C 0 $0 /dev/ttys1"],
+    );
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    let seen = reconciled_again(&mut r);
+    assert!(r.st.tmux().reconciled(), "{seen:?}");
+    assert!(records(&seen).is_empty(), "{seen:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, Some(at.wall));
+}
+
+/// Answers the listing a connection waits on after the start drain already ran, with `%5`
+/// and `%6` as they are; the effects.
+fn reconciled_again(r: &mut Rig) -> Vec<Effect> {
+    let conn = r.conn();
+    let asked: Vec<u64> = r.st.tmux().queries().collect();
+    let mut seen = Vec::new();
+    for n in asked {
+        let lines = |l: &[String]| Ok(l.to_vec());
+        seen.extend(feed(
+            &r.b,
+            &mut r.st,
+            TmuxIn::Replies {
+                conn,
+                token: TmuxToken::Query(n),
+                results: vec![lines(&[info("%5"), info("%6")]), lines(&[])],
+            },
+        ));
+    }
+    seen
+}
+
+/// A stamp the store refused is tried again by the next input, not lost.
+#[test]
+fn a_refused_stamp_is_tried_again() {
+    // `%5`'s row is one this build doesn't know, so a write to it is refused.
+    let known = Rig::found();
+    let open = vec![
+        known.open(5).unwrap().clone(),
+        known.open(6).unwrap().clone(),
+    ];
+    let snapshot = |r: &Rig, unknown: bool| {
+        let mut snap = r.b.snapshot();
+        snap.sessions.push(session_s(&r.b));
+        snap.next_ids.terminal = 3;
+        snap.terminals = open.clone();
+        if unknown {
+            snap.unknown.push(LoadNote {
+                table: "terminals",
+                key: "#1".into(),
+                reason: "a state this build doesn't know",
+            });
+        }
+        snap
+    };
+    let mut r = Rig::linked(Vec::new());
+    let snap = snapshot(&r, true);
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        r.b.now(),
+    );
+    r.list(&[P5, P6], &terms56());
+    r.reconcile(&[&info("%5"), &info("%6")]);
+    let at = later(&r.b, 1_000);
+    let fx = look(&mut r, at);
+    assert!(records(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.open(5).unwrap().touched_at, None);
+
+    // The row is known again; the next input stamps what was refused.
+    let at = later(&r.b, 2_000);
+    let snap = snapshot(&r, false);
+    handle_checked(
+        &mut r.st,
+        Input::Reload {
+            snapshot: Box::new(snap),
+            refuse_writes: None,
+        },
+        at.clone(),
+    );
+    let fx = r.reconcile(&[&info("%5"), &info("%6")]);
+    assert_eq!(records(&fx).len(), 1, "{fx:?}");
+    assert!(r.open(5).unwrap().touched_at.is_some());
+}
+
 const MIN: i64 = 60_000;
 const HOUR: i64 = 60 * MIN;
 const LS_DOWN: &str = "moa isn't connected to tmux right now; this list may be out of date";
@@ -1517,7 +1664,7 @@ fn naming_sets_the_record_label_and_tab() {
                 "-t",
                 "%5",
                 "@moa_label",
-                "⌨ Harbor ##1 build server with a long name"
+                "⌨ Harbor ##1 build server"
             ]),
             Cmd::new("rename-window").args(["-t", "%5", "--", "⌨ Harbor ##1 build server"]),
         ]

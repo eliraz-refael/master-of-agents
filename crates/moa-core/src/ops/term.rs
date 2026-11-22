@@ -21,7 +21,7 @@ use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
 use crate::tmux::link::{
-    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, set_pane_option,
+    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, ready, set_pane_option,
 };
 
 const TERM_NOT_FULL: &str = "term needs a full path";
@@ -446,6 +446,7 @@ pub(crate) fn name(
     if name.starts_with('%') || number.parse::<i64>().is_ok() {
         return Err(OpError(NAME_FORM.into()));
     }
+    ready(state)?;
     let t = terminals::find(state, target)?.clone();
     let pane: PaneId = t.pane_id.parse().map_err(|_| OpError(TERM_GONE.into()))?;
     let id = t.id.0;
@@ -456,7 +457,7 @@ pub(crate) fn name(
             ..t
         })],
     )?;
-    let label = format!("⌨ {name}");
+    let label = tab_label(name);
     tx.tmux(set_pane_option(pane, "@moa_label", &literal_format(&label)));
     let topology = &state.tmux().topology;
     let alone = topology
@@ -467,7 +468,7 @@ pub(crate) fn name(
             "-t",
             &pane.to_string(),
             "--",
-            &literal_format(&tab_label(name)),
+            &literal_format(&label),
         ]));
     }
     if state.tmux().conn().is_some() {

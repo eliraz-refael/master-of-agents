@@ -679,6 +679,7 @@ pub(crate) fn mark_seen_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>)
 
 /// Runs `terminals::touched` and adds what it changed to `fx` ([`fold_in`]).
 fn touched_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    let before = state.looked_at.clone();
     let changes = terminals::touched(state, now.wall);
     if changes.is_empty() {
         return;
@@ -687,6 +688,9 @@ fn touched_into(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
     if tx.commit(state, changes).is_ok() {
         let more = post_commit(state, tx);
         fold_in(fx, more);
+    } else {
+        // Not saved: the next input stamps it again.
+        state.looked_at = before;
     }
 }
 

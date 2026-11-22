@@ -14,7 +14,7 @@ use crate::state::{State, Table};
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_session, trusted_panes};
 use crate::tmux::ids::{Generation, PaneId};
-use crate::tmux::link::{Asked, Link, log, set_pane_option};
+use crate::tmux::link::{Asked, Link, log, ready, set_pane_option};
 use crate::tmux::topology::{HIDDEN, Topology, UNNAMED};
 use crate::{Now, UtcMs};
 
@@ -282,6 +282,11 @@ fn updated(t: &Terminal, topology: &Topology, pane: PaneId, now: UtcMs) -> Optio
 /// it, never one per event. Typing on it counts, as it is on screen. The set looked at is
 /// kept in `state` for the next input, and drives a row's `active`.
 pub(crate) fn touched(state: &mut State, now: UtcMs) -> Vec<Change> {
+    // moa losing tmux isn't a user leaving a terminal, and a connection's topology isn't
+    // trusted until it is reconciled.
+    if ready(state).is_err() {
+        return Vec::new();
+    }
     let current = state.tmux().topology.looked_at();
     let moved: Vec<PaneId> = current
         .symmetric_difference(&state.looked_at)
