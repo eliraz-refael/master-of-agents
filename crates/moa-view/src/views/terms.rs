@@ -30,6 +30,7 @@ fn last(row: &TermRow) -> UtcMs {
     UtcMs(row.touched_at.unwrap_or(row.opened_at))
 }
 
+/// Whether the row is idle, by the rule `term ls` uses; a row with no record is never.
 fn row_idle(row: &TermRow, idle_ms: i64, now: UtcMs) -> bool {
     row.opened_at > 0 && is_idle(last(row), row.active, idle_ms, now)
 }
@@ -58,10 +59,12 @@ pub fn lines(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
         return vec![Line::plain(cut("no terminals open", width), Tone::Dim)];
     }
     let idle_ms = idle_ms(data);
-    let idle_count = rows
-        .iter()
-        .filter(|(_, t)| row_idle(t, idle_ms, ctx.now))
-        .count();
+    // Idleness is worked out once per row: the header counts it and the row marks it.
+    let rows: Vec<_> = rows
+        .into_iter()
+        .map(|(pane, t)| (pane, t, row_idle(t, idle_ms, ctx.now)))
+        .collect();
+    let idle_count = rows.iter().filter(|(_, _, idle)| *idle).count();
     let noun = if rows.len() == 1 {
         "terminal"
     } else {
@@ -71,7 +74,7 @@ pub fn lines(data: &Data, ctx: &Ctx, width: u16) -> Vec<Line> {
     let mut out = vec![Line::plain(cut(&head, width), Tone::Dim)];
     out.extend(
         rows.into_iter()
-            .map(|(pane, t)| row_line(pane, t, idle_ms, ctx, width)),
+            .map(|(pane, t, idle)| row_line(pane, t, idle, idle_ms, ctx, width)),
     );
     out
 }
@@ -99,10 +102,9 @@ fn what(row: &TermRow, now: UtcMs) -> String {
 /// `clamp(w/5, 8, 24)` cells, the folder in `clamp(w/5, 0, 28)` from 70 columns, `what` in
 /// [`WHAT`], `touched` and `open` right-aligned in 4; an idle row is dim, and its note
 /// always is.
-fn row_line(pane: &str, row: &TermRow, idle_ms: i64, ctx: &Ctx, width: usize) -> Line {
+fn row_line(pane: &str, row: &TermRow, idle: bool, idle_ms: i64, ctx: &Ctx, width: usize) -> Line {
     let nw = (width / 5).clamp(8, 24);
     let fw = if width >= 70 { (width / 5).min(28) } else { 0 };
-    let idle = row_idle(row, idle_ms, ctx.now);
     let touched = match row.touched_at {
         _ if row.active => "now".to_string(),
         Some(at) => text::ago(Some(UtcMs(at)), ctx.now),

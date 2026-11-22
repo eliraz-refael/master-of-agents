@@ -37,7 +37,7 @@ pub struct PickArgs {
     brain: Option<String>,
 }
 
-/// What `--once` says to a view other than the picker and help.
+/// What `--once` says to a view other than the picker, help and terminals.
 const ONCE_VIEWS: &str = "moa panel: --once works only for the picker, help and terminals";
 
 fn parse_view(word: &str) -> Result<View, String> {
@@ -47,7 +47,7 @@ fn parse_view(word: &str) -> Result<View, String> {
 
 /// Whether `--once` can draw `view`: the views `Ctrl-a`'s popups open.
 fn once_view(view: Option<View>) -> bool {
-    matches!(view, Some(View::Picker | View::Help | View::Terms))
+    view.is_some_and(View::is_popup)
 }
 
 /// Whether moa placed this panel itself: `MOA_NO_AUTOSTART` is exactly `1`, as moa sets it.

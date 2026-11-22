@@ -105,6 +105,11 @@ impl View {
         matches!(self, View::Picker | View::Help)
     }
 
+    /// Whether the view opens in a tmux popup (S8): the picker, help and the terminals view.
+    pub fn is_popup(self) -> bool {
+        matches!(self, View::Picker | View::Help | View::Terms)
+    }
+
     /// Whether the panel draws its own frame: the spike's `FRAMED`, plus the picker, help and
     /// setup (S11).
     pub fn framed(self) -> bool {
@@ -356,4 +361,18 @@ pub(crate) fn publish_panels(state: &mut State) -> Option<Effect> {
 
 fn reply(conn: ConnId, req: ReqId, result: Result<Done, OpError>) -> Effect {
     Effect::Reply { conn, req, result }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::View;
+
+    /// The views that open in a popup: exactly the picker, help and terminals.
+    #[test]
+    fn popups_are_the_picker_help_and_terminals() {
+        for view in View::ALL {
+            let popup = matches!(view, View::Picker | View::Help | View::Terms);
+            assert_eq!(view.is_popup(), popup, "{view}");
+        }
+    }
 }

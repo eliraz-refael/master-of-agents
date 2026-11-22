@@ -630,7 +630,7 @@ proptest! {
                 }
                 Input::Paste(text) => panel.paste(text),
                 Input::Reply(text) => {
-                    panel.replied(Err(text.clone()));
+                    panel.replied(0, Err(text.clone()));
                 }
             }
             check(&panel.screen(&data, &ctx, size), ctx.now)?;
@@ -664,7 +664,7 @@ proptest! {
                     }
                     Input::Paste(text) => panel.paste(text),
                     Input::Reply(text) => {
-                        panel.replied(Err(text.clone()));
+                        panel.replied(0, Err(text.clone()));
                     }
                 }
                 check(&panel.screen(&data, &ctx, size), ctx.now)?;

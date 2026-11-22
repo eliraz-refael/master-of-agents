@@ -41,6 +41,8 @@ struct T {
     panel: Panel,
     data: Data,
     ctx: Ctx,
+    /// The tag the last op sent went out under.
+    tag: u64,
 }
 
 impl T {
@@ -48,7 +50,12 @@ impl T {
         let (data, ctx) = fixture();
         let mut panel = Panel::new(View::Terms);
         panel.screen(&data, &ctx, SIZE);
-        T { panel, data, ctx }
+        T {
+            panel,
+            data,
+            ctx,
+            tag: 0,
+        }
     }
 
     /// Selects `pane`'s row.
@@ -58,7 +65,17 @@ impl T {
     }
 
     fn key(&mut self, k: Key) -> Vec<Out> {
-        self.panel.key(k, &self.data, &self.ctx, SIZE)
+        let outs = self.panel.key(k, &self.data, &self.ctx, SIZE);
+        for _ in outs.iter().filter(|o| matches!(o, Out::Send(_))) {
+            self.tag += 1;
+            self.panel.sent(self.tag);
+        }
+        outs
+    }
+
+    /// The reply to the last op sent.
+    fn replied(&mut self, result: Result<Done, String>) -> Option<Out> {
+        self.panel.replied(self.tag, result)
     }
 
     fn typed(&mut self, text: &str) {
@@ -206,12 +223,9 @@ fn enter_shows_x_always_confirms_q_and_esc_close() {
             pane: "%5".to_string()
         })]
     );
-    assert_eq!(
-        t.panel.replied(Ok(done("went to dev server"))),
-        Some(Out::Close)
-    );
+    assert_eq!(t.replied(Ok(done("went to dev server"))), Some(Out::Close));
     // Only the jump's reply closes it.
-    assert_eq!(t.panel.replied(Ok(done(""))), None);
+    assert_eq!(t.replied(Ok(done(""))), None);
 
     // `x` asks first, whatever is in the terminal; only `y` sends. A running one says what.
     assert_eq!(t.key(Key::Char('x')), Vec::new());
@@ -302,6 +316,42 @@ fn a_timeout_countdown_redraws_on_time() {
     }
     assert_eq!(next_until_change(UtcMs(5), UtcMs(5)), None);
     assert_eq!(next_until_change(UtcMs(5), UtcMs(9)), None);
+}
+
+#[test]
+fn only_the_picks_own_reply_closes_the_popup() {
+    let mut t = T::new().on("%5");
+    // A note goes out, then a pick; the note's `Ok` comes first and closes nothing.
+    t.key(Key::Char('n'));
+    t.key(Key::Ctrl('u'));
+    t.typed("later");
+    assert!(matches!(
+        t.key(Key::Enter)[..],
+        [Out::Send(Op::TermNote { .. })]
+    ));
+    let note = t.tag;
+    assert!(matches!(
+        t.key(Key::Enter)[..],
+        [Out::Send(Op::TermShow { .. })]
+    ));
+    assert_eq!(t.panel.replied(note, Ok(done("noted"))), None);
+    assert_eq!(t.footer(), "noted");
+    // The pick still waits: another Enter only says so.
+    assert_eq!(t.key(Key::Enter), Vec::new());
+    assert_eq!(t.replied(Ok(done("went to dev server"))), Some(Out::Close));
+}
+
+#[test]
+fn a_refused_show_stays_in_the_footer() {
+    let mut t = T::new().on("%5");
+    t.key(Key::Enter);
+    assert_eq!(t.replied(Err("that terminal is gone".to_string())), None);
+    assert_eq!(t.footer(), "that terminal is gone");
+    // The pick is free again.
+    assert!(matches!(
+        t.key(Key::Enter)[..],
+        [Out::Send(Op::TermShow { .. })]
+    ));
 }
 
 #[test]

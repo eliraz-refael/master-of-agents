@@ -71,7 +71,7 @@ impl Panel {
         }
         let Some(item) = self.selected().cloned() else {
             // The picker with nothing to pick is done; the terminals view stays.
-            return if self.view == View::Picker {
+            return if self.view.is_popup() && self.view != View::Terms {
                 vec![Out::Close]
             } else {
                 Vec::new()
