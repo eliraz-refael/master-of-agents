@@ -918,3 +918,26 @@ fn ctrl_c_closes_a_sheet() {
     help.set_managed(true);
     assert_eq!(help.interrupt(), Some(Out::Close));
 }
+
+#[test]
+fn a_terminal_row_shows_its_folder_and_program() {
+    let (mut data, ctx) = fixture();
+    data.upsert(
+        Topic::Terms,
+        vec![json!({"key": "%5", "name": "kite", "folder": "/h/private/kite", "command": "node"})],
+    );
+    let ui = ViewUi::default();
+    let lines = views::build(View::Picker, &data, &ctx, &ui, 80);
+    let row = lines
+        .iter()
+        .find(|l| l.item == Some(term("%5")))
+        .expect("kite's row");
+    assert!(
+        row.text().trim_end().ends_with("  ~/private/kite · node"),
+        "{}",
+        row.text()
+    );
+    // The row without a folder or program keeps the name-only look.
+    let harbor = lines.iter().find(|l| l.item == Some(term("%7"))).unwrap();
+    assert!(!harbor.text().contains('·'), "{}", harbor.text());
+}

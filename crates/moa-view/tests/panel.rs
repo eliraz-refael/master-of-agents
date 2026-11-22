@@ -14,6 +14,7 @@ use moa_view::geometry::{Rect, Size, geometry};
 use moa_view::keys::Key;
 use moa_view::line::{Item, Tone};
 use moa_view::panel::{EVENT_SHOWN_MS, Mark, Mouse, Out, Panel, debug_screen};
+use serde_json::json;
 
 const SIZE: Size = Size { w: 80, h: 16 };
 
@@ -1102,4 +1103,20 @@ fn the_unreadable_rows_message_fits_a_narrow_panel() {
     let footer = panel.screen(&data, &ctx, size).footer.text;
     assert!(footer.ends_with('…'), "{footer}");
     assert!(moa_view::text::width(&footer) <= 20, "{footer}");
+}
+
+#[test]
+fn ctrl_a_dollar_from_a_terminal_row_uses_its_folder() {
+    let mut t = T::new();
+    t.data.upsert(
+        Topic::Terms,
+        vec![json!({"key": "%5", "name": "kite", "folder": "/h/private/kite", "command": "node"})],
+    );
+    t.panel = Panel::new(View::Picker);
+    t.panel.screen(&t.data, &t.ctx, SIZE);
+    let pane = Item::Term {
+        pane: "%5".to_string(),
+    };
+    assert!(t.panel.select(&pane), "the terminal isn't listed");
+    assert_eq!(t.panel.here(&t.data), Some("/h/private/kite".to_string()));
 }
