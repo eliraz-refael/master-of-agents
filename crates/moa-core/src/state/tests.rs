@@ -674,3 +674,32 @@ fn recent_hooks_forget_the_oldest_past_the_bound() {
     assert!(st.recent_hook_set.contains(&key(1)));
     assert!(st.recent_hook_set.contains(&key(RECENT_HOOKS)));
 }
+
+fn feed_entry(id: i64, thread: &str, message_id: Option<&str>) -> FeedEntry {
+    FeedEntry {
+        id,
+        thread_id: thread.into(),
+        at: UtcMs(id),
+        kind: "moa".into(),
+        message_id: message_id.map(Into::into),
+        automatic: false,
+        body: "{}".into(),
+        state: None,
+    }
+}
+
+#[test]
+fn applying_a_row_adds_its_key() {
+    let mut s = state();
+    assert!(s.feed_keys("th-1").is_none());
+    s.apply(&Change::Feed(feed_entry(1, "th-1", Some("m-1"))));
+    s.apply(&Change::Feed(feed_entry(2, "th-1", None)));
+    assert_eq!(
+        s.feed_keys("th-1").unwrap().iter().collect::<Vec<_>>(),
+        ["m-1"]
+    );
+    assert_eq!(s.feed_tail().count(), 2);
+    // A row rewritten in place stays one row.
+    s.apply(&Change::Feed(feed_entry(1, "th-1", Some("m-1"))));
+    assert_eq!(s.feed_tail().count(), 2);
+}

@@ -32,6 +32,7 @@ pub enum Topic {
     Panels,
     Layouts,
     Terms,
+    Feed,
 }
 
 impl Topic {
@@ -48,6 +49,7 @@ impl Topic {
         Topic::Panels,
         Topic::Layouts,
         Topic::Terms,
+        Topic::Feed,
     ];
 }
 
@@ -180,6 +182,33 @@ pub enum CoreEvent {
 
 /// The newest activity rows published.
 pub const ACTIVITY_SHOWN: usize = 300;
+
+/// The newest feed rows published (and kept in the state). Paging older ones is 6b's.
+pub const FEED_SHOWN: usize = 100;
+
+/// A `feed` row (key `#<id>`): one line of moa's conversation. `body` is the stored JSON
+/// (`null` when the stored text doesn't parse).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FeedRow {
+    pub id: i64,
+    pub thread: String,
+    pub at: i64,
+    pub kind: String,
+    pub message_id: Option<String>,
+    pub automatic: bool,
+    pub body: Value,
+    pub state: Option<String>,
+}
+
+/// The `feed` topic's row with key `state`: whether moa's agent is running, which thread it is
+/// on, and why it failed.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MoaRow {
+    /// `off`, `starting`, `ready`, `thinking` or `failed`.
+    pub phase: String,
+    pub thread: Option<String>,
+    pub why: Option<String>,
+}
 
 /// A row as JSON with its `key` field added.
 fn keyed<T: Serialize>(key: &str, row: &T) -> Value {
@@ -362,6 +391,29 @@ impl State {
             .collect()
     }
 
+    fn feed_rows(&self) -> BTreeMap<String, Value> {
+        let mut rows: BTreeMap<String, Value> = self
+            .feed_tail()
+            .map(|e| {
+                let key = format!("#{}", e.id);
+                let row = FeedRow {
+                    id: e.id,
+                    thread: e.thread_id.clone(),
+                    at: e.at.0,
+                    kind: e.kind.clone(),
+                    message_id: e.message_id.clone(),
+                    automatic: e.automatic,
+                    body: serde_json::from_str(&e.body).unwrap_or(Value::Null),
+                    state: e.state.clone(),
+                };
+                let v = keyed(&key, &row);
+                (key, v)
+            })
+            .collect();
+        rows.insert("state".into(), keyed("state", &self.central.row()));
+        rows
+    }
+
     /// Open record `t`'s `terms` row.
     pub(crate) fn term_row(&self, t: &Terminal) -> TermRow {
         TermRow {
@@ -390,6 +442,7 @@ impl State {
             Topic::Panels => self.panels_rows(),
             Topic::Layouts => self.layouts_rows(),
             Topic::Terms => self.terms_rows(),
+            Topic::Feed => self.feed_rows(),
             Topic::Sessions => self.sessions_rows(),
             Topic::Status => self.status_rows(),
             Topic::Groups => by_key(self.groups().map(|g| (g.path.clone(), g))),

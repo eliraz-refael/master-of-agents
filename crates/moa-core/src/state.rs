@@ -12,6 +12,7 @@ use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
 use crate::UtcMs;
+use crate::central::Moa;
 use crate::change::Change;
 use crate::cockpit::run::CockpitRun;
 use crate::config::{AccountName, BrainName, Config, caller_store};
@@ -21,7 +22,7 @@ use crate::model::*;
 use crate::op::{ConnId, Op, ReqId};
 use crate::panel::{PanelReg, View};
 use crate::prompt::Asking;
-use crate::publish::{ACTIVITY_SHOWN, Model};
+use crate::publish::{ACTIVITY_SHOWN, FEED_SHOWN, Model};
 use crate::terminals::Closing;
 use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Link, TmuxState};
@@ -100,6 +101,10 @@ pub struct Snapshot {
     /// The open terminals only: a closed one's row stays on disk, as history.
     pub terminals: Vec<Terminal>,
     pub activity_tail: Vec<ActivityRow>,
+    /// The newest [`FEED_SHOWN`] feed rows, oldest first.
+    pub feed_tail: Vec<FeedEntry>,
+    /// `(thread id, message_id)` of every keyed feed row in each account's newest thread.
+    pub feed_keys: Vec<(String, String)>,
     pub meta: Vec<(String, String)>,
     pub next_ids: NextIds,
     pub unknown: Vec<LoadNote>,
@@ -292,6 +297,13 @@ pub struct State {
     /// The open terminals: applying a closed one drops it, as a load leaves it out.
     pub(crate) terminals: BTreeMap<TermId, Terminal>,
     pub(crate) activity: BTreeMap<ActivityId, ActivityRow>,
+    /// The newest [`FEED_SHOWN`] feed rows by id.
+    pub(crate) feed_tail: BTreeMap<i64, FeedEntry>,
+    /// The `message_id`s seen in each thread that moa can resume: the adapter's answers are
+    /// matched against them so a loaded session's replay never doubles a row.
+    feed_keys: BTreeMap<String, BTreeSet<String>>,
+    /// moa's own agent, the central one.
+    pub(crate) central: Moa,
     meta: BTreeMap<String, String>,
     next_ids: NextIds,
     unknown: Vec<LoadNote>,
@@ -389,6 +401,9 @@ impl State {
             nags: BTreeMap::new(),
             terminals: BTreeMap::new(),
             activity: BTreeMap::new(),
+            feed_tail: BTreeMap::new(),
+            feed_keys: BTreeMap::new(),
+            central: Moa::default(),
             meta: BTreeMap::new(),
             next_ids: NextIds::default(),
             unknown: Vec::new(),
@@ -585,6 +600,17 @@ impl State {
             .any(|n| n.table == table && n.key == key)
     }
 
+    /// The newest feed rows, oldest first.
+    pub fn feed_tail(&self) -> impl Iterator<Item = &FeedEntry> {
+        self.feed_tail.values()
+    }
+
+    /// The `message_id`s of the rows in `thread`, when it is one of the threads kept (each
+    /// account's newest, and any a row was written to since the load).
+    pub fn feed_keys(&self, thread: &str) -> Option<&BTreeSet<String>> {
+        self.feed_keys.get(thread)
+    }
+
     /// The id the next row of `table` takes.
     pub(crate) fn next_id(&self, table: Table) -> i64 {
         let n = &self.next_ids;
@@ -700,6 +726,12 @@ impl State {
         self.terminals = by(snap.terminals, |r| r.id);
         self.activity = by(snap.activity_tail, |r| r.id);
         self.trim_activity();
+        self.feed_tail = by(snap.feed_tail, |r| r.id);
+        self.trim_feed();
+        self.feed_keys.clear();
+        for (thread, key) in snap.feed_keys {
+            self.feed_keys.entry(thread).or_default().insert(key);
+        }
         self.meta = snap.meta.into_iter().collect();
         self.next_ids = snap.next_ids;
         self.unknown = snap.unknown;
@@ -711,12 +743,18 @@ impl State {
         }
     }
 
+    fn trim_feed(&mut self) {
+        while self.feed_tail.len() > FEED_SHOWN {
+            self.feed_tail.pop_first();
+        }
+    }
+
     fn bump(next: &mut i64, id: i64) {
         *next = (*next).max(id.saturating_add(1));
     }
 
-    /// The in-memory twin of the store's SQL for this change. Events and feed entries are
-    /// not kept, only their ids are counted.
+    /// The in-memory twin of the store's SQL for this change. Events are not kept, only
+    /// their ids are counted; feed entries keep a tail and their keys.
     pub(crate) fn apply(&mut self, c: &Change) {
         match c {
             Change::Project(r) => {
@@ -767,7 +805,17 @@ impl State {
             Change::Thread(r) => {
                 self.threads.insert(r.thread_id.clone(), r.clone());
             }
-            Change::Feed(r) => Self::bump(&mut self.next_ids.feed, r.id),
+            Change::Feed(r) => {
+                Self::bump(&mut self.next_ids.feed, r.id);
+                if let Some(key) = &r.message_id {
+                    self.feed_keys
+                        .entry(r.thread_id.clone())
+                        .or_default()
+                        .insert(key.clone());
+                }
+                self.feed_tail.insert(r.id, r.clone());
+                self.trim_feed();
+            }
             Change::Nag(r) => {
                 self.nags.insert(nag_key(r), *r);
             }

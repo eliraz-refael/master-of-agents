@@ -175,7 +175,8 @@ expression: all
           "brain",
           "panels",
           "layouts",
-          "terms"
+          "terms",
+          "feed"
         ]
       },
       "Op": {
@@ -1708,6 +1709,10 @@ expression: all
             "type": "array",
             "items": true
           },
+          "feed": {
+            "type": "array",
+            "items": true
+          },
           "groups": {
             "type": "array",
             "items": true
@@ -1779,6 +1784,10 @@ expression: all
             "type": "array",
             "items": true
           },
+          "feed": {
+            "type": "array",
+            "items": true
+          },
           "groups": {
             "type": "array",
             "items": true
@@ -1834,6 +1843,12 @@ expression: all
             }
           },
           "brain": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feed": {
             "type": "array",
             "items": {
               "type": "string"

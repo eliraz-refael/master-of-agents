@@ -854,3 +854,60 @@ fn a_clashing_event_id_fails_the_commit() {
         vec![activity(1)]
     );
 }
+
+fn thread_of(id: &str, account: &str, started: i64) -> MoaThread {
+    MoaThread {
+        thread_id: id.into(),
+        account: account.into(),
+        started_at: UtcMs(started),
+        ..thread()
+    }
+}
+
+fn feed_row(id: i64, thread: &str, message_id: Option<&str>) -> FeedEntry {
+    FeedEntry {
+        id,
+        thread_id: thread.into(),
+        message_id: message_id.map(Into::into),
+        ..feed()
+    }
+}
+
+#[test]
+fn a_snapshot_carries_the_feed_tail_and_each_accounts_newest_keys() {
+    let mut rig = empty();
+    let mut changes = vec![
+        Change::Thread(thread_of("a-old", "acct-a", 10)),
+        Change::Thread(thread_of("a-new", "acct-a", 20)),
+        Change::Thread(thread_of("b-only", "acct-b", 5)),
+    ];
+    // 150 rows: ids 1..=50 on a-old, 51..=100 on a-new, 101..=150 on b-only; every other row
+    // has no message id.
+    for id in 1..=150 {
+        let thread = match id {
+            1..=50 => "a-old",
+            51..=100 => "a-new",
+            _ => "b-only",
+        };
+        let key = (id % 2 == 0).then(|| format!("m-{id}"));
+        changes.push(Change::Feed(feed_row(id, thread, key.as_deref())));
+    }
+    rig.store.apply(&changes).unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    let ids: Vec<i64> = s.feed_tail.iter().map(|f| f.id).collect();
+    assert_eq!(ids, (51..=150).collect::<Vec<_>>());
+    let mut keys = s.feed_keys.clone();
+    keys.sort();
+    let want: Vec<(String, String)> = (51..=150)
+        .filter(|id| id % 2 == 0)
+        .map(|id| {
+            let thread = if id <= 100 { "a-new" } else { "b-only" };
+            (thread.to_string(), format!("m-{id}"))
+        })
+        .collect();
+    let mut want = want;
+    want.sort();
+    assert_eq!(keys, want);
+    assert_eq!(s.next_ids.feed, 151);
+    assert_eq!(count(&rig.store, "feed"), 150);
+}

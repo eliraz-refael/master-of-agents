@@ -145,7 +145,7 @@ impl Data {
                 self.layouts.clear();
                 self.layouts_error = None;
             }
-            Topic::Asks | Topic::Status => {}
+            Topic::Asks | Topic::Status | Topic::Feed => {}
         }
         self.unreadable.retain(|(t, _)| *t != topic);
         self.upsert(topic, rows);
@@ -188,7 +188,7 @@ impl Data {
                 self.layouts_error.is_some()
             }
             Topic::Layouts => put(&mut self.layouts, Some(key.to_string()), row),
-            Topic::Asks | Topic::Status => true,
+            Topic::Asks | Topic::Status | Topic::Feed => true,
         }
     }
 
@@ -214,7 +214,7 @@ impl Data {
                 Topic::Terms => drop_key(&mut self.terms, Some(key.clone())),
                 Topic::Layouts if key.is_empty() => self.layouts_error = None,
                 Topic::Layouts => drop_key(&mut self.layouts, Some(key.clone())),
-                Topic::Asks | Topic::Status => {}
+                Topic::Asks | Topic::Status | Topic::Feed => {}
             }
             self.unreadable.remove(&(topic, key.clone()));
         }

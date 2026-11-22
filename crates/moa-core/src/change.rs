@@ -67,11 +67,11 @@ impl Change {
             Change::Ask(_) => &[Topic::Asks],
             Change::Group(_) | Change::DeleteGroup(_) => &[Topic::Groups],
             Change::Terminal(_) => &[Topic::Terms],
+            // A thread change moves the `state` row's thread.
+            Change::Thread(_) | Change::Feed(_) => &[Topic::Feed],
             Change::Event(_)
             | Change::Note(_)
             | Change::SpikePane(_)
-            | Change::Thread(_)
-            | Change::Feed(_)
             | Change::Nag(_)
             | Change::DeleteSpikePane(_) => &[],
             // The views read two meta values: the current layout, and the folds.
