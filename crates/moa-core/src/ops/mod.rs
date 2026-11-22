@@ -117,5 +117,3 @@ pub(crate) fn project_named<'a>(state: &'a State, name: &str) -> Option<&'a crat
     let want = name.trim().to_lowercase();
     state.projects().find(|p| p.name.to_lowercase() == want)
 }
-
-pub(crate) use crate::text::cut;

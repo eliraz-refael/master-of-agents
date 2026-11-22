@@ -7,14 +7,14 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
 use moa_platform::child::{Reaper, first_stderr_line};
-use moa_platform::{Spawner, kill_term};
+use moa_platform::{Spawner, kill_term, lock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe;
 use tokio::process::{ChildStderr, ChildStdin};
@@ -149,10 +149,6 @@ fn notifications_after_blocks(v: &str) -> bool {
         Some(rest) => major_minor(rest).is_some_and(|mm| mm >= (3, 9)),
         None => major_minor(v).is_some_and(|mm| mm >= (3, 8)),
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// What happens when the last result of a batch is in.

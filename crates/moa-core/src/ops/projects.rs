@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{brain_row, cut, project_named};
+use super::{brain_row, project_named};
 use crate::Now;
 use crate::activity;
 use crate::change::Change;
@@ -15,6 +15,7 @@ use crate::names::{label, newest_first};
 use crate::op::{Done, OpError};
 use crate::route::{is_under, is_under_any};
 use crate::state::{State, Table};
+use crate::text::cut;
 use crate::time::age;
 
 /// How much of a last prompt `show` prints.

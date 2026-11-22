@@ -17,7 +17,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{
@@ -28,7 +28,7 @@ use agent_client_protocol::{Agent, ByteStreams, Client, JsonRpcRequest};
 use moa_core::central::wire::{AcpIn, AdapterSpec, Opened, ThreadHow};
 use moa_core::text::cut;
 use moa_platform::child::{Reaper, each_stderr_line};
-use moa_platform::{Spawner, ensure_private_dir, kill_group};
+use moa_platform::{Spawner, ensure_private_dir, kill_group, lock};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::task::JoinHandle;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
@@ -51,10 +51,6 @@ pub type ToCore = Arc<dyn Fn(AcpIn) + Send + Sync>;
 
 /// Permission requests waiting for the core's answer, by their number.
 type Waiting = Arc<Mutex<HashMap<u64, Responder<RequestPermissionResponse>>>>;
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// One running agent, of one generation.
 pub struct Adapter {
