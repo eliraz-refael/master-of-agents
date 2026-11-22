@@ -9,10 +9,21 @@ publish = false
 [dependencies]
 moa-core = { path = "../moa-core" }
 serde_json.workspace = true
+agent-client-protocol = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "macros", "io-util", "process", "sync", "time"] }
+tokio-util = { workspace = true, optional = true, features = ["compat"] }
+
+[features]
+acp = ["dep:agent-client-protocol", "dep:tokio", "dep:tokio-util"]
 
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
+
+
+[[test]]
+name = "acp_check"
+required-features = ["acp"]
 
 [lints]
 workspace = true
