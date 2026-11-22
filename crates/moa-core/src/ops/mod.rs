@@ -118,7 +118,4 @@ pub(crate) fn project_named<'a>(state: &'a State, name: &str) -> Option<&'a crat
     state.projects().find(|p| p.name.to_lowercase() == want)
 }
 
-/// The first `n` characters of `text`.
-pub(crate) fn cut(text: &str, n: usize) -> String {
-    text.chars().take(n).collect()
-}
+pub(crate) use crate::text::cut;

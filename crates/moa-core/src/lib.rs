@@ -28,6 +28,7 @@ pub mod route;
 pub mod sleep;
 pub mod state;
 pub mod terminals;
+pub mod text;
 pub mod time;
 pub mod tmux;
 mod wake;

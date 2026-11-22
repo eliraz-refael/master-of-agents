@@ -48,6 +48,9 @@ pub enum StubStep {
     Stderr { line: String },
     /// Start `/bin/sleep 1000` and write its pid to `<cwd>/.stub-acp.child`.
     Spawn,
+    /// Like `Spawn`, but the child ignores `SIGTERM`. Its pid is written by the child itself,
+    /// once it ignores the signal, so a test that has read the pid can signal it at once.
+    SpawnStubborn,
     /// Wait until `<cwd>/<file>` exists: a test opens the gate once it has seen what the steps
     /// before it did, so no step races the clock.
     Wait { file: String },
@@ -73,6 +76,8 @@ pub fn write_stub_script(dir: &Path, steps: &[StubStep]) {
 
 /// What stub-acp has logged in `<dir>/.stub-acp.log`: every request and notification it
 /// received as `{"method", "params"}`, plus its own `permission.outcome` and `burst.done` lines.
+/// The `initialize` line also has `env` (a few variables' values), `env_names` (every
+/// variable's name) and `cwd`.
 pub fn stub_log(dir: &Path) -> Vec<Value> {
     std::fs::read_to_string(dir.join(".stub-acp.log"))
         .unwrap_or_default()

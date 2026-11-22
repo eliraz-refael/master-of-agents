@@ -8,10 +8,10 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
     CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, FileSystemCapabilities,
     Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionUpdate, StopReason, SystemPrompt, SystemPromptMode,
-    TextContent,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    StopReason, SystemPrompt, SystemPromptMode, TextContent,
 };
 use moa_core::central::wire::{self, Caps, PermKind, PermOption, PlanEntry, Update};
 use serde::Serialize;
@@ -89,7 +89,17 @@ fn chunk_id(chunk: &ContentChunk) -> Option<String> {
     chunk.message_id.as_ref().map(ToString::to_string)
 }
 
-pub(super) fn update(update: SessionUpdate) -> Update {
+/// A new thread's id.
+pub(super) fn new_thread(new: &NewSessionResponse) -> String {
+    new.session_id.to_string()
+}
+
+/// An update and the thread it is in.
+pub(super) fn notification(n: SessionNotification) -> (String, Update) {
+    (n.session_id.to_string(), update(n.update))
+}
+
+fn update(update: SessionUpdate) -> Update {
     match update {
         SessionUpdate::AgentMessageChunk(c) => Update::Message {
             id: chunk_id(&c),

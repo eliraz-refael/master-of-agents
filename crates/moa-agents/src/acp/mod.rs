@@ -26,6 +26,7 @@ use agent_client_protocol::v1::schema::{
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, ByteStreams, Client, JsonRpcRequest};
 use moa_core::central::wire::{AcpIn, AdapterSpec, Opened, ThreadHow};
+use moa_core::text::cut;
 use moa_platform::child::{Reaper, each_stderr_line};
 use moa_platform::{Spawner, ensure_private_dir, kill_group};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
@@ -64,8 +65,9 @@ pub struct Adapter {
     process: Process,
 }
 
-/// The agent's process and the task that reads it. Dropped without `stop`, it still ends the
-/// agent's process group (unless the agent has gone already).
+/// The agent's process and the task that reads it. Dropped without `stop`, it still sends the
+/// agent's process group `SIGTERM` (unless the agent has gone already); once the agent leaves,
+/// its reaper ends the rest of the group.
 struct Process {
     reaper: Reaper,
     driver: Option<JoinHandle<()>>,
@@ -130,14 +132,6 @@ impl Exit {
     /// `start` failed: nothing is ever said for this generation.
     fn failed(&self) {
         *lock(&self.state) = ExitState::Said;
-    }
-}
-
-/// The agent's stderr line, as the log takes it: cut to `STDERR_LINE_CHARS` characters.
-fn cut(line: &str) -> &str {
-    match line.char_indices().nth(STDERR_LINE_CHARS) {
-        Some((end, _)) => &line[..end],
-        None => line,
     }
 }
 
@@ -218,12 +212,13 @@ impl Adapter {
             to_core: Arc::clone(&to_core),
             state: Mutex::new(ExitState::Starting(None)),
         });
-        // Seen exited while its pid is still its own: whatever it started in its group goes
-        // with it.
+        // Seen exited while its pid is still its own (unreaped, so its group id can't be
+        // reused): whatever it started in its group goes with it, even a process that
+        // ignores `SIGTERM`. Only then is it reaped.
         let reaper = Reaper::watch(child, {
             let exit = Arc::clone(&exit);
             move || {
-                kill_group(pid, libc::SIGTERM);
+                kill_group(pid, libc::SIGKILL);
                 exit.say("moa's agent exited");
             }
         });
@@ -246,7 +241,9 @@ impl Adapter {
             (Ok(stdin), Ok(stdout), Ok(stderr)) => (stdin, stdout, stderr),
             _ => return Err(failed("couldn't read moa's agent".into())),
         };
-        each_stderr_line(stderr, |line| tracing::info!("adapter: {}", cut(&line)));
+        each_stderr_line(stderr, |line| {
+            tracing::info!("adapter: {}", cut(&line, STDERR_LINE_CHARS));
+        });
 
         let waiting = Waiting::default();
         let (cx_tx, cx_rx) = tokio::sync::oneshot::channel();
@@ -316,7 +313,7 @@ impl Adapter {
                 }
                 let new = convert::new_session(cwd, system_prompt.as_deref());
                 self.request(new, move |r| {
-                    opened(r.map(|new| (new.session_id.to_string(), Opened::New)));
+                    opened(r.map(|new| (convert::new_thread(&new), Opened::New)));
                 });
             }
             ThreadHow::Resume { thread } => {
@@ -367,9 +364,16 @@ impl Adapter {
         }
     }
 
-    /// Ends the agent and its whole process group: `SIGTERM`, up to 2 s for it to leave,
-    /// then `SIGKILL`. Signals go only while the agent isn't reaped, so its group id can't
-    /// have been reused. Its `Exited`, if not said already, is said before this returns.
+    /// Ends the agent and its whole process group: `SIGTERM` to the group, up to 2 s for the
+    /// agent to leave, then `SIGKILL` to the group. Once the agent has left, and before it is
+    /// reaped, the reaper sends the group `SIGKILL`, so nothing it started outlives it, a
+    /// process that ignored the `SIGTERM` included. Signals go only while the agent isn't
+    /// reaped, so its group id can't have been reused.
+    ///
+    /// When the agent has left within the 3 s (2 s, then 1 s after `SIGKILL`), its `Exited`
+    /// has been said when this returns, and nothing more is. An agent that outlasts even
+    /// `SIGKILL` (stuck in the kernel) is left to its reaper, which ends the group and says
+    /// `Exited` whenever it does leave.
     pub async fn stop(mut self) {
         let reaper = &self.process.reaper;
         reaper.kill_unless_exited(|group| kill_group(group, libc::SIGTERM));
@@ -433,10 +437,11 @@ fn connection(
         .name("moa")
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
+                let (thread, update) = convert::notification(n);
                 updates(AcpIn::Update {
                     generation,
-                    thread: n.session_id.to_string(),
-                    update: convert::update(n.update),
+                    thread,
+                    update,
                 });
                 Ok(())
             },

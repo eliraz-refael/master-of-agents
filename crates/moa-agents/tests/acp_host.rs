@@ -43,7 +43,9 @@ fn spec(dir: &Path) -> AdapterSpec {
             ("CLAUDE_CODE_EXECUTABLE".into(), "/tmp/fake-claude".into()),
             ("CLAUDE_AGENT_ACP_PROTOCOL".into(), "v1".into()),
         ],
-        unset: vec!["CLAUDE_CONFIG_DIR".into()],
+        // `CARGO_MANIFEST_DIR` is always in a test's environment, so its absence in the
+        // stub's shows that `unset` works.
+        unset: vec!["CLAUDE_CONFIG_DIR".into(), "CARGO_MANIFEST_DIR".into()],
         cwd: dir.to_path_buf(),
         settings: r#"{"permissions":{"allow":["Bash(moactl:*)"]}}"#.into(),
         moactl: PathBuf::from("/tmp/moa-test-moactl"),
@@ -165,6 +167,12 @@ async fn the_adapter_starts_with_the_specs_env_and_files() {
     assert_eq!(env["CLAUDE_CODE_EXECUTABLE"], "/tmp/fake-claude");
     assert_eq!(env["CLAUDE_AGENT_ACP_PROTOCOL"], "v1");
     assert_eq!(env["CLAUDE_CONFIG_DIR"], Value::Null);
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+    let names = init["env_names"].as_array().expect("the stub's variables");
+    assert!(!names.is_empty());
+    for unset in ["CLAUDE_CONFIG_DIR", "CARGO_MANIFEST_DIR"] {
+        assert!(!names.contains(&json!(unset)), "{unset} reached the agent");
+    }
     let bin = format!("{}/bin:", dir.path().display());
     let path = env["PATH"].as_str().expect("a PATH");
     assert!(path.starts_with(&bin), "{path}");
@@ -510,31 +518,59 @@ async fn a_dead_adapter_says_so_once() {
     );
 }
 
+/// The pid the stub's `Spawn` or `SpawnStubborn` child wrote, once it is there.
+fn child_pid(dir: &Path) -> u32 {
+    let file = dir.join(".stub-acp.child");
+    wait_for(LIMIT, || {
+        std::fs::read_to_string(&file).ok()?.trim().parse().ok()
+    })
+    .expect("the stub started its child")
+}
+
+fn gone(pids: &[u32]) {
+    wait_for(LIMIT, || pids.iter().all(|&p| !pid_alive(p)).then_some(()))
+        .unwrap_or_else(|| panic!("{pids:?} are still there"));
+}
+
+/// The stub's children: one that leaves on `SIGTERM`, and one that ignores it.
+const CHILDREN: [StubStep; 2] = [StubStep::Spawn, StubStep::SpawnStubborn];
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_ends_the_group() {
-    let dir = folder(&[StubStep::Spawn, StubStep::HangHard]);
-    let (adapter, mut events, _) = start_in(dir.path()).await;
-    let thread = open_new(&adapter, &mut events, dir.path()).await;
-    adapter.prompt(&thread, 1, "go");
-    let child_file = dir.path().join(".stub-acp.child");
-    let child: u32 = wait_for(LIMIT, || {
-        std::fs::read_to_string(&child_file)
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
-    })
-    .expect("the stub started its child");
-    let stub = adapter.pid();
-    assert!(pid_alive(stub) && pid_alive(child));
+    for spawn in CHILDREN {
+        let dir = folder(&[spawn.clone(), StubStep::HangHard]);
+        let (adapter, mut events, _) = start_in(dir.path()).await;
+        let thread = open_new(&adapter, &mut events, dir.path()).await;
+        adapter.prompt(&thread, 1, "go");
+        let child = child_pid(dir.path());
+        let stub = adapter.pid();
+        assert!(pid_alive(stub) && pid_alive(child), "{spawn:?}");
 
-    tokio::time::timeout(LIMIT, adapter.stop())
-        .await
-        .expect("stop returns");
-    wait_for(LIMIT, || {
-        (!pid_alive(stub) && !pid_alive(child)).then_some(())
-    })
-    .expect("the stub and its child are both gone");
+        tokio::time::timeout(LIMIT, adapter.stop())
+            .await
+            .expect("stop returns");
+        gone(&[stub, child]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_agents_group_goes_with_it() {
+    for spawn in CHILDREN {
+        let gate = StubStep::Wait {
+            file: "gate".into(),
+        };
+        let dir = folder(&[spawn.clone(), gate, StubStep::Die]);
+        let (adapter, mut events, _) = start_in(dir.path()).await;
+        let thread = open_new(&adapter, &mut events, dir.path()).await;
+        adapter.prompt(&thread, 1, "go");
+        let child = child_pid(dir.path());
+        assert!(pid_alive(child), "{spawn:?}");
+        std::fs::write(dir.path().join("gate"), "").unwrap();
+
+        while !matches!(next(&mut events).await, AcpIn::Exited { .. }) {}
+        gone(&[child]);
+        adapter.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

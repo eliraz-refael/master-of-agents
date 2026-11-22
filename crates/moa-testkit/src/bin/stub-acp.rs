@@ -191,6 +191,20 @@ impl Stub {
                     self.log("burst.done", &json!({"n": n}), Value::Null);
                 }
                 StubStep::Stderr { line } => eprintln!("{line}"),
+                StubStep::SpawnStubborn => {
+                    // The shell ignores SIGTERM, says its pid (an atomic rename, so the file is
+                    // never read half-written), then becomes `sleep`, which keeps the ignore.
+                    let script = "trap '' TERM; echo $$ > .stub-acp.child.new; \
+                                  mv .stub-acp.child.new .stub-acp.child; exec /bin/sleep 1000";
+                    std::process::Command::new("/bin/sh")
+                        .args(["-c", script])
+                        .current_dir(&self.dir)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .map_err(fail)?;
+                }
                 StubStep::Spawn => {
                     let child = std::process::Command::new("/bin/sleep")
                         .arg("1000")
@@ -231,10 +245,15 @@ fn append(path: &Path, line: &str) {
     writeln!(file, "{line}").expect("append");
 }
 
-/// The initialize line's extra: the environment moa gave its agent, and the cwd.
+/// The initialize line's extra: the environment moa gave its agent (a few values, and the
+/// names of every variable), and the cwd.
 fn launch_facts() -> Value {
     let var = |name: &str| std::env::var(name).ok();
+    let names: Vec<String> = std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
     json!({
+        "env_names": names,
         "env": {
             "MOA_SESSION": var("MOA_SESSION"),
             "MOA_BRAIN": var("MOA_BRAIN"),
