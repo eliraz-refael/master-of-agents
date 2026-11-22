@@ -21,7 +21,7 @@ use crate::time::DAY;
 use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::{bound_session, trusted_panes};
 use crate::tmux::ids::{Generation, PaneId};
-use crate::tmux::link::{Asked, Link, log, ready, set_pane_option};
+use crate::tmux::link::{Asked, Link, log, pane_query, ready, set_pane_option};
 use crate::tmux::topology::{HIDDEN, Topology, UNNAMED};
 use crate::{Now, UtcMs};
 
@@ -393,12 +393,7 @@ pub(crate) fn close(state: &mut State, tell: Option<Tell>, t: &Terminal) -> Opti
     if !on(t, generation) {
         return None;
     }
-    let cmd = Cmd::new("display-message").args([
-        "-p".to_string(),
-        "-t".to_string(),
-        pane.to_string(),
-        "#{pane_current_command}".to_string(),
-    ]);
+    let cmd = pane_query(pane, "#{pane_current_command}");
     let query = state
         .tmux
         .ask(Asked::TermClose { tell, id: t.id }, vec![cmd])?;

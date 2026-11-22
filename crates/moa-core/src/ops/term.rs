@@ -21,7 +21,8 @@ use crate::tmux::cmd::{Cmd, literal_format, one_line};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
 use crate::tmux::link::{
-    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, ready, set_pane_option,
+    Answer, Asked, NO_TERMINAL, OPENED_FORMAT, log, notice, opened_pane, pane_query, ready,
+    set_pane_option,
 };
 use crate::{Now, UtcMs};
 
@@ -84,12 +85,7 @@ pub(crate) fn term_key(state: &mut State, pane: Option<PaneId>, client: ClientNa
     if let Some(cwd) = bound_session(state, pane).and_then(|id| state.session(id)?.cwd.clone()) {
         return term_here(state, client, Some(&cwd));
     }
-    let cmd = Cmd::new("display-message").args([
-        "-p".to_string(),
-        "-t".to_string(),
-        pane.to_string(),
-        "#{pane_current_path}".to_string(),
-    ]);
+    let cmd = pane_query(pane, "#{pane_current_path}");
     // A key comes over the link, so it is up.
     state
         .tmux
@@ -545,11 +541,22 @@ pub(crate) fn close_answered(
     answer: Answer,
     replied: bool,
 ) -> Vec<Effect> {
+    // moa's own close has nobody to tell, and its activity already said it closed: the log
+    // says it didn't.
     let end = |state: &mut State, why: &str| {
         state.closing.remove(&id);
-        told(state, tell.clone(), Err(OpError(why.into())))
-            .into_iter()
-            .collect::<Vec<_>>()
+        match tell.clone() {
+            None => vec![log(
+                LogLevel::Warn,
+                format!(
+                    "terminal #{} wasn't closed when its timeout ran out: {why}",
+                    id.0
+                ),
+            )],
+            tell => told(state, tell, Err(OpError(why.into())))
+                .into_iter()
+                .collect(),
+        }
     };
     if !replied {
         return end(state, adopt::WENT_AWAY);

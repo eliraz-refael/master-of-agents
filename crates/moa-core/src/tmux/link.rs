@@ -398,6 +398,16 @@ pub fn ping() -> Cmd {
     Cmd::new("display-message").args(["-p", "moa:ping"])
 }
 
+/// What tmux's `format` says of `pane`, printed back as one line (`display-message -p`).
+pub(crate) fn pane_query(pane: PaneId, format: &str) -> Cmd {
+    Cmd::new("display-message").args([
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.to_string(),
+        format.to_string(),
+    ])
+}
+
 /// A four-second notice on one client. `-l` keeps the text literal.
 pub fn notice(client: &ClientName, text: &str) -> Cmd {
     Cmd::new("display-message")
