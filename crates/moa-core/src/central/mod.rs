@@ -413,14 +413,15 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
     };
     match result {
         Ok((id, how)) => {
-            let manual = std::mem::take(&mut state.central.new_thread);
             let row = match (how, state.thread(&id)) {
                 (Opened::Resumed | Opened::Loaded, Some(row)) => row.clone(),
+                // Only a new thread ends `console.new`: one said while a reopen was under way
+                // still holds for the next prompt.
                 _ => MoaThread {
                     thread_id: id,
                     account: account.to_string(),
                     day: now.local_day,
-                    kind: if manual {
+                    kind: if std::mem::take(&mut state.central.new_thread) {
                         ThreadKind::Manual
                     } else {
                         ThreadKind::Daily

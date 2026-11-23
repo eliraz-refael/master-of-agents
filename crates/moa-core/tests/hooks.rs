@@ -1216,6 +1216,23 @@ fn a_duplicate_hook_makes_no_event() {
 }
 
 #[test]
+fn a_turn_ending_in_a_question_after_a_permission_still_needs_you() {
+    let mut st = seeded();
+    feed(
+        &mut st,
+        envelope(
+            1,
+            1000,
+            HookKind::NeedsPermission {
+                tool: "Bash".into(),
+            },
+        ),
+    );
+    feed(&mut st, envelope(2, 2000, ended("Ship it?")));
+    assert_eq!(whats(&st), [EventWhat::NeedsYou]);
+}
+
+#[test]
 fn a_turn_ending_while_it_needs_you_is_finished() {
     // A denied permission ends the turn with nothing clearing it first.
     let mut st = seeded();

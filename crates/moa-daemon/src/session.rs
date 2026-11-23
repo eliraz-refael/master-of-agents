@@ -378,7 +378,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
     async fn page(&mut self, id: &Id, before: i64, n: u16) -> Flow {
         if !(1..=PAGE_MAX).contains(&n) {
             return self
-                .refuse(id, code::FAILED, &format!("n is 1 to {PAGE_MAX}"))
+                .refuse(id, code::INVALID_PARAMS, &format!("n is 1 to {PAGE_MAX}"))
                 .await;
         }
         match self.core.feed_page(before, usize::from(n)).await {

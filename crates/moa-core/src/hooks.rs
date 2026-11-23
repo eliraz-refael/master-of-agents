@@ -562,6 +562,7 @@ pub(crate) fn event_of(before: Option<&Session>, after: &Session) -> Option<Even
             Some(b) if needs_you(after) && !needs_you(b) => Some(EventWhat::NeedsYou),
             Some(b)
                 if after.activity == Activity::Idle
+                    && !needs_you(after)
                     && matches!(
                         b.activity,
                         Activity::Working | Activity::NeedsPermission | Activity::NeedsAnswer
