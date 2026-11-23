@@ -473,6 +473,9 @@ impl Op {
             | Op::LayoutApply { .. }
             | Op::ConsolePrompt { .. }
             | Op::ConsoleNew(_)
+            // It may run a write (`/archive`, `/open`), so it is counted as one. A read-only
+            // command still answers while writes are refused: the core refuses only at a
+            // commit, and a read never commits.
             | Op::ConsoleCommand { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }

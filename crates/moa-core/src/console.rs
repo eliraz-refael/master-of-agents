@@ -40,7 +40,10 @@ pub const COMMANDS: &[Command] = &[
     shown("resume", "SESSION: resume a session"),
     shown("focus", "SESSION: bring a session's tab to the screen"),
     shown("term", "[FOLDER]: a plain shell in a new tab"),
-    shown("layout", "list | show NAME | apply [NAME]: layouts"),
+    shown(
+        "layout",
+        "list | show NAME | apply [NAME] | set NAME JSON: layouts",
+    ),
     shown("close", "SESSION: close a session's agent"),
     shown("archive", "SESSION…: archive sessions"),
     shown("new", "the next prompt starts a new thread"),
@@ -110,7 +113,7 @@ pub fn parse(line: &str, cwd: Option<&Path>, deps: &Deps) -> Result<Parsed, Stri
         "quit" => Err("/quit is the console's own: it closes the console's panel".into()),
         n if LATER.contains(&n) => Err(format!("/{n} comes in a later version of moa")),
         _ => {
-            let Some(parse) = deps.parse_command else {
+            let Some(grammar) = deps.parse_command else {
                 return Err("console commands need the moactl grammar".into());
             };
             let verb = match name.as_str() {
@@ -121,9 +124,23 @@ pub fn parse(line: &str, cwd: Option<&Path>, deps: &Deps) -> Result<Parsed, Stri
                 _ => SuggestionAction { verb: name, args },
             };
             let home = Some(deps.home.as_path()).filter(|h| !h.as_os_str().is_empty());
-            parse(&verb, cwd.or(home), &deps.home).map(Parsed::Run)
+            let op = grammar(&verb, cwd.or(home), &deps.home)?;
+            folder_checked(op, deps).map(Parsed::Run)
         }
     }
+}
+
+/// The folder `/open` or `/term` names is there, spelled as the system spells it, as
+/// `moactl` has it before it sends either. The daemon never makes a folder (`moactl open`
+/// does).
+fn folder_checked(mut op: Op, deps: &Deps) -> Result<Op, String> {
+    if let Op::SessionOpen { path, .. } | Op::TermOpen { path, .. } = &mut op {
+        if !(deps.is_dir)(path) {
+            return Err(format!("no folder {}", path.display()));
+        }
+        *path = (deps.canonical)(path);
+    }
+    Ok(op)
 }
 
 /// `/help`'s reply: every command that isn't hidden, one Markdown bullet each.

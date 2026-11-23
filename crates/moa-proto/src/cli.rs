@@ -740,8 +740,18 @@ fn parse_verb(a: &SuggestionAction, ctx: &VerbCtx, from: &Source) -> Result<Op, 
                 return from.no_help.to_string();
             }
             let text = e.render().to_string();
-            let first = text.lines().next().unwrap_or("");
-            first.strip_prefix("error: ").unwrap_or(first).to_string()
+            let mut lines = text.lines();
+            let first = lines.next().unwrap_or("");
+            let first = first.strip_prefix("error: ").unwrap_or(first);
+            // A first line that ends in a colon names nothing: what it is about follows, one
+            // per line, until a blank one (the missing `<ID>`).
+            if first.ends_with(':') {
+                let what: Vec<&str> = lines.map(str::trim).take_while(|l| !l.is_empty()).collect();
+                if !what.is_empty() {
+                    return format!("{first} {}", what.join(" "));
+                }
+            }
+            first.to_string()
         })?;
     parsed.verb.to_op(ctx).map_err(|e| match e {
         VerbError::NotFull => from.not_full.to_string(),

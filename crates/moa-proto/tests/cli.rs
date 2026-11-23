@@ -502,7 +502,11 @@ fn console_commands_parse_with_the_same_grammar() {
     );
     assert_eq!(
         cmd(None, "resume", &[]).unwrap_err(),
-        "the following required arguments were not provided:"
+        "the following required arguments were not provided: <ID>"
+    );
+    assert_eq!(
+        act("close", &[]).unwrap_err(),
+        "the following required arguments were not provided: <ID>"
     );
 }
 

@@ -106,7 +106,7 @@ async fn later_commands_say_so() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unknown_and_bad_lines_are_refused() {
-    let (_rig, up) = typical().await;
+    let (rig, up) = typical().await;
     let mut c = up.client();
 
     assert_eq!(refusal(&command(&mut c, "ls")), "a command starts with /");
@@ -121,12 +121,21 @@ async fn unknown_and_bad_lines_are_refused() {
     );
     assert_eq!(
         refusal(&command(&mut c, "/resume")),
-        "the following required arguments were not provided:"
+        "the following required arguments were not provided: <ID>"
     );
     assert_eq!(
         refusal(&command(&mut c, "/ls --help")),
         "a console command can't ask for help; /help lists them"
     );
+    // The daemon never makes a folder: one that isn't there is refused.
+    let missing = rig.tb.root().join("harbor");
+    for verb in ["open", "term"] {
+        assert_eq!(
+            refusal(&command(&mut c, &format!("/{verb} {}", missing.display()))),
+            format!("no folder {}", missing.display())
+        );
+    }
+    assert!(!missing.exists());
     assert_eq!(
         refusal(&command(&mut c, "/quit")),
         "/quit is the console's own: it closes the console's panel"
