@@ -268,6 +268,10 @@ pub enum Op {
     /// The next prompt starts a new thread, even the same day.
     #[serde(rename = "console.new")]
     ConsoleNew(NoParams),
+    /// A `/command` line typed in the console, run as the op it names with no turn of moa's
+    /// (`moa_core::console`). The reply is that op's reply.
+    #[serde(rename = "console.command")]
+    ConsoleCommand { line: String },
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -435,6 +439,7 @@ impl Op {
         "console.cancel",
         "console.page",
         "console.new",
+        "console.command",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -467,7 +472,8 @@ impl Op {
             | Op::LayoutSet { .. }
             | Op::LayoutApply { .. }
             | Op::ConsolePrompt { .. }
-            | Op::ConsoleNew(_) => true,
+            | Op::ConsoleNew(_)
+            | Op::ConsoleCommand { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -542,6 +548,7 @@ impl Op {
             Op::ConsoleCancel(_) => "console.cancel",
             Op::ConsolePage { .. } => "console.page",
             Op::ConsoleNew(_) => "console.new",
+            Op::ConsoleCommand { .. } => "console.command",
             Op::DebugPanic => "debug.panic",
         }
     }

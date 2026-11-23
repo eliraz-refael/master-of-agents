@@ -1462,6 +1462,31 @@ expression: all
               "method",
               "params"
             ]
+          },
+          {
+            "description": "A `/command` line typed in the console, run as the op it names with no turn of moa's\n(`moa_core::console`). The reply is that op's reply.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.command"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "line": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "line"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
           }
         ]
       },

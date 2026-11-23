@@ -25,8 +25,8 @@ fn joined(a: &SuggestionAction) -> String {
     shell_words::join(std::iter::once(a.verb.as_str()).chain(a.args.iter().map(String::as_str)))
 }
 
-/// Splits a typed action into verb and arguments.
-fn split(act: &str) -> Result<SuggestionAction, String> {
+/// Splits a typed action (or a console command after its `/`) into verb and arguments.
+pub(crate) fn split(act: &str) -> Result<SuggestionAction, String> {
     let mut words = shell_words::split(act).map_err(|e| e.to_string())?;
     // An empty action has no verb; the grammar refuses it with its list of verbs.
     let verb = if words.is_empty() {

@@ -160,6 +160,10 @@ fn conv_key(c: &Conversation) -> ConvKey {
 /// The moactl grammar for one suggestion action: its op, or why it doesn't parse.
 pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Op, String>;
 
+/// The moactl grammar for a console command's verb, given the folder a relative path is
+/// relative to (if any) and home: its op, or why it doesn't parse.
+pub type ParseCommand = fn(&SuggestionAction, Option<&Path>, &Path) -> Result<Op, String>;
+
 /// What the core needs from outside to run suggestions, compare paths and open sessions.
 /// The daemon supplies the real ones; the default has no grammar (so no suggestion can carry
 /// actions), treats every path as already canonical, hands out sequential ids, and finds
@@ -169,6 +173,8 @@ pub struct Deps {
     /// Parses one suggestion action with the moactl grammar (`moa_proto::cli::parse_action`),
     /// given the home directory. `moa-core` doesn't depend on `moa-proto`, so it arrives here.
     pub parse_action: Option<ParseAction>,
+    /// Parses a console command's verb with the same grammar (`moa_proto::cli::parse_command`).
+    pub parse_command: Option<ParseCommand>,
     /// Resolves a path to its one canonical spelling.
     pub canonical: fn(&Path) -> PathBuf,
     pub home: PathBuf,
@@ -245,6 +251,7 @@ impl Default for Deps {
     fn default() -> Self {
         Deps {
             parse_action: None,
+            parse_command: None,
             canonical: identity,
             home: PathBuf::new(),
             new_uuid: sequential_uuid,

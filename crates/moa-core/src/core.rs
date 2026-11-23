@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use crate::central::{self, Waiter};
 use crate::change::Change;
 use crate::cockpit;
+use crate::console;
 use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn, TmuxToken};
 use crate::hooks;
 use crate::keys;
@@ -630,6 +631,34 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::ConsoleNew(_),
             ..
         } => central::start_new(state, conn, req),
+        // A `/command` is answered as the op it names, as if that op had been sent.
+        Input::Client {
+            conn,
+            req,
+            caller,
+            op: Op::ConsoleCommand { line },
+        } => match console::parse(&line, caller.cwd.as_deref(), state.deps()) {
+            Ok(console::Parsed::Run(op)) => decide(
+                state,
+                Input::Client {
+                    conn,
+                    req,
+                    caller,
+                    op,
+                },
+                now,
+            ),
+            Ok(console::Parsed::Help) => vec![Effect::Reply {
+                conn,
+                req,
+                result: Ok(console::help()),
+            }],
+            Err(why) => vec![Effect::Reply {
+                conn,
+                req,
+                result: Err(OpError(why)),
+            }],
+        },
         Input::Acp(heard) => central::heard(state, now, heard),
         Input::Client {
             conn,

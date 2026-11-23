@@ -1,6 +1,8 @@
 //! A running daemon on a short `/tmp` root and a raw line client for it.
 #![allow(dead_code)]
 
+pub mod rig;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
