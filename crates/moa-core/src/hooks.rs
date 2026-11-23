@@ -10,14 +10,14 @@ use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine};
 use crate::hook::{HookEnvelope, HookKind, StartSource};
-use crate::live::cut_middle;
+use crate::live::{asks, cut_middle};
 use crate::model::{
     Activity, ActivityWho, Conversation, Event, EventId, EventKind, Lifecycle, Location, Session,
     SessionId,
 };
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::peers::peers_note;
-use crate::state::{State, Table};
+use crate::state::{EventWhat, State, Table};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::LaunchKind;
@@ -533,6 +533,44 @@ fn source_word(source: StartSource) -> &'static str {
         StartSource::Clear => "clear",
         StartSource::Compact => "compact",
         StartSource::Fork => "fork",
+    }
+}
+
+/// What committing `after` over `before` (`None` for a new session) tells the console (B3),
+/// from the lifecycle and the activity, never the display state (a long turn turns quiet on
+/// its own): brought live, `Started`; ended other than by going to sleep, `Ended`; put to
+/// sleep, `Asleep`; come to need you (a permission, a question, or a turn that ended asking),
+/// `NeedsYou`; a turn that ended any other way, `Finished`. At most one, the first of these.
+pub(crate) fn event_of(before: Option<&Session>, after: &Session) -> Option<EventWhat> {
+    let live = |s: &Session| s.lifecycle == Lifecycle::Live;
+    let ended = |s: &Session| s.lifecycle == Lifecycle::Ended && s.asleep_at.is_none();
+    let asleep = |s: &Session| s.lifecycle == Lifecycle::Ended && s.asleep_at.is_some();
+    let needs_you = |s: &Session| {
+        live(s)
+            && match s.activity {
+                Activity::NeedsPermission | Activity::NeedsAnswer => true,
+                Activity::Idle => asks(s.activity_why.as_deref().unwrap_or("")),
+                Activity::Working | Activity::Failed => false,
+            }
+    };
+    if live(after) {
+        return match before {
+            None => Some(EventWhat::Started),
+            Some(b) if !live(b) => Some(EventWhat::Started),
+            Some(b) if needs_you(after) && !needs_you(b) => Some(EventWhat::NeedsYou),
+            Some(b) if b.activity == Activity::Working && after.activity == Activity::Idle => {
+                Some(EventWhat::Finished)
+            }
+            Some(_) => None,
+        };
+    }
+    let before = before?;
+    if ended(after) && !ended(before) {
+        Some(EventWhat::Ended)
+    } else if asleep(after) && !asleep(before) {
+        Some(EventWhat::Asleep)
+    } else {
+        None
     }
 }
 

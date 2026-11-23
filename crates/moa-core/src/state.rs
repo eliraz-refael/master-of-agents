@@ -265,6 +265,31 @@ impl Default for Deps {
     }
 }
 
+/// How many session events the state keeps (B3), the newest.
+pub const EVENTS_KEPT: usize = 200;
+
+/// What a session did, as the console tells it (B3): one per committed change of a session
+/// that moves it into one of these (`hooks::event_of`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventWhat {
+    Started,
+    Ended,
+    NeedsYou,
+    Finished,
+    Asleep,
+}
+
+/// A session event: kept in memory and published on the `feed` topic, never saved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SessionEvent {
+    /// Counts from 1 while this daemon runs.
+    pub seq: u64,
+    pub at: UtcMs,
+    pub session: SessionId,
+    pub what: EventWhat,
+}
+
 /// What `status` says about the brain, the sessions and the caller.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct StatusData {
@@ -390,6 +415,11 @@ pub struct State {
     pub(crate) sheets: BTreeMap<PaneId, i64>,
     /// The last open's number: two opens in one millisecond still differ.
     pub(crate) last_sheet: i64,
+    /// The newest [`EVENTS_KEPT`] session events, oldest first. Kept in memory: a daemon
+    /// restart forgets them, a reload keeps them.
+    pub(crate) session_events: VecDeque<SessionEvent>,
+    /// The last session event's `seq`.
+    last_event: u64,
 }
 
 impl State {
@@ -442,6 +472,8 @@ impl State {
             last_prompt: 0,
             sheets: BTreeMap::new(),
             last_sheet: 0,
+            session_events: VecDeque::new(),
+            last_event: 0,
         }
     }
 
@@ -633,6 +665,26 @@ impl State {
     /// The newest feed rows, oldest first.
     pub fn feed_tail(&self) -> impl Iterator<Item = &FeedEntry> {
         self.feed_tail.values()
+    }
+
+    /// The session events kept, oldest first.
+    pub fn session_events(&self) -> impl Iterator<Item = &SessionEvent> {
+        self.session_events.iter()
+    }
+
+    /// Records that session `session` did `what` at `at`, dropping the oldest event past
+    /// [`EVENTS_KEPT`].
+    pub(crate) fn push_session_event(&mut self, at: UtcMs, session: SessionId, what: EventWhat) {
+        self.last_event += 1;
+        self.session_events.push_back(SessionEvent {
+            seq: self.last_event,
+            at,
+            session,
+            what,
+        });
+        if self.session_events.len() > EVENTS_KEPT {
+            self.session_events.pop_front();
+        }
     }
 
     /// The `message_id`s of the rows in `thread`, when it is one of the threads kept (each

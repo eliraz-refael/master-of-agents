@@ -9,10 +9,10 @@ use serde_json::{Map, Value};
 use crate::config::{Form, UiConfig};
 use crate::layout::{current_layout, leaves};
 use crate::live::{DisplayState, display_state};
-use crate::model::{FeedEntry, Terminal};
+use crate::model::{FeedEntry, SessionId, Terminal};
 use crate::ops::launch::title_of;
 use crate::panel::{View, key_of};
-use crate::state::State;
+use crate::state::{EventWhat, SessionEvent, State};
 use crate::terminals::{is_active, open_by_pane};
 
 /// A named set of rows a view can subscribe to.
@@ -225,6 +225,32 @@ pub struct MoaRow {
     pub why: Option<String>,
 }
 
+/// A `feed` row (key `ev:<seq>`): a session event (B3), from memory. The console folds them,
+/// one line per session.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct EventRow {
+    pub seq: u64,
+    pub at: i64,
+    pub session: SessionId,
+    pub what: EventWhat,
+}
+
+impl From<&SessionEvent> for EventRow {
+    fn from(e: &SessionEvent) -> EventRow {
+        EventRow {
+            seq: e.seq,
+            at: e.at.0,
+            session: e.session,
+            what: e.what,
+        }
+    }
+}
+
+/// The key of session event `seq`'s `feed` row.
+fn event_key(seq: u64) -> String {
+    format!("ev:{seq}")
+}
+
 /// A row as JSON with its `key` field added.
 fn keyed<T: Serialize>(key: &str, row: &T) -> Value {
     let mut v = serde_json::to_value(row).unwrap_or(Value::Null);
@@ -415,6 +441,11 @@ impl State {
                 (key, v)
             })
             .collect();
+        rows.extend(self.session_events.iter().map(|e| {
+            let key = event_key(e.seq);
+            let v = keyed(&key, &EventRow::from(e));
+            (key, v)
+        }));
         rows.insert("state".into(), keyed("state", &self.central.row()));
         rows
     }
@@ -490,6 +521,23 @@ impl State {
             .get(&Topic::Feed)
             .and_then(|t| t.get("state"));
         if last == Some(&row) {
+            return None;
+        }
+        let rows = self.feed_rows();
+        Some(self.put(vec![(Topic::Feed, rows)]))
+    }
+
+    /// Publishes the `feed` topic when a session event was kept since it was last published.
+    /// Events are pushed only by a commit, in order, and every build of the topic carries all
+    /// of them: the newest one's row is missing exactly when the topic is behind.
+    pub(crate) fn publish_session_events(&mut self) -> Option<Arc<Model>> {
+        let newest = event_key(self.session_events.back()?.seq);
+        if self
+            .model
+            .topics
+            .get(&Topic::Feed)
+            .is_some_and(|t| t.contains_key(&newest))
+        {
             return None;
         }
         let rows = self.feed_rows();

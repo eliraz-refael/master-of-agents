@@ -55,6 +55,13 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
             .publish_changed(Topic::Terms)
             .map(|m| Effect::Publish(Publish::Model(m))),
     );
+    // Session events are kept in memory only: whatever this input committed, the views hear
+    // of the new ones.
+    fx.extend(
+        state
+            .publish_session_events()
+            .map(|m| Effect::Publish(Publish::Model(m))),
+    );
     // Last, so the status line shows what this input saved, after its `Persist`.
     status::run(state, &now, &mut fx);
     fx
@@ -878,7 +885,14 @@ impl Tx {
                 return Err(OpError(unknown_message(state, table, &key)));
             }
         }
+        // Every session change is committed here: what it moved the session into is told
+        // to the console (B3), once it is saved.
         for c in &changes {
+            if let Change::Session(after) = c
+                && let Some(what) = hooks::event_of(state.session(after.id), after)
+            {
+                state.push_session_event(self.wall, after.id, what);
+            }
             state.apply(c);
         }
         self.changes.extend(changes);
