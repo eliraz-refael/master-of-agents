@@ -1,0 +1,24 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"above\\n\\n---\\n\\nbelow\\n\\n- in a list\\n\\n  ***\")"
+---
+── 40 ──
+[text]above
+
+[dim]────────────────────────────────────────
+
+[text]below
+
+[dim]• [text]in a list
+
+[text]  [dim]──────────────────────────────────────
+── 80 ──
+[text]above
+
+[dim]────────────────────────────────────────────────────────────────────────────────
+
+[text]below
+
+[dim]• [text]in a list
+
+[text]  [dim]──────────────────────────────────────────────────────────────────────────────

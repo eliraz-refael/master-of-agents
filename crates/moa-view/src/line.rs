@@ -65,6 +65,9 @@ pub struct Span {
     pub bold: bool,
     /// Drawn with its colours swapped: the strip's flash.
     pub reversed: bool,
+    /// The button it draws, as an index into its view's buttons; a button's span is never
+    /// split across lines.
+    pub button: Option<u16>,
 }
 
 impl Span {
@@ -84,8 +87,32 @@ impl Span {
             tone,
             bold,
             reversed: false,
+            button: None,
         }
     }
+
+    /// Whether `next` can be drawn as part of this span: one style, and neither a button.
+    pub fn joins(&self, next: &Span) -> bool {
+        self.button.is_none()
+            && next.button.is_none()
+            && (self.tone, self.bold, self.reversed) == (next.tone, next.bold, next.reversed)
+    }
+
+    /// `text` in this span's style, standing for the same button.
+    pub fn with_text(&self, text: impl Into<String>) -> Span {
+        Span {
+            text: text.into(),
+            ..*self
+        }
+    }
+}
+
+/// What a button in a view shows and what pressing it sends.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Button {
+    pub label: String,
+    /// The console line a press sends (`/brief`, `/focus <id>`).
+    pub command: String,
 }
 
 /// What a selectable line stands for. Keys act on it, never on a row index (V8).
@@ -185,11 +212,17 @@ impl Line {
 fn push_span(out: &mut String, span: &Span) {
     let bold = if span.bold { "*" } else { "" };
     let reversed = if span.reversed { "!" } else { "" };
-    let _ = write!(out, "[{}{bold}{reversed}]{}", span.tone.word(), span.text);
+    let button = span.button.map(|b| format!("#{b}")).unwrap_or_default();
+    let _ = write!(
+        out,
+        "[{}{bold}{reversed}{button}]{}",
+        span.tone.word(),
+        span.text
+    );
 }
 
 /// The model snapshot form (V19): one line per `Line`, each span as `[tone]text` (`*` after
-/// the tone for bold, then `!` for reversed), the chip in `⟨⟩`, then the item's kind in `‹›`
+/// the tone for bold, then `!` for reversed, then `#N` for button N), the chip in `⟨⟩`, then the item's kind in `‹›`
 /// (`‹more›` for a wrapped line).
 pub fn debug_lines(lines: &[Line]) -> String {
     let mut out = String::new();

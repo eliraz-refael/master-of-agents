@@ -1,0 +1,9 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: debug_lines(&lines)
+---
+[text]before
+
+[dim]code
+[dim]# not a heading
+[dim]- not a list

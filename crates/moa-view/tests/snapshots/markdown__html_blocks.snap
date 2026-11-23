@@ -1,0 +1,18 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"<div>\\nfirst\\nsecond\\n</div>\\n\\nafter\")"
+---
+── 40 ──
+[text]<div>
+[text]first
+[text]second
+[text]</div>
+
+[text]after
+── 80 ──
+[text]<div>
+[text]first
+[text]second
+[text]</div>
+
+[text]after

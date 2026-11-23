@@ -1,0 +1,12 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"- [x] ship the scaffold for Lantern\\n- [ ] review Kite\\n  - [ ] nested\")"
+---
+── 40 ──
+[dim]☑ [text]ship the scaffold for Lantern
+[dim]☐ [text]review Kite
+[text]  [dim]☐ [text]nested
+── 80 ──
+[dim]☑ [text]ship the scaffold for Lantern
+[dim]☐ [text]review Kite
+[text]  [dim]☐ [text]nested

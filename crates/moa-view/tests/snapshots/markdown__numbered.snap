@@ -1,0 +1,37 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"3. three\\n4. four, a longer item that wraps under its own text at forty\\n\\n\\\n         and then\\n\\n1. nine\\n2. ten\\n3. x\\n4. x\\n5. x\\n6. x\\n7. x\\n8. x\\n9. x\\n10. ten\")"
+---
+── 40 ──
+[dim]3. [text]three
+[dim]4. [text]four, a longer item that wraps under
+[text]   its own text at forty  ‹more›
+
+[text]and then
+
+[dim]1. [text]nine
+[dim]2. [text]ten
+[dim]3. [text]x
+[dim]4. [text]x
+[dim]5. [text]x
+[dim]6. [text]x
+[dim]7. [text]x
+[dim]8. [text]x
+[dim]9. [text]x
+[dim]10. [text]ten
+── 80 ──
+[dim]3. [text]three
+[dim]4. [text]four, a longer item that wraps under its own text at forty
+
+[text]and then
+
+[dim]1. [text]nine
+[dim]2. [text]ten
+[dim]3. [text]x
+[dim]4. [text]x
+[dim]5. [text]x
+[dim]6. [text]x
+[dim]7. [text]x
+[dim]8. [text]x
+[dim]9. [text]x
+[dim]10. [text]ten

@@ -11,6 +11,8 @@ use moa_core::UtcMs;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::line::{Span, Tone};
+
 /// The spinner's frames (the spike's); a frame is `SPIN[tick % 10]`.
 pub const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -56,6 +58,20 @@ pub const CHROME: &[(&str, usize)] = &[
     ("╮", 1),
     ("╰", 1),
     ("╯", 1),
+    // Markdown (`markdown::render`): headings, bullets, task boxes, tables
+    ("▌", 1),
+    ("•", 1),
+    ("◦", 1),
+    ("▪", 1),
+    ("☑", 1),
+    ("☐", 1),
+    ("┌", 1),
+    ("┬", 1),
+    ("┐", 1),
+    ("┼", 1),
+    ("┤", 1),
+    ("┴", 1),
+    ("┘", 1),
     // the spinner (`SPIN`)
     ("⠋", 1),
     ("⠙", 1),
@@ -233,6 +249,144 @@ pub fn wrap(s: &str, w: usize) -> Vec<String> {
     } else {
         lines
     }
+}
+
+/// A word of styled text for [`wrap_spans`]: its spans, its width, and the spaces after it.
+#[derive(Debug, Default)]
+struct Word {
+    spans: Vec<Span>,
+    width: usize,
+    space: usize,
+}
+
+impl Word {
+    /// `span` added at the end, joined to the last span when both are text in one style.
+    fn push(&mut self, span: Span) {
+        self.width += width(&span.text);
+        match self.spans.last_mut() {
+            Some(last) if last.joins(&span) => last.text.push_str(&span.text),
+            _ => self.spans.push(span),
+        }
+    }
+
+    /// The word in pieces of at most `w` cells, broken between graphemes but never inside a
+    /// button's span; a grapheme wider than `w` can't be drawn and goes.
+    fn broken(self, w: usize) -> Vec<Word> {
+        if self.width <= w {
+            return vec![self];
+        }
+        let mut out = Vec::new();
+        let mut piece = Word::default();
+        for span in &self.spans {
+            if span.button.is_some() {
+                if piece.width + width(&span.text) > w && !piece.spans.is_empty() {
+                    out.push(std::mem::take(&mut piece));
+                }
+                piece.push(span.clone());
+                continue;
+            }
+            for g in span.text.graphemes(true) {
+                let gw = UnicodeWidthStr::width(g);
+                if gw > w {
+                    continue;
+                }
+                if piece.width + gw > w {
+                    out.push(std::mem::take(&mut piece));
+                }
+                piece.push(span.with_text(g));
+            }
+        }
+        if !piece.spans.is_empty() {
+            out.push(piece);
+        }
+        if let Some(last) = out.last_mut() {
+            last.space = self.space;
+        }
+        out
+    }
+}
+
+impl textwrap::core::Fragment for Word {
+    fn width(&self) -> f64 {
+        self.width as f64
+    }
+
+    fn whitespace_width(&self) -> f64 {
+        self.space as f64
+    }
+
+    fn penalty_width(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Styled text's words: split at spaces, each word keeping its spans' styles. A button's span
+/// is part of a word, never split, and is [`ellipsize`]d when it is wider than `w`.
+fn words(spans: &[Span], w: usize) -> Vec<Word> {
+    let mut words = Vec::new();
+    let mut word = Word::default();
+    for span in spans {
+        if span.button.is_some() {
+            if word.space > 0 {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(span.with_text(ellipsize(&span.text, w)));
+            continue;
+        }
+        for (i, part) in span.text.split(' ').enumerate() {
+            if i > 0 {
+                word.space += 1;
+            }
+            if part.is_empty() {
+                continue;
+            }
+            if word.space > 0 {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(span.with_text(part));
+        }
+    }
+    words.push(word);
+    // Spaces before the first word don't draw.
+    words.retain(|word| !word.spans.is_empty());
+    words
+}
+
+/// `spans` wrapped at spaces to `w` cells, first fit as [`wrap`] does, each piece keeping its
+/// span's style: a word wider than a line is broken, but a button's span never is; it moves
+/// whole to the next line, and only one wider than the line is cut with `…`. Never empty.
+pub fn wrap_spans(spans: &[Span], w: usize) -> Vec<Vec<Span>> {
+    let w = w.max(1);
+    let words: Vec<Word> = words(spans, w)
+        .into_iter()
+        .flat_map(|word| word.broken(w))
+        .collect();
+    let mut lines: Vec<Vec<Span>> = textwrap::wrap_algorithms::wrap_first_fit(&words, &[w as f64])
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut out = Word::default();
+            for (i, word) in line.iter().enumerate() {
+                for span in &word.spans {
+                    out.push(span.clone());
+                }
+                if i + 1 < line.len() && word.space > 0 {
+                    let last = out.spans.last().expect("a word has a span");
+                    let space = " ".repeat(word.space);
+                    out.push(if last.button.is_some() {
+                        Span::new(space, Tone::Text)
+                    } else {
+                        last.with_text(space)
+                    });
+                }
+            }
+            out.spans
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+    lines
 }
 
 /// A day, in milliseconds.

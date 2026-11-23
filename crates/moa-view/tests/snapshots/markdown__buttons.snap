@@ -1,0 +1,13 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"Run `/brief` or `/attention`, not `moactl ls --all`.\\n\\n- see `/ls`\")"
+---
+── 40 ──
+[text]Run [work#0][/brief][text] or [work#1][/attention][text], not [work]moactl
+[work]ls --all[text].  ‹more›
+
+[dim]• [text]see [work#2][/ls]
+── 80 ──
+[text]Run [work#0][/brief][text] or [work#1][/attention][text], not [work]moactl ls --all[text].
+
+[dim]• [text]see [work#2][/ls]
