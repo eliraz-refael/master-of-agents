@@ -36,6 +36,7 @@ pub(crate) fn set(
     commands: Vec<String>,
     user: bool,
 ) -> Result<Done, OpError> {
+    let commands: Vec<String> = commands.iter().map(|c| c.trim().to_string()).collect();
     if commands.len() > MAX_COMMANDS {
         return Err(OpError(format!(
             "a bar holds at most {MAX_COMMANDS} buttons"
@@ -50,7 +51,7 @@ pub(crate) fn set(
         .then(|| serde_json::to_string(&commands).expect("a list of strings serializes"));
     let done = Done {
         text: if commands.is_empty() {
-            format!("cleared {by} bar")
+            format!("cleared {} bar", if user { "your" } else { "moa's" })
         } else {
             format!("the bar is set: {}", commands.join(" "))
         },

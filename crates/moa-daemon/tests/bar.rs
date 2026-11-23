@@ -123,6 +123,22 @@ async fn a_bad_bar_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn entries_are_trimmed_before_the_length_check_and_stored_trimmed() {
+    let (_rig, up) = typical().await;
+    let mut c = up.client();
+    // 40 characters plus padding: the padding doesn't count.
+    let forty = format!("/focus {}", "x".repeat(33));
+    assert_eq!(forty.chars().count(), 40);
+    let padded = format!("  {forty}  ");
+    let told = set(&mut c, &["  /ls ", &padded], false);
+    assert!(told.get("result").is_some(), "{told}");
+    assert_eq!(shown(&up), (vec!["/ls".to_string(), forty], "moa".into()));
+    let cleared = set(&mut c, &[], true);
+    assert_eq!(cleared["result"]["text"], "cleared your bar");
+    up.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_bar_survives_a_restart() {
     let (rig, up) = typical().await;
     let mut c = up.client();
