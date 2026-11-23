@@ -812,14 +812,22 @@ fn any_size_lays_out_inside_itself() {
                 && u32::from(r.x) + u32::from(r.w) <= u32::from(size.w)
                 && u32::from(r.y) + u32::from(r.h) <= u32::from(size.h))
     };
-    for view in [View::Tree, View::Picture, View::EmptySlot] {
+    for view in [View::Tree, View::Picture, View::EmptySlot, View::Console] {
         for w in 0..12 {
             for h in 0..14 {
                 let size = Size { w, h };
                 let g = geometry(view, view.framed(), size);
-                for r in [Some(g.body), Some(g.footer), g.tabs, g.strip]
-                    .into_iter()
-                    .flatten()
+                for r in [
+                    Some(g.body),
+                    Some(g.footer),
+                    g.tabs,
+                    g.strip,
+                    g.head,
+                    g.input,
+                    g.bar,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     assert!(inside(r, size), "{view:?} {size:?}: {r:?}");
                 }

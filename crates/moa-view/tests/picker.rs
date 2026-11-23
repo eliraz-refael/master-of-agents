@@ -661,7 +661,7 @@ fn a_second_pick_waits_for_the_first() {
     // A connection that ended takes the wait with it.
     t.key(Key::Enter);
     assert_eq!(t.key(Key::Enter), []);
-    t.panel.forget_pick();
+    t.panel.forget_replies();
     assert_eq!(t.key(Key::Enter).len(), 1);
 }
 

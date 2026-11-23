@@ -44,13 +44,18 @@ pub struct Geometry {
     pub framed: bool,
     /// The picture's tab row.
     pub tabs: Option<Rect>,
-    /// The picker's head, fixed above its list: the query line and a rule.
+    /// The picker's head, fixed above its list: the query line and a rule. The console's:
+    /// its head line (B9).
     pub head: Option<Rect>,
     /// The list.
     pub body: Rect,
     /// The picture's activity strip; the rule above it is the line just above the rect.
     /// `None` when the screen is too short for it.
     pub strip: Option<Rect>,
+    /// The console's input line, under its feed (B7).
+    pub input: Option<Rect>,
+    /// The console's button bar, under its input line (B5).
+    pub bar: Option<Rect>,
     /// One line for the editor, a question, a message or the key hints.
     pub footer: Rect,
 }
@@ -65,14 +70,26 @@ pub const STRIP: u16 = 7;
 /// footer on the last line; a screen too short for the strip leaves it out. Anything else
 /// without a frame is laid out like the empty slot: the spike's margins, the body at x 2,
 /// y 1, and the footer on the last line. The picker's head takes the first [`HEAD`] lines of
-/// its body, framed or not. Parts too small to have cells are empty.
+/// its body, framed or not. The console's body is, from the top: its head line, the feed, its
+/// input line and its bar, a line each but the feed; a body too short for all of them keeps
+/// the input first, then the head line, then the bar. Parts too small to have cells are empty.
 pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
     let mut g = layout(view, framed, size);
+    let b = g.body;
     if view == View::Picker {
-        let b = g.body;
         let head = b.h.min(HEAD);
         g.head = Some(Rect::new(b.x, b.y, b.w, head));
         g.body = Rect::new(b.x, b.y + head, b.w, b.h - head);
+    }
+    if view == View::Console {
+        let input = b.h.min(1);
+        let head = b.h.saturating_sub(1).min(1);
+        let bar = b.h.saturating_sub(2).min(1);
+        let feed = b.h - input - head - bar;
+        g.head = Some(Rect::new(b.x, b.y, b.w, head));
+        g.body = Rect::new(b.x, b.y + head, b.w, feed);
+        g.input = Some(Rect::new(b.x, b.y + head + feed, b.w, input));
+        g.bar = Some(Rect::new(b.x, b.y + head + feed + input, b.w, bar));
     }
     g
 }
@@ -102,6 +119,8 @@ fn layout(view: View, framed: bool, size: Size) -> Geometry {
             head: None,
             body: Rect::new(0, 1, w, body_h),
             strip,
+            input: None,
+            bar: None,
             footer,
         };
     }
@@ -117,6 +136,8 @@ fn layout(view: View, framed: bool, size: Size) -> Geometry {
             head: None,
             body: Rect::new(2, 1, w.saturating_sub(2), h.saturating_sub(2)),
             strip: None,
+            input: None,
+            bar: None,
             footer,
         };
     }
@@ -133,6 +154,8 @@ fn layout(view: View, framed: bool, size: Size) -> Geometry {
         head: None,
         body: Rect::new(2, 1, inner_w, inner.saturating_sub(2)),
         strip: None,
+        input: None,
+        bar: None,
         footer,
     }
 }

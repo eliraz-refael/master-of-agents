@@ -4,7 +4,7 @@
 //! errors; and a separator where the thread changes (B2). A row it can't read is one dim line
 //! (B10): nothing here panics, whatever the daemon sends.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use moa_core::UtcMs;
@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::ctx::Ctx;
 use crate::data::{Data, SessionRow};
+use crate::editor::Editor;
 use crate::line::{Button, Line, Span, Tone};
 use crate::markdown::{self, button_span};
 use crate::text::{self, clean, cut, cut_spans, ellipsize, width, wrap_spans};
@@ -41,15 +42,117 @@ pub struct Card {
 }
 
 /// What the console keeps in its panel: the rows paged in from before the topic's tail (B2),
-/// the cards of the commands sent from it, and the errors it was told of, with when.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+/// the cards of the commands sent from it, the errors it was told of, with when; its focused
+/// button, its input line and history (B7), where its feed is scrolled to (B8, F15), what it
+/// waits on, and when it last showed each error (B10).
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ConsoleUi {
     pub older: BTreeMap<i64, FeedRow>,
     pub cards: Vec<Card>,
     pub errors: Vec<(UtcMs, String)>,
     /// The button Tab is on, as an index into `ConsoleView.buttons`: that one is drawn
-    /// reversed, and no other, whatever its command.
+    /// reversed, and no other, whatever its command. It holds for one build;
+    /// [`focused`](ConsoleUi::focused) finds the button again in the next.
     pub focus: Option<u16>,
+    /// The focused button, as a rebuild finds it again.
+    pub focused: Option<Focused>,
+    /// The input line.
+    pub draft: Editor,
+    /// What Up and Down step through, taken when Up was first pressed ([`history`]).
+    pub history: Vec<String>,
+    /// The entry of `history` the input shows; `None` while it shows the draft.
+    pub hist_at: Option<usize>,
+    /// The draft as it was when Up was first pressed: Down past the newest entry brings it
+    /// back.
+    pub kept: String,
+    /// The lines typed here and sent, oldest first: the history has them before their rows
+    /// come.
+    pub sent: Vec<String>,
+    /// The view follows the newest line (B8).
+    pub follow: bool,
+    /// While it doesn't: the line at its bottom (F15).
+    pub anchor: Option<Anchor>,
+    /// How many lines were below the view when it was last scrolled: more are new.
+    pub below: usize,
+    /// A request a key made, until its tag is known ([`Panel::sent`](crate::panel::Panel::sent)).
+    pub asked: Option<Asked>,
+    /// The requests sent, by tag, until their replies come.
+    pub waits: BTreeMap<u64, Asked>,
+    /// A page came back short: there is nothing older to ask for.
+    pub exhausted: bool,
+    /// When each error text was last drawn (B10).
+    pub shown: HashMap<String, UtcMs>,
+    /// The data's revision when the topic's rows were last kept in `older`.
+    pub kept_at: Option<u64>,
+}
+
+impl Default for ConsoleUi {
+    fn default() -> ConsoleUi {
+        ConsoleUi {
+            older: BTreeMap::new(),
+            cards: Vec::new(),
+            errors: Vec::new(),
+            focus: None,
+            focused: None,
+            draft: Editor::default(),
+            history: Vec::new(),
+            hist_at: None,
+            kept: String::new(),
+            sent: Vec::new(),
+            follow: true,
+            anchor: None,
+            below: 0,
+            asked: None,
+            waits: BTreeMap::new(),
+            exhausted: false,
+            shown: HashMap::new(),
+            kept_at: None,
+        }
+    }
+}
+
+/// A request the console sent, and what its reply is for.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Asked {
+    /// `console.page` for `n` rows (B2).
+    Page { n: u16 },
+    /// A prompt typed in the input.
+    Prompt { text: String },
+    /// A command, typed or pressed at `at`: its reply is a card (B4).
+    Command {
+        line: String,
+        at: UtcMs,
+        typed: bool,
+    },
+}
+
+/// A line of the console, as a rebuild finds it again (F15): by the row drawn at or above
+/// it, and how many lines below that row's first it is (above, when negative: a line before
+/// every row). `row` is `None` only when no row is drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Anchor {
+    pub row: Option<i64>,
+    pub offset: isize,
+}
+
+/// A focused button, as a rebuild finds it again: where it is, and its command.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Focused {
+    /// Its line; `None` for the bar's.
+    pub line: Option<Anchor>,
+    /// For the bar's: which of its buttons it is.
+    pub nth: usize,
+    pub command: String,
+}
+
+/// The lines a feed of a given height shows: `lines[top..end]`, under an `↑ N more` line when
+/// `more` (the lines above) isn't 0; `new` lines came below since it was scrolled up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Window {
+    pub top: usize,
+    pub end: usize,
+    pub more: usize,
+    pub new: usize,
 }
 
 /// The console's lines, and the buttons their spans press.
@@ -60,6 +163,8 @@ pub struct ConsoleView {
     pub bar: Vec<Line>,
     /// The buttons of `lines` first, then the bar's: a span's `button` indexes this.
     pub buttons: Vec<Button>,
+    /// Each row drawn, by id, with the line it starts at: both in order.
+    pub starts: Vec<(i64, usize)>,
 }
 
 impl ConsoleView {
@@ -74,6 +179,268 @@ impl ConsoleView {
             .flat_map(|l| l.spans.iter().filter_map(|s| s.button))
             .collect()
     }
+
+    /// The button Tab (BTab when `back`) goes to from `from` (F26): the next in
+    /// [`order`](ConsoleView::order), wrapping at both ends. From none, or one out of sight,
+    /// the newest visible text button (the first on the lowest line with one), else the
+    /// bar's first.
+    pub fn tab(&self, visible: Range<usize>, from: Option<u16>, back: bool) -> Option<u16> {
+        let order = self.order(visible.clone());
+        let n = order.len();
+        match from.and_then(|f| order.iter().position(|b| *b == f)) {
+            Some(i) if back => Some(order[(i + n - 1) % n]),
+            Some(i) => Some(order[(i + 1) % n]),
+            None => {
+                let from = visible.start.min(self.lines.len());
+                let to = visible.end.min(self.lines.len()).max(from);
+                let newest = self.lines[from..to]
+                    .iter()
+                    .rev()
+                    .find_map(|l| l.spans.iter().find_map(|s| s.button));
+                newest.or_else(|| order.first().copied())
+            }
+        }
+    }
+
+    /// Draws `focus` reversed, and no other button.
+    pub fn set_focus(&mut self, focus: Option<u16>) {
+        for span in self
+            .lines
+            .iter_mut()
+            .chain(&mut self.bar)
+            .flat_map(|l| &mut l.spans)
+        {
+            if span.button.is_some() {
+                span.reversed = focus.is_some() && span.button == focus;
+            }
+        }
+    }
+
+    /// Line `line`, as a rebuild finds it again.
+    pub fn anchor(&self, line: usize) -> Anchor {
+        let below = self.starts.partition_point(|(_, start)| *start <= line);
+        let (id, start) = match (below.checked_sub(1), self.starts.first()) {
+            (Some(i), _) => self.starts[i],
+            (None, Some(first)) => *first,
+            (None, None) => {
+                return Anchor {
+                    row: None,
+                    offset: isize::try_from(line).unwrap_or(isize::MAX),
+                };
+            }
+        };
+        Anchor {
+            row: Some(id),
+            offset: signed(line) - signed(start),
+        }
+    }
+
+    /// The line `anchor` stands for in this build, within the lines; `None` when there are
+    /// none. A row no longer drawn gives the first line of the next one drawn, else the last
+    /// line.
+    pub fn line_of(&self, anchor: &Anchor) -> Option<usize> {
+        let last = self.lines.len().checked_sub(1)?;
+        let line = match anchor.row {
+            None => anchor.offset,
+            Some(id) => match self.starts.binary_search_by_key(&id, |(r, _)| *r) {
+                Ok(i) => signed(self.starts[i].1) + anchor.offset,
+                Err(i) => self.starts.get(i).map_or(signed(last), |s| signed(s.1)),
+            },
+        };
+        Some(usize::try_from(line).unwrap_or(0).min(last))
+    }
+
+    /// Button `button` of this build, as the next finds it again.
+    pub fn focused(&self, button: u16) -> Option<Focused> {
+        let command = self.buttons.get(usize::from(button))?.command.clone();
+        let has = |l: &Line| l.spans.iter().any(|s| s.button == Some(button));
+        if let Some(line) = self.lines.iter().position(has) {
+            return Some(Focused {
+                line: Some(self.anchor(line)),
+                nth: 0,
+                command,
+            });
+        }
+        let nth = self.bar_buttons().position(|b| b == button)?;
+        Some(Focused {
+            line: None,
+            nth,
+            command,
+        })
+    }
+
+    /// The button `focused` was, in this build: the one with its command on its line or
+    /// nearest it (the bar's, at its place or else the first), or none.
+    pub fn find(&self, focused: &Focused) -> Option<u16> {
+        let same = |b: &u16| {
+            self.buttons
+                .get(usize::from(*b))
+                .is_some_and(|b| b.command == focused.command)
+        };
+        let Some(anchor) = &focused.line else {
+            let bar: Vec<u16> = self.bar_buttons().collect();
+            let at = bar.get(focused.nth).copied().filter(same);
+            return at.or_else(|| bar.into_iter().find(same));
+        };
+        let line = self.line_of(anchor)?;
+        self.lines
+            .iter()
+            .enumerate()
+            .flat_map(|(i, l)| l.spans.iter().filter_map(move |s| Some((i, s.button?))))
+            .filter(|(_, b)| same(b))
+            .min_by_key(|(i, _)| i.abs_diff(line))
+            .map(|(_, b)| b)
+    }
+
+    fn bar_buttons(&self) -> impl Iterator<Item = u16> + '_ {
+        self.bar
+            .iter()
+            .flat_map(|l| l.spans.iter().filter_map(|s| s.button))
+    }
+}
+
+fn signed(n: usize) -> isize {
+    isize::try_from(n).unwrap_or(isize::MAX)
+}
+
+impl ConsoleUi {
+    /// What a feed `rows` lines high shows of `view` (B8, F15): its newest lines while it
+    /// follows, else those up to its anchor; never fewer than fill it. The `↑ N more` line
+    /// takes the top row when lines are above.
+    pub fn window(&self, view: &ConsoleView, rows: usize) -> Window {
+        let n = view.lines.len();
+        let anchored = self.anchor.as_ref().and_then(|a| view.line_of(a));
+        let end = match (self.follow, anchored) {
+            (false, Some(line)) => line + 1,
+            _ => n,
+        };
+        let end = end.clamp(n.min(rows), n);
+        let top = if end <= rows {
+            0
+        } else if rows < 2 {
+            end - rows
+        } else {
+            end - (rows - 1)
+        };
+        Window {
+            top,
+            end,
+            more: if rows < 2 { 0 } else { top },
+            new: if self.follow {
+                0
+            } else {
+                (n - end).saturating_sub(self.below)
+            },
+        }
+    }
+
+    /// Scrolls the feed `by` lines (up when negative) from where it is: at the newest line it
+    /// follows again; elsewhere it anchors there.
+    pub fn scroll(&mut self, view: &ConsoleView, rows: usize, by: isize) {
+        let n = view.lines.len();
+        let end = self
+            .window(view, rows)
+            .end
+            .saturating_add_signed(by)
+            .clamp(n.min(rows), n);
+        self.follow = end == n || end == 0;
+        self.anchor = (!self.follow).then(|| view.anchor(end - 1));
+        self.below = n - end;
+    }
+
+    /// The feed follows its newest line again.
+    pub fn to_bottom(&mut self) {
+        self.follow = true;
+        self.anchor = None;
+        self.below = 0;
+    }
+
+    /// Whether a page of older rows is asked for, or on its way.
+    pub fn paging(&self) -> bool {
+        let page = |a: &Asked| matches!(a, Asked::Page { .. });
+        self.asked.as_ref().is_some_and(page) || self.waits.values().any(page)
+    }
+}
+
+/// What Up and Down step through (B7): the text of every prompt you typed, in the rows loaded
+/// (moa's own, F20, are left out), then the lines sent here that no row has yet; one entry
+/// for a line typed twice in a row.
+pub fn history(data: &Data, ui: &ConsoleUi) -> Vec<String> {
+    let typed: Vec<String> = rows(data, ui)
+        .into_values()
+        .filter(|r| r.kind == kind::YOU && !r.automatic)
+        .filter_map(|r| r.body.get("text")?.as_str().map(str::to_string))
+        .collect();
+    let mut all = typed.clone();
+    all.extend(ui.sent.iter().filter(|s| !typed.contains(s)).cloned());
+    all.dedup();
+    all
+}
+
+/// `↑ N more`, dim, in `width` cells.
+pub fn more(n: usize, width: u16) -> Line {
+    Line::plain(cut(&format!("↑ {n} more"), usize::from(width)), Tone::Dim)
+}
+
+/// The head line (B9): moa's thread and state, and `↓ N new` when `new` lines came below a
+/// view scrolled up. `up` is whether the panel's connection is. The thread goes first when
+/// the width is short, then the end of the rest.
+pub fn head(data: &Data, ctx: &Ctx, up: bool, new: usize, width: u16) -> Line {
+    let dim = |s: &str| Span::new(s, Tone::Dim);
+    let moa = data.moa.as_ref().filter(|_| up);
+    let phase = moa.map_or("off", |m| m.phase.as_str());
+    let mut spans = match phase {
+        _ if !up => vec![dim("connecting…")],
+        "off" => vec![dim("○ off · type to start moa")],
+        "starting" => vec![Span::new("◌ starting", Tone::Work)],
+        "thinking" => vec![
+            Span::new(format!("{} thinking…", spinner(ctx.tick)), Tone::Work),
+            dim(" Esc cancels"),
+        ],
+        "ready" => vec![Span::new("● ready", Tone::Ok)],
+        "failed" => {
+            let why = moa
+                .and_then(|m| m.why.as_deref())
+                .map(clean)
+                .filter(|w| !w.trim().is_empty())
+                .unwrap_or_else(|| "failed".to_string());
+            vec![fail(&format!("✗ {why}"))]
+        }
+        other => vec![dim(&clean(other))],
+    };
+    if new > 0 {
+        spans.push(dim(" · "));
+        spans.push(Span::new(format!("↓ {new} new"), Tone::Work));
+    }
+    if let Some(thread) = moa.and_then(|m| m.thread.as_deref()) {
+        let thread: String = clean(thread).chars().take(8).collect();
+        let thread = dim(&format!("thread {thread} · "));
+        if text::width(&thread.text) + text::spans_width(&spans) <= usize::from(width) {
+            spans.insert(0, thread);
+        }
+    }
+    let mut line = Line::new(cut_spans(spans, usize::from(width)));
+    line.animated = up && phase == "thinking";
+    line
+}
+
+/// What the input line says while it is empty.
+const INPUT_HINT: &str = "ask moa, or / for commands";
+
+/// The input line (B7), `width` cells: `› ` and the draft with the cursor in sight, or a dim
+/// hint while it is empty; and the cursor's column.
+pub fn input(ui: &ConsoleUi, width: u16) -> (Line, usize) {
+    let w = usize::from(width);
+    let lead = Span::new("› ", Tone::You);
+    let room = w.saturating_sub(text::width(&lead.text));
+    let (text, at) = ui.draft.view(room);
+    let rest = if ui.draft.text.is_empty() {
+        Span::new(INPUT_HINT, Tone::Dim)
+    } else {
+        Span::bold(text, Tone::Text)
+    };
+    let line = Line::new(cut_spans(vec![lead, rest], w));
+    (line, (w - room) + at)
 }
 
 /// The button drawn at cell `col` of `line`, if any.
@@ -168,6 +535,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
         last: Last::Nothing,
     };
     let entries = entries(data, ui);
+    let mut starts = Vec::new();
     let mut i = 0;
     while i < entries.len() {
         if let Entry::Row(first) = entries[i]
@@ -182,26 +550,26 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
                 })
                 .collect();
             i += run.len();
+            starts.extend(run.iter().map(|r| (r.id, draw.lines.len())));
             draw.tools(&run);
             continue;
+        }
+        if let Entry::Row(row) = entries[i] {
+            starts.push((row.id, draw.lines.len()));
         }
         draw.entry(&entries[i]);
         i += 1;
     }
     draw.end_turn();
-    let mut bar = draw.bar();
-    let mut lines = draw.lines;
-    let buttons = draw.buttons;
-    if let Some(focus) = &ui.focus {
-        for span in lines.iter_mut().chain(&mut bar).flat_map(|l| &mut l.spans) {
-            span.reversed |= span.button == Some(*focus);
-        }
-    }
-    ConsoleView {
-        lines,
+    let bar = draw.bar();
+    let mut view = ConsoleView {
+        lines: draw.lines,
         bar,
-        buttons,
-    }
+        buttons: draw.buttons,
+        starts,
+    };
+    view.set_focus(ui.focus);
+    view
 }
 
 /// One thing the console shows, in the order it shows them.
@@ -254,11 +622,18 @@ fn folded(events: &BTreeMap<u64, EventRow>) -> Vec<Folded> {
         .collect()
 }
 
-/// The rows, paged-in ones and the topic's merged by id (an overlap shows once), in id order;
-/// the session lines, cards and errors each placed before the first row after their time.
-fn entries<'a>(data: &'a Data, ui: &'a ConsoleUi) -> Vec<Entry<'a>> {
+/// The rows, paged-in ones and the topic's merged by id: an overlap shows once, as the topic
+/// has it.
+fn rows<'a>(data: &'a Data, ui: &'a ConsoleUi) -> BTreeMap<i64, &'a FeedRow> {
     let mut rows: BTreeMap<i64, &FeedRow> = ui.older.iter().map(|(id, r)| (*id, r)).collect();
     rows.extend(data.feed.iter().map(|(id, r)| (*id, r)));
+    rows
+}
+
+/// The rows ([`rows`]), in id order; the session lines, cards and errors each placed before
+/// the first row after their time.
+fn entries<'a>(data: &'a Data, ui: &'a ConsoleUi) -> Vec<Entry<'a>> {
+    let rows = rows(data, ui);
     let mut others: Vec<(i64, Entry)> = folded(&data.events)
         .into_iter()
         .map(|f| (f.at, Entry::Event(f)))

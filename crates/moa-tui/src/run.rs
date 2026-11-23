@@ -690,9 +690,9 @@ impl Loop {
                         self.panel.sent(tag);
                     }
                     // Nothing is sent to another build; elsewhere the footer says why. A
-                    // pick that wasn't sent waits for no reply.
+                    // pick or a console request that wasn't sent waits for no reply.
                     _ => {
-                        self.panel.forget_pick();
+                        self.panel.forget_replies();
                         let line = self.link_line();
                         self.panel.note(line.as_deref().unwrap_or(CONNECTING));
                     }
@@ -837,7 +837,7 @@ impl Loop {
                 }
                 self.follow_row();
             }
-            LiveMsg::Event(CoreEvent::Error { message }) => self.panel.note(&message),
+            LiveMsg::Event(CoreEvent::Error { message }) => self.panel.error(&message, now()),
             // Every panel hears it: it shows a while, dim, and goes (its deadline wakes us).
             LiveMsg::Event(CoreEvent::Ui { text }) => self.panel.event(&text, now()),
             LiveMsg::Reply { tag, result } => {
@@ -848,9 +848,10 @@ impl Loop {
                 self.closing |= self.act(out.into_iter().collect());
             }
             LiveMsg::Closed => {
-                // No reply still owed will come: a pick waiting on one is forgotten.
+                // No reply still owed will come: a pick or a console request waiting on one
+                // is forgotten.
                 self.asked.clear();
-                self.panel.forget_pick();
+                self.panel.forget_replies();
                 self.wait(0);
             }
         }
@@ -988,6 +989,7 @@ impl Loop {
         }
         let ctx = self.ctx();
         let mut shown = None;
+        self.panel.set_link_up(matches!(self.link, Link::Up { .. }));
         term.draw(|f| {
             let area = f.area();
             let size = Size {
@@ -1239,6 +1241,7 @@ mod tests {
 
     use moa_client::LiveMsg;
     use moa_core::op::Done;
+    use moa_core::publish::CoreEvent;
     use moa_view::panel::Out;
 
     use super::{
@@ -1776,5 +1779,72 @@ mod tests {
                 "{written}"
             );
         }
+    }
+
+    /// B7: the console's draft outlives the connection. A line typed while moa is down
+    /// isn't sent (the footer says why, the head line says `connecting…`) and stays; one sent
+    /// when the connection ends stays too, and Enter can send it again.
+    #[tokio::test]
+    async fn the_link_going_down_keeps_the_draft() {
+        let (data, ctx) = moa_view::fixture::lantern();
+        let key = |code| Event::Key(KeyEvent::from(code));
+        let mut lp = looped(Some(View::Console), false);
+        lp.data = data;
+        lp.link = Link::Waiting {
+            waited: 0,
+            sleep: Box::pin(tokio::time::sleep(std::time::Duration::from_secs(60))),
+        };
+        for c in "hello".chars() {
+            input(&mut lp, key(KeyCode::Char(c)));
+        }
+        assert!(matches!(
+            input(&mut lp, key(KeyCode::Enter)),
+            Turn::Go(true)
+        ));
+        assert!(lp.asked.is_empty(), "nothing was sent");
+        let mut term = terminal();
+        lp.draw(&mut term).unwrap();
+        let text = shown(&term);
+        assert!(text.contains("connecting…"), "{text}");
+        assert!(text.contains("› hello"), "{text}");
+        assert!(text.contains(TRYING), "{text}");
+
+        // Sent, then the connection ends before the reply.
+        let outs = lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
+        assert!(matches!(outs[..], [Out::Send(_)]), "{outs:?}");
+        lp.asked.insert(7);
+        lp.panel.sent(7);
+        lp.take(LiveMsg::Closed);
+        lp.draw(&mut term).unwrap();
+        assert!(shown(&term).contains("› hello"));
+        let outs = lp.panel.key(Key::Enter, &lp.data, &ctx, SIZE);
+        assert!(matches!(outs[..], [Out::Send(_)]), "sent again: {outs:?}");
+    }
+
+    /// B10: an error event is a `✗` line in the console, once for the same text within 30 s,
+    /// and the footer's as before.
+    #[tokio::test]
+    async fn an_error_event_shows_in_the_console() {
+        let mut lp = looped(Some(View::Console), false);
+        let error = || {
+            LiveMsg::Event(CoreEvent::Error {
+                message: "moa's agent couldn't start".into(),
+            })
+        };
+        assert!(lp.take(error()));
+        assert!(lp.take(error()));
+        let mut term = terminal();
+        lp.draw(&mut term).unwrap();
+        let text = shown(&term);
+        assert_eq!(
+            text.matches("✗ moa's agent couldn't start").count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("moa's agent couldn't start").count(),
+            2,
+            "{text}"
+        );
     }
 }

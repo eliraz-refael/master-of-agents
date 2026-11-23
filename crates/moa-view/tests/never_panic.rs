@@ -14,7 +14,7 @@ use moa_core::model::{
     SuggestionStatus, Task, TaskId, TaskStatus, Who,
 };
 use moa_core::panel::View;
-use moa_core::publish::{BrainRow, EventRow, FeedRow, LayoutRow, TermRow};
+use moa_core::publish::{BrainRow, EventRow, FeedRow, LayoutRow, MoaRow, TermRow};
 use moa_core::state::EventWhat;
 use moa_view::ctx::Ctx;
 use moa_view::data::{Data, SessionRow};
@@ -547,11 +547,18 @@ fn check(screen: &Screen, now: UtcMs) -> Result<(), TestCaseError> {
     for line in &screen.head {
         check_line(line, body, "a head line")?;
     }
+    let input = g.input.unwrap_or_default();
     if let Some((x, y)) = screen.cursor {
         prop_assert!(
-            head.contains(x, y),
-            "the cursor ({x}, {y}) is outside {head:?}"
+            head.contains(x, y) || input.contains(x, y),
+            "the cursor ({x}, {y}) is outside {head:?} and {input:?}"
         );
+    }
+    prop_assert!(screen.input.is_none() || input.h > 0);
+    let bar = g.bar.unwrap_or_default();
+    prop_assert!(screen.bar.len() <= usize::from(bar.h));
+    for line in screen.input.iter().chain(&screen.bar) {
+        check_line(line, body, "an input or bar line")?;
     }
     prop_assert!(screen.body.len() <= usize::from(g.body.h));
     for (line, _) in &screen.body {
@@ -692,6 +699,19 @@ fn event_row() -> impl Strategy<Value = EventRow> {
 
 /// The console's data and panel memory: sessions, rows (some paged in, overlapping the
 /// tail), session events, cards and errors.
+/// moa's state row: every phase, an odd one, and odd threads and reasons.
+fn moa_row() -> impl Strategy<Value = MoaRow> {
+    (
+        prop_oneof![
+            4 => select(vec![s("off"), s("starting"), s("ready"), s("thinking"), s("failed")]),
+            1 => text(),
+        ],
+        option::of(text()),
+        option::of(text()),
+    )
+        .prop_map(|(phase, thread, why)| MoaRow { phase, thread, why })
+}
+
 fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {
     (
         vec(session(), 0..6),
@@ -702,9 +722,11 @@ fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {
         0usize..40,
         vec(text(), 0..9),
         option::of(0usize..9),
+        option::of(moa_row()),
+        text(),
     )
         .prop_map(
-            |(sessions, rows, events, cards, errors, paged, bar, focus)| {
+            |(sessions, rows, events, cards, errors, paged, bar, focus, moa, draft)| {
                 let mut data = Data::default();
                 for (n, mut row) in (0u8..).zip(sessions) {
                     row.session.id = session_id(n);
@@ -736,6 +758,8 @@ fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {
                     .map(|(at, line, text)| Card { at, line, text })
                     .collect();
                 ui.errors = errors;
+                data.moa = moa;
+                ui.draft.set(draft);
                 (data, ui)
             },
         )
@@ -771,6 +795,25 @@ proptest! {
         for b in view.order(0..view.lines.len()) {
             prop_assert!(usize::from(b) < view.buttons.len());
         }
+        // The head line (F23), up or not, with or without new lines below; the input line,
+        // its cursor within it.
+        for (up, new) in [(true, 0), (false, 0), (true, 3), (true, usize::MAX)] {
+            let head = console::head(&data, &ctx, up, new, w);
+            check_line(&head, usize::from(w), "the head line")?;
+            prop_assert_eq!(head.animated, up && data.moa.as_ref().is_some_and(|m| m.phase == "thinking"));
+        }
+        let (input, at) = console::input(&ui, w);
+        check_line(&input, usize::from(w), "the input line")?;
+        prop_assert!(at <= usize::from(w), "the cursor at {at}, past {w}");
+        // Scrolling and the history never panic, and the window stays in the lines.
+        let mut ui = ui;
+        for (rows, by) in [(5, -7), (0, -1), (1, 3), (30, -100), (12, 400)] {
+            ui.scroll(&view, rows, by);
+            let win = ui.window(&view, rows);
+            prop_assert!(win.top <= win.end && win.end <= view.lines.len());
+            prop_assert!(win.end - win.top + usize::from(win.more > 0) <= rows);
+        }
+        console::history(&data, &ui);
     }
 
     /// The terminals view, for 0 to 60 terminals with odd names at any width from 20 to 200:

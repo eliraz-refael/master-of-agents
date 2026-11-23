@@ -549,3 +549,45 @@ fn cards_and_errors_never_split_a_turn() {
         ]
     );
 }
+
+/// B9: the head line at each of moa's phases, at 40 and 80: connecting (the link down), off,
+/// starting, thinking (animated), ready, failed with and without a reason, an unknown phase,
+/// and `↓ N new` below a view scrolled up.
+#[test]
+fn the_head_line_at_each_phase() {
+    use moa_core::publish::MoaRow;
+    use moa_view::views::console::head;
+    let (mut data, ctx) = lantern();
+    let thread = Some("0193b4f0-aaaa-7000-8000-000000000001".to_string());
+    let phases: [(&str, Option<&str>, bool, usize); 9] = [
+        ("ready", None, false, 0),
+        ("off", None, true, 0),
+        ("starting", None, true, 0),
+        ("thinking", None, true, 0),
+        ("ready", None, true, 0),
+        (
+            "failed",
+            Some("moa's agent exited (code 1)\nsee moa.log"),
+            true,
+            0,
+        ),
+        ("failed", None, true, 0),
+        ("waking", None, true, 0),
+        ("thinking", None, true, 12),
+    ];
+    for w in [40, 80] {
+        let mut lines = Vec::new();
+        for (phase, why, up, new) in phases {
+            data.moa = Some(MoaRow {
+                phase: phase.into(),
+                thread: thread.clone(),
+                why: why.map(str::to_string),
+            });
+            let line = head(&data, &ctx, up, new, w);
+            assert_eq!(line.animated, up && phase == "thinking", "{phase}");
+            lines.push(line);
+        }
+        assert_fits(&lines, w);
+        insta::assert_snapshot!(format!("head@{w}"), debug_lines(&lines));
+    }
+}
