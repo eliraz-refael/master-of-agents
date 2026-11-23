@@ -403,6 +403,74 @@ pub fn wrap_spans(spans: &[Span], w: usize) -> Vec<Vec<Span>> {
     lines
 }
 
+/// `spans` wrapped to `room` cells as [`wrap_spans`] wraps them, each line with what goes in
+/// front of it: `lead` on the first, as many spaces on the rest (a hanging indent).
+pub fn hang(lead: &[Span], spans: &[Span], room: usize) -> Vec<(Vec<Span>, Vec<Span>)> {
+    let indent = vec![Span::new(" ".repeat(spans_width(lead)), Tone::Text)];
+    wrap_spans(spans, room)
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            (
+                if i == 0 {
+                    lead.to_vec()
+                } else {
+                    indent.clone()
+                },
+                line,
+            )
+        })
+        .collect()
+}
+
+/// The first `w` cells of `spans`: the span crossing the edge is [`cut`] there, and the
+/// spans after it go.
+pub fn cut_spans(spans: Vec<Span>, w: usize) -> Vec<Span> {
+    keep_spans(spans.into_iter(), w, cut)
+}
+
+/// The last `w` cells of `spans`: the span crossing the edge keeps its [`tail`], and the
+/// spans before it go.
+pub fn tail_spans(spans: Vec<Span>, w: usize) -> Vec<Span> {
+    let mut out = keep_spans(spans.into_iter().rev(), w, tail);
+    out.reverse();
+    out
+}
+
+/// The spans, in the order given, while `part` of each fits what is left of `w` cells; the
+/// first that doesn't fit whole is the last kept, as `part` of it.
+fn keep_spans(
+    spans: impl Iterator<Item = Span>,
+    w: usize,
+    part: fn(&str, usize) -> String,
+) -> Vec<Span> {
+    let mut left = w;
+    let mut out = Vec::new();
+    for span in spans {
+        let text = part(&span.text, left);
+        let whole = text.len() == span.text.len();
+        left -= width(&text);
+        if !text.is_empty() {
+            out.push(span.with_text(text));
+        }
+        if !whole {
+            break;
+        }
+    }
+    out
+}
+
+/// `spans` without the spaces at their end: what a blank line keeps of its prefix.
+pub fn trim_end_spans(spans: &mut Vec<Span>) {
+    while let Some(last) = spans.last_mut() {
+        last.text.truncate(last.text.trim_end().len());
+        if !last.text.is_empty() {
+            break;
+        }
+        spans.pop();
+    }
+}
+
 /// The cells `spans` take, side by side.
 pub fn spans_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| width(&s.text)).sum()

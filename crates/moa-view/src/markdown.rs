@@ -346,13 +346,7 @@ impl Render<'_> {
         self.flush(&[]);
         if std::mem::take(&mut self.gap) && !self.lines.is_empty() {
             let mut spans = self.prefix(false);
-            while let Some(last) = spans.last_mut() {
-                last.text.truncate(last.text.trim_end().len());
-                if !last.text.is_empty() {
-                    break;
-                }
-                spans.pop();
-            }
+            text::trim_end_spans(&mut spans);
             self.lines.push(Line::new(spans));
         }
     }
@@ -400,7 +394,7 @@ impl Render<'_> {
         let mut front = self.prefix(true);
         front.extend(lead);
         let mut line: Vec<Span> = Vec::new();
-        for span in tail_spans(front, self.indent_cap())
+        for span in text::tail_spans(front, self.indent_cap())
             .into_iter()
             .chain(spans)
         {
@@ -427,20 +421,17 @@ impl Render<'_> {
         if runs.is_empty() {
             return;
         }
-        let lead_width: usize = lead.iter().map(|s| width(&s.text)).sum();
+        let lead_width = text::spans_width(lead);
         let room = self.room(lead_width);
-        let mut first = true;
+        // The runs after the first hang under the lead too.
+        let indent = [Span::new(" ".repeat(lead_width), Tone::Text)];
+        let mut front = lead;
         for run in runs {
             let run: Vec<Span> = run.into_iter().map(|s| self.fit_button(s, room)).collect();
-            for (i, spans) in text::wrap_spans(&run, room).into_iter().enumerate() {
-                let lead = if first {
-                    lead.to_vec()
-                } else {
-                    vec![Span::new(" ".repeat(lead_width), Tone::Text)]
-                };
-                first = false;
+            for (i, (lead, spans)) in text::hang(front, &run, room).into_iter().enumerate() {
                 self.line(lead, spans, i > 0);
             }
+            front = &indent;
         }
     }
 
@@ -534,25 +525,4 @@ pub fn button_span(buttons: &mut Vec<Button>, button: Button, bold: bool) -> Opt
         command: button.command,
     });
     Some(span)
-}
-
-/// The last `w` cells of `spans`: what's left of an indent once its outer columns go.
-fn tail_spans(spans: Vec<Span>, w: usize) -> Vec<Span> {
-    let mut left = w;
-    let mut out = Vec::new();
-    for span in spans.into_iter().rev() {
-        let sw = width(&span.text);
-        if sw <= left {
-            left -= sw;
-            out.push(span);
-        } else {
-            let text = text::tail(&span.text, left);
-            if !text.is_empty() {
-                out.push(span.with_text(text));
-            }
-            break;
-        }
-    }
-    out.reverse();
-    out
 }

@@ -18,7 +18,7 @@ use crate::ctx::Ctx;
 use crate::data::Data;
 use crate::line::{Button, Line, Span, Tone};
 use crate::markdown::{self, button_span};
-use crate::text::{self, clean, cut, width};
+use crate::text::{self, clean, cut, cut_spans, width};
 use crate::views::{label, spinner};
 
 /// What a moa turn draws in front of each of its lines.
@@ -64,6 +64,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
         buttons: Vec::new(),
         thread: None,
         turn: None,
+        held: Vec::new(),
         last: Last::Nothing,
     };
     let entries = entries(data, ui);
@@ -87,6 +88,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
         draw.entry(&entries[i]);
         i += 1;
     }
+    draw.end_turn();
     ConsoleView {
         lines: draw.lines,
         buttons: draw.buttons,
@@ -103,6 +105,7 @@ enum Entry<'a> {
 
 /// A session's events folded into its one line (B3): the newest, and when it is `Finished`,
 /// how many turns it finished since it last started or needed you, from when.
+#[derive(Clone, Copy)]
 struct Folded {
     session: SessionId,
     what: EventWhat,
@@ -169,7 +172,8 @@ fn entries<'a>(data: &'a Data, ui: &'a ConsoleUi) -> Vec<Entry<'a>> {
     out
 }
 
-/// A moa turn: from a `you` row to the next, or to a thread change.
+/// A moa turn: from a `you` row, or a row of moa's with none before it, to the next `you`
+/// row or a thread change.
 struct Turn {
     /// Its prompt was moa's own.
     automatic: bool,
@@ -197,6 +201,8 @@ struct Draw<'a> {
     /// The thread of the last row.
     thread: Option<&'a str>,
     turn: Option<Turn>,
+    /// The session lines whose time falls inside the turn: drawn right after it.
+    held: Vec<Folded>,
     last: Last,
 }
 
@@ -214,13 +220,8 @@ impl<'a> Draw<'a> {
                     self.last = Last::Row;
                 }
             }
-            Entry::Event(f) => {
-                if self.last != Last::Event {
-                    self.gap();
-                }
-                self.event(f);
-                self.last = Last::Event;
-            }
+            Entry::Event(f) if self.turn.is_some() => self.held.push(*f),
+            Entry::Event(f) => self.session(f),
             Entry::Card(card) => {
                 self.gap();
                 self.card(card);
@@ -230,7 +231,7 @@ impl<'a> Draw<'a> {
                 if self.last != Last::Error {
                     self.gap();
                 }
-                let lines = hang(fail("✗ "), vec![fail(&clean(text))], self.width);
+                let lines = hanging(fail("✗ "), vec![fail(&clean(text))], self.width);
                 self.lines.extend(lines);
                 self.last = Last::Error;
             }
@@ -256,13 +257,17 @@ impl<'a> Draw<'a> {
         }
     }
 
-    /// Before `row`: a separator when its thread isn't the last row's; a `you` row starts a
-    /// turn, and the turn's first other row draws its header.
+    /// Before `row`: the turn ends at a `you` row or a thread change, and a separator marks
+    /// the change. A `you` row starts a turn; the first other row starts one when none is
+    /// open, and draws the turn's header.
     fn enter(&mut self, row: &'a FeedRow) {
-        if self.thread.is_some_and(|t| t != row.thread) {
+        let new_thread = self.thread.is_some_and(|t| t != row.thread);
+        if new_thread || row.kind == kind::YOU {
+            self.end_turn();
+        }
+        if new_thread {
             self.gap();
             self.separator(row);
-            self.turn = None;
         }
         self.thread = Some(&row.thread);
         if row.kind == kind::YOU {
@@ -278,9 +283,10 @@ impl<'a> Draw<'a> {
         if !matches!(self.last, Last::Row | Last::Separator) {
             self.gap();
         }
-        let Some(turn) = &mut self.turn else {
-            return;
-        };
+        let turn = self.turn.get_or_insert(Turn {
+            automatic: false,
+            headed: false,
+        });
         if turn.headed {
             return;
         }
@@ -295,6 +301,23 @@ impl<'a> Draw<'a> {
             spans.push(Span::new(" · on its own", Tone::Dim));
         }
         self.lines.push(Line::new(cut_spans(spans, self.width)));
+    }
+
+    /// The turn is over: the session lines held while it ran are drawn.
+    fn end_turn(&mut self) {
+        self.turn = None;
+        for f in std::mem::take(&mut self.held) {
+            self.session(&f);
+        }
+    }
+
+    /// A session's line, after a blank line unless another session's is just above.
+    fn session(&mut self, f: &Folded) {
+        if self.last != Last::Event {
+            self.gap();
+        }
+        self.event(f);
+        self.last = Last::Event;
     }
 
     /// `── Fri 13 Nov · thread 0193b4f0 ──`, at `row`'s day.
@@ -338,15 +361,19 @@ impl<'a> Draw<'a> {
         let lines = match row.kind.as_str() {
             kind::YOU => text.map(|t| {
                 let you = |s: &str| Span::new(s, Tone::You);
-                hang(you("› "), vec![you(&clean(t))], room)
+                hanging(you("› "), vec![you(&clean(t))], room)
             }),
             kind::MOA => text.map(|t| {
                 let w = u16::try_from(room).unwrap_or(u16::MAX);
                 markdown::render(t, w, &mut self.buttons, &|_| None)
             }),
+            // Its first line that isn't blank; nothing when every line is.
             kind::THOUGHT => text.map(|t| {
-                let first = t.lines().map(str::trim).find(|l| !l.is_empty());
-                let first = cut(&clean(first.unwrap_or_default()), room.saturating_sub(2));
+                let mut lines = t.lines().map(|l| clean(l).trim().to_string());
+                let Some(first) = lines.find(|l| !l.is_empty()) else {
+                    return Vec::new();
+                };
+                let first = cut(&first, room.saturating_sub(2));
                 let line = Span::new(format!("{first} …"), Tone::Dim);
                 vec![Line::new(cut_spans(vec![line], room))]
             }),
@@ -354,9 +381,9 @@ impl<'a> Draw<'a> {
             kind::PLAN => plan(row, room),
             kind::SYSTEM => text.map(|t| {
                 let dim = |s: &str| Span::new(s, Tone::Dim);
-                hang(dim("· "), vec![dim(&clean(t))], room)
+                hanging(dim("· "), vec![dim(&clean(t))], room)
             }),
-            kind::ERROR => text.map(|t| hang(fail("✗ "), vec![fail(&clean(t))], room)),
+            kind::ERROR => text.map(|t| hanging(fail("✗ "), vec![fail(&clean(t))], room)),
             _ => None,
         };
         lines.unwrap_or_else(|| {
@@ -405,8 +432,8 @@ impl<'a> Draw<'a> {
         Some(line)
     }
 
-    /// A session's folded line (B3), with a button to go to it when it needs you or finished,
-    /// and its last line under it.
+    /// A session's folded line (B3). When it needs you or finished a turn: a button to go to
+    /// it, and its last line under it (under a start or an end that line may be stale).
     fn event(&mut self, f: &Folded) {
         let row = self.data.sessions.get(&f.session);
         let name = row.map_or_else(|| f.session.to_string().chars().take(8).collect(), label);
@@ -439,9 +466,9 @@ impl<'a> Draw<'a> {
             spans.push(Span::new(" ", Tone::Text));
             spans.push(button);
         }
-        self.lines.extend(hang(glyph, spans, self.width));
+        self.lines.extend(hanging(glyph, spans, self.width));
         let why = row.map(|r| clean(&r.why)).unwrap_or_default();
-        if !why.trim().is_empty() {
+        if press.is_some() && !why.trim().is_empty() {
             let spans = vec![Span::new("  ", Tone::Text), Span::new(why, Tone::Dim)];
             self.lines.push(Line::new(cut_spans(spans, self.width)));
         }
@@ -450,7 +477,7 @@ impl<'a> Draw<'a> {
     /// `▸ <command>`, then its reply as Markdown behind the card's gutter.
     fn card(&mut self, card: &Card) {
         let dim = |s: &str| Span::new(s, Tone::Dim);
-        let lines = hang(dim("▸ "), vec![dim(&clean(&card.line))], self.width);
+        let lines = hanging(dim("▸ "), vec![dim(&clean(&card.line))], self.width);
         self.lines.extend(lines);
         if self.width <= width(CARD_GUTTER) {
             return;
@@ -498,60 +525,40 @@ fn fail(text: &str) -> Span {
     Span::new(text, Tone::Fail)
 }
 
-/// `lead`, then `spans` wrapped to the cells left beside it; the wrapped lines start under the
-/// text. All of it cut to one line when `lead` leaves no room.
-fn hang(lead: Span, spans: Vec<Span>, w: usize) -> Vec<Line> {
+/// `lead`, then `spans` wrapped to the cells left beside it ([`text::hang`]); the wrapped
+/// lines start under the text. All of it cut to one line when `lead` leaves no room.
+fn hanging(lead: Span, spans: Vec<Span>, w: usize) -> Vec<Line> {
     let lead_w = width(&lead.text);
     if lead_w >= w {
         let mut all = vec![lead];
         all.extend(spans);
         return vec![Line::new(cut_spans(all, w))];
     }
-    text::wrap_spans(&spans, w - lead_w)
+    text::hang(&[lead], &spans, w - lead_w)
         .into_iter()
         .enumerate()
-        .map(|(i, mut line)| {
+        .map(|(i, (mut front, line))| {
+            front.extend(line);
             if i == 0 {
-                line.insert(0, lead.clone());
-                Line::new(line)
+                Line::new(front)
             } else {
-                line.insert(0, Span::new(" ".repeat(lead_w), Tone::Text));
-                Line::wrapped(line)
+                Line::wrapped(front)
             }
         })
         .collect()
 }
 
-/// `lines`, each behind `gutter` (Dim); a blank line gets the gutter's mark alone.
+/// `lines`, each behind `gutter` (Dim); a blank line keeps only the gutter's mark.
 fn behind(gutter: &str, lines: Vec<Line>) -> Vec<Line> {
     lines
         .into_iter()
         .map(|mut line| {
-            let mark = if line.text().is_empty() {
-                gutter.trim_end()
-            } else {
-                gutter
-            };
-            line.spans.insert(0, Span::new(mark, Tone::Dim));
+            let blank = line.text().trim().is_empty();
+            line.spans.insert(0, Span::new(gutter, Tone::Dim));
+            if blank {
+                text::trim_end_spans(&mut line.spans);
+            }
             line
         })
         .collect()
-}
-
-/// The spans that fit in `w` cells, cut at the first one that doesn't fit whole.
-fn cut_spans(spans: Vec<Span>, w: usize) -> Vec<Span> {
-    let mut left = w;
-    let mut out = Vec::new();
-    for span in spans {
-        let text = cut(&span.text, left);
-        let whole = text.len() == span.text.len();
-        left -= width(&text);
-        if !text.is_empty() {
-            out.push(span.with_text(text));
-        }
-        if !whole {
-            break;
-        }
-    }
-    out
 }

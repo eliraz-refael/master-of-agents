@@ -1,6 +1,6 @@
 ---
 source: crates/moa-view/tests/console.rs
-assertion_line: 82
+assertion_line: 87
 expression: debug_lines(&view.lines)
 ---
 [you]› [you]What did Kite do today?
@@ -17,7 +17,6 @@ expression: debug_lines(&view.lines)
 [dim]│ [dim]• [work]/attention [text]lists the rest
 
 [work]▶ [text]Migrate DB [dim]started
-[text]  [dim]API error
 [dim]○ [text]Closed thing 👨 [dim]ended
 
 [you]› [you]Run the Lantern tests and tell me what fails
@@ -35,15 +34,14 @@ expression: debug_lines(&view.lines)
 [brain*]◆ moa  09:30
 [dim]│ [dim]· [dim]you cancelled moa's turn
 
-[warn]⚠ [text]Fix login [dim]needs you [work#0][↩ answer]
-[text]  [dim]Bash: cargo test ⚠
-
 [dim]▸ [dim]/ls
 [dim]┊ [text]2 sessions need you:
 [dim]┊
 [dim]┊ [dim]• [text]Fix login
 [dim]┊ [dim]• [text]Release notes
 
+[warn]⚠ [text]Fix login [dim]needs you [work#0][↩ answer]
+[text]  [dim]Bash: cargo test ⚠
 [ok]● [text]Rust scaffold [dim]· 3 turns since 09:20 [work#1][↩ open]
 
 [you]› [you]Why did Migrate DB fail?

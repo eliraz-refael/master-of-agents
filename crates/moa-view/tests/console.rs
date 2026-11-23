@@ -4,10 +4,11 @@
 
 use moa_core::UtcMs;
 use moa_core::panel::View;
-use moa_core::publish::{FeedRow, Topic};
+use moa_core::publish::{EventRow, FeedRow, Topic};
+use moa_core::state::EventWhat;
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
-use moa_view::fixture::{THREAD_TODAY, console_rows, lantern};
+use moa_view::fixture::{THREAD_TODAY, console_rows, lantern, session};
 use moa_view::line::{Line, debug_lines};
 use moa_view::text::width;
 use moa_view::views::console::{Card, ConsoleUi, ConsoleView, build};
@@ -15,6 +16,10 @@ use moa_view::views::{self, ViewUi};
 use serde_json::{Value, json};
 
 const MINUTE: i64 = 60_000;
+
+fn s(text: &str) -> String {
+    text.to_string()
+}
 
 /// The fixture with the made-up day in its `feed` topic.
 fn day() -> (Data, Ctx) {
@@ -88,7 +93,7 @@ fn the_day_at_three_widths() {
         .iter()
         .map(|b| (b.label.as_str(), b.command.as_str()))
         .collect();
-    let focus = |n| format!("/focus {}", moa_view::fixture::session(n));
+    let focus = |n| format!("/focus {}", session(n));
     let (fix_login, rust_scaffold) = (focus(1), focus(2));
     assert_eq!(
         pressed,
@@ -109,7 +114,8 @@ fn the_panel_draws_the_console() {
 }
 
 /// A `tool` row whose body is a string, a `plan` with no entries, a kind nobody knows, a text
-/// row without its text and a `tool` without a title each draw one dim line naming the id.
+/// row without its text and a `tool` without a title each draw one dim line naming the id,
+/// behind the gutter of the turn they open.
 #[test]
 fn bad_rows_draw_degraded() {
     let (_, ctx) = lantern();
@@ -123,10 +129,13 @@ fn bad_rows_draw_degraded() {
     ];
     let view = only(rows, &ctx, 80);
     let want: String = (1..=6)
-        .map(|id| format!("[dim]· an entry moa couldn't show (#{id})\n"))
+        .map(|id| format!("[dim]│ [dim]· an entry moa couldn't show (#{id})\n"))
         .collect();
-    assert_eq!(debug_lines(&view.lines), want);
-    // Inside a turn, behind its gutter, still one line each.
+    assert_eq!(
+        debug_lines(&view.lines),
+        format!("[brain*]◆ moa  19:00\n{want}")
+    );
+    // After a prompt, still one line each.
     let mut rows = vec![row(0, "you", json!({"text": "go"}), None)];
     rows.push(row(1, "tool", json!("ls -la"), Some("completed")));
     let view = only(rows, &ctx, 80);
@@ -156,17 +165,89 @@ fn the_thinking_line_animates() {
         ("cancelled", false),
     ] {
         let view = only(vec![row(1, "tool", body.clone(), Some(state))], &ctx, 80);
-        assert_eq!(view.lines.len(), 1, "{state}");
-        let line = &view.lines[0];
+        assert_eq!(view.lines.len(), 2, "{state}: the header, then the call");
+        assert!(!view.lines[0].animated);
+        let line = &view.lines[1];
         assert_eq!(line.animated, animated, "{state}: {:?}", line.text());
         assert!(
-            line.text().starts_with("⚙ Terminal: cargo test "),
+            line.text().starts_with("│ ⚙ Terminal: cargo test "),
             "{state}"
         );
     }
     let spinning = only(vec![row(1, "tool", body, Some("in_progress"))], &ctx, 80);
     let frame = views::spinner(ctx.tick);
-    assert!(spinning.lines[0].text().ends_with(frame));
+    assert!(spinning.lines[1].text().ends_with(frame));
+}
+
+/// moa's rows with no prompt before them (moa speaking first, or the edge of what is loaded)
+/// still read as a turn: a header, then the gutter. A thought that is only blank lines draws
+/// nothing.
+#[test]
+fn rows_without_a_prompt_open_a_turn() {
+    let (_, ctx) = lantern();
+    let rows = vec![
+        row(1, "thought", json!({"text": "\n  \n\t\n"}), None),
+        row(
+            2,
+            "moa",
+            json!({"text": "Morning. **Fix login** needs you."}),
+            None,
+        ),
+        row(3, "you", json!({"text": "on it"}), None),
+    ];
+    let text: Vec<String> = only(rows, &ctx, 80).lines.iter().map(Line::text).collect();
+    assert_eq!(
+        text,
+        [
+            "◆ moa  19:00",
+            "│ Morning. Fix login needs you.",
+            "",
+            "› on it"
+        ]
+    );
+}
+
+/// A session line whose time falls inside a turn waits for the turn to end, and then shows
+/// right after it; its last line shows only under needs-you and finished.
+#[test]
+fn session_lines_never_split_a_turn() {
+    let (mut data, ctx) = lantern();
+    let rows = [
+        row(1, "you", json!({"text": "go"}), None),
+        row(2, "moa", json!({"text": "first"}), None),
+        row(4, "moa", json!({"text": "second"}), None),
+        row(6, "you", json!({"text": "next"}), None),
+    ];
+    data.feed = rows.into_iter().map(|r| (r.id, r)).collect();
+    let event = |seq: u64, n: u8, what: EventWhat| EventRow {
+        seq,
+        at: 1_003,
+        session: session(n),
+        what,
+    };
+    data.events.insert(1, event(1, 1, EventWhat::NeedsYou));
+    data.events.insert(2, event(2, 6, EventWhat::Started));
+    data.touch();
+    let text: Vec<String> = build(&data, &ctx, &ConsoleUi::default(), 80)
+        .lines
+        .iter()
+        .map(Line::text)
+        .collect();
+    assert_eq!(
+        text,
+        [
+            "› go",
+            "◆ moa  19:00",
+            "│ first",
+            "│ second",
+            "",
+            "⚠ Fix login needs you [↩ answer]",
+            "  Bash: cargo test ⚠",
+            "▶ Migrate DB started",
+            "",
+            "› next",
+        ]
+    );
 }
 
 /// Rows paged in and the topic's tail are merged by id: an overlap draws once.
@@ -186,7 +267,8 @@ fn paged_rows_merge_with_the_tail_once() {
         .iter()
         .map(Line::text)
         .collect();
-    let want: Vec<String> = (1..=6).map(|id| format!("· line {id}")).collect();
+    let mut want = vec![s("◆ moa  19:00")];
+    want.extend((1..=6).map(|id| format!("│ · line {id}")));
     assert_eq!(lines, want);
 }
 
