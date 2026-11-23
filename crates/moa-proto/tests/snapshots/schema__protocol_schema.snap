@@ -1412,6 +1412,56 @@ expression: all
               "method",
               "params"
             ]
+          },
+          {
+            "description": "The `n` feed rows before id `before`, oldest first, from every thread: what the\nconsole pages back through. Answered by the daemon from the store, not by the core.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.page"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "before": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "n": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535,
+                    "default": 100
+                  }
+                },
+                "required": [
+                  "before"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "The next prompt starts a new thread, even the same day.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.new"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
           }
         ]
       },

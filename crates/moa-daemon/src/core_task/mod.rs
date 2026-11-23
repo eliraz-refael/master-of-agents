@@ -19,6 +19,7 @@ use moa_core::central::wire::AcpCmd;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Input, Publish, TmuxToken};
 use moa_core::hook::{HookEnvelope, HookLine};
+use moa_core::model::FeedEntry;
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
@@ -653,6 +654,13 @@ impl CoreHandle {
         let (reply, answer) = oneshot::channel();
         self.inbox.send(Item::Status { caller, reply }).ok()?;
         answer.await.ok()
+    }
+
+    /// The `n` feed rows before id `before`, oldest first, read from the store directly (the
+    /// core keeps only the newest 100).
+    pub async fn feed_page(&self, before: i64, n: usize) -> Result<Vec<FeedEntry>, String> {
+        let store = lock(&self.store).clone();
+        store.feed_page(before, n).await.map_err(|e| e.to_string())
     }
 
     /// Tests only: the core task panics where nothing catches it.

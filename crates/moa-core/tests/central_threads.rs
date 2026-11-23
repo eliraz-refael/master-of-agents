@@ -7,7 +7,7 @@ use common::central::{
     acps, caps, ended, feed_rows, first_turn, hear, hear_at, moa, moa_with, opened, phase, prompt,
     prompt_at, prompts_sent, published_state, saved, started, text_of, thread, thread_rows,
 };
-use common::{at, changes, replies, send};
+use common::{at, changes, replies, send, send_on};
 use jiff::ToSpan;
 use jiff::civil::Date;
 use moa_core::UtcMs;
@@ -15,11 +15,12 @@ use moa_core::central::launch::spec;
 use moa_core::central::prompt::system_text;
 use moa_core::central::threads::{How, choose};
 use moa_core::central::wire::{AcpCmd, AcpIn, Opened, ThreadHow};
-use moa_core::central::{Phase, Waiter};
+use moa_core::central::{Phase, Waiter, console_attached};
 use moa_core::config::AccountName;
 use moa_core::effect::{Effect, Input, Publish, RefuseWrites, check_order, handle_checked};
-use moa_core::model::MoaThread;
+use moa_core::model::{MoaThread, ThreadKind};
 use moa_core::op::{ConnId, NoParams, Op, OpError, ReqId};
+use moa_core::panel::View;
 use moa_core::publish::{CoreEvent, Topic};
 use moa_core::state::Snapshot;
 use moa_testkit::brain::TypicalBrain;
@@ -402,6 +403,76 @@ fn a_failed_new_thread_refuses_the_prompt() {
             ..
         }]
     ));
+}
+
+#[test]
+fn new_starts_a_thread_the_same_day() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let mut st = moa(&b);
+    first_turn(&mut st, &now, "th-1", false);
+    hear(&b, &mut st, ended(1, 1));
+
+    let fx = send(&b, &mut st, 2, Op::ConsoleNew(NoParams));
+    match &replies(&fx)[..] {
+        [(ReqId(2), Ok(done))] => assert_eq!(done.text, "the next prompt starts a new thread"),
+        other => panic!("{other:?}"),
+    }
+    assert!(acps(&fx).is_empty() && changes(&fx).is_empty());
+
+    // The next prompt opens a new thread, told the system text.
+    let fx = prompt(&b, &mut st, 3, "again");
+    let text = system_text(&st, &now);
+    assert_eq!(
+        acps(&fx),
+        [&AcpCmd::Open {
+            generation: 1,
+            how: ThreadHow::New {
+                system_prompt: Some(text.full),
+                claude_md: None,
+            },
+            cwd: st.deps().agent_dir.clone(),
+        }]
+    );
+    let fx = hear(&b, &mut st, opened(1, "th-2", Opened::New));
+    let rows = thread_rows(&fx);
+    assert_eq!(rows.len(), 1, "{fx:?}");
+    assert_eq!(
+        (rows[0].thread_id.as_str(), rows[0].kind),
+        ("th-2", ThreadKind::Manual)
+    );
+    assert_eq!(st.threads().count(), 2);
+    hear(&b, &mut st, ended(1, 2));
+
+    // The prompt after that uses it.
+    let fx = prompt(&b, &mut st, 4, "third");
+    assert!(
+        matches!(
+            acps(&fx)[..],
+            [AcpCmd::Prompt { thread, .. }] if thread == "th-2"
+        ),
+        "{fx:?}"
+    );
+}
+
+#[test]
+fn console_attached_follows_panels() {
+    let b = TypicalBrain::new();
+    let mut st = moa(&b);
+    assert!(!console_attached(&st));
+    let panel = |view| Op::UiPanel {
+        pane: Some("%5".into()),
+        view: Some(view),
+        placed: false,
+        once: false,
+    };
+    send_on(&b, &mut st, 7, 1, panel(View::Tree));
+    assert!(!console_attached(&st));
+    let fx = send_on(&b, &mut st, 8, 1, panel(View::Console));
+    assert!(matches!(replies(&fx)[..], [(_, Ok(_))]), "{fx:?}");
+    assert!(console_attached(&st));
+    handle_checked(&mut st, Input::ClientGone(ConnId(8)), b.now());
+    assert!(!console_attached(&st));
 }
 
 #[test]

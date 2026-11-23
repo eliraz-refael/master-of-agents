@@ -27,6 +27,7 @@ use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
 use crate::model::{FeedEntry, MoaThread, ThreadKind};
 use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
 use crate::state::State;
 use crate::tmux::link::log;
@@ -134,6 +135,9 @@ pub struct Moa {
     /// moa's updates that couldn't be saved since the count was last logged, at a turn's
     /// end.
     pub unsaved: u64,
+    /// `console.new` was said: the next prompt opens a new thread of kind `Manual`, even the
+    /// same day. Kept in memory; it ends once that thread is open.
+    pub new_thread: bool,
 }
 
 impl Moa {
@@ -237,6 +241,21 @@ pub fn send(
     };
     fx.extend(said(state));
     fx
+}
+
+/// `console.new`: the next prompt starts a new thread.
+pub fn start_new(state: &mut State, conn: ConnId, req: ReqId) -> Vec<Effect> {
+    state.central.new_thread = true;
+    let result = Ok(Done {
+        text: "the next prompt starts a new thread".into(),
+        data: json!({}),
+    });
+    vec![Effect::Reply { conn, req, result }]
+}
+
+/// Whether a console is attached: some registered panel shows [`View::Console`].
+pub fn console_attached(state: &State) -> bool {
+    state.panels.values().any(|p| p.view == View::Console)
 }
 
 /// What moa's agent said, from the run the core listens to; any other run's is dropped.
@@ -394,13 +413,18 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
     };
     match result {
         Ok((id, how)) => {
+            let manual = std::mem::take(&mut state.central.new_thread);
             let row = match (how, state.thread(&id)) {
                 (Opened::Resumed | Opened::Loaded, Some(row)) => row.clone(),
                 _ => MoaThread {
                     thread_id: id,
                     account: account.to_string(),
                     day: now.local_day,
-                    kind: ThreadKind::Daily,
+                    kind: if manual {
+                        ThreadKind::Manual
+                    } else {
+                        ThreadKind::Daily
+                    },
                     started_at: now.wall,
                 },
             };

@@ -257,6 +257,17 @@ pub enum Op {
     /// Cancels moa's turn under way.
     #[serde(rename = "console.cancel")]
     ConsoleCancel(NoParams),
+    /// The `n` feed rows before id `before`, oldest first, from every thread: what the
+    /// console pages back through. Answered by the daemon from the store, not by the core.
+    #[serde(rename = "console.page")]
+    ConsolePage {
+        before: i64,
+        #[serde(default = "page_n")]
+        n: u16,
+    },
+    /// The next prompt starts a new thread, even the same day.
+    #[serde(rename = "console.new")]
+    ConsoleNew(NoParams),
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -264,6 +275,14 @@ pub enum Op {
     #[cfg_attr(feature = "schema", schemars(skip))]
     DebugPanic,
 }
+
+/// How many rows `console.page` returns when it isn't told.
+fn page_n() -> u16 {
+    100
+}
+
+/// The most rows `console.page` returns.
+pub const PAGE_MAX: u16 = 200;
 
 /// How a suggestion is answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -414,6 +433,8 @@ impl Op {
         "goto",
         "console.prompt",
         "console.cancel",
+        "console.page",
+        "console.new",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -445,7 +466,8 @@ impl Op {
             | Op::SuggestionAnswer { .. }
             | Op::LayoutSet { .. }
             | Op::LayoutApply { .. }
-            | Op::ConsolePrompt { .. } => true,
+            | Op::ConsolePrompt { .. }
+            | Op::ConsoleNew(_) => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -465,6 +487,7 @@ impl Op {
             | Op::LayoutShow { .. }
             | Op::Goto { .. }
             | Op::ConsoleCancel(_)
+            | Op::ConsolePage { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -517,6 +540,8 @@ impl Op {
             Op::Goto { .. } => "goto",
             Op::ConsolePrompt { .. } => "console.prompt",
             Op::ConsoleCancel(_) => "console.cancel",
+            Op::ConsolePage { .. } => "console.page",
+            Op::ConsoleNew(_) => "console.new",
             Op::DebugPanic => "debug.panic",
         }
     }

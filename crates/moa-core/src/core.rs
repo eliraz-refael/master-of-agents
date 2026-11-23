@@ -617,6 +617,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::ConsoleCancel(_),
             ..
         } => central::cancel(state, conn, req),
+        Input::Client {
+            conn,
+            req,
+            op: Op::ConsoleNew(_),
+            ..
+        } => central::start_new(state, conn, req),
         Input::Acp(heard) => central::heard(state, now, heard),
         Input::Client {
             conn,

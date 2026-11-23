@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use crate::config::{Form, UiConfig};
 use crate::layout::{current_layout, leaves};
 use crate::live::{DisplayState, display_state};
-use crate::model::Terminal;
+use crate::model::{FeedEntry, Terminal};
 use crate::ops::launch::title_of;
 use crate::panel::{View, key_of};
 use crate::state::State;
@@ -198,6 +198,21 @@ pub struct FeedRow {
     pub automatic: bool,
     pub body: Value,
     pub state: Option<String>,
+}
+
+impl From<&FeedEntry> for FeedRow {
+    fn from(e: &FeedEntry) -> FeedRow {
+        FeedRow {
+            id: e.id,
+            thread: e.thread_id.clone(),
+            at: e.at.0,
+            kind: e.kind.clone(),
+            message_id: e.message_id.clone(),
+            automatic: e.automatic,
+            body: serde_json::from_str(&e.body).unwrap_or(Value::Null),
+            state: e.state.clone(),
+        }
+    }
 }
 
 /// The `feed` topic's row with key `state`: whether moa's agent is running, which thread it is
@@ -396,17 +411,7 @@ impl State {
             .feed_tail()
             .map(|e| {
                 let key = format!("#{}", e.id);
-                let row = FeedRow {
-                    id: e.id,
-                    thread: e.thread_id.clone(),
-                    at: e.at.0,
-                    kind: e.kind.clone(),
-                    message_id: e.message_id.clone(),
-                    automatic: e.automatic,
-                    body: serde_json::from_str(&e.body).unwrap_or(Value::Null),
-                    state: e.state.clone(),
-                };
-                let v = keyed(&key, &row);
+                let v = keyed(&key, &FeedRow::from(e));
                 (key, v)
             })
             .collect();
