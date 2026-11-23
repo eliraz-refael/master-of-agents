@@ -4,10 +4,10 @@
 use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
-use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use moa_core::op::Op;
 use moa_core::publish::{FeedRow, MoaRow, Topic};
+use moa_core::time::{UtcMs, local_format};
 use serde_json::Value;
 
 use crate::ctl::{BrainArgs, finish, running, send_routed};
@@ -116,9 +116,7 @@ fn phase_line(s: &MoaRow) -> String {
 pub fn render(rows: &[FeedRow], tz: &TimeZone) -> Vec<String> {
     rows.iter()
         .map(|r| {
-            let at = Timestamp::from_millisecond(r.at)
-                .map(|t| tz.to_datetime(t).strftime("%H:%M").to_string())
-                .unwrap_or_else(|_| "--:--".into());
+            let at = local_format(UtcMs(r.at), tz, "%H:%M");
             let text = r.body.get("text").and_then(Value::as_str).unwrap_or("");
             match r.kind.as_str() {
                 "you" => format!("{at} you  {}", first_line(text)),

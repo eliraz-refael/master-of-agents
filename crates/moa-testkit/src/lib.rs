@@ -74,12 +74,17 @@ pub fn stub_acp() -> PathBuf {
 /// `~/.claude-acct-a`, launcher `fake-claude`) whose ACP adapter is `stub-acp`. The stub reads
 /// its script from the brain's agent folder ([`write_stub_script`]).
 pub fn stub_moa_toml() -> String {
+    moa_toml_with_adapter(&stub_acp())
+}
+
+/// [`stub_moa_toml`], with `adapter` as the account's ACP adapter.
+pub fn moa_toml_with_adapter(adapter: &Path) -> String {
     format!(
         "[brains.default]\nmoa_account = \"acct-a\"\n\
          [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
          launcher = \"{}\"\nacp = \"{}\"\n",
         fake_claude().display(),
-        stub_acp().display()
+        adapter.display()
     )
 }
 

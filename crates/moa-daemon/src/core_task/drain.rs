@@ -118,8 +118,9 @@ impl Core {
             }
         };
         self.wait_for_backups().await;
-        self.stop_link().await;
-        self.stop_agent().await;
+        // Both links stop at once: neither waits for the other.
+        let agent = self.stop_agent();
+        tokio::join!(self.stop_link(), agent);
         // Nobody waits for the process to exit: what is left is told to try again, and the
         // connections' senders drop.
         inbox.close();
@@ -503,18 +504,21 @@ impl Core {
     }
 
     /// Asks the link to moa's agent to stop the agent, with everything it started, and to
-    /// close; waits for it a short while.
-    async fn stop_agent(&mut self) {
+    /// close; the future waits for it a short while.
+    fn stop_agent(&self) -> impl Future<Output = ()> + use<> {
         let (done, stopped) = oneshot::channel();
-        if self.acp.send(AcpMsg::Stop(done)).is_ok()
-            && tokio::time::timeout(AGENT_STOP_WAIT, stopped)
-                .await
-                .is_err()
-        {
-            tracing::warn!(
-                "moa's agent didn't stop within {} s",
-                AGENT_STOP_WAIT.as_secs()
-            );
+        let sent = self.acp.send(AcpMsg::Stop(done)).is_ok();
+        async move {
+            if sent
+                && tokio::time::timeout(AGENT_STOP_WAIT, stopped)
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(
+                    "moa's agent didn't stop within {} s",
+                    AGENT_STOP_WAIT.as_secs()
+                );
+            }
         }
     }
 

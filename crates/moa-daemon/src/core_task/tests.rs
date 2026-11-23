@@ -6,7 +6,9 @@ use std::time::Duration;
 use moa_core::config::BrainName;
 use moa_core::state::PanelLaunch;
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
-use moa_testkit::{StubStep, fake_claude, stub_acp, stub_log, wait_for, write_stub_script};
+use moa_testkit::{
+    StubStep, moa_toml_with_adapter, stub_acp, stub_log, wait_for, write_stub_script,
+};
 use serde_json::json;
 use tokio::time::timeout;
 
@@ -127,13 +129,7 @@ async fn moa_core(
     program: &Path,
     agent: Option<mpsc::UnboundedSender<AcpMsg>>,
 ) -> CoreHandle {
-    let toml = format!(
-        "[brains.default]\nmoa_account = \"acct-a\"\n\
-         [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
-         launcher = \"{}\"\nacp = \"{}\"\n",
-        fake_claude().display(),
-        program.display()
-    );
+    let toml = moa_toml_with_adapter(program);
     let time = FakeTime::new(brain.now().wall);
     let mut opts = options(brain, &time, None);
     opts.config = Config::from_file_text(Some(&toml), home, Path::to_path_buf).unwrap();

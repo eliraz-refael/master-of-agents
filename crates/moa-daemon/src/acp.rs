@@ -169,6 +169,8 @@ impl Actor {
         };
         // The reason may name a path: it goes to the log and to whoever asked, nowhere else.
         tracing::warn!("moa's agent couldn't start: {why}");
+        // Said here, once: a later panic has no run to report.
+        *lock(&self.sh.live) = None;
         (self.sh.to_core)(AcpIn::Exited { generation, why });
         Ok(())
     }
@@ -199,10 +201,15 @@ impl Actor {
         }
     }
 
-    /// Stops the agent, if there is one, with its whole process group.
+    /// Stops the agent, if there is one, with its whole process group. Its exit is said by
+    /// the host, so a later panic has no run to report.
     async fn stop_agent(&mut self) {
-        if let Some((_, agent)) = self.agent.take() {
+        if let Some((generation, agent)) = self.agent.take() {
             agent.stop().await;
+            let mut live = lock(&self.sh.live);
+            if *live == Some(generation) {
+                *live = None;
+            }
         }
     }
 }
