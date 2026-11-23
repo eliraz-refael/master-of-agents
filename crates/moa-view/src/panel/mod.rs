@@ -14,7 +14,7 @@ use crate::data::{Data, SessionRow};
 use crate::editor::{Edited, Editor};
 use crate::geometry::{Geometry, Rect, Size, geometry};
 use crate::keys::{self, Action, Key};
-use crate::line::{Item, Line, Span, Tone, debug_lines};
+use crate::line::{Button, Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
 use crate::text::{self, clean};
 use crate::views::console::{self, ConsoleUi};
@@ -202,6 +202,10 @@ pub struct Panel {
     picks: Option<Picks>,
     /// What the console keeps: its paged-in rows, cards and errors.
     console: ConsoleUi,
+    /// The buttons of the console's last build (the text's, then the bar's), and the bar's
+    /// lines.
+    buttons: Vec<Button>,
+    bar: Vec<Line>,
 }
 
 /// The picker's matches for one revision of the data and one query.
@@ -263,6 +267,8 @@ impl Panel {
             pick_tag: None,
             picks: None,
             console: ConsoleUi::default(),
+            buttons: Vec::new(),
+            bar: Vec::new(),
         }
     }
 
@@ -415,7 +421,10 @@ impl Panel {
             let m = picks(&mut self.picks, data, &self.ui.query);
             picker::lines(m, &self.ui.query, ctx, width)
         } else if self.view == View::Console {
-            console::build(data, ctx, &self.console, width).lines
+            let mut built = console::build(data, ctx, &self.console, width);
+            self.buttons = built.buttons;
+            self.bar = built.bar;
+            std::mem::take(&mut built.lines)
         } else {
             views::build(self.view, data, ctx, &self.ui, width)
         };
@@ -493,6 +502,12 @@ impl Panel {
             }
             Mouse::Click { x, y } => {
                 self.pointer = Some((x, y));
+                if let Some(command) = self.button_at(g.body, x, y) {
+                    // A click on a button presses it.
+                    self.message = None;
+                    let out = vec![Out::Send(Op::ConsoleCommand { line: command })];
+                    return Handled { out, redraw: true };
+                }
                 let hit = self.row_at(g.body, x, y);
                 self.hover = hit.and_then(|i| self.lines[i].item.clone());
                 if let Some(i) = hit {
@@ -522,6 +537,18 @@ impl Panel {
             out,
             redraw: was != self.hover,
         }
+    }
+
+    /// The command of the console's button drawn at screen cell (`x`, `y`), if any.
+    fn button_at(&self, body: Rect, x: u16, y: u16) -> Option<String> {
+        if self.view != View::Console || !body.contains(x, y) {
+            return None;
+        }
+        let line = self.lines.get(self.list.top + usize::from(y - body.y))?;
+        let button = console::button_at(line, usize::from(x - body.x))?;
+        self.buttons
+            .get(usize::from(button))
+            .map(|b| b.command.clone())
     }
 
     /// The selectable line drawn at screen cell (`x`, `y`), if any.

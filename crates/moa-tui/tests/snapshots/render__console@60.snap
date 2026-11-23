@@ -1,12 +1,11 @@
 ---
 source: crates/moa-tui/tests/render.rs
-assertion_line: 178
 expression: screen_text(&buf)
 ---
 ╭─ ◆ moa ──────────────────────────────────────────────────╮
 │ › What did Kite do today?                                │
 │ ◆ moa  17:41                                             │
-│ │ Kite finished the release notes draft. /brief has the  │
+│ │ Kite finished the release notes draft. [/brief] has the│
 │ │ rest.                                                  │
 │                                                          │
 │ ── Fri 13 Nov · thread 0193b4f0 ──                       │

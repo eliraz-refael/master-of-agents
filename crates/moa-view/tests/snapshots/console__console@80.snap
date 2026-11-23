@@ -1,11 +1,10 @@
 ---
 source: crates/moa-view/tests/console.rs
-assertion_line: 87
 expression: debug_lines(&view.lines)
 ---
 [you]› [you]What did Kite do today?
 [brain*]◆ moa  17:41
-[dim]│ [text]Kite finished the [text*]release notes [text]draft. [work]/brief [text]has the rest.
+[dim]│ [text]Kite finished the [text*]release notes [text]draft. [work#0][/brief][text] has the rest.
 
 [dim]── Fri 13 Nov · thread 0193b4f0 ──
 [brain*]◆ moa  08:00[dim] · on its own
@@ -14,7 +13,7 @@ expression: debug_lines(&view.lines)
 [dim]│
 [dim]│ [dim]• [text*]Fix login [text]needs you
 [dim]│ [dim]• [text]Kite's release notes are done [ok]✓
-[dim]│ [dim]• [work]/attention [text]lists the rest
+[dim]│ [dim]• [work#1][/attention][text] lists the rest
 
 [work]▶ [text]Migrate DB [dim]started
 [dim]○ [text]Closed thing 👨 [dim]ended
@@ -34,15 +33,16 @@ expression: debug_lines(&view.lines)
 [brain*]◆ moa  09:30
 [dim]│ [dim]· [dim]you cancelled moa's turn
 
+[warn]⚠ [text]Fix login [dim]needs you [work#2][↩ answer]
+[text]  [dim]Bash: cargo test ⚠
+
 [dim]▸ [dim]/ls
 [dim]┊ [text]2 sessions need you:
 [dim]┊
 [dim]┊ [dim]• [text]Fix login
 [dim]┊ [dim]• [text]Release notes
 
-[warn]⚠ [text]Fix login [dim]needs you [work#0][↩ answer]
-[text]  [dim]Bash: cargo test ⚠
-[ok]● [text]Rust scaffold [dim]· 3 turns since 09:20 [work#1][↩ open]
+[ok]● [text]Rust scaffold [dim]· 3 turns since 09:20 [work#3][↩ open]
 
 [you]› [you]Why did Migrate DB fail?
 [brain*]◆ moa  09:51

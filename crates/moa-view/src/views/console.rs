@@ -5,9 +5,11 @@
 //! (B10): nothing here panics, whatever the daemon sends.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use moa_core::UtcMs;
 use moa_core::central::feed::kind;
+use moa_core::console::COMMANDS;
 use moa_core::model::SessionId;
 use moa_core::publish::{EventRow, FeedRow};
 use moa_core::state::EventWhat;
@@ -15,10 +17,10 @@ use moa_core::time::local_format;
 use serde_json::Value;
 
 use crate::ctx::Ctx;
-use crate::data::Data;
+use crate::data::{Data, SessionRow};
 use crate::line::{Button, Line, Span, Tone};
 use crate::markdown::{self, button_span};
-use crate::text::{self, clean, cut, cut_spans, width};
+use crate::text::{self, clean, cut, cut_spans, ellipsize, width, wrap_spans};
 use crate::views::{label, spinner};
 
 /// What a moa turn draws in front of each of its lines.
@@ -45,13 +47,111 @@ pub struct ConsoleUi {
     pub older: BTreeMap<i64, FeedRow>,
     pub cards: Vec<Card>,
     pub errors: Vec<(UtcMs, String)>,
+    /// The button Tab is on, by its command: every button pressing it is drawn reversed. By
+    /// identity, so a rebuild (a rename, a new line) keeps it.
+    pub focus: Option<String>,
 }
 
 /// The console's lines, and the buttons their spans press.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ConsoleView {
     pub lines: Vec<Line>,
+    /// The bar under the input (B5), one or more lines of buttons.
+    pub bar: Vec<Line>,
+    /// The buttons of `lines` first, then the bar's: a span's `button` indexes this.
     pub buttons: Vec<Button>,
+}
+
+impl ConsoleView {
+    /// The buttons Tab walks (F26), as indexes into `buttons`: those of the `visible` lines
+    /// in reading order (top to bottom, left to right), then the bar's, left to right.
+    pub fn order(&self, visible: Range<usize>) -> Vec<u16> {
+        let from = visible.start.min(self.lines.len());
+        let to = visible.end.min(self.lines.len()).max(from);
+        self.lines[from..to]
+            .iter()
+            .chain(&self.bar)
+            .flat_map(|l| l.spans.iter().filter_map(|s| s.button))
+            .collect()
+    }
+}
+
+/// The button drawn at cell `col` of `line`, if any.
+pub fn button_at(line: &Line, col: usize) -> Option<u16> {
+    let mut at = 0;
+    for span in &line.spans {
+        let end = at + width(&span.text);
+        if col < end {
+            return span.button;
+        }
+        at = end;
+    }
+    None
+}
+
+/// The button moa's text makes of inline `code` (B13): a `/command` the console knows (its
+/// own text), or `moactl resume|focus|open|close|archive SESSION` with no flag (`[↩ name]`,
+/// the session's name as it is now; the id for one not known). `None` for any other code.
+pub fn find(data: &Data, code: &str) -> Option<Button> {
+    let code = code.trim();
+    if code.contains(char::is_control) {
+        return None;
+    }
+    if let Some(rest) = code.strip_prefix('/') {
+        let name = rest.split_whitespace().next()?;
+        let known = COMMANDS.iter().any(|c| c.name == name);
+        return known.then(|| Button {
+            label: code.to_string(),
+            command: code.to_string(),
+        });
+    }
+    let words: Vec<&str> = code.split_whitespace().collect();
+    let [moactl, verb, who] = words[..] else {
+        return None;
+    };
+    // No flag, and nothing a shell would read otherwise.
+    let id = !who.starts_with('-')
+        && who
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if moactl != "moactl" || !id {
+        return None;
+    }
+    let known = match verb {
+        // `moactl open` takes a folder: only a session's id is a session.
+        "open" => who.parse::<SessionId>().is_ok(),
+        "resume" | "focus" | "close" | "archive" => true,
+        _ => false,
+    };
+    if !known {
+        return None;
+    }
+    let name = session_named(data, who).map_or_else(|| who.to_string(), session_name);
+    Some(Button {
+        label: format!("↩ {}", ellipsize(&name, 40)),
+        command: format!("/{verb} {who}"),
+    })
+}
+
+/// The session `who` names: its id, or the start of it (4 characters or more) or its handle.
+fn session_named<'a>(data: &'a Data, who: &str) -> Option<&'a SessionRow> {
+    if let Ok(id) = who.parse::<SessionId>() {
+        return data.sessions.get(&id);
+    }
+    data.sessions
+        .values()
+        .find(|r| r.handle == who || (who.len() >= 4 && r.session.id.to_string().starts_with(who)))
+}
+
+/// `Project · title`, or what [`label`] says when it lacks either.
+fn session_name(row: &SessionRow) -> String {
+    let title = row.session.title.as_deref().map(clean).unwrap_or_default();
+    let project = row.project.as_deref().map(clean).unwrap_or_default();
+    if title.trim().is_empty() || project.trim().is_empty() {
+        label(row)
+    } else {
+        format!("{project} · {title}")
+    }
 }
 
 /// The console's lines, none wider than `width` cells.
@@ -89,13 +189,24 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
         i += 1;
     }
     draw.end_turn();
+    let mut bar = draw.bar();
+    let mut lines = draw.lines;
+    let buttons = draw.buttons;
+    if let Some(focus) = &ui.focus {
+        for span in lines.iter_mut().chain(&mut bar).flat_map(|l| &mut l.spans) {
+            let pressed = span.button.and_then(|b| buttons.get(usize::from(b)));
+            span.reversed |= pressed.is_some_and(|b| b.command == *focus);
+        }
+    }
     ConsoleView {
-        lines: draw.lines,
-        buttons: draw.buttons,
+        lines,
+        bar,
+        buttons,
     }
 }
 
 /// One thing the console shows, in the order it shows them.
+#[derive(Clone, Copy)]
 enum Entry<'a> {
     Row(&'a FeedRow),
     Event(Folded),
@@ -201,8 +312,8 @@ struct Draw<'a> {
     /// The thread of the last row.
     thread: Option<&'a str>,
     turn: Option<Turn>,
-    /// The session lines whose time falls inside the turn: drawn right after it.
-    held: Vec<Folded>,
+    /// The session lines, cards and errors whose time falls inside the turn: drawn right after it.
+    held: Vec<Entry<'a>>,
     last: Last,
 }
 
@@ -220,7 +331,20 @@ impl<'a> Draw<'a> {
                     self.last = Last::Row;
                 }
             }
-            Entry::Event(f) if self.turn.is_some() => self.held.push(*f),
+            other => {
+                if self.turn.is_some() {
+                    self.held.push(*other);
+                } else {
+                    self.other(other);
+                }
+            }
+        }
+    }
+
+    /// A session's line, a card or an error, at its place between turns.
+    fn other(&mut self, entry: &Entry<'a>) {
+        match entry {
+            Entry::Row(_) => {}
             Entry::Event(f) => self.session(f),
             Entry::Card(card) => {
                 self.gap();
@@ -303,11 +427,11 @@ impl<'a> Draw<'a> {
         self.lines.push(Line::new(cut_spans(spans, self.width)));
     }
 
-    /// The turn is over: the session lines held while it ran are drawn.
+    /// The turn is over: what was held while it ran is drawn.
     fn end_turn(&mut self) {
         self.turn = None;
-        for f in std::mem::take(&mut self.held) {
-            self.session(&f);
+        for entry in std::mem::take(&mut self.held) {
+            self.other(&entry);
         }
     }
 
@@ -364,8 +488,8 @@ impl<'a> Draw<'a> {
                 hanging(you("› "), vec![you(&clean(t))], room)
             }),
             kind::MOA => text.map(|t| {
-                let w = u16::try_from(room).unwrap_or(u16::MAX);
-                markdown::render(t, w, &mut self.buttons, &|_| None)
+                let (w, data) = (u16::try_from(room).unwrap_or(u16::MAX), self.data);
+                markdown::render(t, w, &mut self.buttons, &|code| find(data, code))
             }),
             // Its first line that isn't blank; nothing when every line is.
             kind::THOUGHT => text.map(|t| {
@@ -483,8 +607,35 @@ impl<'a> Draw<'a> {
             return;
         }
         let w = u16::try_from(self.width - width(CARD_GUTTER)).unwrap_or(u16::MAX);
-        let reply = markdown::render(&card.text, w, &mut self.buttons, &|_| None);
+        let data = self.data;
+        let reply = markdown::render(&card.text, w, &mut self.buttons, &|c| find(data, c));
         self.lines.extend(behind(CARD_GUTTER, reply));
+    }
+
+    /// The bar (B5): `data.bar`'s commands as buttons, wrapped to the width; none when it has
+    /// none. Its buttons come after the text's.
+    fn bar(&mut self) -> Vec<Line> {
+        let commands = self.data.bar.iter().flat_map(|b| &b.commands);
+        let mut spans = Vec::new();
+        for command in commands {
+            let button = Button {
+                label: command.clone(),
+                command: command.clone(),
+            };
+            if let Some(span) = button_span(&mut self.buttons, button, false) {
+                if !spans.is_empty() {
+                    spans.push(Span::new(" ", Tone::Text));
+                }
+                spans.push(span);
+            }
+        }
+        if spans.is_empty() {
+            return Vec::new();
+        }
+        wrap_spans(&spans, self.width)
+            .into_iter()
+            .map(Line::new)
+            .collect()
     }
 
     /// A blank line, unless the last is one or a separator is just above.

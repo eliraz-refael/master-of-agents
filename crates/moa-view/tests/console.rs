@@ -9,9 +9,9 @@ use moa_core::state::EventWhat;
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
 use moa_view::fixture::{THREAD_TODAY, console_rows, lantern, session};
-use moa_view::line::{Line, debug_lines};
+use moa_view::line::{Line, Tone, debug_lines};
 use moa_view::text::width;
-use moa_view::views::console::{Card, ConsoleUi, ConsoleView, build};
+use moa_view::views::console::{Card, ConsoleUi, ConsoleView, build, button_at};
 use moa_view::views::{self, ViewUi};
 use serde_json::{Value, json};
 
@@ -86,7 +86,7 @@ fn the_day_at_three_widths() {
         assert_fits(&view.lines, w);
         insta::assert_snapshot!(format!("console@{w}"), debug_lines(&view.lines));
     }
-    // The buttons: the two session lines', in the order they show.
+    // The buttons: the Markdown's two commands, the two session lines', then the bar's.
     let view = build(&data, &ctx, &ui(&ctx), 80);
     let pressed: Vec<(&str, &str)> = view
         .buttons
@@ -98,8 +98,15 @@ fn the_day_at_three_widths() {
     assert_eq!(
         pressed,
         [
+            ("/brief", "/brief"),
+            ("/attention", "/attention"),
             ("↩ answer", fix_login.as_str()),
-            ("↩ open", rust_scaffold.as_str())
+            ("↩ open", rust_scaffold.as_str()),
+            // The bar's, after the text's.
+            ("/brief", "/brief"),
+            ("/attention", "/attention"),
+            ("/ls", "/ls"),
+            ("/help", "/help"),
         ]
     );
 }
@@ -293,4 +300,251 @@ fn the_feed_topic_decodes() {
     data.replace(Topic::Feed, Vec::new());
     assert!(data.feed.is_empty() && data.events.is_empty());
     assert_eq!(data.unreadable(), 0);
+}
+
+/// moa's one answer, `text`, over the fixture's sessions, with the bar's commands.
+fn says(text: &str, bar: &[&str], ui: &ConsoleUi, w: u16) -> (Data, ConsoleView) {
+    let (mut data, ctx) = lantern();
+    let rows = [row(1, "moa", json!({ "text": text }), None)];
+    data.feed = rows.into_iter().map(|r| (r.id, r)).collect();
+    data.bar = Some(moa_core::publish::BarRow {
+        commands: bar.iter().map(|c| s(c)).collect(),
+        by: s("you"),
+    });
+    data.touch();
+    let view = build(&data, &ctx, ui, w);
+    (data, view)
+}
+
+fn pressed(view: &ConsoleView) -> Vec<(&str, &str)> {
+    view.buttons
+        .iter()
+        .map(|b| (b.label.as_str(), b.command.as_str()))
+        .collect()
+}
+
+/// A command moa names in code is a button; a session's `moactl` line is the session's name;
+/// other code stays code.
+#[test]
+fn commands_in_text_become_buttons() {
+    let rust = session(2).to_string();
+    let text = format!(
+        "Try `/brief`, then `moactl focus {rust}`; `moactl ls --all` and `/nope` and \
+         `moactl focus --all` stay code."
+    );
+    let (_, view) = says(&text, &[], &ConsoleUi::default(), 100);
+    let focus = format!("/focus {rust}");
+    assert_eq!(
+        pressed(&view),
+        [
+            ("/brief", "/brief"),
+            ("↩ Lantern · Rust scaffold", focus.as_str())
+        ]
+    );
+    let line = &view.lines[1];
+    assert!(line.text().contains("[/brief]"), "{}", line.text());
+    assert!(line.text().contains("[↩ Lantern · Rust scaffold]"));
+    assert!(line.text().contains("`moactl ls --all`") || line.text().contains("moactl ls --all"));
+}
+
+/// A session button is built from the sessions every time: a rename shows at once.
+#[test]
+fn session_buttons_follow_renames() {
+    let rust = session(2);
+    let text = format!("`moactl resume {rust}`");
+    let (mut data, view) = says(&text, &[], &ConsoleUi::default(), 80);
+    assert_eq!(view.buttons[0].label, "↩ Lantern · Rust scaffold");
+    data.sessions.get_mut(&rust).expect("there").session.title = Some(s("Renamed"));
+    data.touch();
+    let (_, ctx) = lantern();
+    let view = build(&data, &ctx, &ConsoleUi::default(), 80);
+    assert_eq!(view.buttons[0].label, "↩ Lantern · Renamed");
+    assert_eq!(view.buttons[0].command, format!("/resume {rust}"));
+}
+
+/// A session nobody knows shows its id, and a press still sends the command, so the reply's
+/// refusal shows in the footer.
+#[test]
+fn an_unknown_session_button_says_why() {
+    let id = "01930000-0000-7000-8000-00000000dead";
+    let (_, view) = says(
+        &format!("`moactl focus {id}`"),
+        &[],
+        &ConsoleUi::default(),
+        80,
+    );
+    assert_eq!(
+        pressed(&view),
+        [(format!("↩ {id}").as_str(), format!("/focus {id}").as_str())]
+    );
+}
+
+/// A title with a ZWJ sequence, right-to-left text and a wide glyph, at width 40: the button
+/// is cut to the width, whole, and not split.
+#[test]
+fn odd_text_in_buttons() {
+    let rust = session(2);
+    let (mut data, ctx) = lantern();
+    let title = "👩‍👩‍👧 שלום עולם 日本語のとても長いタイトル and more words to fill it";
+    data.sessions.get_mut(&rust).expect("there").session.title = Some(s(title));
+    let rows = [row(
+        1,
+        "moa",
+        json!({"text": format!("go `moactl focus {rust}` now")}),
+        None,
+    )];
+    data.feed = rows.into_iter().map(|r| (r.id, r)).collect();
+    data.touch();
+    let view = build(&data, &ctx, &ConsoleUi::default(), 40);
+    assert_fits(&view.lines, 40);
+    let spans: Vec<_> = view
+        .lines
+        .iter()
+        .flat_map(|l| &l.spans)
+        .filter(|s| s.button.is_some())
+        .collect();
+    assert_eq!(spans.len(), 1, "one span, not split");
+    assert!(spans[0].text.starts_with("[↩ Lantern"));
+    assert!(width(&spans[0].text) <= 40);
+}
+
+/// A click on a button's cells finds it; a cell beside it finds nothing.
+#[test]
+fn a_click_finds_the_button_under_it() {
+    let (_, view) = says("go `/brief` now", &[], &ConsoleUi::default(), 80);
+    let line = &view.lines[1];
+    // `│ go [/brief] now`: the button covers columns 5..=12.
+    let text = line.text();
+    let at = text.find('[').expect("a button");
+    let col = width(&text[..at]);
+    for c in col..col + width("[/brief]") {
+        assert_eq!(button_at(line, c), Some(0), "column {c}");
+    }
+    assert_eq!(button_at(line, col - 1), None);
+    assert_eq!(button_at(line, col + width("[/brief]")), None);
+    assert_eq!(button_at(line, 200), None);
+}
+
+/// The bar draws as buttons, wraps, and comes after the text's buttons in the numbering.
+#[test]
+fn the_bar_draws_as_buttons() {
+    let bar = ["/brief", "/attention", "/ls", "/help"];
+    let (_, view) = says("go `/new`", &bar, &ConsoleUi::default(), 80);
+    assert_eq!(view.bar.len(), 1);
+    assert_eq!(view.bar[0].text(), "[/brief] [/attention] [/ls] [/help]");
+    let all: Vec<&str> = view.buttons.iter().map(|b| b.command.as_str()).collect();
+    assert_eq!(all, ["/new", "/brief", "/attention", "/ls", "/help"]);
+    let (_, narrow) = says("hi", &bar, &ConsoleUi::default(), 20);
+    assert_eq!(narrow.bar.len(), 3);
+    assert_fits(&narrow.bar, 20);
+    assert!(says("hi", &[], &ConsoleUi::default(), 20).1.bar.is_empty());
+}
+
+/// Tab's order (F26): the visible text buttons in reading order, then the bar's.
+#[test]
+fn the_tab_order_is_reading_order() {
+    let rust = session(2);
+    let text = format!("First `/ls` and `/brief`.\n\nThen `moactl focus {rust}`.");
+    let (_, view) = says(&text, &["/help", "/attention"], &ConsoleUi::default(), 80);
+    let command = |i: &u16| view.buttons[usize::from(*i)].command.clone();
+    let order: Vec<String> = view
+        .order(0..view.lines.len())
+        .iter()
+        .map(command)
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "/ls",
+            "/brief",
+            &format!("/focus {rust}"),
+            "/help",
+            "/attention"
+        ]
+    );
+    // Only the visible lines count: the last line alone has the session's button.
+    let last = view.lines.len() - 1;
+    let order: Vec<String> = view.order(last..last + 5).iter().map(command).collect();
+    assert_eq!(
+        order,
+        [format!("/focus {rust}"), s("/help"), s("/attention")]
+    );
+    // Nothing visible: the bar's first.
+    assert_eq!(view.order(0..0).first().map(command), Some(s("/help")));
+}
+
+/// The focused button is drawn reversed, text's or bar's, and no other.
+#[test]
+fn the_focused_button_is_reversed() {
+    let ui = ConsoleUi {
+        focus: Some(s("/attention")),
+        ..ConsoleUi::default()
+    };
+    let (_, view) = says("go `/ls`", &["/help", "/attention"], &ui, 80);
+    let reversed: Vec<&str> = view
+        .lines
+        .iter()
+        .chain(&view.bar)
+        .flat_map(|l| &l.spans)
+        .filter(|s| s.reversed)
+        .map(|s| s.text.as_str())
+        .collect();
+    assert_eq!(reversed, ["[/attention]"]);
+    let ui = ConsoleUi {
+        focus: Some(s("/ls")),
+        ..ConsoleUi::default()
+    };
+    let (_, view) = says("go `/ls`", &["/help"], &ui, 80);
+    assert!(
+        view.lines[1]
+            .spans
+            .iter()
+            .any(|s| s.reversed && s.tone == Tone::Work)
+    );
+}
+
+/// Cards and the console's own errors never split a turn either: one timed inside a turn is
+/// drawn right after it, in time order.
+#[test]
+fn cards_and_errors_never_split_a_turn() {
+    let (_, ctx) = lantern();
+    let rows = vec![
+        row(1, "you", json!({"text": "go"}), None),
+        row(2, "moa", json!({"text": "first"}), None),
+        row(4, "moa", json!({"text": "second"}), None),
+        row(6, "you", json!({"text": "next"}), None),
+    ];
+    let mut data = Data::default();
+    data.feed = rows.into_iter().map(|r| (r.id, r)).collect();
+    data.touch();
+    let ui = ConsoleUi {
+        cards: vec![Card {
+            at: UtcMs(1_002),
+            line: s("/ls"),
+            text: s("nothing"),
+        }],
+        errors: vec![(UtcMs(1_003), s("it broke"))],
+        ..ConsoleUi::default()
+    };
+    let text: Vec<String> = build(&data, &ctx, &ui, 80)
+        .lines
+        .iter()
+        .map(Line::text)
+        .collect();
+    assert_eq!(
+        text,
+        [
+            "› go",
+            "◆ moa  19:00",
+            "│ first",
+            "│ second",
+            "",
+            "▸ /ls",
+            "┊ nothing",
+            "",
+            "✗ it broke",
+            "",
+            "› next",
+        ]
+    );
 }

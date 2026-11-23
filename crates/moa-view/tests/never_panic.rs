@@ -700,35 +700,45 @@ fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {
         vec((at(), text(), text()), 0..4),
         vec((at(), text()), 0..4),
         0usize..40,
+        vec(text(), 0..9),
+        option::of(0usize..9),
     )
-        .prop_map(|(sessions, rows, events, cards, errors, paged)| {
-            let mut data = Data::default();
-            for (n, mut row) in (0u8..).zip(sessions) {
-                row.session.id = session_id(n);
-                data.sessions.insert(row.session.id, row);
-            }
-            let mut ui = ConsoleUi::default();
-            for (id, mut row) in (1i64..).zip(rows) {
-                row.id = id;
-                if id <= paged as i64 {
-                    ui.older.insert(id, row.clone());
+        .prop_map(
+            |(sessions, rows, events, cards, errors, paged, bar, focus)| {
+                let mut data = Data::default();
+                for (n, mut row) in (0u8..).zip(sessions) {
+                    row.session.id = session_id(n);
+                    data.sessions.insert(row.session.id, row);
                 }
-                if id + 5 > paged as i64 {
-                    data.feed.insert(id, row);
+                let mut ui = ConsoleUi::default();
+                for (id, mut row) in (1i64..).zip(rows) {
+                    row.id = id;
+                    if id <= paged as i64 {
+                        ui.older.insert(id, row.clone());
+                    }
+                    if id + 5 > paged as i64 {
+                        data.feed.insert(id, row);
+                    }
                 }
-            }
-            for (seq, mut e) in (1u64..).zip(events) {
-                e.seq = seq;
-                data.events.insert(seq, e);
-            }
-            data.touch();
-            ui.cards = cards
-                .into_iter()
-                .map(|(at, line, text)| Card { at, line, text })
-                .collect();
-            ui.errors = errors;
-            (data, ui)
-        })
+                for (seq, mut e) in (1u64..).zip(events) {
+                    e.seq = seq;
+                    data.events.insert(seq, e);
+                }
+                // The bar's commands are odd text too, and the focus is one of them (or not).
+                ui.focus = focus.map(|i| bar.get(i).cloned().unwrap_or_else(|| "/ls".into()));
+                data.bar = Some(moa_core::publish::BarRow {
+                    commands: bar,
+                    by: "you".into(),
+                });
+                data.touch();
+                ui.cards = cards
+                    .into_iter()
+                    .map(|(at, line, text)| Card { at, line, text })
+                    .collect();
+                ui.errors = errors;
+                (data, ui)
+            },
+        )
 }
 
 proptest! {
@@ -751,6 +761,15 @@ proptest! {
             for span in &line.spans {
                 prop_assert!(span.button.is_none_or(|b| usize::from(b) < view.buttons.len()));
             }
+        }
+        // The bar (B5), and Tab's order, in the same bounds.
+        for line in &view.bar {
+            check_line(line, usize::from(w), "a bar line")?;
+            let cells: usize = line.spans.iter().map(|s| width(&s.text)).sum();
+            prop_assert!(cells <= usize::from(w), "bar over {w}: {:?}", line.text());
+        }
+        for b in view.order(0..view.lines.len()) {
+            prop_assert!(usize::from(b) < view.buttons.len());
         }
     }
 
