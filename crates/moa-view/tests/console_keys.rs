@@ -996,3 +996,26 @@ fn the_palette_leaves_the_feed_a_row() {
     }
     assert!(palette(&mut c).iter().any(|l| l.starts_with('*')));
 }
+
+/// Once Esc closed the palette on a `/` draft, Tab and BackTab are Task 8's: they type or do
+/// nothing to the draft, and never complete or choose.
+#[test]
+fn a_closed_palette_leaves_tab_alone() {
+    let mut c = C::new(Vec::new(), SIZE);
+    c.bar(&["/brief", "/ls"]);
+    c.screen();
+    c.typed("/re");
+    c.key(Key::Esc);
+    assert!(palette(&mut c).is_empty());
+    c.key(Key::Tab);
+    c.key(Key::BackTab);
+    assert_eq!(c.input(), "› /re", "no completion");
+    // Deleting back and retyping reopens it.
+    c.key(Key::Backspace);
+    c.typed("e");
+    assert_eq!(palette(&mut c).len(), 1);
+    // With the draft cleared, Tab moves button focus as before.
+    c.key(Key::Ctrl('u'));
+    c.key(Key::Tab);
+    assert!(c.focused().is_some());
+}

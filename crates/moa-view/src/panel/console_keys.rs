@@ -70,6 +70,7 @@ impl Panel {
         let g = g.with_bar_rows(rows);
         let open = console::palette(data, ui).map_or(0, |p| p.entries.len());
         let g = g.with_palette_rows(u16::try_from(open).unwrap_or(u16::MAX));
+        ui.palette_rows = g.palette.map_or(0, |r| r.h);
         built.bar.truncate(usize::from(g.bar.map_or(0, |r| r.h)));
         let focus = ui.focused.as_ref().and_then(|f| built.find(f));
         if focus != ui.focus {
@@ -102,6 +103,21 @@ impl Panel {
     /// history; PgUp and PgDn scroll `rows` lines less one, and PgUp at the top asks for a
     /// page of older rows.
     pub(super) fn console_key(&mut self, k: Key, data: &Data, ctx: &Ctx, rows: usize) -> Vec<Out> {
+        let out = self.console_key_inner(k, data, ctx, rows);
+        self.reopen_if_edited();
+        out
+    }
+
+    /// Esc's close holds for the draft it closed at only: any edit that changes the text, by
+    /// any path, opens the palette again.
+    pub(super) fn reopen_if_edited(&mut self) {
+        let ui = &mut self.console;
+        if ui.closed.as_deref() != Some(ui.draft.text.as_str()) {
+            ui.closed = None;
+        }
+    }
+
+    fn console_key_inner(&mut self, k: Key, data: &Data, ctx: &Ctx, rows: usize) -> Vec<Out> {
         if self.console.draft.step(k) {
             return Vec::new();
         }
@@ -142,7 +158,6 @@ impl Panel {
             _ => {
                 self.console.draft.key(k);
                 self.console.pick = 0;
-                self.console.closed = None;
                 if !self.console.draft.text.is_empty() {
                     self.focus(None);
                 }
@@ -155,6 +170,10 @@ impl Panel {
     /// Down (and BackTab) choose, Esc closes it until the draft changes. Whether the palette
     /// took the key.
     fn palette_key(&mut self, k: Key, data: &Data) -> bool {
+        // With no row to show it in, the palette is closed.
+        if self.console.palette_rows == 0 {
+            return false;
+        }
         let Some(p) = console::palette(data, &self.console) else {
             return false;
         };

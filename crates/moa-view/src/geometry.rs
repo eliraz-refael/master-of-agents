@@ -117,9 +117,7 @@ impl Geometry {
         self.bar = Some(Rect::new(bar.x, bar.y - more, bar.w, bar.h + more));
         self
     }
-}
 
-impl Geometry {
     /// The console's palette `rows` high, directly above its input line, its rows taken from
     /// the bottom of the feed, which keeps at least one row while it has one (F16). Its other
     /// views are as they are.

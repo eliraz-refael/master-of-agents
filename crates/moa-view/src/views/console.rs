@@ -90,6 +90,8 @@ pub struct ConsoleUi {
     pub pick: usize,
     /// The draft Esc closed the palette at: it stays shut until the draft changes.
     pub closed: Option<String>,
+    /// The rows the last build gave the palette: none, and it is as good as closed.
+    pub palette_rows: u16,
 }
 
 impl Default for ConsoleUi {
@@ -115,6 +117,7 @@ impl Default for ConsoleUi {
             kept_at: None,
             pick: 0,
             closed: None,
+            palette_rows: 0,
         }
     }
 }
@@ -527,7 +530,7 @@ fn sessions(data: &Data, word: &str) -> Vec<Choice> {
             (name.to_lowercase().contains(word) || id.starts_with(word)).then(|| Choice {
                 label: name,
                 help: r.handle.clone(),
-                insert: shell_words::quote(&id).into_owned(),
+                insert: shell_words::quote(&clean(&id)).into_owned(),
                 chain: false,
             })
         })
@@ -544,7 +547,7 @@ fn layouts(data: &Data, word: &str) -> Vec<Choice> {
         .map(|l| Choice {
             label: clean(&l.name),
             help: if l.current { "current" } else { "" }.to_string(),
-            insert: shell_words::quote(&l.name).into_owned(),
+            insert: shell_words::quote(&clean(&l.name)).into_owned(),
             chain: false,
         })
         .take(PALETTE_ROWS)

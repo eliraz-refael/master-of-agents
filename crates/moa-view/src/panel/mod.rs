@@ -658,6 +658,7 @@ impl Panel {
             self.edit_query(|e| e.paste(text));
         } else if self.view == View::Console {
             self.console.draft.paste(text);
+            self.reopen_if_edited();
         }
     }
 
