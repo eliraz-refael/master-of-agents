@@ -11,7 +11,7 @@ use moa_view::fixture::lantern;
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
 use moa_view::line::Line;
-use moa_view::panel::{CONSOLE_MANAGED, Mouse, Out, PAGE, Panel, Screen};
+use moa_view::panel::{CONSOLE_MANAGED, Mouse, Out, PAGE, Panel, STILL_WAITING, Screen};
 use serde_json::json;
 
 /// 9 lines of feed between the head line and the input line.
@@ -288,6 +288,7 @@ fn a_refused_prompt_keeps_the_draft() {
     let outs = c.key(Key::Enter);
     let (tag, _) = c.send(outs);
     assert!(c.key(Key::Enter).is_empty(), "one line at a time");
+    assert_eq!(c.footer(), STILL_WAITING);
     c.reply(tag, Err("moa is still answering".into()));
     assert_eq!(c.input(), "› hello");
     assert_eq!(c.footer(), "moa is still answering");
@@ -469,6 +470,19 @@ fn an_error_shows_once_per_30_s() {
         .error("moa's agent couldn't start", UtcMs(now + 30_000));
     assert_eq!(errors(&mut c, "✗ moa's agent couldn't start"), 2);
 
+    // Only the newest 50 error lines are kept.
+    let mut c = C::new(Vec::new(), TALL);
+    for n in 0..60 {
+        c.panel.error(&format!("error {n}"), UtcMs(now + n));
+    }
+    let body = c.body();
+    assert_eq!(
+        body.iter().filter(|l| l.starts_with("✗ error ")).count(),
+        50
+    );
+    assert!(body.contains(&"✗ error 59".to_string()));
+    assert!(!body.contains(&"✗ error 9".to_string()));
+
     // Any other view keeps its footer only.
     let mut tree = Panel::new(View::Tree);
     tree.error("boom", UtcMs(now));
@@ -599,6 +613,9 @@ fn quit_is_the_consoles_own() {
         c.panel.set_managed(managed);
         c.typed("/quit");
         let typed = c.key(Key::Enter);
+        if managed {
+            assert_eq!(c.footer(), CONSOLE_MANAGED, "the typed line says why");
+        }
         let screen = c.screen();
         let (y, line) = screen
             .body
@@ -640,4 +657,134 @@ fn the_frame_names_the_brain_and_the_thread() {
     c.panel.set_link_up(false);
     assert_eq!(c.head(), "connecting…");
     assert!(!c.screen().animate);
+}
+
+/// The focus goes when its button scrolls out of sight: Enter then presses nothing.
+#[test]
+fn a_focus_out_of_sight_goes() {
+    let mut rows = notes(1..=20);
+    rows.push(row(30, "moa", "try `/ls`"));
+    let mut c = C::new(rows, SIZE);
+    c.key(Key::Tab);
+    assert_eq!(c.focused(), Some(("[/ls]".to_string(), false)));
+    c.add(notes(31..=50));
+    assert_eq!(c.focused(), None);
+    assert!(c.key(Key::Enter).is_empty(), "nothing in sight to press");
+
+    // Scrolled away by a key, too.
+    let mut rows = vec![row(1, "moa", "try `/ls`")];
+    rows.extend(notes(2..=40));
+    let mut c = C::new(rows, SIZE);
+    while !c.body().iter().any(|l| l.contains("[/ls]")) {
+        c.key(Key::PageUp);
+    }
+    c.key(Key::Tab);
+    assert_eq!(c.focused(), Some(("[/ls]".to_string(), false)));
+    c.key(Key::PageDown);
+    assert_eq!(c.focused(), None);
+    assert!(c.key(Key::Enter).is_empty());
+}
+
+/// F15: a page that changes what is drawn above a row (a thread separator added, or the
+/// row's turn header gone into an earlier turn) doesn't move a view anchored inside that
+/// row, even one taller than the view.
+#[test]
+fn a_page_above_a_tall_row_keeps_the_view() {
+    let items: Vec<String> = (1..=30).map(|i| format!("- item {i}")).collect();
+    let tall = row(101, "moa", &items.join("\n"));
+    let other = |mut r: FeedRow| {
+        r.thread = "0193aaaa-bbbb-7000-8000-000000000002".into();
+        r
+    };
+    let pages: [(&str, Vec<FeedRow>); 2] = [
+        (
+            "another thread: a separator",
+            vec![
+                other(row(50, "you", "earlier")),
+                other(row(51, "moa", "yes")),
+            ],
+        ),
+        (
+            "the same turn: no header",
+            vec![row(50, "you", "go on"), row(51, "moa", "first part")],
+        ),
+    ];
+    for (what, page) in pages {
+        let mut c = C::new(vec![tall.clone(), row(102, "system", "end")], SIZE);
+        let outs = loop {
+            let outs = c.key(Key::PageUp);
+            if !outs.is_empty() {
+                break outs;
+            }
+        };
+        let (tag, _) = c.send(outs);
+        let before = c.body();
+        assert!(before.iter().any(|l| l.ends_with("item 5")), "{before:#?}");
+        c.reply(
+            tag,
+            Ok(Done {
+                text: "2 older rows".into(),
+                data: json!({ "rows": page }),
+            }),
+        );
+        let after = c.body();
+        assert!(after[0].starts_with("↑ "), "{what}: {after:#?}");
+        assert_eq!(after[1..], before[1..], "{what}: the view stays");
+    }
+}
+
+/// B5: a bar too long for one row wraps onto up to 3; the third ends in `…` when buttons are
+/// left out. Only the drawn buttons are in the Tab order and can be clicked.
+#[test]
+fn a_long_bar_wraps_onto_three_rows() {
+    const NARROW: Size = Size { w: 40, h: 16 };
+    let mut c = C::new(Vec::new(), NARROW);
+    c.bar(&[
+        "/brief",
+        "/attention",
+        "/ls",
+        "/help",
+        "/resume lantern-rust-scaffold",
+        "/focus kite-release-notes",
+        "/layout apply cockpit-wide",
+        "/suggestions",
+    ]);
+    let screen = c.screen();
+    let g = screen.geometry;
+    let bar = g.bar.unwrap();
+    assert_eq!(bar.h, 3);
+    assert_eq!(bar.y, g.input.unwrap().y + 1, "under the input line");
+    assert_eq!(
+        g.body.y + g.body.h,
+        g.input.unwrap().y,
+        "the feed gave the rows"
+    );
+    let rows: Vec<String> = screen.bar.iter().map(text).collect();
+    assert_eq!(
+        rows,
+        [
+            "[/brief] [/attention] [/ls] [/help]",
+            "[/resume lantern-rust-scaffold]",
+            "[/focus kite-release-notes] …",
+        ]
+    );
+    // Tab walks the six drawn buttons and wraps.
+    let mut seen = Vec::new();
+    for _ in 0..7 {
+        c.key(Key::Tab);
+        seen.push(c.focused().unwrap().0);
+    }
+    assert_eq!(seen[6], seen[0], "{seen:?}");
+    assert!(!seen.iter().any(|b| b.contains("layout")), "{seen:?}");
+    // The third row's button is pressed by a click.
+    let x = bar.x + 3;
+    let handled = c
+        .panel
+        .mouse(Mouse::Click { x, y: bar.y + 2 }, &c.data, &c.ctx, NARROW);
+    assert_eq!(
+        handled.out,
+        vec![Out::Send(Op::ConsoleCommand {
+            line: "/focus kite-release-notes".into()
+        })]
+    );
 }

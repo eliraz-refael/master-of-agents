@@ -28,6 +28,8 @@ use crate::views::{label, spinner};
 const GUTTER: &str = "│ ";
 /// What a card draws in front of each line of its reply.
 const CARD_GUTTER: &str = "┊ ";
+/// The most rows the bar wraps onto (B5).
+pub const BAR_ROWS: usize = 3;
 /// A run of tool calls longer than this shows only its last this many.
 const TOOLS_SHOWN: usize = 3;
 
@@ -163,7 +165,8 @@ pub struct ConsoleView {
     pub bar: Vec<Line>,
     /// The buttons of `lines` first, then the bar's: a span's `button` indexes this.
     pub buttons: Vec<Button>,
-    /// Each row drawn, by id, with the line it starts at: both in order.
+    /// Each row drawn, by id, with its first own line (after a separator or a turn's header
+    /// before it): both in order.
     pub starts: Vec<(i64, usize)>,
 }
 
@@ -343,8 +346,8 @@ impl ConsoleUi {
             .end
             .saturating_add_signed(by)
             .clamp(n.min(rows), n);
-        self.follow = end == n || end == 0;
-        self.anchor = (!self.follow).then(|| view.anchor(end - 1));
+        self.follow = end == n;
+        self.anchor = (!self.follow).then(|| view.anchor(end.saturating_sub(1)));
         self.below = n - end;
     }
 
@@ -533,9 +536,9 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
         turn: None,
         held: Vec::new(),
         last: Last::Nothing,
+        starts: Vec::new(),
     };
     let entries = entries(data, ui);
-    let mut starts = Vec::new();
     let mut i = 0;
     while i < entries.len() {
         if let Entry::Row(first) = entries[i]
@@ -550,12 +553,8 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
                 })
                 .collect();
             i += run.len();
-            starts.extend(run.iter().map(|r| (r.id, draw.lines.len())));
             draw.tools(&run);
             continue;
-        }
-        if let Entry::Row(row) = entries[i] {
-            starts.push((row.id, draw.lines.len()));
         }
         draw.entry(&entries[i]);
         i += 1;
@@ -566,7 +565,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
         lines: draw.lines,
         bar,
         buttons: draw.buttons,
-        starts,
+        starts: draw.starts,
     };
     view.set_focus(ui.focus);
     view
@@ -689,6 +688,9 @@ struct Draw<'a> {
     /// The session lines, cards and errors whose time falls inside the turn: drawn right after it.
     held: Vec<Entry<'a>>,
     last: Last,
+    /// Each row drawn, by id, with its first own line: after what [`Draw::enter`] draws
+    /// before it, which a page arriving can change (F15).
+    starts: Vec<(i64, usize)>,
 }
 
 impl<'a> Draw<'a> {
@@ -696,6 +698,7 @@ impl<'a> Draw<'a> {
         match entry {
             Entry::Row(row) => {
                 self.enter(row);
+                self.starts.push((row.id, self.lines.len()));
                 if row.kind != kind::YOU {
                     let lines = self.row(row, self.room());
                     self.push_row(lines);
@@ -743,6 +746,8 @@ impl<'a> Draw<'a> {
             return;
         };
         self.enter(first);
+        let at = self.lines.len();
+        self.starts.extend(run.iter().map(|r| (r.id, at)));
         let hidden = run.len().saturating_sub(TOOLS_SHOWN);
         if hidden > 0 {
             let calls = if hidden == 1 { "call" } else { "calls" };
@@ -987,8 +992,9 @@ impl<'a> Draw<'a> {
         self.lines.extend(behind(CARD_GUTTER, reply));
     }
 
-    /// The bar (B5): `data.bar`'s commands as buttons, wrapped to the width; none when it has
-    /// none. Its buttons come after the text's.
+    /// The bar (B5): `data.bar`'s commands as buttons, wrapped to the width on at most
+    /// [`BAR_ROWS`] rows, the last ending in `…` when buttons are left out; none when it has
+    /// none. Its buttons come after the text's (those left out included, never drawn).
     fn bar(&mut self) -> Vec<Line> {
         let commands = self.data.bar.iter().flat_map(|b| &b.commands);
         let mut spans = Vec::new();
@@ -1008,10 +1014,20 @@ impl<'a> Draw<'a> {
         if spans.is_empty() {
             return Vec::new();
         }
-        wrap_spans(&spans, self.width)
-            .into_iter()
-            .map(Line::new)
-            .collect()
+        let mut rows = wrap_spans(&spans, self.width);
+        if rows.len() > BAR_ROWS {
+            rows.truncate(BAR_ROWS);
+            // The last row's buttons go from its end until a `…` fits after them.
+            let last = rows.last_mut().expect("BAR_ROWS rows");
+            while !last.is_empty() && text::spans_width(last) + 2 > self.width {
+                last.pop();
+            }
+            text::trim_end_spans(last);
+            let more = if last.is_empty() { "…" } else { " …" };
+            last.push(Span::new(more, Tone::Dim));
+            *last = cut_spans(std::mem::take(last), self.width);
+        }
+        rows.into_iter().map(Line::new).collect()
     }
 
     /// A blank line, unless the last is one or a separator is just above.

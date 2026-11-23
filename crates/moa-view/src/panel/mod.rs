@@ -27,7 +27,7 @@ mod term_keys;
 mod tree_keys;
 
 use ask::Ask;
-pub use console_keys::{CONSOLE_MANAGED, ERROR_AGAIN_MS, PAGE};
+pub use console_keys::{CONSOLE_MANAGED, ERROR_AGAIN_MS, PAGE, STILL_WAITING};
 
 /// What a panel asks its loop to do.
 // One is built per key, click or reply, so boxing the op buys nothing.
@@ -461,14 +461,14 @@ impl Panel {
     /// Rebuilds the lines from `data`, keeps the selection on its item (V8) and the view on
     /// the selection, and drops a hover whose item left the list.
     fn refresh(&mut self, data: &Data, ctx: &Ctx, size: Size) -> Geometry {
-        let g = geometry(self.view, self.view.framed() && !self.popup, size);
+        let mut g = geometry(self.view, self.view.framed() && !self.popup, size);
         let was = self.selected().cloned();
         let width = build_width(&g);
         self.lines = if self.view == View::Picker {
             let m = picks(&mut self.picks, data, &self.ui.query);
             picker::lines(m, &self.ui.query, ctx, width)
         } else if self.view == View::Console {
-            self.console_refresh(data, ctx, &g);
+            g = self.console_refresh(data, ctx, g);
             Vec::new()
         } else {
             views::build(self.view, data, ctx, &self.ui, width)

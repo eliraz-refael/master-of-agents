@@ -23,6 +23,12 @@ pub const ERROR_AGAIN_MS: i64 = 30_000;
 pub const CONSOLE_MANAGED: &str = "the console is part of this layout; switch layouts to close it";
 /// How many rows a page asks for (B2).
 pub const PAGE: u16 = 100;
+/// What Enter says while a typed line waits for its reply.
+pub const STILL_WAITING: &str = "still waiting for the reply to the last line";
+/// The console keeps its newest this many error lines.
+const ERRORS_KEPT: usize = 50;
+/// The history keeps the newest this many lines sent from the panel.
+const SENT_KEPT: usize = 200;
 
 /// The console's parts of a screen.
 pub(super) struct Parts {
@@ -43,11 +49,13 @@ fn thinking(data: &Data) -> bool {
 }
 
 impl Panel {
-    /// Builds the console for `g`: its focused button found again (by its place and command),
-    /// its bar cut to the rows it has, and what its feed shows. Once it has paged, it keeps
-    /// every row the topic shows it, so a row that leaves the topic's tail leaves no gap.
-    pub(super) fn console_refresh(&mut self, data: &Data, ctx: &Ctx, g: &Geometry) {
+    /// Builds the console for `g`, and gives `g` back with as many bar rows as the bar has:
+    /// its focused button found again (by its place and command), the bar cut to the rows
+    /// it got, and what its feed shows. Once it has paged, it keeps every row the topic shows
+    /// it, so a row that leaves the topic's tail leaves no gap.
+    pub(super) fn console_refresh(&mut self, data: &Data, ctx: &Ctx, g: Geometry) -> Geometry {
         let ui = &mut self.console;
+        // `older` grows for the panel's life once it has paged: it is never cut.
         if !ui.older.is_empty() && ui.kept_at != Some(data.revision()) {
             ui.kept_at = Some(data.revision());
             for (id, row) in &data.feed {
@@ -56,7 +64,9 @@ impl Panel {
                 }
             }
         }
-        let mut built = console::build(data, ctx, ui, build_width(g));
+        let mut built = console::build(data, ctx, ui, build_width(&g));
+        let rows = u16::try_from(built.bar.len()).unwrap_or(u16::MAX);
+        let g = g.with_bar_rows(rows);
         built.bar.truncate(usize::from(g.bar.map_or(0, |r| r.h)));
         let focus = ui.focused.as_ref().and_then(|f| built.find(f));
         if focus != ui.focus {
@@ -66,6 +76,20 @@ impl Panel {
         ui.focused = focus.and_then(|b| built.focused(b));
         self.window = ui.window(&built, usize::from(g.body.h));
         self.built = built;
+        self.keep_focus_in_sight();
+        g
+    }
+
+    /// The focus goes when its button is out of sight, as Tab takes it to be: Enter never
+    /// presses a button you can't see.
+    fn keep_focus_in_sight(&mut self) {
+        let Some(focus) = self.console.focus else {
+            return;
+        };
+        let visible = self.window.top..self.window.end;
+        if !self.built.order(visible).contains(&focus) {
+            self.focus(None);
+        }
     }
 
     /// A key in the console, after Ctrl-c, a question and a prompt have had theirs. Every
@@ -150,7 +174,7 @@ impl Panel {
             Asked::Page { .. } => false,
         };
         if typed && (ui.asked.as_ref().is_some_and(typing) || ui.waits.values().any(typing)) {
-            return Vec::new();
+            return self.say(STILL_WAITING);
         }
         ui.to_bottom();
         let (asked, op) = if line.starts_with('/') {
@@ -195,6 +219,7 @@ impl Panel {
     pub(super) fn console_scroll(&mut self, rows: usize, by: isize) {
         self.console.scroll(&self.built, rows, by);
         self.window = self.console.window(&self.built, rows);
+        self.keep_focus_in_sight();
     }
 
     /// Up (older) or Down (newer) through the history, the draft kept to come back to.
@@ -276,21 +301,25 @@ impl Panel {
         if self.console.draft.text.trim() == line {
             self.clear_draft();
         }
-        self.console.sent.push(line);
+        let sent = &mut self.console.sent;
+        sent.push(line);
+        sent.drain(..sent.len().saturating_sub(SENT_KEPT));
     }
 
     /// An error the daemon told of at `now` (B10): a `✗` line in the feed, unless the same
     /// text was drawn less than [`ERROR_AGAIN_MS`] ago.
     pub(super) fn console_error(&mut self, text: &str, now: UtcMs) {
         let ui = &mut self.console;
-        let again = ui
-            .shown
-            .get(text)
-            .is_none_or(|t| now.0.saturating_sub(t.0) >= ERROR_AGAIN_MS);
-        if again {
-            ui.shown.insert(text.to_string(), now);
-            ui.errors.push((now, text.to_string()));
+        let recent = |t: &UtcMs| now.0.saturating_sub(t.0) < ERROR_AGAIN_MS;
+        if ui.shown.get(text).is_some_and(recent) {
+            return;
         }
+        // Only the texts drawn in the last 30 s are remembered.
+        ui.shown.retain(|_, t| recent(t));
+        ui.shown.insert(text.to_string(), now);
+        ui.errors.push((now, text.to_string()));
+        ui.errors
+            .drain(..ui.errors.len().saturating_sub(ERRORS_KEPT));
     }
 
     /// The console's head line, feed, input line (and the cursor in it) and bar, for `g`

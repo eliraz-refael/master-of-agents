@@ -94,6 +94,26 @@ pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
     g
 }
 
+impl Geometry {
+    /// The console's bar `rows` high, its extra rows taken from the bottom of the feed, which
+    /// keeps at least one row while it has one. Its other views, and a console too short for
+    /// its bar, are as they are.
+    pub fn with_bar_rows(mut self, rows: u16) -> Geometry {
+        let (Some(bar), Some(input)) = (self.bar, self.input) else {
+            return self;
+        };
+        if bar.h == 0 || rows <= bar.h {
+            return self;
+        }
+        let more = (rows - bar.h).min(self.body.h.saturating_sub(1));
+        let b = self.body;
+        self.body = Rect::new(b.x, b.y, b.w, b.h - more);
+        self.input = Some(Rect::new(input.x, input.y - more, input.w, input.h));
+        self.bar = Some(Rect::new(bar.x, bar.y - more, bar.w, bar.h + more));
+        self
+    }
+}
+
 /// The picker's head: its query line and the rule under it.
 pub const HEAD: u16 = 2;
 

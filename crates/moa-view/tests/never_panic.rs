@@ -786,7 +786,8 @@ proptest! {
                 prop_assert!(span.button.is_none_or(|b| usize::from(b) < view.buttons.len()));
             }
         }
-        // The bar (B5), and Tab's order, in the same bounds.
+        // The bar (B5), on at most its rows, and Tab's order, in the same bounds.
+        prop_assert!(view.bar.len() <= console::BAR_ROWS);
         for line in &view.bar {
             check_line(line, usize::from(w), "a bar line")?;
             let cells: usize = line.spans.iter().map(|s| width(&s.text)).sum();
