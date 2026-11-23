@@ -321,8 +321,9 @@ fn next_from_client(input: &mut impl BufRead) -> Option<Value> {
 /// Plays `file` as the agent: the recorded agent messages go out in order, and each recorded
 /// request or answer from the client is waited for in turn. A request must be the method the
 /// recording has next, and an answer must answer the request it does, else the replay exits 1
-/// saying both; the recorded answer to a request goes out under the client's id. Once the recording runs out, the client's requests are refused the
-/// same way, and the replay exits when the client closes its end.
+/// saying both; the recorded answer to a request goes out under the client's id. Once the
+/// recording runs out, the client's requests are refused the same way, and the replay exits
+/// when the client closes its end.
 fn replay(file: &Path) -> ! {
     let (_, entries) = recording::read(file).unwrap_or_else(|e| out_of_step(e));
     let mut input = std::io::stdin().lock();

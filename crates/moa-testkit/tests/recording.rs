@@ -581,7 +581,7 @@ fn scrub_replaces_and_denies() {
             update_with(
                 json!({"text": "Beacon's projects: /Users/beacon/.claude/projects/-Users-beacon-private-kite on file://beacon-mbp.local/x"}),
             ),
-            update_with(json!({"text": "mail beacon@harbor.test about Harbor Labs"})),
+            update_with(json!({"text": "mail beacon@harbor.lan about Harbor Labs"})),
             update_with(
                 json!({"text": "/Users/Shared/notes and .claude/settings.local.json, signed Ada Lantern on scrub-test-host"}),
             ),
@@ -590,7 +590,7 @@ fn scrub_replaces_and_denies() {
     let home = Some("/var/lib/lantern-svc");
     let replace = [
         "--replace",
-        "beacon@harbor.test=EMAIL",
+        "beacon@harbor.lan=EMAIL",
         "Harbor Labs=Org",
         "--deny",
         "harbor",
@@ -631,7 +631,7 @@ fn scrub_replaces_and_denies() {
         home,
         &[
             "--replace",
-            "beacon@harbor.test=EMAIL",
+            "beacon@harbor.lan=EMAIL",
             "--deny",
             "nowhere",
             "harbor",
@@ -657,7 +657,7 @@ fn scrub_replaces_and_denies() {
         stderr.contains("line 4: holds an email address"),
         "{stderr}"
     );
-    assert!(!stderr.contains("harbor.test"), "{stderr}");
+    assert!(!stderr.contains("harbor.lan"), "{stderr}");
     assert!(!out.exists());
 }
 
@@ -671,10 +671,12 @@ fn scrub_redacts_the_account() {
             json!({"dir": "out", "msg": {"jsonrpc": "2.0", "method": "_auth/status_update",
                 "params": {"authStatus": {"kind": "account", "label": "Claude Max",
                     "detail": "gw.harbor.internal", "vendor": {"region": "harbor-east"},
-                    "account": {"plan": "max", "email": "beacon@harbor.test",
+                    "account": {"plan": "max", "email": "beacon@harbor.lan",
                         "organization": "Harbor Labs", "seat": "harbor-17"}}}}}),
             update_with(json!({"accountUuid": "8c1f-harbor", "orgId": 42,
-                "nested": [{"orgName": "Harbor Labs", "emailAddress": "beacon@harbor.test"}]})),
+                "nested": [{"orgName": "Harbor Labs", "emailAddress": "beacon@harbor.lan"}],
+                "org_name": "Harbor Labs", "Email": "beacon@harbor.lan",
+                "organizationID": "harbor-17", "email-address": "beacon@harbor.lan"})),
         ],
     );
     let out = dir.path().join("clean.jsonl");
@@ -689,7 +691,9 @@ fn scrub_redacts_the_account() {
     assert_eq!(
         clean[3]["msg"]["params"],
         json!({"accountUuid": id, "orgId": 0,
-               "nested": [{"orgName": "Org", "emailAddress": "user@example.com"}]})
+               "nested": [{"orgName": "Org", "emailAddress": "user@example.com"}],
+               "org_name": "Org", "Email": "user@example.com",
+               "organizationID": id, "email-address": "user@example.com"})
     );
 }
 
@@ -764,6 +768,35 @@ fn scrub_fails_closed() {
         stderr.contains("the header's name or version changed"),
         "{stderr}"
     );
+
+    // Lookalikes of allowed hosts, and IPv4 addresses but loopback and any, fail their lines,
+    // never echoed; so does an email or host at a domain that isn't reserved.
+    let dir = folder();
+    let input = tap_file(
+        dir.path(),
+        &[
+            update_with(json!({"text": "see evil-anthropic.com"})),
+            update_with(json!({"text": "see https://anthropic.com.internal/x"})),
+            update_with(json!({"text": "ssh 10.20.30.40"})),
+            update_with(json!({"text": "listen on 0.0.0.0 or 127.0.0.1"})),
+            update_with(json!({"text": "mail a@foo.example.internal or a@example.io"})),
+            update_with(json!({"text": "fine: a@docs.example.edu, b@x.invalid, https://x.host/"})),
+        ],
+    );
+    let (code, stderr) = scrub(&input, &dir.path().join("out.jsonl"), None, &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    for want in [
+        "line 2: names a host",
+        "line 3: names a host",
+        "line 4: holds an IP address",
+        "line 6: holds an email address",
+        "line 7: names a host",
+    ] {
+        assert!(stderr.contains(want), "{want}: {stderr}");
+    }
+    assert!(!stderr.contains("line 5"), "{stderr}");
+    assert!(!stderr.contains("line 7: holds"), "{stderr}");
+    assert!(!stderr.contains("10.20"), "{stderr}");
 }
 
 #[test]
@@ -775,8 +808,8 @@ fn scrub_finds_ordinary_email_addresses() {
     let said = |text: &str| json!({"dir": "out", "msg": {"text": text}});
     let lines = [
         agent,
-        said("write to first.last+moa@mail.harbor.test"),
-        said("KITE_99@Harbor-Labs.co.test said so"),
+        said("write to first.last+moa@mail.harbor.lan"),
+        said("KITE_99@Harbor-Labs.co.lan said so"),
         said("<a-b@c-d.io>"),
         said("an npm name: @scope/pkg@1.2.3, and user@example.com"),
     ];

@@ -18,11 +18,11 @@
 //! Steps 2 to 4 match in any case, names only as whole words, and each also in the spelling
 //! Claude gives a path in its project folders (`/Users/a.b` as `-Users-a-b`). Then each line
 //! must be clean. It may not match a `--deny` pattern (in any case), still hold a `FROM` (in
-//! any case) or anything steps 2 to 4 found, hold an email address (but one at an example
-//! domain), or name a host outside [`ALLOWED_HOSTS`] (`--replace` one to pass). Nor may
-//! scrubbing have changed a message's `method` or the header. A line that isn't clean is
-//! named, with what it matched but never the text; nothing is written, and the scrubber
-//! exits with 1. `<out>` starts with the header (`moa_testkit::recording::Header`): the
+//! any case) or anything steps 2 to 4 found, hold an email address (but one at a reserved
+//! domain) or an IPv4 address (but `127.0.0.1` and `0.0.0.0`), or name a host outside
+//! [`ALLOWED_HOSTS`] (`--replace` one to pass). Nor may scrubbing have changed a message's
+//! `method` or the header. A line that isn't clean is named, with what it matched but never
+//! the text; nothing is written, and the scrubber exits with 1. `<out>` starts with the header (`moa_testkit::recording::Header`): the
 //! agent's name and version from its own `initialize` answer.
 //!
 //! `MOA_SCRUB_HOST` and `MOA_SCRUB_FULL_NAME`, when set, stand for this machine's host name
@@ -47,25 +47,34 @@ const ID: &str = "00000000-0000-0000-0000-000000000000";
 const AUTH_STATUS: &str = "_auth/status_update";
 
 /// Keys that say who the account is, wherever they are, and the text each becomes. From the
-/// adapter's auth status, `claude auth status --json`, and Claude's account info.
+/// adapter's auth status, `claude auth status --json`, and Claude's account info. Written as
+/// [`key_name`] spells a key, so `org_name`, `Email` and `organizationID` match too.
 const IDENTITY_KEYS: &[(&str, &str)] = &[
     ("email", EMAIL),
-    ("emailAddress", EMAIL),
-    ("userEmail", EMAIL),
+    ("emailaddress", EMAIL),
+    ("useremail", EMAIL),
     ("organization", ORG),
-    ("organizationName", ORG),
-    ("orgName", ORG),
-    ("orgId", ID),
-    ("orgUuid", ID),
-    ("organizationId", ID),
-    ("organizationUuid", ID),
-    ("accountId", ID),
-    ("accountUuid", ID),
-    ("userId", ID),
-    ("user_id", ID),
+    ("organizationname", ORG),
+    ("orgname", ORG),
+    ("orgid", ID),
+    ("orguuid", ID),
+    ("organizationid", ID),
+    ("organizationuuid", ID),
+    ("accountid", ID),
+    ("accountuuid", ID),
+    ("userid", ID),
 ];
 
-/// Hosts a line may name, with their subdomains; `example.*`, `*.example` and `*.test` too.
+/// A key as [`IDENTITY_KEYS`] spells it: lower case, without `_` or `-`.
+fn key_name(key: &str) -> String {
+    key.chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Hosts a line may name, with their subdomains (but the `host` placeholder only whole), and
+/// the reserved ones ([`is_reserved`]).
 const ALLOWED_HOSTS: &[&str] = &[
     "github.com",
     "anthropic.com",
@@ -262,7 +271,8 @@ fn redact_keys(value: Value) -> Value {
             fields
                 .into_iter()
                 .map(|(k, v)| {
-                    let v = match IDENTITY_KEYS.iter().find(|(key, _)| *key == k) {
+                    let name = key_name(&k);
+                    let v = match IDENTITY_KEYS.iter().find(|(key, _)| *key == name) {
                         Some((_, text)) => placeholder(&v, text),
                         None => redact_keys(v),
                     };
@@ -453,30 +463,43 @@ fn header(entries: &[(usize, Entry)]) -> Option<Header> {
     })
 }
 
-/// Whether `domain` is reserved for examples: `example.<tld>`, its subdomains, `*.example`.
-fn is_example(domain: &str) -> bool {
-    let labels: Vec<&str> = domain.split('.').collect();
-    labels.last() == Some(&"example") || labels.iter().rev().nth(1) == Some(&"example")
+/// Whether `domain` is reserved, so naming it gives nothing away: `example.com`, `.org`,
+/// `.net` or `.edu` or a subdomain of one, or a name under `.example`, `.test` or `.invalid`.
+fn is_reserved(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_lowercase();
+    let under = |parent: &str| domain == parent || domain.ends_with(&format!(".{parent}"));
+    ["example.com", "example.org", "example.net", "example.edu"]
+        .into_iter()
+        .any(under)
+        || [".example", ".test", ".invalid"]
+            .iter()
+            .any(|tld| domain.ends_with(tld))
 }
 
-/// Whether `text` holds an email address, other than one at an example domain.
+/// Whether `text` holds an email address, other than one at a reserved domain.
 fn has_email(email: &Regex, text: &str) -> bool {
-    email
-        .captures_iter(text)
-        .any(|m| !is_example(&m[1].to_lowercase()))
+    email.captures_iter(text).any(|m| !is_reserved(&m[1]))
 }
 
-/// Whether a line may name `host`: an allowed one or its subdomain, an example or test
-/// domain, or a loopback address.
+/// Whether a line may name `host`: an allowed one or its subdomain, a reserved domain, or a
+/// loopback address.
 fn allowed_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_lowercase();
     let host = host.trim_start_matches('[').trim_end_matches(']');
     ALLOWED_HOSTS
         .iter()
-        .any(|a| host == *a || host.ends_with(&format!(".{a}")))
-        || is_example(host)
-        || host.ends_with(".test")
+        .any(|a| host == *a || (*a != HOST && host.ends_with(&format!(".{a}"))))
+        || is_reserved(host)
         || ["127.0.0.1", "::1"].contains(&host)
+}
+
+/// Whether `text` holds an IPv4 address other than `127.0.0.1` or `0.0.0.0`.
+fn has_ip(ipv4: &Regex, text: &str) -> bool {
+    ipv4.find_iter(text).any(|m| {
+        let address = m.as_str();
+        let octets = address.split('.').all(|o| o.parse::<u8>().is_ok());
+        octets && !["127.0.0.1", "0.0.0.0"].contains(&address)
+    })
 }
 
 /// Finds the hosts a line names: each URL's, and each bare `a.b.tld` with a [`HOST_TLDS`] tld.
@@ -589,6 +612,7 @@ fn main() {
     let email = Regex::new(r"(?i)[a-z0-9._%+-]+@([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})\b")
         .expect("a pattern");
     let hosts = Hosts::new();
+    let ipv4 = Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b").expect("a pattern");
     let mut denied = found.denied();
     denied.extend(args.replace.iter().map(|(from, _)| {
         let re = RegexBuilder::new(&regex::escape(from))
@@ -629,6 +653,9 @@ fn main() {
         }
         if texts.iter().any(|t| has_email(&email, t)) {
             problems.push(format!("{name}: holds an email address"));
+        }
+        if texts.iter().any(|t| has_ip(&ipv4, t)) {
+            problems.push(format!("{name}: holds an IP address"));
         }
         if texts.iter().any(|t| hosts.any_unknown(t)) {
             problems.push(format!(
