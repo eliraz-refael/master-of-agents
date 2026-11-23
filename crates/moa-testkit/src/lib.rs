@@ -70,6 +70,19 @@ pub fn stub_acp() -> PathBuf {
     test_bin("stub-acp")
 }
 
+/// A `moa.toml` whose default brain's moa runs on `acct-a`, a Claude account (store
+/// `~/.claude-acct-a`, launcher `fake-claude`) whose ACP adapter is `stub-acp`. The stub reads
+/// its script from the brain's agent folder ([`write_stub_script`]).
+pub fn stub_moa_toml() -> String {
+    format!(
+        "[brains.default]\nmoa_account = \"acct-a\"\n\
+         [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
+         launcher = \"{}\"\nacp = \"{}\"\n",
+        fake_claude().display(),
+        stub_acp().display()
+    )
+}
+
 /// `fake-claude` under the name `claude`: the symlink `<dir>/bin/claude`, so process reads
 /// recognise it as Claude by its argv (R9). Returns the symlink's path.
 pub fn fake_claude_named_claude(dir: &Path) -> PathBuf {

@@ -21,7 +21,7 @@ use moa_store::Store;
 use moa_store::actor::Fault;
 use moa_testkit::brain::{TYPICAL_NOW, TYPICAL_TZ};
 use moa_testkit::{
-    StubStep, TempBrain, fake_claude, stub_acp, stub_log, wait_for, write_stub_script,
+    StubStep, TempBrain, fake_claude, stub_log, stub_moa_toml, wait_for, write_stub_script,
 };
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -45,17 +45,6 @@ fn gate(file: &str) -> StubStep {
     StubStep::Wait { file: file.into() }
 }
 
-/// `moa.toml`: the default brain's moa runs on `acct-a`, whose agent is the stub.
-fn moa_toml() -> String {
-    format!(
-        "[brains.default]\nmoa_account = \"acct-a\"\n\
-         [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
-         launcher = \"{}\"\nacp = \"{}\"\n",
-        fake_claude().display(),
-        stub_acp().display()
-    )
-}
-
 /// A root whose agent folder holds the stub's script.
 struct Rig {
     _tb: TempBrain,
@@ -74,7 +63,7 @@ struct Up {
 
 impl Rig {
     fn new(steps: &[StubStep]) -> Rig {
-        let tb = TempBrain::new(Some(&moa_toml()));
+        let tb = TempBrain::new(Some(&stub_moa_toml()));
         let paths = tb.paths();
         let agent = paths.agent_dir("default");
         ensure_private_dir(&agent).expect("the agent folder");
