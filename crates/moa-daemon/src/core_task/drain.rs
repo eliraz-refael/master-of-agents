@@ -171,9 +171,14 @@ impl Core {
         // what moa's agent said. If the commit fails, they are applied again after the
         // reload rather than lost with it.
         let mut replay: Vec<Item> = Vec::new();
+        // The session events kept before this drain, and before the step that panicked: what
+        // isn't saved takes its events with it (`recover`).
+        let drain_mark = self.state.event_mark();
+        let mut panic_mark = None;
         while let Some(item) = work.pop_front() {
             // A `StartDrained` whose step panics is sent again after the reload.
             let mut start_drained = false;
+            let step_mark = self.state.event_mark();
             let stepped = match item {
                 Item::Input(input) => {
                     start_drained = matches!(input, Input::StartDrained);
@@ -264,6 +269,7 @@ impl Core {
                     // The drain stops here: what is before it is committed below, what is
                     // after it goes first into the next drain, in order.
                     panicked = true;
+                    panic_mark = Some(step_mark);
                     while let Some(rest) = work.pop_back() {
                         self.carry.push_front(rest);
                     }
@@ -296,8 +302,13 @@ impl Core {
                 self.carry.push_front(item);
             }
         }
+        // A failed commit saved nothing of the drain; a panic, nothing of its step.
+        let unsaved = match (&failed, panic_mark) {
+            (None, Some(mark)) => mark,
+            _ => drain_mark,
+        };
         if (failed.is_some() || panicked)
-            && let Err(line) = self.recover(failed, panicked, &mut held).await
+            && let Err(line) = self.recover(failed, panicked, unsaved, &mut held).await
         {
             return self.fatal(line, held);
         }

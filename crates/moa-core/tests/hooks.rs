@@ -14,8 +14,8 @@ use moa_core::effect::{
 use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{
-    Activity, ActivityWho, AgentKind, Conversation, ConversationReason, Lifecycle, Location,
-    PaneBinding, Project, ProjectId, ProjectStatus, Session, SessionId,
+    Activity, ActivityWho, AgentKind, Conversation, ConversationReason, FeedEntry, Lifecycle,
+    Location, PaneBinding, Project, ProjectId, ProjectStatus, Session, SessionId,
 };
 use moa_core::op::{ConnId, ReqId};
 use moa_core::publish::{EventRow, Topic};
@@ -1197,12 +1197,59 @@ fn a_turn_ending_in_a_question_needs_you() {
 
 #[test]
 fn a_duplicate_hook_makes_no_event() {
+    // All at one time, so only the dedupe stops the copy: applied again, the permission
+    // would need you again after the clear.
     let mut st = seeded();
-    let e = envelope(1, 1000, ended("All done."));
-    feed(&mut st, envelope(0, 500, prompt("Fix the lamp")));
+    let e = envelope(
+        1,
+        1000,
+        HookKind::NeedsPermission {
+            tool: "Bash".into(),
+        },
+    );
     feed(&mut st, e.clone());
+    feed(&mut st, envelope(2, 1000, HookKind::NeedsCleared));
+    assert_eq!(session(&st).activity, Activity::Working);
     feed(&mut st, e);
-    assert_eq!(whats(&st), [EventWhat::Finished]);
+    assert_eq!(session(&st).activity, Activity::Working);
+    assert_eq!(whats(&st), [EventWhat::NeedsYou]);
+}
+
+#[test]
+fn a_turn_ending_while_it_needs_you_is_finished() {
+    // A denied permission ends the turn with nothing clearing it first.
+    let mut st = seeded();
+    feed(
+        &mut st,
+        envelope(
+            1,
+            1000,
+            HookKind::NeedsPermission {
+                tool: "Bash".into(),
+            },
+        ),
+    );
+    feed(&mut st, envelope(2, 2000, ended("Stopped there.")));
+    feed(
+        &mut st,
+        envelope(
+            3,
+            3000,
+            HookKind::NeedsAnswer {
+                what: "a form".into(),
+            },
+        ),
+    );
+    feed(&mut st, envelope(4, 4000, ended("Done.")));
+    assert_eq!(
+        whats(&st),
+        [
+            EventWhat::NeedsYou,
+            EventWhat::Finished,
+            EventWhat::NeedsYou,
+            EventWhat::Finished
+        ]
+    );
 }
 
 #[test]
@@ -1235,13 +1282,38 @@ fn going_to_sleep_is_asleep() {
 #[test]
 fn events_ride_the_feed_topic() {
     let mut st = seeded();
+    // One line of moa's conversation, to sit beside the event.
+    let line = FeedEntry {
+        id: 7,
+        thread_id: "th-1".into(),
+        at: UtcMs(T0),
+        kind: "moa".into(),
+        message_id: None,
+        automatic: false,
+        body: json!({"text": "hello"}).to_string(),
+        state: None,
+    };
+    let snapshot = Snapshot {
+        sessions: vec![session(&st)],
+        conversations: conversations(&st),
+        feed_tail: vec![line],
+        ..Snapshot::default()
+    };
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes: None,
+        },
+        now(),
+    );
     let fx = feed(&mut st, ends(1, 1000, "prompt_input_exit"));
     let published = fx.iter().any(|e| {
         matches!(e, Effect::Publish(Publish::Model(m)) if m.topics[&Topic::Feed].contains_key("ev:1"))
     });
     assert!(published, "the commit publishes the feed topic");
     let rows = st.model().topics[&Topic::Feed].clone();
-    assert!(rows.contains_key("state"));
+    assert!(rows.contains_key("state") && rows.contains_key("#7"));
     assert_eq!(
         rows["ev:1"],
         json!({"key": "ev:1", "seq": 1, "at": now().wall.0, "session": S, "what": "ended"})

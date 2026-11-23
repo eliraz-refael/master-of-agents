@@ -540,7 +540,9 @@ fn source_word(source: StartSource) -> &'static str {
 /// from the lifecycle and the activity, never the display state (a long turn turns quiet on
 /// its own): brought live, `Started`; ended other than by going to sleep, `Ended`; put to
 /// sleep, `Asleep`; come to need you (a permission, a question, or a turn that ended asking),
-/// `NeedsYou`; a turn that ended any other way, `Finished`. At most one, the first of these.
+/// `NeedsYou`; a turn that ended any other way, `Finished`, from working or from needing you
+/// (a denied permission ends the turn with nothing clearing it first, and "needs you" mustn't
+/// stay on a session that is done). At most one, the first of these.
 pub(crate) fn event_of(before: Option<&Session>, after: &Session) -> Option<EventWhat> {
     let live = |s: &Session| s.lifecycle == Lifecycle::Live;
     let ended = |s: &Session| s.lifecycle == Lifecycle::Ended && s.asleep_at.is_none();
@@ -558,7 +560,13 @@ pub(crate) fn event_of(before: Option<&Session>, after: &Session) -> Option<Even
             None => Some(EventWhat::Started),
             Some(b) if !live(b) => Some(EventWhat::Started),
             Some(b) if needs_you(after) && !needs_you(b) => Some(EventWhat::NeedsYou),
-            Some(b) if b.activity == Activity::Working && after.activity == Activity::Idle => {
+            Some(b)
+                if after.activity == Activity::Idle
+                    && matches!(
+                        b.activity,
+                        Activity::Working | Activity::NeedsPermission | Activity::NeedsAnswer
+                    ) =>
+            {
                 Some(EventWhat::Finished)
             }
             Some(_) => None,
@@ -665,4 +673,26 @@ fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
         Some(folder) => format!("{folder} {what}"),
         None => what,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live::tests::session;
+
+    #[test]
+    fn a_new_session_is_started_only_when_live() {
+        let live = session();
+        let ended = Session {
+            lifecycle: Lifecycle::Ended,
+            ..session()
+        };
+        let asleep = Session {
+            asleep_at: Some(UtcMs(1)),
+            ..ended.clone()
+        };
+        assert_eq!(event_of(None, &live), Some(EventWhat::Started));
+        assert_eq!(event_of(None, &ended), None);
+        assert_eq!(event_of(None, &asleep), None);
+    }
 }

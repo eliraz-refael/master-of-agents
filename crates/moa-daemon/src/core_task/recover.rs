@@ -14,12 +14,14 @@ use super::*;
 
 impl Core {
     /// Puts the core right after a failed commit, a dead store or a panic: tells the drain's
-    /// callers, then reloads the in-memory state from disk. `Err` is the line the daemon
-    /// stops with.
+    /// callers, then reloads the in-memory state from disk. The session events kept after
+    /// `unsaved` (an event mark) are for changes the reload undoes: they go first, so the
+    /// reload publishes none of them. `Err` is the line the daemon stops with.
     pub(super) async fn recover(
         &mut self,
         failed: Option<CommitError>,
         panicked: bool,
+        unsaved: u64,
         held: &mut Vec<Held>,
     ) -> Result<(), String> {
         // Reloading lifts a refusal unless it is handed back.
@@ -53,6 +55,7 @@ impl Core {
         if panicked {
             held.push(error_event("moa hit a bug and reloaded"));
         }
+        self.state.drop_events_after(unsaved);
         self.reload(refuse, held, restarted).await?;
         // A status asked in the failed drain shows the reloaded state, not the failed one.
         let now = self.clock.wall();

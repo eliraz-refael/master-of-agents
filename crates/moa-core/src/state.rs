@@ -687,6 +687,18 @@ impl State {
         }
     }
 
+    /// The last session event's `seq` so far: [`State::drop_events_after`] takes it.
+    pub fn event_mark(&self) -> u64 {
+        self.last_event
+    }
+
+    /// Forgets the session events pushed after `mark` ([`State::event_mark`]): the daemon's
+    /// recovery, before it reloads, for the changes its failed commit didn't save. Their
+    /// `seq`s aren't handed out again, so no published key is reused.
+    pub fn drop_events_after(&mut self, mark: u64) {
+        self.session_events.retain(|e| e.seq <= mark);
+    }
+
     /// The `message_id`s of the rows in `thread`, when it is one of the threads kept (each
     /// account's newest, and any a row was written to since the load).
     pub fn feed_keys(&self, thread: &str) -> Option<&BTreeSet<String>> {

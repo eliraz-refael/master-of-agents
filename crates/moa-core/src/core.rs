@@ -886,7 +886,8 @@ impl Tx {
             }
         }
         // Every session change is committed here: what it moved the session into is told
-        // to the console (B3), once it is saved.
+        // to the console (B3). The store saves it later; should that fail, the daemon drops
+        // the events with the reload (`State::drop_events_after`).
         for c in &changes {
             if let Change::Session(after) = c
                 && let Some(what) = hooks::event_of(state.session(after.id), after)
