@@ -1451,6 +1451,7 @@ dependencies = [
  "moa-platform",
  "moa-store",
  "proptest",
+ "regex",
  "rusqlite",
  "rustix",
  "serde",

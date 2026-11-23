@@ -31,13 +31,13 @@
             pname = "moa";
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
             # cleanCargoSource keeps only .rs/.toml/Cargo.lock; the store's .sql and the
-            # tests' .snap files, moa-tmux's .tpl config template and the hook fixtures (.json)
-            # must reach the build too.
+            # tests' .snap files, moa-tmux's .tpl config template, the hook fixtures (.json)
+            # and the recordings of moa's agent (.jsonl) must reach the build too.
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
                 (craneLib.fileset.commonCargoSources ./.)
-                (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap" || f.hasExt "tpl" || f.hasExt "json" || f.hasExt "proptest-regressions") ./crates)
+                (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap" || f.hasExt "tpl" || f.hasExt "json" || f.hasExt "jsonl" || f.hasExt "proptest-regressions") ./crates)
                 # moa's embedded constitution (`include_str!`)
                 ./crates/moa-core/src/central/constitution.md
                 # read by a DDL check test; removed with the spike
