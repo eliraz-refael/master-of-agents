@@ -67,9 +67,9 @@ pub struct ConsoleUi {
     /// The draft as it was when Up was first pressed: Down past the newest entry brings it
     /// back.
     pub kept: String,
-    /// The lines typed here and sent, oldest first: the history has them before their rows
-    /// come.
-    pub sent: Vec<String>,
+    /// The lines typed here and sent, with when, oldest first: the history has them before
+    /// their rows come.
+    pub sent: Vec<(UtcMs, String)>,
     /// The view follows the newest line (B8).
     pub follow: bool,
     /// While it doesn't: the line at its bottom (F15).
@@ -127,8 +127,12 @@ impl Default for ConsoleUi {
 pub enum Asked {
     /// `console.page` for `n` rows (B2).
     Page { n: u16 },
-    /// A prompt typed in the input.
-    Prompt { text: String },
+    /// A prompt, typed in the input or pressed, at `at`.
+    Prompt {
+        text: String,
+        at: UtcMs,
+        typed: bool,
+    },
     /// A command, typed or pressed at `at`: its reply is a card (B4).
     Command {
         line: String,
@@ -369,22 +373,35 @@ impl ConsoleUi {
 
     /// Whether a page of older rows is asked for, or on its way.
     pub fn paging(&self) -> bool {
-        let page = |a: &Asked| matches!(a, Asked::Page { .. });
-        self.asked.as_ref().is_some_and(page) || self.waits.values().any(page)
+        self.waits_on(|a| matches!(a, Asked::Page { .. }))
+    }
+
+    /// Whether a request `is` matches is asked for, or on its way.
+    pub fn waits_on(&self, is: impl Fn(&Asked) -> bool) -> bool {
+        self.asked.as_ref().is_some_and(&is) || self.waits.values().any(is)
     }
 }
 
-/// What Up and Down step through (B7): the text of every prompt you typed, in the rows loaded
-/// (moa's own, F20, are left out), then the lines sent here that no row has yet; one entry
-/// for a line typed twice in a row.
+/// What Up and Down step through (B7), oldest first: the text of every prompt you typed, in
+/// the rows loaded (moa's own, F20, are left out), and the lines sent here that no row has
+/// (commands, and prompts whose rows haven't come), each at its time; one entry for a line
+/// typed twice in a row.
 pub fn history(data: &Data, ui: &ConsoleUi) -> Vec<String> {
-    let typed: Vec<String> = rows(data, ui)
+    let typed: Vec<(i64, String)> = rows(data, ui)
         .into_values()
         .filter(|r| r.kind == kind::YOU && !r.automatic)
-        .filter_map(|r| r.body.get("text")?.as_str().map(str::to_string))
+        .filter_map(|r| Some((r.at, r.body.get("text")?.as_str()?.to_string())))
         .collect();
     let mut all = typed.clone();
-    all.extend(ui.sent.iter().filter(|s| !typed.contains(s)).cloned());
+    all.extend(
+        ui.sent
+            .iter()
+            .filter(|(_, s)| !typed.iter().any(|(_, t)| t == s))
+            .map(|(at, s)| (at.0, s.clone())),
+    );
+    // Stable: rows keep their order, and a line sent keeps its place among the others.
+    all.sort_by_key(|(at, _)| *at);
+    let mut all: Vec<String> = all.into_iter().map(|(_, s)| s).collect();
     all.dedup();
     all
 }

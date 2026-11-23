@@ -256,6 +256,39 @@ fn up_and_down_walk_the_history() {
     }
 }
 
+/// B7: the history is in the order things were sent: a command typed before a prompt is older
+/// than the prompt once its row comes. A pressed prompt button is none of yours: it never
+/// joins the history, and Enter still sends while it waits.
+#[test]
+fn the_history_keeps_the_order_sent() {
+    let mut c = C::new(Vec::new(), SIZE);
+    c.typed("/brief");
+    let outs = c.key(Key::Enter);
+    let (tag, _) = c.send(outs);
+    c.reply(tag, Ok(done("the brief")));
+    let mut hello = row(1, "you", "hello");
+    hello.at = c.ctx.now.0 + 1_000;
+    c.add(vec![hello]);
+    for want in ["hello", "/brief"] {
+        c.key(Key::Up);
+        assert_eq!(c.input(), format!("› {want}"));
+    }
+    c.key(Key::Esc);
+
+    c.bar(&["say hi"]);
+    c.screen();
+    c.key(Key::Tab);
+    let outs = c.key(Key::Enter);
+    let (tag, op) = c.send(outs);
+    assert!(matches!(op, Op::ConsolePrompt { .. }), "{op:?}");
+    c.typed("next");
+    let outs = c.key(Key::Enter);
+    assert!(matches!(outs[..], [Out::Send(_)]), "{outs:?}");
+    c.reply(tag, Ok(done("ok")));
+    c.key(Key::Up);
+    assert_ne!(c.input(), "› say hi");
+}
+
 /// B8: Esc while moa thinks cancels its turn, the draft kept; the head line says so.
 #[test]
 fn esc_cancels_while_thinking() {

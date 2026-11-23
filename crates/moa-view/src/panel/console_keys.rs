@@ -68,7 +68,8 @@ impl Panel {
         let mut built = console::build(data, ctx, ui, build_width(&g));
         let rows = u16::try_from(built.bar.len()).unwrap_or(u16::MAX);
         let g = g.with_bar_rows(rows);
-        let open = console::palette(data, ui).map_or(0, |p| p.entries.len());
+        self.palette = console::palette(data, ui);
+        let open = self.palette.as_ref().map_or(0, |p| p.entries.len());
         let g = g.with_palette_rows(u16::try_from(open).unwrap_or(u16::MAX));
         ui.palette_rows = g.palette.map_or(0, |r| r.h);
         built.bar.truncate(usize::from(g.bar.map_or(0, |r| r.h)));
@@ -121,7 +122,7 @@ impl Panel {
         if self.console.draft.step(k) {
             return Vec::new();
         }
-        if self.palette_key(k, data) {
+        if self.palette_key(k) {
             return Vec::new();
         }
         let page = isize::try_from(rows.saturating_sub(1).max(1)).unwrap_or(isize::MAX);
@@ -168,13 +169,13 @@ impl Panel {
 
     /// A key while the palette is open: Tab completes the word with the chosen entry, Up and
     /// Down (and BackTab) choose, Esc closes it until the draft changes. Whether the palette
-    /// took the key.
-    fn palette_key(&mut self, k: Key, data: &Data) -> bool {
+    /// took the key. The palette is the last refresh's: only the cursor has moved since.
+    fn palette_key(&mut self, k: Key) -> bool {
         // With no row to show it in, the palette is closed.
         if self.console.palette_rows == 0 {
             return false;
         }
-        let Some(p) = console::palette(data, &self.console) else {
+        let Some(p) = &self.palette else {
             return false;
         };
         let ui = &mut self.console;
@@ -224,11 +225,10 @@ impl Panel {
         }
         let ui = &mut self.console;
         let typing = |a: &Asked| match a {
-            Asked::Prompt { .. } => true,
-            Asked::Command { typed, .. } => *typed,
+            Asked::Prompt { typed, .. } | Asked::Command { typed, .. } => *typed,
             Asked::Page { .. } => false,
         };
-        if typed && (ui.asked.as_ref().is_some_and(typing) || ui.waits.values().any(typing)) {
+        if typed && ui.waits_on(typing) {
             return self.say(STILL_WAITING);
         }
         ui.to_bottom();
@@ -240,7 +240,11 @@ impl Panel {
             };
             (asked, Op::ConsoleCommand { line })
         } else {
-            let asked = Asked::Prompt { text: line.clone() };
+            let asked = Asked::Prompt {
+                text: line.clone(),
+                at: now,
+                typed,
+            };
             (
                 asked,
                 Op::ConsolePrompt {
@@ -336,13 +340,15 @@ impl Panel {
                     }
                 }
             }
-            Asked::Prompt { text } => {
-                self.accepted(text);
+            Asked::Prompt { text, at, typed } => {
+                if typed {
+                    self.accepted(text, at);
+                }
                 self.show(Ok(done));
             }
             Asked::Command { line, at, typed } => {
                 if typed {
-                    self.accepted(line.clone());
+                    self.accepted(line.clone(), at);
                 }
                 self.console.cards.push(Card {
                     at,
@@ -353,14 +359,14 @@ impl Panel {
         }
     }
 
-    /// `line`, typed and sent, went through: the history has it, and the draft clears if it
-    /// is still that line.
-    fn accepted(&mut self, line: String) {
+    /// `line`, typed and sent at `at`, went through: the history has it, and the draft clears
+    /// if it is still that line.
+    fn accepted(&mut self, line: String, at: UtcMs) {
         if self.console.draft.text.trim() == line {
             self.clear_draft();
         }
         let sent = &mut self.console.sent;
-        sent.push(line);
+        sent.push((at, line));
         sent.drain(..sent.len().saturating_sub(SENT_KEPT));
     }
 
@@ -395,9 +401,11 @@ impl Panel {
             .head
             .filter(|r| r.h > 0)
             .map(|_| console::head(data, ctx, !self.link_down, w.new, width));
-        let palette = console::palette(data, &self.console)
+        let palette = self
+            .palette
+            .as_ref()
             .zip(g.palette)
-            .map(|(p, r)| console::palette_lines(&p, self.console.pick, usize::from(r.h), r.w))
+            .map(|(p, r)| console::palette_lines(p, self.console.pick, usize::from(r.h), r.w))
             .unwrap_or_default();
         let (input, cursor) = match g.input.filter(|r| r.h > 0 && r.w > 0) {
             Some(r) => {

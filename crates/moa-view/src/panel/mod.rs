@@ -17,7 +17,7 @@ use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::{ListState, WHEEL};
 use crate::text::{self, clean};
-use crate::views::console::{ConsoleUi, ConsoleView, Window};
+use crate::views::console::{ConsoleUi, ConsoleView, Palette, Window};
 use crate::views::{self, ViewUi, picker, picture, tree};
 
 mod ask;
@@ -227,6 +227,8 @@ pub struct Panel {
     built: ConsoleView,
     /// What the console's feed showed of it.
     window: Window,
+    /// The console's `/` palette for the last build's draft, if open.
+    palette: Option<Palette>,
     /// The loop's connection isn't up: the console's head line says so.
     link_down: bool,
 }
@@ -292,6 +294,7 @@ impl Panel {
             console: ConsoleUi::default(),
             built: ConsoleView::default(),
             window: Window::default(),
+            palette: None,
             link_down: false,
         }
     }
@@ -769,9 +772,14 @@ impl Panel {
         let mut palette = Vec::new();
         if self.view == View::Console {
             let parts = self.console_parts(data, ctx, &g);
-            (head, body, cursor, input, bar) =
-                (parts.head, parts.body, parts.cursor, parts.input, parts.bar);
-            palette = parts.palette;
+            (head, body, cursor, input, palette, bar) = (
+                parts.head,
+                parts.body,
+                parts.cursor,
+                parts.input,
+                parts.palette,
+                parts.bar,
+            );
         } else if let Some(r) = g.head.filter(|r| r.h > 0 && r.w > 0) {
             let m = picks(&mut self.picks, data, &self.ui.query);
             let built = picker::head(m, &self.ui.query, build_width(&g));
