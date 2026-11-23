@@ -1412,6 +1412,113 @@ expression: all
               "method",
               "params"
             ]
+          },
+          {
+            "description": "The `n` feed rows before id `before`, oldest first, from every thread: what the\nconsole pages back through. Answered by the daemon from the store, not by the core.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.page"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "before": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "n": {
+                    "type": "integer",
+                    "format": "uint16",
+                    "minimum": 0,
+                    "maximum": 65535,
+                    "default": 100
+                  }
+                },
+                "required": [
+                  "before"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "The next prompt starts a new thread, even the same day.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.new"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "A `/command` line typed in the console, run as the op it names with no turn of moa's\n(`moa_core::console`). The reply is that op's reply.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.command"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "line": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "line"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from\n`moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "bar.set"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "commands": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "user": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "commands"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
           }
         ]
       },

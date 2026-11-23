@@ -188,3 +188,34 @@ async fn backup_writes_today_once_and_prunes() {
     let again = rig.handle.backup(today).await.unwrap();
     assert_eq!(again.written, None);
 }
+
+#[tokio::test]
+async fn a_feed_page_is_the_rows_before_oldest_first() {
+    let rig = rig();
+    let entry = |id: i64| {
+        Change::Feed(FeedEntry {
+            id,
+            thread_id: "th-1".into(),
+            at: UtcMs(id),
+            kind: "moa".into(),
+            message_id: None,
+            automatic: false,
+            body: "{}".into(),
+            state: None,
+        })
+    };
+    let mut changes = vec![Change::Thread(MoaThread {
+        thread_id: "th-1".into(),
+        account: "acct-a".into(),
+        day: date(2026, 11, 20),
+        kind: ThreadKind::Daily,
+        started_at: UtcMs(1),
+    })];
+    changes.extend((1..=5).map(entry));
+    rig.handle.commit(changes).await.unwrap();
+
+    let ids = |rows: Vec<FeedEntry>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+    assert_eq!(ids(rig.handle.feed_page(5, 2).await.unwrap()), [3, 4]);
+    assert_eq!(ids(rig.handle.feed_page(3, 200).await.unwrap()), [1, 2]);
+    assert!(rig.handle.feed_page(1, 10).await.unwrap().is_empty());
+}

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use crate::central::{self, Waiter};
 use crate::change::Change;
 use crate::cockpit;
+use crate::console;
 use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn, TmuxToken};
 use crate::hooks;
 use crate::keys;
@@ -53,6 +54,13 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     fx.extend(
         state
             .publish_changed(Topic::Terms)
+            .map(|m| Effect::Publish(Publish::Model(m))),
+    );
+    // Session events are kept in memory only: whatever this input committed, the views hear
+    // of the new ones.
+    fx.extend(
+        state
+            .publish_session_events()
             .map(|m| Effect::Publish(Publish::Model(m))),
     );
     // Last, so the status line shows what this input saved, after its `Persist`.
@@ -617,6 +625,40 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::ConsoleCancel(_),
             ..
         } => central::cancel(state, conn, req),
+        Input::Client {
+            conn,
+            req,
+            op: Op::ConsoleNew(_),
+            ..
+        } => central::start_new(state, conn, req),
+        // A `/command` is answered as the op it names, as if that op had been sent.
+        Input::Client {
+            conn,
+            req,
+            caller,
+            op: Op::ConsoleCommand { line },
+        } => match console::parse(&line, caller.cwd.as_deref(), state.deps()) {
+            Ok(console::Parsed::Run(op)) => decide(
+                state,
+                Input::Client {
+                    conn,
+                    req,
+                    caller,
+                    op,
+                },
+                now,
+            ),
+            Ok(console::Parsed::Help) => vec![Effect::Reply {
+                conn,
+                req,
+                result: Ok(console::help()),
+            }],
+            Err(why) => vec![Effect::Reply {
+                conn,
+                req,
+                result: Err(OpError(why)),
+            }],
+        },
         Input::Acp(heard) => central::heard(state, now, heard),
         Input::Client {
             conn,
@@ -872,7 +914,15 @@ impl Tx {
                 return Err(OpError(unknown_message(state, table, &key)));
             }
         }
+        // Every session change is committed here: what it moved the session into is told
+        // to the console (B3). The store saves it later; should that fail, the daemon drops
+        // the events with the reload (`State::drop_events_after`).
         for c in &changes {
+            if let Change::Session(after) = c
+                && let Some(what) = hooks::event_of(state.session(after.id), after)
+            {
+                state.push_session_event(self.wall, after.id, what);
+            }
             state.apply(c);
         }
         self.changes.extend(changes);

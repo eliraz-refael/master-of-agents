@@ -13,6 +13,7 @@ use std::thread;
 
 use jiff::civil::Date;
 use moa_core::change::Change;
+use moa_core::model::FeedEntry;
 use moa_core::state::Snapshot;
 use tokio::sync::oneshot;
 
@@ -66,6 +67,7 @@ type Reply<T> = oneshot::Sender<Result<T, CommitError>>;
 enum Cmd {
     Commit(Vec<Change>, Reply<()>),
     Snapshot(Reply<Snapshot>),
+    FeedPage(i64, usize, Reply<Vec<FeedEntry>>),
     Backup(Date, Reply<BackupDone>),
     Sync(oneshot::Sender<()>),
     Fault(Fault),
@@ -113,6 +115,11 @@ impl StoreHandle {
         self.ask(Cmd::Snapshot).await
     }
 
+    /// The `n` feed rows before id `before`, oldest first ([`Store::feed_page`]).
+    pub async fn feed_page(&self, before: i64, n: usize) -> Result<Vec<FeedEntry>, CommitError> {
+        self.ask(|r| Cmd::FeedPage(before, n, r)).await
+    }
+
     /// Writes `daily-<day>.db` unless it exists, then prunes old dailies.
     pub async fn backup(&self, day: Date) -> Result<BackupDone, CommitError> {
         self.ask(|r| Cmd::Backup(day, r)).await
@@ -156,6 +163,9 @@ fn run(mut store: Store, backups: &Path, rx: &mpsc::Receiver<Cmd>) {
             }
             Cmd::Snapshot(reply) => {
                 let _ = reply.send(store.load_snapshot().map_err(|e| one_line(&e)));
+            }
+            Cmd::FeedPage(before, n, reply) => {
+                let _ = reply.send(store.feed_page(before, n).map_err(|e| one_line(&e)));
             }
             Cmd::Backup(day, reply) => {
                 if let Some(gate) = pause_backup.take() {

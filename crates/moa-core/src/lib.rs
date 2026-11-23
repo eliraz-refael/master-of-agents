@@ -5,6 +5,7 @@ pub mod central;
 pub mod change;
 pub mod cockpit;
 pub mod config;
+pub mod console;
 mod core;
 pub mod due;
 pub mod effect;

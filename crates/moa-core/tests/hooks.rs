@@ -8,16 +8,18 @@ use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
-    Effect, Input, LogLevel, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked, reply_of,
+    Effect, Input, LogLevel, Publish, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked,
+    reply_of,
 };
 use moa_core::hook::{HookEnvelope, HookKind, StartSource};
 use moa_core::live::{DisplayState, display_state};
 use moa_core::model::{
-    Activity, ActivityWho, AgentKind, Conversation, ConversationReason, Lifecycle, Location,
-    PaneBinding, Project, ProjectId, ProjectStatus, Session, SessionId,
+    Activity, ActivityWho, AgentKind, Conversation, ConversationReason, FeedEntry, Lifecycle,
+    Location, PaneBinding, Project, ProjectId, ProjectStatus, Session, SessionId,
 };
 use moa_core::op::{ConnId, ReqId};
-use moa_core::state::{Deps, Snapshot, State};
+use moa_core::publish::{EventRow, Topic};
+use moa_core::state::{Deps, EVENTS_KEPT, EventWhat, Snapshot, State};
 use moa_core::tmux::ids::{ClientName, Generation};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::status::counts_text;
@@ -1140,6 +1142,228 @@ fn an_event_with_nothing_to_write_is_no_failed_write() {
     );
     let fx = feed(&mut st, envelope(2, 1000, HookKind::NeedsCleared));
     assert_eq!(logs(&fx), 0);
+}
+
+/// The session events kept, as `(seq, what)`, oldest first.
+fn session_events(st: &State) -> Vec<(u64, EventWhat)> {
+    st.session_events().map(|e| (e.seq, e.what)).collect()
+}
+
+fn whats(st: &State) -> Vec<EventWhat> {
+    session_events(st).into_iter().map(|(_, w)| w).collect()
+}
+
+#[test]
+fn each_change_makes_one_event() {
+    // A start brings an ended session back: one already live only moves its times.
+    let mut st = seeded();
+    reseed(&mut st, None, |s| s.lifecycle = Lifecycle::Ended);
+    feed(&mut st, started(1, 1000, StartSource::Resume));
+    feed(&mut st, envelope(2, 2000, prompt("Fix the lamp")));
+    feed(&mut st, envelope(3, 3000, ended("All done.")));
+    feed(
+        &mut st,
+        envelope(
+            4,
+            4000,
+            HookKind::NeedsPermission {
+                tool: "Bash".into(),
+            },
+        ),
+    );
+    feed(&mut st, ends(5, 5000, "prompt_input_exit"));
+    let events = session_events(&st);
+    assert_eq!(
+        whats(&st),
+        [
+            EventWhat::Started,
+            EventWhat::Finished,
+            EventWhat::NeedsYou,
+            EventWhat::Ended
+        ]
+    );
+    assert!(events.windows(2).all(|w| w[0].0 < w[1].0));
+    let e = st.session_events().next().unwrap();
+    assert_eq!((e.session, e.at), (sid(), now().wall));
+}
+
+#[test]
+fn a_turn_ending_in_a_question_needs_you() {
+    let mut st = seeded();
+    feed(&mut st, envelope(1, 1000, prompt("Fix the lamp")));
+    feed(&mut st, envelope(2, 2000, ended("Ship it?")));
+    assert_eq!(whats(&st), [EventWhat::NeedsYou]);
+}
+
+#[test]
+fn a_duplicate_hook_makes_no_event() {
+    // All at one time, so only the dedupe stops the copy: applied again, the permission
+    // would need you again after the clear.
+    let mut st = seeded();
+    let e = envelope(
+        1,
+        1000,
+        HookKind::NeedsPermission {
+            tool: "Bash".into(),
+        },
+    );
+    feed(&mut st, e.clone());
+    feed(&mut st, envelope(2, 1000, HookKind::NeedsCleared));
+    assert_eq!(session(&st).activity, Activity::Working);
+    feed(&mut st, e);
+    assert_eq!(session(&st).activity, Activity::Working);
+    assert_eq!(whats(&st), [EventWhat::NeedsYou]);
+}
+
+#[test]
+fn a_turn_ending_in_a_question_after_a_permission_still_needs_you() {
+    let mut st = seeded();
+    feed(
+        &mut st,
+        envelope(
+            1,
+            1000,
+            HookKind::NeedsPermission {
+                tool: "Bash".into(),
+            },
+        ),
+    );
+    feed(&mut st, envelope(2, 2000, ended("Ship it?")));
+    assert_eq!(whats(&st), [EventWhat::NeedsYou]);
+}
+
+#[test]
+fn a_turn_ending_while_it_needs_you_is_finished() {
+    // A denied permission ends the turn with nothing clearing it first.
+    let mut st = seeded();
+    feed(
+        &mut st,
+        envelope(
+            1,
+            1000,
+            HookKind::NeedsPermission {
+                tool: "Bash".into(),
+            },
+        ),
+    );
+    feed(&mut st, envelope(2, 2000, ended("Stopped there.")));
+    feed(
+        &mut st,
+        envelope(
+            3,
+            3000,
+            HookKind::NeedsAnswer {
+                what: "a form".into(),
+            },
+        ),
+    );
+    feed(&mut st, envelope(4, 4000, ended("Done.")));
+    assert_eq!(
+        whats(&st),
+        [
+            EventWhat::NeedsYou,
+            EventWhat::Finished,
+            EventWhat::NeedsYou,
+            EventWhat::Finished
+        ]
+    );
+}
+
+#[test]
+fn a_refused_write_makes_no_event() {
+    let mut st = seeded();
+    reseed(
+        &mut st,
+        Some(RefuseWrites {
+            until: UtcMs(T0 + 3_600_000),
+            reason: "test".into(),
+        }),
+        |_| {},
+    );
+    feed(&mut st, ends(1, 1000, "prompt_input_exit"));
+    assert_eq!(session(&st).lifecycle, Lifecycle::Live);
+    assert_eq!(whats(&st), []);
+}
+
+#[test]
+fn going_to_sleep_is_asleep() {
+    let mut st = seeded();
+    // An end that isn't a clean quit puts the session to sleep; the quit that follows it
+    // ends the session.
+    feed(&mut st, ends(1, 1000, "other"));
+    assert_eq!(shown(&st).0, DisplayState::Asleep);
+    feed(&mut st, ends(2, 2000, "prompt_input_exit"));
+    assert_eq!(whats(&st), [EventWhat::Asleep, EventWhat::Ended]);
+}
+
+#[test]
+fn events_ride_the_feed_topic() {
+    let mut st = seeded();
+    // One line of moa's conversation, to sit beside the event.
+    let line = FeedEntry {
+        id: 7,
+        thread_id: "th-1".into(),
+        at: UtcMs(T0),
+        kind: "moa".into(),
+        message_id: None,
+        automatic: false,
+        body: json!({"text": "hello"}).to_string(),
+        state: None,
+    };
+    let snapshot = Snapshot {
+        sessions: vec![session(&st)],
+        conversations: conversations(&st),
+        feed_tail: vec![line],
+        ..Snapshot::default()
+    };
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes: None,
+        },
+        now(),
+    );
+    let fx = feed(&mut st, ends(1, 1000, "prompt_input_exit"));
+    let published = fx.iter().any(|e| {
+        matches!(e, Effect::Publish(Publish::Model(m)) if m.topics[&Topic::Feed].contains_key("ev:1"))
+    });
+    assert!(published, "the commit publishes the feed topic");
+    let rows = st.model().topics[&Topic::Feed].clone();
+    assert!(rows.contains_key("state") && rows.contains_key("#7"));
+    assert_eq!(
+        rows["ev:1"],
+        json!({"key": "ev:1", "seq": 1, "at": now().wall.0, "session": S, "what": "ended"})
+    );
+    let row: EventRow = serde_json::from_value(rows["ev:1"].clone()).unwrap();
+    assert_eq!(row.what, EventWhat::Ended);
+}
+
+#[test]
+fn needs_you_is_snake_case() {
+    assert_eq!(json!(EventWhat::NeedsYou), json!("needs_you"));
+}
+
+#[test]
+fn only_200_are_kept() {
+    let mut st = seeded();
+    // Each clean quit ends the session and each start brings it back: one event a hook.
+    let n = EVENTS_KEPT as u32 + 1;
+    for seq in 1..=n {
+        let at = 1000 * i64::from(seq);
+        if seq % 2 == 1 {
+            feed(&mut st, ends(seq, at, "prompt_input_exit"));
+        } else {
+            feed(&mut st, started(seq, at, StartSource::Resume));
+        }
+    }
+    let events = session_events(&st);
+    assert_eq!(events.len(), EVENTS_KEPT);
+    assert_eq!(events[0].0, 2);
+    assert_eq!(events.last().unwrap().0, u64::from(n));
+    let rows = st.model().topics[&Topic::Feed].clone();
+    assert!(!rows.contains_key("ev:1"));
+    assert!(rows.contains_key("ev:2") && rows.contains_key(&format!("ev:{n}")));
 }
 
 fn kind_strategy() -> impl Strategy<Value = HookKind> {

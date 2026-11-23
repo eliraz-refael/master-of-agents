@@ -22,6 +22,7 @@ use moa_core::model::{
     Session, SessionId, SpikePane,
 };
 use moa_core::op::{Op, ReqId};
+use moa_core::publish::Topic;
 use moa_core::state::CallerInfo;
 use moa_core::state::Deps;
 use moa_daemon::testing::FakeTime;
@@ -580,6 +581,32 @@ async fn a_hook_in_a_drain_whose_commit_fails_is_applied_after_the_reload() {
     assert_eq!(saved_activity(&brain), "working");
     // Applied, not spooled.
     assert!(fs::read_to_string(&live).unwrap_or_default().is_empty());
+    core.stop().await;
+}
+
+/// A session event pushed in a drain whose commit fails goes with the reload: the hook,
+/// applied again after it, makes the only one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_commit_leaves_no_session_event() {
+    let brain = TypicalBrain::new();
+    seed(&mut brain.store());
+    let live = brain.dir.path().join("spool").join("default.jsonl");
+    let core = started(&brain, &live).await;
+    core.store_fault(Fault::FailNextCommit);
+    // An end that isn't a clean quit puts the session to sleep: an `asleep` event.
+    core_hook(&core, &hook_line("SessionEnd", ago(1000), 1));
+    let applied = wait_for(WAIT, || (seen_events(&brain) == 1).then_some(()));
+    assert!(applied.is_some(), "the hook was applied after the reload");
+    // The drain that saved it has released what it published.
+    core.barrier().await;
+    let model = core.model().borrow().clone();
+    let events: Vec<&Value> = model.topics[&Topic::Feed]
+        .iter()
+        .filter(|(k, row)| k.starts_with("ev:") && row["session"] == S)
+        .map(|(_, row)| row)
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["what"], "asleep");
     core.stop().await;
 }
 

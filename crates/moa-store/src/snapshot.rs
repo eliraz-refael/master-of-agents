@@ -2,6 +2,7 @@
 //! writes the same [`Change`]s the core applies in memory, so memory and disk change by one value.
 
 use moa_core::change::Change;
+use moa_core::model::FeedEntry;
 use moa_core::state::{LoadNote, NextIds, Snapshot};
 use rusqlite::TransactionBehavior;
 
@@ -31,6 +32,25 @@ fn store_error(e: ImportError) -> StoreError {
 }
 
 impl Store {
+    /// The `n` feed rows with `id < before`, oldest first, from every thread: what the console
+    /// pages back through, beyond the tail the core keeps.
+    pub fn feed_page(&self, before: i64, n: usize) -> Result<Vec<FeedEntry>, StoreError> {
+        let src = Src { conn: self.conn() };
+        let mut rows: Vec<_> = src
+            .rows(
+                "feed",
+                rows::FEED,
+                Some(&format!("id < {before}")),
+                &format!("id DESC LIMIT {n}"),
+            )
+            .map_err(store_error)?
+            .iter()
+            .map(rows::feed)
+            .collect();
+        rows.reverse();
+        Ok(rows)
+    }
+
     /// Every row of every table except `events` (the core doesn't hold them), the newest 300
     /// activity rows, the newest 100 feed rows and the `message_id`s of each account's newest
     /// thread, the open terminals, and the next id of each integer-id table

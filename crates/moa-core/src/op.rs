@@ -257,6 +257,29 @@ pub enum Op {
     /// Cancels moa's turn under way.
     #[serde(rename = "console.cancel")]
     ConsoleCancel(NoParams),
+    /// The `n` feed rows before id `before`, oldest first, from every thread: what the
+    /// console pages back through. Answered by the daemon from the store, not by the core.
+    #[serde(rename = "console.page")]
+    ConsolePage {
+        before: i64,
+        #[serde(default = "page_n")]
+        n: u16,
+    },
+    /// The next prompt starts a new thread, even the same day.
+    #[serde(rename = "console.new")]
+    ConsoleNew(NoParams),
+    /// A `/command` line typed in the console, run as the op it names with no turn of moa's
+    /// (`moa_core::console`). The reply is that op's reply.
+    #[serde(rename = "console.command")]
+    ConsoleCommand { line: String },
+    /// Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from
+    /// `moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.
+    #[serde(rename = "bar.set")]
+    BarSet {
+        commands: Vec<String>,
+        #[serde(default)]
+        user: bool,
+    },
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -264,6 +287,14 @@ pub enum Op {
     #[cfg_attr(feature = "schema", schemars(skip))]
     DebugPanic,
 }
+
+/// How many rows `console.page` returns when it isn't told.
+fn page_n() -> u16 {
+    100
+}
+
+/// The most rows `console.page` returns.
+pub const PAGE_MAX: u16 = 200;
 
 /// How a suggestion is answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -414,6 +445,10 @@ impl Op {
         "goto",
         "console.prompt",
         "console.cancel",
+        "console.page",
+        "console.new",
+        "console.command",
+        "bar.set",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -445,7 +480,13 @@ impl Op {
             | Op::SuggestionAnswer { .. }
             | Op::LayoutSet { .. }
             | Op::LayoutApply { .. }
-            | Op::ConsolePrompt { .. } => true,
+            | Op::ConsolePrompt { .. }
+            | Op::ConsoleNew(_)
+            | Op::BarSet { .. }
+            // It may run a write (`/archive`, `/open`), so it is counted as one. A read-only
+            // command still answers while writes are refused: the core refuses only at a
+            // commit, and a read never commits.
+            | Op::ConsoleCommand { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -465,6 +506,7 @@ impl Op {
             | Op::LayoutShow { .. }
             | Op::Goto { .. }
             | Op::ConsoleCancel(_)
+            | Op::ConsolePage { .. }
             | Op::DebugPanic => false,
         }
     }
@@ -517,6 +559,10 @@ impl Op {
             Op::Goto { .. } => "goto",
             Op::ConsolePrompt { .. } => "console.prompt",
             Op::ConsoleCancel(_) => "console.cancel",
+            Op::ConsolePage { .. } => "console.page",
+            Op::ConsoleNew(_) => "console.new",
+            Op::BarSet { .. } => "bar.set",
+            Op::ConsoleCommand { .. } => "console.command",
             Op::DebugPanic => "debug.panic",
         }
     }

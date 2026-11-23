@@ -20,9 +20,9 @@ use moa_core::model::{
     ConversationReason, Inspected, Lifecycle, Location, PaneAgent, PaneBinding, Session, SessionId,
 };
 use moa_core::op::{Op, OpError, ReqId};
-use moa_core::publish::CoreEvent;
+use moa_core::publish::{CoreEvent, Topic};
 use moa_core::sleep::why_not;
-use moa_core::state::{Deps, LoadNote, Snapshot, State};
+use moa_core::state::{Deps, EventWhat, LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
@@ -715,6 +715,25 @@ fn an_idle_session_sleeps_at_its_deadline() {
     assert_eq!(
         timers(&fx, TimerKey::Sleep),
         [&Effect::CancelTimer(TimerKey::Sleep)]
+    );
+}
+
+#[test]
+fn sleeping_at_the_deadline_is_an_asleep_event() {
+    let mut r = World::new().up();
+    let due = r.due;
+    let fx = r.input(due, Input::Timer(TimerKey::Sleep));
+    let events: Vec<_> = r.st.session_events().map(|e| (e.session, e.what)).collect();
+    assert_eq!(
+        events.last(),
+        Some(&(s_id(), EventWhat::Asleep)),
+        "{events:?}"
+    );
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Publish(Publish::Model(m))
+            if m.topics[&Topic::Feed].values().any(|row| row["what"] == "asleep"))),
+        "{fx:?}"
     );
 }
 

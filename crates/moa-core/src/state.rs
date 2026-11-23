@@ -160,6 +160,10 @@ fn conv_key(c: &Conversation) -> ConvKey {
 /// The moactl grammar for one suggestion action: its op, or why it doesn't parse.
 pub type ParseAction = fn(&SuggestionAction, &Path) -> Result<Op, String>;
 
+/// The moactl grammar for a console command's verb, given the folder a relative path is
+/// relative to (if any) and home: its op, or why it doesn't parse.
+pub type ParseCommand = fn(&SuggestionAction, Option<&Path>, &Path) -> Result<Op, String>;
+
 /// What the core needs from outside to run suggestions, compare paths and open sessions.
 /// The daemon supplies the real ones; the default has no grammar (so no suggestion can carry
 /// actions), treats every path as already canonical, hands out sequential ids, and finds
@@ -169,6 +173,8 @@ pub struct Deps {
     /// Parses one suggestion action with the moactl grammar (`moa_proto::cli::parse_action`),
     /// given the home directory. `moa-core` doesn't depend on `moa-proto`, so it arrives here.
     pub parse_action: Option<ParseAction>,
+    /// Parses a console command's verb with the same grammar (`moa_proto::cli::parse_command`).
+    pub parse_command: Option<ParseCommand>,
     /// Resolves a path to its one canonical spelling.
     pub canonical: fn(&Path) -> PathBuf,
     pub home: PathBuf,
@@ -245,6 +251,7 @@ impl Default for Deps {
     fn default() -> Self {
         Deps {
             parse_action: None,
+            parse_command: None,
             canonical: identity,
             home: PathBuf::new(),
             new_uuid: sequential_uuid,
@@ -263,6 +270,31 @@ impl Default for Deps {
             constitution_file: PathBuf::from("/tmp/moa-test-config/constitution.md"),
         }
     }
+}
+
+/// How many session events the state keeps (B3), the newest.
+pub const EVENTS_KEPT: usize = 200;
+
+/// What a session did, as the console tells it (B3): one per committed change of a session
+/// that moves it into one of these (`hooks::event_of`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventWhat {
+    Started,
+    Ended,
+    NeedsYou,
+    Finished,
+    Asleep,
+}
+
+/// A session event: kept in memory and published on the `feed` topic, never saved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SessionEvent {
+    /// Counts from 1 while this daemon runs.
+    pub seq: u64,
+    pub at: UtcMs,
+    pub session: SessionId,
+    pub what: EventWhat,
 }
 
 /// What `status` says about the brain, the sessions and the caller.
@@ -390,6 +422,11 @@ pub struct State {
     pub(crate) sheets: BTreeMap<PaneId, i64>,
     /// The last open's number: two opens in one millisecond still differ.
     pub(crate) last_sheet: i64,
+    /// The newest [`EVENTS_KEPT`] session events, oldest first. Kept in memory: a daemon
+    /// restart forgets them, a reload keeps them.
+    pub(crate) session_events: VecDeque<SessionEvent>,
+    /// The last session event's `seq`.
+    last_event: u64,
 }
 
 impl State {
@@ -442,6 +479,8 @@ impl State {
             last_prompt: 0,
             sheets: BTreeMap::new(),
             last_sheet: 0,
+            session_events: VecDeque::new(),
+            last_event: 0,
         }
     }
 
@@ -633,6 +672,38 @@ impl State {
     /// The newest feed rows, oldest first.
     pub fn feed_tail(&self) -> impl Iterator<Item = &FeedEntry> {
         self.feed_tail.values()
+    }
+
+    /// The session events kept, oldest first.
+    pub fn session_events(&self) -> impl Iterator<Item = &SessionEvent> {
+        self.session_events.iter()
+    }
+
+    /// Records that session `session` did `what` at `at`, dropping the oldest event past
+    /// [`EVENTS_KEPT`].
+    pub(crate) fn push_session_event(&mut self, at: UtcMs, session: SessionId, what: EventWhat) {
+        self.last_event += 1;
+        self.session_events.push_back(SessionEvent {
+            seq: self.last_event,
+            at,
+            session,
+            what,
+        });
+        if self.session_events.len() > EVENTS_KEPT {
+            self.session_events.pop_front();
+        }
+    }
+
+    /// The last session event's `seq` so far: [`State::drop_events_after`] takes it.
+    pub fn event_mark(&self) -> u64 {
+        self.last_event
+    }
+
+    /// Forgets the session events pushed after `mark` ([`State::event_mark`]): the daemon's
+    /// recovery, before it reloads, for the changes its failed commit didn't save. Their
+    /// `seq`s aren't handed out again, so no published key is reused.
+    pub fn drop_events_after(&mut self, mark: u64) {
+        self.session_events.retain(|e| e.seq <= mark);
     }
 
     /// The `message_id`s of the rows in `thread`, when it is one of the threads kept (each

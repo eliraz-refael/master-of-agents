@@ -126,9 +126,11 @@ impl Exit {
             ExitState::Starting(held) => {
                 held.get_or_insert_with(|| why.to_string());
             }
+            // Sent under the lock (`to_core` never blocks): a caller that finds the exit
+            // already said can then rely on it having reached the core before anything it
+            // sends next, such as a failed turn's `TurnEnded`.
             ExitState::Live => {
                 *state = ExitState::Said;
-                drop(state);
                 (self.to_core)(AcpIn::Exited {
                     generation: self.generation,
                     why: why.to_string(),

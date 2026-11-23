@@ -1,4 +1,5 @@
-//! The verb grammar: one clap grammar shared by the `moactl` CLI and by suggestion actions.
+//! The verb grammar: one clap grammar shared by the `moactl` CLI, suggestion actions and the
+//! console's `/commands`.
 //!
 //! Pure: parsing and mapping to an [`Op`], no IO. A verb the daemon can't run yet maps to
 //! [`VerbError::NotYet`].
@@ -8,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
+use moa_core::console;
 use moa_core::layout::{LEAVES, Leaf};
 use moa_core::model::{ACTION_VERBS, SuggestionAction};
 use moa_core::op::{ADOPT_USAGE, Answer, NoParams, Op, SLEEP_USAGE, TaskAdd, TaskSet};
@@ -105,6 +107,8 @@ pub enum Verb {
         #[arg(long)]
         group: Option<String>,
     },
+    /// Set the console's button bar: `/command` lines; none clears moa's list.
+    Bar { commands: Vec<String> },
     /// Archive sessions.
     Archive {
         #[arg(required = true)]
@@ -268,6 +272,7 @@ pub const VERB_NAMES: &[&str] = &[
     "find",
     "set",
     "archive",
+    "bar",
     "group",
     "note",
     "project",
@@ -296,7 +301,8 @@ pub const VERB_NAMES: &[&str] = &[
 
 /// What turning a verb into an op needs to know about where it was typed.
 pub struct VerbCtx {
-    /// The directory a relative path is relative to; `None` in a suggestion action.
+    /// The directory a relative path is relative to; `None` in a suggestion action, and for a
+    /// console command with no folder to give.
     pub cwd: Option<PathBuf>,
     pub home: PathBuf,
 }
@@ -305,6 +311,8 @@ pub struct VerbCtx {
 pub enum VerbError {
     NotYet(&'static str),
     Usage(String),
+    /// A relative path, with no folder to join it to.
+    NotFull,
 }
 
 impl fmt::Display for VerbError {
@@ -312,6 +320,7 @@ impl fmt::Display for VerbError {
         match self {
             VerbError::NotYet(v) => write!(f, "moactl {v} isn't in this build yet"),
             VerbError::Usage(u) => f.write_str(u),
+            VerbError::NotFull => f.write_str("use a full path"),
         }
     }
 }
@@ -370,7 +379,7 @@ fn resolve_path(raw: &str, ctx: &VerbCtx) -> Result<PathBuf, VerbError> {
     } else {
         match &ctx.cwd {
             Some(cwd) => cwd.join(raw),
-            None => return usage("use a full path in a suggestion"),
+            None => return Err(VerbError::NotFull),
         }
     };
     let mut out = PathBuf::new();
@@ -393,6 +402,7 @@ impl Verb {
             Verb::Ls { .. } => "ls",
             Verb::Find { .. } => "find",
             Verb::Set { .. } => "set",
+            Verb::Bar { .. } => "bar",
             Verb::Archive { .. } => "archive",
             Verb::Group { .. } => "group",
             Verb::Note { .. } => "note",
@@ -432,6 +442,10 @@ impl Verb {
                 group: group.clone(),
             },
             Verb::Archive { ids } => Op::SessionArchive { qs: ids.clone() },
+            Verb::Bar { commands } => Op::BarSet {
+                commands: commands.clone(),
+                user: false,
+            },
             Verb::Group { op, args } => match (op, args.as_slice()) {
                 (GroupOp::Add, [p]) => Op::GroupAdd { path: p.clone() },
                 (GroupOp::Rename, [old, new]) => Op::GroupRename {
@@ -679,12 +693,44 @@ impl Verb {
     }
 }
 
-/// Parse a suggestion's action with the `moactl` grammar. No cwd: paths must be full.
-pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Op, String> {
-    if !ACTION_VERBS.contains(&a.verb.as_str()) {
+/// Where a verb line comes from, and so which verbs it may run and how it is told no. Every
+/// source parses with the same `moactl` grammar.
+struct Source {
+    /// The verbs it may run.
+    verbs: &'static [&'static str],
+    /// What any other verb is told, given that verb.
+    other_verb: fn(&str) -> String,
+    /// What `--help` is told: help is a page, not a reason.
+    no_help: &'static str,
+    /// What a relative path is told when there is no folder to join it to.
+    not_full: &'static str,
+}
+
+/// A suggestion's action.
+const SUGGESTION: Source = Source {
+    verbs: ACTION_VERBS,
+    other_verb: |_| {
         let mut verbs = ACTION_VERBS.to_vec();
         verbs.sort_unstable();
-        return Err(format!("a suggestion can run moactl {}", verbs.join(", ")));
+        format!("a suggestion can run moactl {}", verbs.join(", "))
+    },
+    no_help: "a suggestion action can't ask for help",
+    not_full: "use a full path in a suggestion",
+};
+
+/// A console `/command` that runs a verb.
+const CONSOLE: Source = Source {
+    verbs: console::VERBS,
+    other_verb: console::unknown,
+    no_help: "a console command can't ask for help; /help lists them",
+    not_full: "use a full path",
+};
+
+/// Parses one verb and its words with the `moactl` grammar, as `from` may: the op, or why
+/// not in one line (clap's first line, for a line clap refuses).
+fn parse_verb(a: &SuggestionAction, ctx: &VerbCtx, from: &Source) -> Result<Op, String> {
+    if !from.verbs.contains(&a.verb.as_str()) {
+        return Err((from.other_verb)(&a.verb));
     }
     let argv = ["moactl", a.verb.as_str()]
         .into_iter()
@@ -699,15 +745,43 @@ pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Op, String> {
                     | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
                     | clap::error::ErrorKind::DisplayVersion
             ) {
-                return "a suggestion action can't ask for help".to_string();
+                return from.no_help.to_string();
             }
             let text = e.render().to_string();
-            let first = text.lines().next().unwrap_or("");
-            first.strip_prefix("error: ").unwrap_or(first).to_string()
+            let mut lines = text.lines();
+            let first = lines.next().unwrap_or("");
+            let first = first.strip_prefix("error: ").unwrap_or(first);
+            // A first line that ends in a colon names nothing: what it is about follows, one
+            // per line, until a blank one (the missing `<ID>`).
+            if first.ends_with(':') {
+                let what: Vec<&str> = lines.map(str::trim).take_while(|l| !l.is_empty()).collect();
+                if !what.is_empty() {
+                    return format!("{first} {}", what.join(" "));
+                }
+            }
+            first.to_string()
         })?;
+    parsed.verb.to_op(ctx).map_err(|e| match e {
+        VerbError::NotFull => from.not_full.to_string(),
+        e => e.to_string(),
+    })
+}
+
+/// Parse a suggestion's action with the `moactl` grammar. No cwd: paths must be full.
+pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Op, String> {
     let ctx = VerbCtx {
         cwd: None,
         home: home.to_path_buf(),
     };
-    parsed.verb.to_op(&ctx).map_err(|e| e.to_string())
+    parse_verb(a, &ctx, &SUGGESTION)
+}
+
+/// Parse a console command's verb with the `moactl` grammar; a relative path is relative to
+/// `cwd`, and refused without one.
+pub fn parse_command(a: &SuggestionAction, cwd: Option<&Path>, home: &Path) -> Result<Op, String> {
+    let ctx = VerbCtx {
+        cwd: cwd.map(Path::to_path_buf),
+        home: home.to_path_buf(),
+    };
+    parse_verb(a, &ctx, &CONSOLE)
 }

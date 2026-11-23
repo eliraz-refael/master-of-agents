@@ -9,10 +9,10 @@ use serde_json::{Map, Value};
 use crate::config::{Form, UiConfig};
 use crate::layout::{current_layout, leaves};
 use crate::live::{DisplayState, display_state};
-use crate::model::Terminal;
+use crate::model::{FeedEntry, SessionId, Terminal};
 use crate::ops::launch::title_of;
 use crate::panel::{View, key_of};
-use crate::state::State;
+use crate::state::{EventWhat, SessionEvent, State};
 use crate::terminals::{is_active, open_by_pane};
 
 /// A named set of rows a view can subscribe to.
@@ -200,6 +200,21 @@ pub struct FeedRow {
     pub state: Option<String>,
 }
 
+impl From<&FeedEntry> for FeedRow {
+    fn from(e: &FeedEntry) -> FeedRow {
+        FeedRow {
+            id: e.id,
+            thread: e.thread_id.clone(),
+            at: e.at.0,
+            kind: e.kind.clone(),
+            message_id: e.message_id.clone(),
+            automatic: e.automatic,
+            body: serde_json::from_str(&e.body).unwrap_or(Value::Null),
+            state: e.state.clone(),
+        }
+    }
+}
+
 /// The `feed` topic's row with key `state`: whether moa's agent is running, which thread it is
 /// on, and why it failed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -208,6 +223,48 @@ pub struct MoaRow {
     pub phase: String,
     pub thread: Option<String>,
     pub why: Option<String>,
+}
+
+/// The `meta` keys of the console's button bar start with this: `.moa` holds the list moa set
+/// and `.you` the one you did, each as JSON.
+pub const BAR_KEY_PREFIX: &str = "console.bar.";
+
+/// The bar a brain has until moa or you set one.
+pub const DEFAULT_BAR: &[&str] = &["/brief", "/attention", "/ls", "/help"];
+
+/// The `feed` topic's row with key `bar`: the console's buttons, as `/command` lines. Yours
+/// wins over moa's, which wins over the default.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BarRow {
+    pub commands: Vec<String>,
+    /// `you`, `moa` or `default`.
+    pub by: String,
+}
+
+/// A `feed` row (key `ev:<seq>`): a session event (B3), from memory. The console folds them,
+/// one line per session.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct EventRow {
+    pub seq: u64,
+    pub at: i64,
+    pub session: SessionId,
+    pub what: EventWhat,
+}
+
+impl From<&SessionEvent> for EventRow {
+    fn from(e: &SessionEvent) -> EventRow {
+        EventRow {
+            seq: e.seq,
+            at: e.at.0,
+            session: e.session,
+            what: e.what,
+        }
+    }
+}
+
+/// The key of session event `seq`'s `feed` row.
+fn event_key(seq: u64) -> String {
+    format!("ev:{seq}")
 }
 
 /// A row as JSON with its `key` field added.
@@ -391,26 +448,41 @@ impl State {
             .collect()
     }
 
+    /// The console's bar: yours, else moa's, else the default. A stored list that doesn't parse,
+    /// or is empty, counts as none.
+    pub fn bar(&self) -> BarRow {
+        let stored = |by: &str| {
+            let list: Vec<String> =
+                serde_json::from_str(self.meta(&format!("{BAR_KEY_PREFIX}{by}"))?).ok()?;
+            (!list.is_empty()).then(|| BarRow {
+                commands: list,
+                by: by.into(),
+            })
+        };
+        stored("you")
+            .or_else(|| stored("moa"))
+            .unwrap_or_else(|| BarRow {
+                commands: DEFAULT_BAR.iter().map(|c| c.to_string()).collect(),
+                by: "default".into(),
+            })
+    }
+
     fn feed_rows(&self) -> BTreeMap<String, Value> {
         let mut rows: BTreeMap<String, Value> = self
             .feed_tail()
             .map(|e| {
                 let key = format!("#{}", e.id);
-                let row = FeedRow {
-                    id: e.id,
-                    thread: e.thread_id.clone(),
-                    at: e.at.0,
-                    kind: e.kind.clone(),
-                    message_id: e.message_id.clone(),
-                    automatic: e.automatic,
-                    body: serde_json::from_str(&e.body).unwrap_or(Value::Null),
-                    state: e.state.clone(),
-                };
-                let v = keyed(&key, &row);
+                let v = keyed(&key, &FeedRow::from(e));
                 (key, v)
             })
             .collect();
+        rows.extend(self.session_events.iter().map(|e| {
+            let key = event_key(e.seq);
+            let v = keyed(&key, &EventRow::from(e));
+            (key, v)
+        }));
         rows.insert("state".into(), keyed("state", &self.central.row()));
+        rows.insert("bar".into(), keyed("bar", &self.bar()));
         rows
     }
 
@@ -485,6 +557,23 @@ impl State {
             .get(&Topic::Feed)
             .and_then(|t| t.get("state"));
         if last == Some(&row) {
+            return None;
+        }
+        let rows = self.feed_rows();
+        Some(self.put(vec![(Topic::Feed, rows)]))
+    }
+
+    /// Publishes the `feed` topic when a session event was kept since it was last published.
+    /// Events are pushed only by a commit, in order, and every build of the topic carries all
+    /// of them: the newest one's row is missing exactly when the topic is behind.
+    pub(crate) fn publish_session_events(&mut self) -> Option<Arc<Model>> {
+        let newest = event_key(self.session_events.back()?.seq);
+        if self
+            .model
+            .topics
+            .get(&Topic::Feed)
+            .is_some_and(|t| t.contains_key(&newest))
+        {
             return None;
         }
         let rows = self.feed_rows();

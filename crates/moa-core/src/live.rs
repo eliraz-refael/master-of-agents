@@ -254,7 +254,7 @@ pub fn spike_state(s: &Session) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::{AgentKind, SessionId};
     use proptest::prelude::*;
@@ -278,7 +278,8 @@ mod tests {
         );
     }
 
-    fn session() -> Session {
+    /// A live, idle session with nothing else set (also `hooks`' tests).
+    pub(crate) fn session() -> Session {
         Session {
             id: SessionId(uuid::Uuid::from_u128(1)),
             agent_kind: AgentKind::Claude,

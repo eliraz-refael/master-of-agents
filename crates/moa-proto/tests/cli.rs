@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use moa_core::model::SuggestionAction;
 use moa_core::op::{Answer, NoParams, Op, TaskAdd, TaskSet};
-use moa_proto::cli::{Moactl, VERB_NAMES, VerbCtx, parse_action};
+use moa_proto::cli::{Moactl, VERB_NAMES, VerbCtx, parse_action, parse_command};
 
 fn ctx() -> VerbCtx {
     VerbCtx {
@@ -197,6 +197,7 @@ const EACH_VERB: &[&[&str]] = &[
     &["find", "q"],
     &["set", "x"],
     &["archive", "x"],
+    &["bar"],
     &["group", "add", "A"],
     &["note", "x"],
     &["project", "x"],
@@ -457,6 +458,56 @@ fn actions_parse_with_the_same_grammar() {
     assert_eq!(
         act("project", &["X", "--add", "rel"]).unwrap_err(),
         "use a full path in a suggestion"
+    );
+}
+
+fn cmd(cwd: Option<&str>, verb: &str, args: &[&str]) -> Result<Op, String> {
+    parse_command(
+        &SuggestionAction {
+            verb: verb.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        },
+        cwd.map(Path::new),
+        Path::new("/h"),
+    )
+}
+
+/// A console command parses with the same grammar, as the console may: its own verbs, its
+/// own words, and a relative path joined to the folder it is given.
+#[test]
+fn console_commands_parse_with_the_same_grammar() {
+    assert_eq!(
+        cmd(None, "focus", &["Rust scaffold"]),
+        Ok(Op::SessionFocus {
+            q: "Rust scaffold".into()
+        })
+    );
+    assert_eq!(
+        cmd(Some("/h/private"), "term", &["lantern"]),
+        Ok(Op::TermOpen {
+            path: PathBuf::from("/h/private/lantern"),
+            title: None,
+        })
+    );
+    assert_eq!(
+        cmd(None, "term", &["lantern"]).unwrap_err(),
+        "use a full path"
+    );
+    assert_eq!(
+        cmd(None, "task", &["ls"]).unwrap_err(),
+        "there's no /task command; /help lists them"
+    );
+    assert_eq!(
+        cmd(None, "ls", &["--help"]).unwrap_err(),
+        "a console command can't ask for help; /help lists them"
+    );
+    assert_eq!(
+        cmd(None, "resume", &[]).unwrap_err(),
+        "the following required arguments were not provided: <ID>"
+    );
+    assert_eq!(
+        act("close", &[]).unwrap_err(),
+        "the following required arguments were not provided: <ID>"
     );
 }
 

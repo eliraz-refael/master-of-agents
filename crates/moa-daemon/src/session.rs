@@ -13,7 +13,8 @@ use futures_util::{SinkExt, StreamExt};
 use moa_agents::claude;
 use moa_core::config::BrainName;
 use moa_core::hook::HookLine;
-use moa_core::op::{ConnId, OpError, ReqId};
+use moa_core::op::{ConnId, Done, Op, OpError, PAGE_MAX, ReqId};
+use moa_core::publish::FeedRow;
 use moa_core::state::CallerInfo;
 use moa_proto::{
     Call, CoreEvent, Hello, HelloOk, Id, Incoming, Model, Patch, RpcError, StatusOk, Subscribe,
@@ -318,6 +319,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
                 if flow == Flow::Go { Flow::Close } else { flow }
             }
             Call::Subscribe(s) => self.subscribe(&id, s).await,
+            Call::Op(Op::ConsolePage { before, n }) => self.page(&id, before, n).await,
             Call::Op(op) => {
                 self.next_req += 1;
                 let req = ReqId(self.next_req);
@@ -370,6 +372,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             panel_starts: data.panel_starts,
         };
         self.say(encode_result(id, &ok)).await
+    }
+
+    /// `console.page`: older feed rows, read from the store here rather than through the core.
+    async fn page(&mut self, id: &Id, before: i64, n: u16) -> Flow {
+        if !(1..=PAGE_MAX).contains(&n) {
+            return self
+                .refuse(id, code::INVALID_PARAMS, &format!("n is 1 to {PAGE_MAX}"))
+                .await;
+        }
+        match self.core.feed_page(before, usize::from(n)).await {
+            Ok(rows) => {
+                let done = Done {
+                    text: format!("{} older rows", rows.len()),
+                    data: json!({"rows": rows.iter().map(FeedRow::from).collect::<Vec<_>>()}),
+                };
+                self.say(encode_result(id, &done)).await
+            }
+            Err(why) => self.refuse(id, code::FAILED, &why).await,
+        }
     }
 
     /// Always a full snapshot (`since` is not used yet), then patches and events.

@@ -257,6 +257,7 @@ async fn bring_up(
         let session_plugin = write_session_plugin(paths, &exe)?;
         let deps = Deps {
             parse_action: Some(moa_proto::cli::parse_action),
+            parse_command: Some(moa_proto::cli::parse_command),
             canonical: moa_platform::canonical,
             home: paths.home().to_path_buf(),
             new_uuid: moa_store::new_uuid,

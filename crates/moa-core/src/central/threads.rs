@@ -24,9 +24,13 @@ pub enum How {
     New,
 }
 
-/// The open thread when it is `account`'s and `today`'s; else `today`'s newest thread of
-/// `account`, reopened as `caps` allow; else a new one.
+/// A new thread when `console.new` asked for one; else the open thread when it is
+/// `account`'s and `today`'s; else `today`'s newest thread of `account`, reopened as `caps`
+/// allow; else a new one.
 pub fn choose(state: &State, account: &AccountName, today: Date, caps: Caps) -> How {
+    if state.central().new_thread {
+        return How::New;
+    }
     let ours = |account_of: &str, day: Date| account_of == account.as_str() && day == today;
     if let Some(open) = &state.central().thread
         && ours(&open.row.account, open.row.day)
