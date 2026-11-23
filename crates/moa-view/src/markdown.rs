@@ -345,7 +345,8 @@ impl Render<'_> {
     fn block(&mut self) {
         self.flush(&[]);
         if std::mem::take(&mut self.gap) && !self.lines.is_empty() {
-            let mut spans = self.prefix(false);
+            // Cut as `line` cuts it: a deep prefix keeps only its inner columns.
+            let mut spans = text::tail_spans(self.prefix(false), self.indent_cap());
             text::trim_end_spans(&mut spans);
             self.lines.push(Line::new(spans));
         }
@@ -412,7 +413,7 @@ impl Render<'_> {
     }
 
     /// The open block's text, wrapped under the prefix and `lead` (on its first line; spaces
-    /// on the rest). A button wider than the room is cut, keeping its brackets.
+    /// on the rest). A button wider than the room is cut, keeping its brackets ([`text::wrap_spans`]).
     fn flush(&mut self, lead: &[Span]) {
         let mut runs = std::mem::take(&mut self.inline);
         while runs.last().is_some_and(Vec::is_empty) {
@@ -427,21 +428,10 @@ impl Render<'_> {
         let indent = [Span::new(" ".repeat(lead_width), Tone::Text)];
         let mut front = lead;
         for run in runs {
-            let run: Vec<Span> = run.into_iter().map(|s| self.fit_button(s, room)).collect();
             for (i, (lead, spans)) in text::hang(front, &run, room).into_iter().enumerate() {
                 self.line(lead, spans, i > 0);
             }
             front = &indent;
-        }
-    }
-
-    /// A button's span as it fits `room` cells: whole, or its label cut with `…`.
-    fn fit_button(&self, span: Span, room: usize) -> Span {
-        match span.button.and_then(|i| self.buttons.get(usize::from(i))) {
-            Some(button) if width(&span.text) > room && room > 2 => {
-                span.with_text(format!("[{}]", text::ellipsize(&button.label, room - 2)))
-            }
-            _ => span,
         }
     }
 

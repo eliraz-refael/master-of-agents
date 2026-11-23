@@ -327,8 +327,18 @@ impl textwrap::core::Fragment for Word {
     }
 }
 
+/// A button's `[label]` as it fits `w` cells: whole, or its label [`ellipsize`]d inside its
+/// brackets (the whole text when `w` leaves no room for them).
+fn fit_button(text: &str, w: usize) -> String {
+    let inner = text.strip_prefix('[').and_then(|t| t.strip_suffix(']'));
+    match inner {
+        Some(label) if width(text) > w && w > 2 => format!("[{}]", ellipsize(label, w - 2)),
+        _ => ellipsize(text, w),
+    }
+}
+
 /// Styled text's words: split at spaces, each word keeping its spans' styles. A button's span
-/// is part of a word, never split, and is [`ellipsize`]d when it is wider than `w`.
+/// is part of a word, never split, and is cut by [`fit_button`] when it is wider than `w`.
 fn words(spans: &[Span], w: usize) -> Vec<Word> {
     let mut words = Vec::new();
     let mut word = Word::default();
@@ -337,7 +347,7 @@ fn words(spans: &[Span], w: usize) -> Vec<Word> {
             if word.space > 0 {
                 words.push(std::mem::take(&mut word));
             }
-            word.push(span.with_text(ellipsize(&span.text, w)));
+            word.push(span.with_text(fit_button(&span.text, w)));
             continue;
         }
         for (i, part) in span.text.split(' ').enumerate() {

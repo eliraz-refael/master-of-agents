@@ -421,10 +421,10 @@ impl Panel {
             let m = picks(&mut self.picks, data, &self.ui.query);
             picker::lines(m, &self.ui.query, ctx, width)
         } else if self.view == View::Console {
-            let mut built = console::build(data, ctx, &self.console, width);
+            let built = console::build(data, ctx, &self.console, width);
             self.buttons = built.buttons;
             self.bar = built.bar;
-            std::mem::take(&mut built.lines)
+            built.lines
         } else {
             views::build(self.view, data, ctx, &self.ui, width)
         };

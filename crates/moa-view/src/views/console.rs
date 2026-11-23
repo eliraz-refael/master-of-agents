@@ -194,7 +194,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
     let buttons = draw.buttons;
     if let Some(focus) = &ui.focus {
         for span in lines.iter_mut().chain(&mut bar).flat_map(|l| &mut l.spans) {
-            span.reversed |= span.button.is_some() && span.button == Some(*focus);
+            span.reversed |= span.button == Some(*focus);
         }
     }
     ConsoleView {
@@ -370,7 +370,8 @@ impl<'a> Draw<'a> {
         self.enter(first);
         let hidden = run.len().saturating_sub(TOOLS_SHOWN);
         if hidden > 0 {
-            let more = format!("⚙ {hidden} more tool calls");
+            let calls = if hidden == 1 { "call" } else { "calls" };
+            let more = format!("⚙ {hidden} more tool {calls}");
             let line = Line::plain(cut(&more, self.room()), Tone::Dim);
             self.push_row(vec![line]);
         }

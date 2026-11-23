@@ -339,3 +339,13 @@ fn odd_answers_fit() {
         assert!(!lines.is_empty());
     }
 }
+
+/// The blank line between two blocks in deep quotes is cut like the rest: never wider than
+/// the width.
+#[test]
+fn a_deep_gap_fits() {
+    let md = "> > > > > > a\n> > > > > >\n> > > > > > b";
+    for line in lines_at(md, 10, &no_buttons) {
+        assert!(width(&line.text()) <= 10, "{:?}", line.text());
+    }
+}
