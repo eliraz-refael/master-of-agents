@@ -34,7 +34,7 @@ pub(crate) enum AcpMsg {
     Cmd(AcpCmd),
     /// Stop the agent and its process group, then answer. The link ends.
     Stop(oneshot::Sender<()>),
-    /// Tests only: the actor panics.
+    /// Tests only: the actor panics, at once even while the agent starts.
     #[cfg(test)]
     Crash,
 }
@@ -134,7 +134,7 @@ impl Actor {
     /// Starts run `generation`'s agent once the last one has stopped, so the two never share
     /// the agent folder. A start that fails, or takes longer than [`START_WAIT`], is told to
     /// the core as that run's exit. A stop that comes meanwhile gives the start up, which ends
-    /// the agent; other messages wait for the start.
+    /// the agent; other messages wait for the start (but a test's crash).
     async fn start(
         &mut self,
         generation: u64,
@@ -153,6 +153,8 @@ impl Actor {
                 msg = inbox.recv() => match msg {
                     Some(AcpMsg::Stop(done)) => return Err(Some(done)),
                     None => return Err(None),
+                    #[cfg(test)]
+                    Some(AcpMsg::Crash) => panic!("a test crashed the link to moa's agent"),
                     Some(msg) => queued.push_back(msg),
                 },
             }

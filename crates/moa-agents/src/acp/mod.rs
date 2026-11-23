@@ -46,6 +46,9 @@ const STOP_WAIT: Duration = Duration::from_secs(2);
 /// How long `stop` then waits for `SIGKILL` to take.
 const KILL_WAIT: Duration = Duration::from_secs(1);
 
+/// Why the agent is gone when its connection ended first.
+const CLOSED: &str = "moa's agent closed its connection";
+
 /// Where the host's messages go: the core's input, which never blocks.
 pub type ToCore = Arc<dyn Fn(AcpIn) + Send + Sync>;
 
@@ -59,6 +62,7 @@ pub struct Adapter {
     cx: ConnectionTo<Agent>,
     waiting: Waiting,
     process: Process,
+    exit: Arc<Exit>,
 }
 
 /// The agent's process and the task that reads it. Dropped without `stop`, it still sends the
@@ -265,7 +269,7 @@ impl Adapter {
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
                     let _ = cx_tx.send(cx.clone());
                     cx.incoming_closed().await;
-                    closed.say("moa's agent closed its connection");
+                    closed.say(CLOSED);
                     Ok(())
                 })
                 .await;
@@ -298,6 +302,7 @@ impl Adapter {
             cx,
             waiting,
             process,
+            exit,
         })
     }
 
@@ -400,7 +405,9 @@ impl Adapter {
     }
 
     /// Sends `req` so that its answer reaches `done` after every message the agent sent
-    /// before it. A request that can't be sent reaches `done` as an error at once.
+    /// before it. A request that can't be sent reaches `done` as an error at once. One that
+    /// fails because the connection is gone says the run's `Exited` first, so the core hears
+    /// that the agent went away, in plain words, before the request's own failure.
     fn request<Req>(
         &self,
         req: Req,
@@ -411,19 +418,29 @@ impl Adapter {
     {
         let slot = Arc::new(Mutex::new(Some(done)));
         let answered = Arc::clone(&slot);
+        let exit = Arc::clone(&self.exit);
+        let failed = move |e: &agent_client_protocol::Error| {
+            if agent_client_protocol::is_incoming_transport_closed(e)
+                || agent_client_protocol::is_connection_terminated(e)
+            {
+                exit.say(CLOSED);
+            }
+            convert::error_text(e)
+        };
+        let failed_to_send = failed.clone();
         let sent = self
             .cx
             .prepare_request(req)
             .on_receiving_result(move |result| async move {
                 if let Some(done) = lock(&answered).take() {
-                    done(result.map_err(|e| convert::error_text(&e)));
+                    done(result.map_err(|e| failed(&e)));
                 }
                 Ok(())
             });
         if let Err(e) = sent
             && let Some(done) = lock(&slot).take()
         {
-            done(Err(convert::error_text(&e)));
+            done(Err(failed_to_send(&e)));
         }
     }
 }

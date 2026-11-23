@@ -304,12 +304,17 @@ async fn a_crash_mid_turn_says_so_and_the_next_prompt_resumes() {
     let up = rig.start().await;
     let mut c = up.client();
 
-    // Whichever the host notices first: the agent's exit, or its connection's end failing
-    // the turn.
+    // However the host notices (the exit, or the connection's end failing the turn), the
+    // user hears that moa's agent stopped, in plain words.
     let lost = refusal(&prompt(&mut c, "first"));
-    let stopped = lost.starts_with("moa's agent stopped: ")
-        && lost.ends_with("; your next prompt starts it again");
-    assert!(stopped || lost.starts_with("moa's turn failed: "), "{lost}");
+    let why = lost
+        .strip_prefix("moa's agent stopped: ")
+        .and_then(|rest| rest.strip_suffix("; your next prompt starts it again"))
+        .unwrap_or_else(|| panic!("{lost}"));
+    assert!(
+        ["moa's agent exited", "moa's agent closed its connection"].contains(&why),
+        "{lost}"
+    );
     let feed = rig.feed();
     let errors: Vec<_> = feed.iter().filter(|(k, _)| k == "error").collect();
     assert_eq!(errors.len(), 1, "{feed:?}");

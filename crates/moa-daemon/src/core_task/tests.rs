@@ -66,6 +66,7 @@ async fn stepped_at_start(
             brain.store(),
             vec![],
             Some(link),
+            None,
             panics,
         ),
     )
@@ -117,19 +118,69 @@ async fn a_start_drained_that_panics_is_sent_again() {
     );
 }
 
+/// A core whose moa runs on `acct-a`, with `program` as its agent (`fake-claude` as its
+/// Claude) and `agent_dir` as its folder, under a fresh `/tmp` home; `agent`, when given,
+/// stands in for the link to moa's agent.
+async fn moa_core(
+    brain: &TypicalBrain,
+    home: &Path,
+    program: &Path,
+    agent: Option<mpsc::UnboundedSender<AcpMsg>>,
+) -> CoreHandle {
+    let toml = format!(
+        "[brains.default]\nmoa_account = \"acct-a\"\n\
+         [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
+         launcher = \"{}\"\nacp = \"{}\"\n",
+        fake_claude().display(),
+        program.display()
+    );
+    let time = FakeTime::new(brain.now().wall);
+    let mut opts = options(brain, &time, None);
+    opts.config = Config::from_file_text(Some(&toml), home, Path::to_path_buf).unwrap();
+    opts.deps = Deps {
+        home: home.to_path_buf(),
+        agent_dir: home.join("agent"),
+        panel: PanelLaunch {
+            exe: stub_acp(),
+            env: Vec::new(),
+        },
+        ..Deps::default()
+    };
+    let (link, _commands) = mpsc::unbounded_channel();
+    timeout(
+        PATIENCE,
+        CoreHandle::start_inner(opts, brain.store(), vec![], Some(link), agent, 0),
+    )
+    .await
+    .expect("the core starts in time")
+    .expect("the core starts")
+}
+
+/// A fresh home under `/tmp`, with its agent folder made.
+fn moa_home() -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
+    moa_platform::ensure_private_dir(&dir.path().join("agent")).unwrap();
+    dir
+}
+
+fn prompt_op(text: &str, wait: bool) -> Op {
+    Op::ConsolePrompt {
+        text: text.into(),
+        wait,
+    }
+}
+
 /// The link to moa's agent panics while moa is answering: whoever waits hears that moa's
 /// agent stopped (the live generation's `Exited`), the core says the link was restarted, and
 /// the next prompt starts the agent again on the restarted link.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panicking_acp_actor_is_restarted_and_says_so() {
     let brain = TypicalBrain::new();
-    let dir = tempfile::Builder::new()
-        .prefix("moa")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let home = dir.path().to_path_buf();
-    let agent = home.join("agent");
-    moa_platform::ensure_private_dir(&agent).unwrap();
+    let dir = moa_home();
+    let agent = dir.path().join("agent");
     let say = |text: &str, id: &str| StubStep::Say {
         text: text.into(),
         id: Some(id.into()),
@@ -141,41 +192,16 @@ async fn a_panicking_acp_actor_is_restarted_and_says_so() {
         StubStep::End { stop: None },
     ];
     write_stub_script(&agent, &steps);
-    let toml = format!(
-        "[brains.default]\nmoa_account = \"acct-a\"\n\
-         [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
-         launcher = \"{}\"\nacp = \"{}\"\n",
-        fake_claude().display(),
-        stub_acp().display()
-    );
-    let time = FakeTime::new(brain.now().wall);
-    let mut opts = options(&brain, &time, None);
-    opts.config = Config::from_file_text(Some(&toml), &home, Path::to_path_buf).unwrap();
-    opts.deps = Deps {
-        home: home.clone(),
-        agent_dir: agent.clone(),
-        panel: PanelLaunch {
-            exe: stub_acp(),
-            env: Vec::new(),
-        },
-        ..Deps::default()
-    };
-    let (link, _commands) = mpsc::unbounded_channel();
-    let core = timeout(
-        PATIENCE,
-        CoreHandle::start_inner(opts, brain.store(), vec![], Some(link), 0),
-    )
-    .await
-    .expect("the core starts in time")
-    .expect("the core starts");
+    let core = moa_core(&brain, dir.path(), &stub_acp(), None).await;
     let mut events = core.events();
     let (conn, mut replies) = core.open_conn();
     let prompt = |req, text: &str| {
-        let op = Op::ConsolePrompt {
-            text: text.into(),
-            wait: true,
-        };
-        core.send(conn, ReqId(req), CallerInfo::default(), op);
+        core.send(
+            conn,
+            ReqId(req),
+            CallerInfo::default(),
+            prompt_op(text, true),
+        );
     };
 
     prompt(1, "wait for it");
@@ -268,4 +294,148 @@ fn the_end_of_moas_turn_starts_a_drain() {
     let second = drain::take_drain(&mut carry, &mut inbox);
     assert_eq!(second.len(), 2);
     assert!(is_end(&second[0]));
+}
+
+/// The link panics while moa's agent starts, before the agent has said anything: the link's
+/// own `Exited` is the only word of it, and whoever waits hears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_link_that_fails_while_moas_agent_starts_says_so() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let brain = TypicalBrain::new();
+    let dir = moa_home();
+    // An agent that never answers `initialize`: the stub in its child mode, which only sleeps.
+    let silent = dir.path().join("silent-agent");
+    let script = format!("#!/bin/sh\nexec '{}' --child\n", stub_acp().display());
+    std::fs::write(&silent, script).unwrap();
+    std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let core = moa_core(&brain, dir.path(), &silent, None).await;
+    let (conn, mut replies) = core.open_conn();
+    let launched = moa_platform::spawn::launches();
+
+    core.send(
+        conn,
+        ReqId(1),
+        CallerInfo::default(),
+        prompt_op("hello", true),
+    );
+    wait_for(PATIENCE, || {
+        (moa_platform::spawn::launches() > launched).then_some(())
+    })
+    .expect("the agent is starting");
+    core.acp.send(AcpMsg::Crash).expect("the link takes it");
+
+    let (req, told) = timeout(PATIENCE, replies.recv())
+        .await
+        .expect("the waiter is told in time")
+        .expect("a reply");
+    assert_eq!(req, ReqId(1));
+    assert_eq!(
+        told.expect_err("the start failed").0,
+        "moa's agent couldn't start: the link to moa's agent failed"
+    );
+    timeout(PATIENCE, core.stop())
+        .await
+        .expect("the core stops");
+}
+
+/// A cancel stepped in the same drain as the prompt it cancels, which waits for the drain's
+/// commit, reaches moa's agent after that prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_in_its_prompts_drain_follows_the_prompt() {
+    use moa_core::central::wire::{AcpCmd, AcpIn, Caps, Opened, StopReason, Update};
+    use moa_core::op::NoParams;
+    use moa_store::actor::Fault;
+
+    let brain = TypicalBrain::new();
+    let dir = moa_home();
+    let (agent, mut sent) = mpsc::unbounded_channel();
+    let core = moa_core(&brain, dir.path(), &stub_acp(), Some(agent)).await;
+    let (conn, mut replies) = core.open_conn();
+    let heard = |input| {
+        let _ = core.inbox.send(Item::Input(Input::Acp(input)));
+    };
+    let mut next = async || match timeout(PATIENCE, sent.recv()).await {
+        Ok(Some(AcpMsg::Cmd(cmd))) => cmd,
+        _ => panic!("a command for moa's agent in time"),
+    };
+
+    // The first prompt starts moa's agent and opens its thread; moa is then answering.
+    core.send(
+        conn,
+        ReqId(1),
+        CallerInfo::default(),
+        prompt_op("one", false),
+    );
+    assert!(matches!(next().await, AcpCmd::Start { generation: 1, .. }));
+    let caps = Caps {
+        load: true,
+        resume: true,
+        system_prompt: true,
+    };
+    heard(AcpIn::Started {
+        generation: 1,
+        caps,
+    });
+    assert!(matches!(next().await, AcpCmd::Open { .. }));
+    heard(AcpIn::Opened {
+        generation: 1,
+        result: Ok(("t1".into(), Opened::New)),
+    });
+    assert!(matches!(next().await, AcpCmd::Prompt { prompt: 1, .. }));
+
+    // A piece of the answer whose commit waits: what comes meanwhile makes one drain, the
+    // turn's end first (it starts a drain of its own), then the next prompt and its cancel.
+    let (resume, paused) = std::sync::mpsc::channel();
+    core.store_fault(Fault::PauseNextCommit(paused));
+    heard(AcpIn::Update {
+        generation: 1,
+        thread: "t1".into(),
+        update: Update::Message {
+            id: Some("m1".into()),
+            text: "hi".into(),
+        },
+    });
+    heard(AcpIn::TurnEnded {
+        generation: 1,
+        prompt: 1,
+        result: Ok(StopReason::EndTurn),
+    });
+    core.send(
+        conn,
+        ReqId(2),
+        CallerInfo::default(),
+        prompt_op("two", false),
+    );
+    core.send(
+        conn,
+        ReqId(3),
+        CallerInfo::default(),
+        Op::ConsoleCancel(NoParams),
+    );
+    resume.send(()).unwrap();
+
+    assert!(matches!(next().await, AcpCmd::Prompt { prompt: 2, .. }));
+    assert!(matches!(next().await, AcpCmd::Cancel { .. }));
+    // Each was answered, the cancel as taken.
+    let mut answers = Vec::new();
+    while answers.len() < 3 {
+        let (req, result) = timeout(PATIENCE, replies.recv())
+            .await
+            .expect("answered in time")
+            .expect("a reply");
+        answers.push((req, result.map(|d| d.text)));
+    }
+    assert_eq!(
+        answers,
+        [
+            (ReqId(1), Ok("moa has it".to_string())),
+            (ReqId(2), Ok("moa has it".to_string())),
+            (ReqId(3), Ok("cancelling moa's turn".to_string())),
+        ]
+    );
+    drop(sent);
+    timeout(PATIENCE, core.stop())
+        .await
+        .expect("the core stops");
 }

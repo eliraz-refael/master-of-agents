@@ -235,7 +235,7 @@ impl CoreHandle {
         store: Store,
         faults: Vec<Fault>,
     ) -> Result<CoreHandle, DaemonError> {
-        Self::start_inner(opts, store, faults, None, 0).await
+        Self::start_inner(opts, store, faults, None, None, 0).await
     }
 
     /// Like `start_with_store`, with the first `panics` inputs after `Startup` (the spool's
@@ -246,16 +246,17 @@ impl CoreHandle {
         store: Store,
         panics: u32,
     ) -> Result<CoreHandle, DaemonError> {
-        Self::start_inner(opts, store, Vec::new(), None, panics).await
+        Self::start_inner(opts, store, Vec::new(), None, None, panics).await
     }
 
-    /// `link`, when given, stands in for the terminal link that `opts.tmux` would start
-    /// (tests that watch what the core sends it).
+    /// `link`, when given, stands in for the terminal link that `opts.tmux` would start, and
+    /// `agent` for the link to moa's agent (tests that watch what the core sends them).
     pub(crate) async fn start_inner(
         mut opts: CoreOptions,
         store: Store,
         faults: Vec<Fault>,
         link: Option<mpsc::UnboundedSender<TmuxCmd>>,
+        agent: Option<mpsc::UnboundedSender<acp::AcpMsg>>,
         drain_panics: u32,
     ) -> Result<CoreHandle, DaemonError> {
         let store = StoreHandle::spawn(store, opts.backups.clone());
@@ -319,15 +320,17 @@ impl CoreHandle {
 
         // Weak for the same reason. Always there: it does nothing until a prompt starts moa's
         // agent.
-        let heard = inbox.downgrade();
-        let acp = acp::start(
-            move |input| {
-                if let Some(inbox) = heard.upgrade() {
-                    let _ = inbox.send(Item::Input(Input::Acp(input)));
-                }
-            },
-            report_failure(&inbox),
-        );
+        let acp = agent.unwrap_or_else(|| {
+            let heard = inbox.downgrade();
+            acp::start(
+                move |input| {
+                    if let Some(inbox) = heard.upgrade() {
+                        let _ = inbox.send(Item::Input(Input::Acp(input)));
+                    }
+                },
+                report_failure(&inbox),
+            )
+        });
 
         let spool = opts.spool.take();
         let conns = Conns::default();

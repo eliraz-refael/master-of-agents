@@ -91,8 +91,8 @@ pub(super) enum Stepped {
 const BUG_REPLY: &str = "moa hit a bug answering that; it reloaded";
 /// How long the end of the loop waits for the terminal link to take its hooks down.
 const LINK_STOP_WAIT: Duration = Duration::from_secs(2);
-/// How long the end of the loop waits for moa's agent to stop: its own stop takes up to 3 s
-/// (`SIGTERM`, 2 s, `SIGKILL`, 1 s).
+/// How long the end of the loop waits for moa's agent to stop: the agent's own stop, which
+/// takes up to 3 s (`SIGTERM`, up to 2 s, `SIGKILL`, up to 1 s), plus a 1 s margin.
 const AGENT_STOP_WAIT: Duration = Duration::from_secs(4);
 pub(super) const UNEXPECTED: &str = "the core stopped unexpectedly; see the log";
 pub(super) const BUG_LOADING: &str = "moa hit a bug loading the brain; see the log";

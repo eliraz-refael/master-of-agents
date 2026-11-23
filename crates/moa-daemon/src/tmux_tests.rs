@@ -833,6 +833,7 @@ async fn a_view_held_by_a_failed_commit_never_reaches_the_link() {
         brain.store(),
         vec![],
         Some(link),
+        None,
         0,
     )
     .await
@@ -923,7 +924,7 @@ async fn opening_core(
         ..Deps::default()
     };
     let (link, mut rx) = mpsc::unbounded_channel();
-    let core = CoreHandle::start_inner(opts, brain.store(), vec![], Some(link), 0)
+    let core = CoreHandle::start_inner(opts, brain.store(), vec![], Some(link), None, 0)
         .await
         .expect("the core starts");
     core.tmux_input(TmuxIn::Connected {
@@ -1167,7 +1168,7 @@ async fn an_ensure_right_after_kill_server_says_not_running() {
     let time = FakeTime::new(brain.now().wall);
     let mut opts = core_options(&brain, &time);
     opts.tmux = Some(server(&tb));
-    let core = CoreHandle::start_inner(opts, brain.store(), vec![], None, 0)
+    let core = CoreHandle::start_inner(opts, brain.store(), vec![], None, None, 0)
         .await
         .expect("the core starts");
     let (c, mut replies) = core.open_conn();
