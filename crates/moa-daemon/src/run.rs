@@ -269,8 +269,8 @@ async fn bring_up(
             read_text,
             layouts_file: paths.config_dir().join("layouts.json"),
             panel: launch,
-            // The daemon doesn't host moa's agent yet, so it knows no built-in one.
-            acp_adapter: None,
+            // Set only in the packaged build; a plain `cargo` build (every test's) knows none.
+            acp_adapter: moa_agents::acp::BUILT_IN_ADAPTER.map(PathBuf::from),
             agent_dir: paths.agent_dir(b),
             scope_file: paths.config_dir().join(format!("{b}.md")),
             constitution_file: paths.config_dir().join(format!("{CONSTITUTION_NAME}.md")),

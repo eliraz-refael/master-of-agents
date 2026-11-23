@@ -15,7 +15,6 @@ use moa_core::change::Change;
 use moa_core::effect::{
     Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, TmuxToken, check_order,
 };
-use moa_core::hook::{HookEnvelope, HookLine};
 use moa_core::op::{Done, OpError};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::State;
@@ -26,6 +25,7 @@ use tokio_util::task::TaskTracker;
 
 use super::recover::fail_held;
 use super::*;
+use crate::acp::AcpMsg;
 use crate::clock::Clock;
 use crate::scheduler::{SchedCmd, Wake};
 
@@ -35,6 +35,8 @@ pub(super) struct Core {
     pub(super) inbox: mpsc::WeakUnboundedSender<Item>,
     /// The terminal link, when the daemon has one.
     pub(super) link: Option<mpsc::UnboundedSender<TmuxCmd>>,
+    /// The link to moa's agent.
+    pub(super) acp: mpsc::UnboundedSender<AcpMsg>,
     pub(super) state: State,
     pub(super) store: SharedStore,
     pub(super) clock: Arc<dyn Clock>,
@@ -89,6 +91,9 @@ pub(super) enum Stepped {
 const BUG_REPLY: &str = "moa hit a bug answering that; it reloaded";
 /// How long the end of the loop waits for the terminal link to take its hooks down.
 const LINK_STOP_WAIT: Duration = Duration::from_secs(2);
+/// How long the end of the loop waits for moa's agent to stop: its own stop takes up to 3 s
+/// (`SIGTERM`, 2 s, `SIGKILL`, 1 s).
+const AGENT_STOP_WAIT: Duration = Duration::from_secs(4);
 pub(super) const UNEXPECTED: &str = "the core stopped unexpectedly; see the log";
 pub(super) const BUG_LOADING: &str = "moa hit a bug loading the brain; see the log";
 
@@ -114,6 +119,7 @@ impl Core {
         };
         self.wait_for_backups().await;
         self.stop_link().await;
+        self.stop_agent().await;
         // Nobody waits for the process to exit: what is left is told to try again, and the
         // connections' senders drop.
         inbox.close();
@@ -160,16 +166,25 @@ impl Core {
         let mut batch: Vec<Change> = Vec::new();
         let mut held: Vec<Held> = Vec::new();
         let mut panicked = false;
-        // The hooks stepped here, with their lines: if the commit fails, they are applied
-        // again after the reload rather than lost with it.
-        let mut replay: Vec<(HookEnvelope, Box<HookLine>)> = Vec::new();
+        // What nothing else would say again, stepped here: the hooks, with their lines, and
+        // what moa's agent said. If the commit fails, they are applied again after the
+        // reload rather than lost with it.
+        let mut replay: Vec<Item> = Vec::new();
         while let Some(item) = work.pop_front() {
             // A `StartDrained` whose step panics is sent again after the reload.
             let mut start_drained = false;
             let stepped = match item {
                 Item::Input(input) => {
                     start_drained = matches!(input, Input::StartDrained);
-                    self.step(input, &mut batch, &mut held)
+                    let heard = match &input {
+                        Input::Acp(heard) => Some(heard.clone()),
+                        _ => None,
+                    };
+                    let stepped = self.step(input, &mut batch, &mut held);
+                    if matches!(stepped, Stepped::Done) {
+                        replay.extend(heard.map(|h| Item::Input(Input::Acp(h))));
+                    }
+                    stepped
                 }
                 // While writes are refused the core would drop the event: keep it for the end
                 // of the refusal instead, and tell a waiting hook there is nothing to say. A
@@ -199,7 +214,11 @@ impl Core {
                     envelope,
                     line,
                 } => {
-                    let kept = line.map(|line| (envelope.clone(), line));
+                    let kept = line.map(|line| Item::Hook {
+                        reply: None,
+                        envelope: envelope.clone(),
+                        line: Some(line),
+                    });
                     let stepped = self.step(Input::Hook { reply, envelope }, &mut batch, &mut held);
                     if matches!(stepped, Stepped::Done) {
                         replay.extend(kept);
@@ -269,13 +288,11 @@ impl Core {
             // Nothing retries a hook as a client retries an op: its event goes first into the
             // next drain, after the reload has forgotten the keys this one remembered (or to
             // the spool, with the rest of the carry, if the core stops). A waiting hook was
-            // answered with the drain's failure, so it isn't answered again.
-            for (envelope, line) in replay.into_iter().rev() {
-                self.carry.push_front(Item::Hook {
-                    reply: None,
-                    envelope,
-                    line: Some(line),
-                });
+            // answered with the drain's failure, so it isn't answered again. moa's agent's
+            // updates go the same way, in the order they came, and extend the rows the
+            // reload left.
+            for item in replay.into_iter().rev() {
+                self.carry.push_front(item);
             }
         }
         if (failed.is_some() || panicked)
@@ -348,7 +365,11 @@ impl Core {
         // true, so its publish and reply are skipped up to that reply.
         let mut unsaved: Option<(ConnId, ReqId)> = None;
         for effect in effects {
-            if effect.runs_at_once() {
+            // A cancel stepped after a prompt that waits for this drain's commit waits too:
+            // sent first, it would reach moa's agent before the turn it cancels.
+            let after_prompt = matches!(effect, Effect::Acp(AcpCmd::Cancel { .. }))
+                && held.iter().any(|h| matches!(h, Held::Acp(_)));
+            if effect.runs_at_once() && !after_prompt {
                 self.run_now(effect);
                 continue;
             }
@@ -384,8 +405,8 @@ impl Core {
                 // `open`'s new window, which starts an agent for a session the commit saves.
                 // The link's plumbing ran above.
                 Effect::Tmux { conn, cmds, token } => held.push(Held::Tmux { conn, cmds, token }),
-                // Nothing hosts moa's agent yet: no prompt is sent, since none can start it.
-                Effect::Acp(_) => tracing::debug!("no host for moa's agent: a command was dropped"),
+                // A prompt goes once its row is saved.
+                Effect::Acp(cmd) => held.push(Held::Acp(cmd)),
                 // Handled above.
                 Effect::SetTimer { .. }
                 | Effect::CancelTimer(_)
@@ -427,16 +448,21 @@ impl Core {
                 cmds,
                 token: Some(token),
             } => self.to_link(conn, cmds, Some(token)),
-            // Nothing hosts moa's agent yet: a start fails at once, so the prompt that asked
-            // for it is told.
-            Effect::Acp(AcpCmd::Start { generation, .. }) => {
-                if let Some(inbox) = self.inbox.upgrade() {
-                    let why = "this build of moa can't run moa's agent yet".to_string();
-                    let exited = AcpIn::Exited { generation, why };
-                    let _ = inbox.send(Item::Input(Input::Acp(exited)));
-                }
-            }
+            Effect::Acp(cmd) => self.to_agent(cmd),
             _ => {}
+        }
+    }
+
+    /// A command for moa's agent, to its link. Once the link has ended (the core is
+    /// stopping) nothing can start the agent: a start is told so at once, as its exit.
+    fn to_agent(&self, cmd: AcpCmd) {
+        if let Err(mpsc::error::SendError(AcpMsg::Cmd(cmd))) = self.acp.send(AcpMsg::Cmd(cmd)) {
+            tracing::debug!("the link to moa's agent has ended: a command was dropped");
+            if let (AcpCmd::Start { generation, .. }, Some(inbox)) = (cmd, self.inbox.upgrade()) {
+                let why = STOPPING.to_string();
+                let exited = AcpIn::Exited { generation, why };
+                let _ = inbox.send(Item::Input(Input::Acp(exited)));
+            }
         }
     }
 
@@ -472,6 +498,22 @@ impl Core {
             tracing::warn!(
                 "the terminal link didn't stop within {} s",
                 LINK_STOP_WAIT.as_secs()
+            );
+        }
+    }
+
+    /// Asks the link to moa's agent to stop the agent, with everything it started, and to
+    /// close; waits for it a short while.
+    async fn stop_agent(&mut self) {
+        let (done, stopped) = oneshot::channel();
+        if self.acp.send(AcpMsg::Stop(done)).is_ok()
+            && tokio::time::timeout(AGENT_STOP_WAIT, stopped)
+                .await
+                .is_err()
+        {
+            tracing::warn!(
+                "moa's agent didn't stop within {} s",
+                AGENT_STOP_WAIT.as_secs()
             );
         }
     }
@@ -521,6 +563,7 @@ impl Core {
                     }
                     self.to_link(conn, cmds, token);
                 }
+                Held::Acp(cmd) => self.to_agent(cmd),
                 Held::Barrier(reply) => {
                     self.store().sync().await;
                     sync_scheduler(&self.sched).await;
@@ -587,8 +630,10 @@ fn through_links(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// The carried-over items, then what is already waiting, up to [`DRAIN_CAP`]. A `stop` ends
-/// the drain: whatever follows it stays where it is.
-fn take_drain(
+/// the drain: whatever follows it stays where it is. The end of moa's turn starts a drain of
+/// its own: if the commit of the updates before it fails, they are stepped again (see
+/// `drain`) while the turn is still under way, and its end follows them.
+pub(super) fn take_drain(
     carry: &mut VecDeque<Item>,
     inbox: &mut mpsc::UnboundedReceiver<Item>,
 ) -> VecDeque<Item> {
@@ -597,6 +642,10 @@ fn take_drain(
         let Some(item) = carry.pop_front().or_else(|| inbox.try_recv().ok()) else {
             break;
         };
+        if !work.is_empty() && matches!(item, Item::Input(Input::Acp(AcpIn::TurnEnded { .. }))) {
+            carry.push_front(item);
+            break;
+        }
         let last = matches!(item, Item::Stop(_));
         work.push_back(item);
         if last {

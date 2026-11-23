@@ -1,13 +1,17 @@
-//! The start drain's signal to the core: what the core steps, in order, as a start runs.
+//! The start drain's signal to the core: what the core steps, in order, as a start runs. How
+//! drains are cut around moa's turns, and the link to moa's agent failing.
 
 use std::time::Duration;
 
 use moa_core::config::BrainName;
+use moa_core::state::PanelLaunch;
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
+use moa_testkit::{StubStep, fake_claude, stub_acp, stub_log, wait_for, write_stub_script};
 use serde_json::json;
 use tokio::time::timeout;
 
 use super::*;
+use crate::acp::AcpMsg;
 use crate::testing::FakeTime;
 
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -111,4 +115,157 @@ async fn a_start_drained_that_panics_is_sent_again() {
         stepped_at_start(&brain, Some(spool), 1).await,
         ["Startup", "StartDrained", "Reload", "StartDrained"]
     );
+}
+
+/// The link to moa's agent panics while moa is answering: whoever waits hears that moa's
+/// agent stopped (the live generation's `Exited`), the core says the link was restarted, and
+/// the next prompt starts the agent again on the restarted link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_acp_actor_is_restarted_and_says_so() {
+    let brain = TypicalBrain::new();
+    let dir = tempfile::Builder::new()
+        .prefix("moa")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = dir.path().to_path_buf();
+    let agent = home.join("agent");
+    moa_platform::ensure_private_dir(&agent).unwrap();
+    let say = |text: &str, id: &str| StubStep::Say {
+        text: text.into(),
+        id: Some(id.into()),
+    };
+    let steps = [
+        say("thinking", "m1"),
+        StubStep::Hang,
+        say("back", "m2"),
+        StubStep::End { stop: None },
+    ];
+    write_stub_script(&agent, &steps);
+    let toml = format!(
+        "[brains.default]\nmoa_account = \"acct-a\"\n\
+         [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
+         launcher = \"{}\"\nacp = \"{}\"\n",
+        fake_claude().display(),
+        stub_acp().display()
+    );
+    let time = FakeTime::new(brain.now().wall);
+    let mut opts = options(&brain, &time, None);
+    opts.config = Config::from_file_text(Some(&toml), &home, Path::to_path_buf).unwrap();
+    opts.deps = Deps {
+        home: home.clone(),
+        agent_dir: agent.clone(),
+        panel: PanelLaunch {
+            exe: stub_acp(),
+            env: Vec::new(),
+        },
+        ..Deps::default()
+    };
+    let (link, _commands) = mpsc::unbounded_channel();
+    let core = timeout(
+        PATIENCE,
+        CoreHandle::start_inner(opts, brain.store(), vec![], Some(link), 0),
+    )
+    .await
+    .expect("the core starts in time")
+    .expect("the core starts");
+    let mut events = core.events();
+    let (conn, mut replies) = core.open_conn();
+    let prompt = |req, text: &str| {
+        let op = Op::ConsolePrompt {
+            text: text.into(),
+            wait: true,
+        };
+        core.send(conn, ReqId(req), CallerInfo::default(), op);
+    };
+
+    prompt(1, "wait for it");
+    // Its first words are saved: the stub has counted the turn, and hangs.
+    let thinking = || {
+        let store = Store::open_read_only(&brain.db).ok()?;
+        let n: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM feed WHERE kind = 'moa'", [], |r| {
+                r.get(0)
+            })
+            .ok()?;
+        (n == 1).then_some(())
+    };
+    wait_for(PATIENCE, thinking).expect("moa is answering");
+    core.acp.send(AcpMsg::Crash).expect("the link takes it");
+
+    let (req, told) = timeout(PATIENCE, replies.recv())
+        .await
+        .expect("the waiter is told in time")
+        .expect("a reply");
+    assert_eq!(req, ReqId(1));
+    let told = told.expect_err("moa's agent stopped").0;
+    assert!(told.starts_with("moa's agent stopped: "), "{told}");
+    let said = timeout(PATIENCE, async {
+        loop {
+            if let Ok(CoreEvent::Error { message }) = events.recv().await
+                && message.contains("moa's agent")
+                && message.ends_with("stopped and was restarted")
+            {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("the core says the link was restarted");
+    assert_eq!(said, "the link to moa's agent stopped and was restarted");
+
+    prompt(2, "again");
+    let (req, answered) = timeout(PATIENCE, replies.recv())
+        .await
+        .expect("answered in time")
+        .expect("a reply");
+    assert_eq!(req, ReqId(2));
+    assert_eq!(answered.expect("moa answers").text, "back");
+    let started = stub_log(&agent)
+        .iter()
+        .filter(|l| l["method"] == "initialize")
+        .count();
+    assert_eq!(started, 2, "the agent started again");
+    timeout(PATIENCE, core.stop())
+        .await
+        .expect("the core stops");
+}
+
+/// The end of moa's turn starts a drain of its own, so a failed commit of the updates before
+/// it is stepped again while the turn is still under way.
+#[test]
+fn the_end_of_moas_turn_starts_a_drain() {
+    use moa_core::central::wire::{AcpIn, StopReason, Update};
+
+    let acp = |input| Item::Input(Input::Acp(input));
+    let update = || {
+        acp(AcpIn::Update {
+            generation: 1,
+            thread: "t".into(),
+            update: Update::Message {
+                id: None,
+                text: "hi".into(),
+            },
+        })
+    };
+    let ended = || {
+        acp(AcpIn::TurnEnded {
+            generation: 1,
+            prompt: 1,
+            result: Ok(StopReason::EndTurn),
+        })
+    };
+    let is_end = |item: &Item| matches!(item, Item::Input(Input::Acp(AcpIn::TurnEnded { .. })));
+    let (tx, mut inbox) = mpsc::unbounded_channel();
+    for item in [update(), update(), ended(), update()] {
+        tx.send(item).unwrap();
+    }
+    let mut carry = VecDeque::new();
+
+    let first = drain::take_drain(&mut carry, &mut inbox);
+    assert_eq!(first.len(), 2);
+    assert!(!first.iter().any(is_end));
+    let second = drain::take_drain(&mut carry, &mut inbox);
+    assert_eq!(second.len(), 2);
+    assert!(is_end(&second[0]));
 }
