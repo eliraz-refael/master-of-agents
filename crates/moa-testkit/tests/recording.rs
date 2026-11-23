@@ -115,6 +115,10 @@ impl Peer {
         }
     }
 
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Closes the child's stdin, reads what's left, and waits for it to exit: its status and
     /// its stderr.
     fn finish(mut self) -> (ExitStatus, String, Vec<Entry>, Vec<u8>) {
@@ -253,6 +257,69 @@ fn a_replay_out_of_step_says_so() {
         .map(|e| e.msg["id"].clone())
         .collect::<Vec<_>>();
     assert_eq!(answers, [json!(7), json!(8)], "the load is never answered");
+}
+
+#[test]
+fn the_tap_exits_as_a_signalled_agent_does() {
+    let dir = folder();
+    let file = dir.path().join("tap.jsonl");
+    let mut peer = Peer::spawn(tap(dir.path(), &stub_acp(), &file, &[]));
+    peer.ask(0, "initialize", initialize());
+    let agent = wait_for(LIMIT, || {
+        moa_platform::proc::children(peer.pid())
+            .ok()
+            .and_then(|c| c.first().copied())
+    })
+    .expect("the tap's agent");
+    let agent = rustix::process::Pid::from_raw(agent as i32).expect("a pid");
+    rustix::process::kill_process(agent, rustix::process::Signal::KILL).unwrap();
+    let (status, _, _, _) = peer.finish();
+    assert_eq!(status.code(), Some(128 + 9));
+}
+
+/// `stub-acp --replay` of `lines`, written to a file in `dir`.
+fn replay_of(dir: &Path, lines: &[Value]) -> Peer {
+    let file = dir.join("recording.jsonl");
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(&file, text).unwrap();
+    let mut stub = Command::new(stub_acp());
+    stub.current_dir(dir).arg("--replay").arg(&file);
+    Peer::spawn(stub)
+}
+
+#[test]
+fn a_replay_past_its_end_or_a_wrong_answer_says_so() {
+    let dir = folder();
+    let initialize_lines = [
+        json!({"dir": "in", "msg": {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}}}),
+        json!({"dir": "out", "msg": {"jsonrpc": "2.0", "id": 0, "result": {}}}),
+    ];
+
+    let mut peer = replay_of(dir.path(), &initialize_lines);
+    peer.ask(5, "initialize", initialize());
+    peer.send(json!({"jsonrpc": "2.0", "id": 6, "method": "session/new", "params": {}}));
+    let (status, stderr, _, _) = peer.finish();
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        stderr.contains("replay expected the end, got session/new"),
+        "{stderr}"
+    );
+
+    let ask = json!({"dir": "out", "msg": {"jsonrpc": "2.0", "id": 3,
+        "method": "session/request_permission", "params": {}}});
+    let answer = json!({"dir": "in", "msg": {"jsonrpc": "2.0", "id": 3, "result": {}}});
+    let lines: Vec<Value> = initialize_lines.into_iter().chain([ask, answer]).collect();
+    let mut peer = replay_of(dir.path(), &lines);
+    peer.ask(5, "initialize", initialize());
+    let request = peer.next().expect("the permission request");
+    assert_eq!(request["id"], 3);
+    peer.send(json!({"jsonrpc": "2.0", "id": 4, "result": {}}));
+    let (status, stderr, _, _) = peer.finish();
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        stderr.contains("replay expected an answer to 3, got an answer to 4"),
+        "{stderr}"
+    );
 }
 
 /// The generation the host's agent starts with.
@@ -452,8 +519,12 @@ async fn replay_answers_in_order() {
     assert_eq!(updates, sent);
 }
 
+/// The host name and full name `acp-scrub` takes for this machine's in every test.
+const TEST_HOST: &str = "scrub-test-host";
+const TEST_FULL_NAME: &str = "Ada Lantern";
+
 /// `acp-scrub <in> <out> args…` with no home, user or login name in its environment, unless
-/// `home` is given.
+/// `home` is given, and the test's host and full name, not the machine's.
 fn scrub(input: &Path, out: &Path, home: Option<&str>, args: &[&str]) -> (Option<i32>, String) {
     let mut scrub = Command::new(test_bin("acp-scrub"));
     scrub
@@ -462,7 +533,9 @@ fn scrub(input: &Path, out: &Path, home: Option<&str>, args: &[&str]) -> (Option
         .args(args)
         .env_remove("HOME")
         .env_remove("USER")
-        .env_remove("LOGNAME");
+        .env_remove("LOGNAME")
+        .env("MOA_SCRUB_HOST", TEST_HOST)
+        .env("MOA_SCRUB_FULL_NAME", TEST_FULL_NAME);
     if let Some(home) = home {
         scrub.env("HOME", home);
     }
@@ -470,23 +543,50 @@ fn scrub(input: &Path, out: &Path, home: Option<&str>, args: &[&str]) -> (Option
     (done.status.code(), String::from_utf8(done.stderr).unwrap())
 }
 
+/// Writes `lines` as a tap file in `dir`, after an `initialize` answer from the adapter.
+fn tap_file(dir: &Path, lines: &[Value]) -> PathBuf {
+    let input = dir.join("tap.jsonl");
+    let agent = json!({"dir": "out", "msg": {"jsonrpc": "2.0", "id": 0, "result": {"agentInfo":
+        {"name": "@agentclientprotocol/claude-agent-acp", "version": "0.100.0"}}}});
+    let text: String = std::iter::once(&agent)
+        .chain(lines)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(&input, text).unwrap();
+    input
+}
+
+/// A `session/update` notification from the agent with `params`.
+fn update_with(params: Value) -> Value {
+    json!({"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/update", "params": params}})
+}
+
+/// The scrubbed file's lines.
+fn scrubbed(out: &Path) -> Vec<Value> {
+    std::fs::read_to_string(out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
 #[test]
 fn scrub_replaces_and_denies() {
     let dir = folder();
-    let input = dir.path().join("tap.jsonl");
-    let lines = [
-        json!({"dir": "in", "msg": {"jsonrpc": "2.0", "id": 0, "method": "initialize"}}),
-        json!({"dir": "out", "msg": {"jsonrpc": "2.0", "id": 0, "result": {"agentInfo":
-            {"name": "@agentclientprotocol/claude-agent-acp", "version": "0.100.0"}}}}),
-        json!({"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "method": "session/new",
-            "params": {"cwd": "/Users/beacon/private/kite", "notes": "/var/lib/lantern-svc/notes"}}}),
-        json!({"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/update", "params":
-            {"text": "Beacon's projects: /Users/beacon/.claude/projects/-Users-beacon-private-kite on file://beacon-mbp.local/x"}}}),
-        json!({"dir": "out", "msg": {"jsonrpc": "2.0", "method": "_auth/status_update", "params":
-            {"authStatus": {"account": {"email": "beacon@harbor.test", "organization": "Harbor Labs"}}}}}),
-    ];
-    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-    std::fs::write(&input, text).unwrap();
+    let input = tap_file(
+        dir.path(),
+        &[
+            json!({"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "method": "session/new",
+                "params": {"cwd": "/Users/beacon/private/kite", "notes": "/var/lib/lantern-svc/notes"}}}),
+            update_with(
+                json!({"text": "Beacon's projects: /Users/beacon/.claude/projects/-Users-beacon-private-kite on file://beacon-mbp.local/x"}),
+            ),
+            update_with(json!({"text": "mail beacon@harbor.test about Harbor Labs"})),
+            update_with(
+                json!({"text": "/Users/Shared/notes and .claude/settings.local.json, signed Ada Lantern on scrub-test-host"}),
+            ),
+        ],
+    );
     let home = Some("/var/lib/lantern-svc");
     let replace = [
         "--replace",
@@ -494,49 +594,59 @@ fn scrub_replaces_and_denies() {
         "Harbor Labs=Org",
         "--deny",
         "harbor",
+        "beacon",
     ];
 
     let out = dir.path().join("clean.jsonl");
     let (code, stderr) = scrub(&input, &out, home, &replace);
     assert_eq!(code, Some(0), "{stderr}");
-    let clean = std::fs::read_to_string(&out).unwrap();
-    let clean: Vec<Value> = clean
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let clean = scrubbed(&out);
     assert_eq!(
         clean[0],
         json!({"adapter": "claude-agent-acp", "version": "0.100.0"}),
         "the header comes first"
     );
-    assert_eq!(clean.len(), lines.len() + 1);
+    assert_eq!(clean.len(), 6);
     assert_eq!(
-        clean[3]["msg"]["params"],
+        clean[2]["msg"]["params"],
         json!({"cwd": "/home/user/private/kite", "notes": "/home/user/notes"})
     );
     assert_eq!(
-        clean[4]["msg"]["params"]["text"],
-        "user's projects: /home/user/.claude/projects/-Users-user-private-kite on file://host/x"
+        clean[3]["msg"]["params"]["text"],
+        "user's projects: /home/user/.claude/projects/-home-user-private-kite on file://host/x"
     );
+    assert_eq!(clean[4]["msg"]["params"]["text"], "mail EMAIL about Org");
+    // `/Users/Shared` names no one, and `settings.local.json` is no host.
     assert_eq!(
-        clean[5]["msg"]["params"]["authStatus"]["account"],
-        json!({"email": "EMAIL", "organization": "Org"})
+        clean[5]["msg"]["params"]["text"],
+        "/Users/Shared/notes and .claude/settings.local.json, signed user on host"
     );
 
-    // A deny pattern that still matches (in any case) fails the line; the error names the
-    // line and the pattern, never what matched, and nothing is written.
+    // A deny pattern that still matches (in any case) fails the line; each pattern is named
+    // with its line, never what matched, and nothing is written.
     let out = dir.path().join("denied.jsonl");
     let (code, stderr) = scrub(
         &input,
         &out,
         home,
-        &["--replace", "beacon@harbor.test=EMAIL", "--deny", "harbor"],
+        &[
+            "--replace",
+            "beacon@harbor.test=EMAIL",
+            "--deny",
+            "nowhere",
+            "harbor",
+            "kite",
+        ],
     );
     assert_eq!(code, Some(1), "{stderr}");
-    assert!(
-        stderr.contains("line 5") && stderr.contains("harbor"),
-        "{stderr}"
-    );
+    for want in [
+        r#"line 4: matches --deny "harbor""#,
+        r#"line 2: matches --deny "kite""#,
+        r#"line 3: matches --deny "kite""#,
+    ] {
+        assert!(stderr.contains(want), "{want}: {stderr}");
+    }
+    assert!(!stderr.contains("nowhere"), "{stderr}");
     assert!(!stderr.contains("Harbor"), "{stderr}");
     assert!(!out.exists());
 
@@ -544,11 +654,116 @@ fn scrub_replaces_and_denies() {
     let (code, stderr) = scrub(&input, &out, home, &["--replace", "Harbor Labs=Org"]);
     assert_eq!(code, Some(1), "{stderr}");
     assert!(
-        stderr.contains("line 5") && stderr.contains("email"),
+        stderr.contains("line 4: holds an email address"),
         "{stderr}"
     );
     assert!(!stderr.contains("harbor.test"), "{stderr}");
     assert!(!out.exists());
+}
+
+#[test]
+fn scrub_redacts_the_account() {
+    let dir = folder();
+    let id = "00000000-0000-0000-0000-000000000000";
+    let input = tap_file(
+        dir.path(),
+        &[
+            json!({"dir": "out", "msg": {"jsonrpc": "2.0", "method": "_auth/status_update",
+                "params": {"authStatus": {"kind": "account", "label": "Claude Max",
+                    "detail": "gw.harbor.internal", "vendor": {"region": "harbor-east"},
+                    "account": {"plan": "max", "email": "beacon@harbor.test",
+                        "organization": "Harbor Labs", "seat": "harbor-17"}}}}}),
+            update_with(json!({"accountUuid": "8c1f-harbor", "orgId": 42,
+                "nested": [{"orgName": "Harbor Labs", "emailAddress": "beacon@harbor.test"}]})),
+        ],
+    );
+    let out = dir.path().join("clean.jsonl");
+    let (code, stderr) = scrub(&input, &out, None, &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let clean = scrubbed(&out);
+    assert_eq!(
+        clean[2]["msg"]["params"]["authStatus"],
+        json!({"kind": "account", "label": "Claude Max", "detail": "host",
+               "account": {"plan": "max", "email": "user@example.com", "organization": "Org"}})
+    );
+    assert_eq!(
+        clean[3]["msg"]["params"],
+        json!({"accountUuid": id, "orgId": 0,
+               "nested": [{"orgName": "Org", "emailAddress": "user@example.com"}]})
+    );
+}
+
+#[test]
+fn scrub_fails_closed() {
+    let dir = folder();
+    let input = tap_file(
+        dir.path(),
+        &[
+            update_with(
+                json!({"text": "HARBOR LABS ships from /Users/ada.lantern/x (-Users-ada-lantern-x)"}),
+            ),
+            update_with(
+                json!({"text": "see https://wiki.harbor.internal/x and build-01.harbor.io, not github.com or api.anthropic.com"}),
+            ),
+        ],
+    );
+    let out = dir.path().join("out.jsonl");
+    let hosts = ["wiki.harbor.internal=host", "build-01.harbor.io=host"];
+    let run = |extra: &[&str]| {
+        let args: Vec<&str> = ["--replace", "Harbor Labs=Org"]
+            .iter()
+            .chain(&hosts)
+            .chain(extra)
+            .copied()
+            .collect();
+        scrub(&input, &out, None, &args)
+    };
+
+    // A FROM is still there in another case.
+    let (code, stderr) = run(&[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("line 2: still holds a --replace FROM"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("line 3"), "{stderr}");
+
+    // Once it's gone, both spellings of the found home are replaced.
+    let (code, stderr) = run(&["HARBOR LABS=Org"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        scrubbed(&out)[2]["msg"]["params"]["text"],
+        "Org ships from /home/user/x (-home-user-x)"
+    );
+
+    // A host outside the allowed ones fails its line until it is replaced.
+    let (code, stderr) = scrub(
+        &input,
+        &out,
+        None,
+        &["--replace", "Harbor Labs=Org", "HARBOR LABS=Org"],
+    );
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("line 3: names a host outside the allowed ones"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("harbor.i"), "{stderr}");
+
+    // Scrubbing may not change the protocol: a method, or the header.
+    let (code, stderr) = run(&["HARBOR LABS=Org", "session=sitting"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("line 2: its method changed")
+            && stderr.contains("line 3: its method changed"),
+        "{stderr}"
+    );
+    let (code, stderr) = run(&["HARBOR LABS=Org", "claude=x"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("the header's name or version changed"),
+        "{stderr}"
+    );
 }
 
 #[test]

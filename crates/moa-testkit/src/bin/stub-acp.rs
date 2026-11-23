@@ -320,8 +320,8 @@ fn next_from_client(input: &mut impl BufRead) -> Option<Value> {
 
 /// Plays `file` as the agent: the recorded agent messages go out in order, and each recorded
 /// request or answer from the client is waited for in turn. A request must be the method the
-/// recording has next, else the replay exits 1 saying both; the recorded answer to it goes out
-/// under the client's id. Once the recording runs out, the client's requests are refused the
+/// recording has next, and an answer must answer the request it does, else the replay exits 1
+/// saying both; the recorded answer to a request goes out under the client's id. Once the recording runs out, the client's requests are refused the
 /// same way, and the replay exits when the client closes its end.
 fn replay(file: &Path) -> ! {
     let (_, entries) = recording::read(file).unwrap_or_else(|e| out_of_step(e));
@@ -343,8 +343,17 @@ fn replay(file: &Path) -> ! {
                         Kind::of(&got).describe()
                     ));
                 }
-                if let Kind::Request(_) = want {
-                    ids.insert(msg["id"].to_string(), got["id"].clone());
+                match want {
+                    Kind::Request(_) => {
+                        ids.insert(msg["id"].to_string(), got["id"].clone());
+                    }
+                    // The agent's requests go out under their recorded ids, so the answer
+                    // must name the one the recording answers next.
+                    _ if got["id"] != msg["id"] => out_of_step(format!(
+                        "replay expected an answer to {}, got an answer to {}",
+                        msg["id"], got["id"]
+                    )),
+                    _ => {}
                 }
             }
             (Dir::Out, kind) => {

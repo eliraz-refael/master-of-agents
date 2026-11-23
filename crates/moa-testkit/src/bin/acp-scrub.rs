@@ -1,24 +1,36 @@
 //! `acp-scrub <in> <out> [--replace FROM=TO…] [--deny REGEX…]`: makes a recording of moa's
-//! agent (`acp-tap`'s file) safe to commit. In every string of every message, keys too, it
-//! replaces:
+//! agent (`acp-tap`'s file) safe to commit. It fails closed: what it can't clean, it refuses.
+//!
+//! First it redacts who the account is, whatever the flags: each `_auth/status_update` keeps
+//! only its `kind`, `label` and `account.plan` (its `account.email`, `account.organization`
+//! and `detail` become placeholders), and every identity key anywhere ([`IDENTITY_KEYS`])
+//! gets a placeholder of its value's type. Then, in every string of every message, keys too,
+//! it replaces:
 //!
 //! 1. each `FROM` with its `TO`, as given;
 //! 2. every home folder: each `/Users/<name>` and `/home/<name>` in the file, and `$HOME`,
 //!    with `/home/user`;
 //! 3. every host name: this machine's, and each one the file's paths reveal (`file://<host>/`,
 //!    `<host>.local`), with `host`;
-//! 4. every user name: each home folder's name, `$USER` and `$LOGNAME`, with `user`.
+//! 4. every user name: each home folder's name, `$USER`, `$LOGNAME`, and the user's full name
+//!    (`git config user.name`, the OS's), with `user`.
 //!
-//! Steps 2 to 4 match in any case, and names only as whole words. Then each line must be
-//! clean: no `--deny` pattern may match it (in any case), and it may hold no email address
-//! (but one at a reserved example domain). A line that isn't clean is named, with the pattern
-//! it matched but never the text, nothing is written, and the scrubber exits 1. `<out>`
-//! starts with the header (`moa_testkit::recording::Header`): the agent's name and version
-//! from its own `initialize` answer.
+//! Steps 2 to 4 match in any case, names only as whole words, and each also in the spelling
+//! Claude gives a path in its project folders (`/Users/a.b` as `-Users-a-b`). Then each line
+//! must be clean. It may not match a `--deny` pattern (in any case), still hold a `FROM` (in
+//! any case) or anything steps 2 to 4 found, hold an email address (but one at an example
+//! domain), or name a host outside [`ALLOWED_HOSTS`] (`--replace` one to pass). Nor may
+//! scrubbing have changed a message's `method` or the header. A line that isn't clean is
+//! named, with what it matched but never the text; nothing is written, and the scrubber
+//! exits with 1. `<out>` starts with the header (`moa_testkit::recording::Header`): the
+//! agent's name and version from its own `initialize` answer.
+//!
+//! `MOA_SCRUB_HOST` and `MOA_SCRUB_FULL_NAME`, when set, stand for this machine's host name
+//! and the user's full name, so a test doesn't depend on the machine it runs on.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::process::exit;
+use std::process::{Command, exit};
 
 use moa_testkit::recording::{Dir, Entry, Header, Line};
 use regex::{Regex, RegexBuilder};
@@ -27,6 +39,88 @@ use serde_json::{Map, Value};
 const HOME: &str = "/home/user";
 const USER: &str = "user";
 const HOST: &str = "host";
+const EMAIL: &str = "user@example.com";
+const ORG: &str = "Org";
+const ID: &str = "00000000-0000-0000-0000-000000000000";
+
+/// The adapter's notification of who the account is.
+const AUTH_STATUS: &str = "_auth/status_update";
+
+/// Keys that say who the account is, wherever they are, and the text each becomes. From the
+/// adapter's auth status, `claude auth status --json`, and Claude's account info.
+const IDENTITY_KEYS: &[(&str, &str)] = &[
+    ("email", EMAIL),
+    ("emailAddress", EMAIL),
+    ("userEmail", EMAIL),
+    ("organization", ORG),
+    ("organizationName", ORG),
+    ("orgName", ORG),
+    ("orgId", ID),
+    ("orgUuid", ID),
+    ("organizationId", ID),
+    ("organizationUuid", ID),
+    ("accountId", ID),
+    ("accountUuid", ID),
+    ("userId", ID),
+    ("user_id", ID),
+];
+
+/// Hosts a line may name, with their subdomains; `example.*`, `*.example` and `*.test` too.
+const ALLOWED_HOSTS: &[&str] = &[
+    "github.com",
+    "anthropic.com",
+    "claude.ai",
+    "claude.com",
+    "agentclientprotocol.com",
+    "localhost",
+    HOST,
+];
+
+/// The last labels that make a bare `a.b.tld` a host. Not file extensions (`.sh`, `.md`,
+/// `.app`, `.info`), so file names don't pass for hosts.
+const HOST_TLDS: &[&str] = &[
+    "com",
+    "net",
+    "org",
+    "edu",
+    "gov",
+    "mil",
+    "io",
+    "dev",
+    "ai",
+    "co",
+    "cloud",
+    "internal",
+    "corp",
+    "lan",
+    "local",
+    "localdomain",
+    "intra",
+    "intranet",
+    "home",
+    "site",
+    "tech",
+    "biz",
+    "me",
+    "us",
+    "uk",
+    "de",
+    "fr",
+    "nl",
+    "il",
+    "eu",
+    "ca",
+    "au",
+    "jp",
+    "cn",
+    "ru",
+    "ch",
+    "se",
+    "xyz",
+    "ly",
+    "gg",
+    "tv",
+];
 
 const USAGE: &str = "usage: acp-scrub <in> <out> [--replace FROM=TO…] [--deny REGEX…]";
 
@@ -107,6 +201,79 @@ fn strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
     }
 }
 
+/// A stand-in for `value` of the same type: `text` for a string, else the type's empty value.
+fn placeholder(value: &Value, text: &str) -> Value {
+    match value {
+        Value::String(_) => Value::String(text.into()),
+        Value::Number(_) => Value::from(0),
+        Value::Bool(_) => Value::Bool(false),
+        Value::Array(_) => Value::Array(Vec::new()),
+        Value::Object(_) => Value::Object(Map::new()),
+        Value::Null => Value::Null,
+    }
+}
+
+/// An auth status that says only how the account signs in: `kind`, `label` and
+/// `account.plan`, with placeholders for `account.email`, `account.organization` and
+/// `detail` (a gateway's host). Everything else, `vendor` included, goes.
+fn auth_status(status: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (key, value) in status {
+        match key.as_str() {
+            "kind" | "label" => {
+                out.insert(key.clone(), value.clone());
+            }
+            "detail" => {
+                out.insert(key.clone(), placeholder(value, HOST));
+            }
+            "account" => {
+                let mut account = Map::new();
+                for (key, value) in value.as_object().into_iter().flatten() {
+                    let value = match key.as_str() {
+                        "plan" => value.clone(),
+                        "email" => placeholder(value, EMAIL),
+                        "organization" => placeholder(value, ORG),
+                        _ => continue,
+                    };
+                    account.insert(key.clone(), value);
+                }
+                out.insert(key.clone(), Value::Object(account));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `msg` with its identity redacted: its auth status, if it is one, and every identity key.
+fn redact(mut msg: Value) -> Value {
+    if msg["method"] == AUTH_STATUS
+        && let Some(status) = msg["params"]["authStatus"].as_object()
+    {
+        msg["params"]["authStatus"] = Value::Object(auth_status(status));
+    }
+    redact_keys(msg)
+}
+
+fn redact_keys(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_keys).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| {
+                    let v = match IDENTITY_KEYS.iter().find(|(key, _)| *key == k) {
+                        Some((_, text)) => placeholder(&v, text),
+                        None => redact_keys(v),
+                    };
+                    (k, v)
+                })
+                .collect::<Map<_, _>>(),
+        ),
+        other => other,
+    }
+}
+
 /// `text` in any case; as a whole word at each end that is a word character.
 fn word(text: &str) -> Regex {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
@@ -123,18 +290,57 @@ fn word(text: &str) -> Regex {
         .expect("an escaped pattern")
 }
 
-/// What steps 2 to 4 replace, found in `texts` and this machine's environment.
-#[derive(Default)]
-struct Found {
-    homes: BTreeSet<String>,
-    hosts: BTreeSet<String>,
-    users: BTreeSet<String>,
+/// `text` as Claude spells a path in its project folders' names: `/Users/a.b` is `-Users-a-b`.
+fn claude_spelling(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Whether `name` could name someone: not the placeholder, `root`, macOS's `/Users/Shared`
 /// or a hidden folder.
 fn names_someone(name: &str) -> bool {
     !["", USER, "root", "shared"].contains(&name.to_lowercase().as_str()) && !name.starts_with('.')
+}
+
+/// A command's first line of output, if it ran and said something.
+fn output(program: &str, args: &[&str]) -> Option<String> {
+    let done = Command::new(program).args(args).output().ok()?;
+    let text = String::from_utf8(done.stdout).ok()?;
+    let line = text.lines().next()?.trim().to_string();
+    (done.status.success() && !line.is_empty()).then_some(line)
+}
+
+/// This machine's host name and its user's full names, or the stand-ins a test set.
+fn machine() -> (String, Vec<String>) {
+    let env = |name: &str| std::env::var(name).ok();
+    let host = env("MOA_SCRUB_HOST")
+        .unwrap_or_else(|| rustix::system::uname().nodename().to_string_lossy().into());
+    if let Some(name) = env("MOA_SCRUB_FULL_NAME") {
+        return (host, vec![name]);
+    }
+    let os_name = output("id", &["-F"]).or_else(|| {
+        let uid = output("id", &["-u"])?;
+        let entry = output("getent", &["passwd", &uid])?;
+        let gecos = entry
+            .split(':')
+            .nth(4)?
+            .split(',')
+            .next()?
+            .trim()
+            .to_string();
+        Some(gecos)
+    });
+    let names = [output("git", &["config", "user.name"]), os_name];
+    (host, names.into_iter().flatten().collect())
+}
+
+/// What steps 2 to 4 replace, found in `texts`, this machine and its environment.
+#[derive(Default)]
+struct Found {
+    homes: BTreeSet<String>,
+    hosts: BTreeSet<String>,
+    users: BTreeSet<String>,
 }
 
 impl Found {
@@ -185,31 +391,53 @@ impl Found {
         for name in ["USER", "LOGNAME"].into_iter().filter_map(env) {
             found.user(&name);
         }
-        let uname = rustix::system::uname();
-        let machine = uname.nodename().to_string_lossy();
+        let (machine, full_names) = machine();
         found.host(&machine);
         if let Some((short, _)) = machine.split_once('.') {
             found.host(short);
         }
+        for name in &full_names {
+            found.user(name);
+        }
         found
+    }
+
+    /// Each kind of found text, with the placeholders it and its Claude spelling become.
+    fn kinds(&self) -> [(&BTreeSet<String>, &'static str, &'static str, &'static str); 3] {
+        [
+            (&self.homes, HOME, "-home-user", "a home folder"),
+            (&self.hosts, HOST, HOST, "a host name"),
+            (&self.users, USER, USER, "a user name"),
+        ]
     }
 
     /// Each found text's pattern and what it becomes, in the order they apply: homes, then
     /// hosts (which often hold the user name), then user names; the longest of each first.
     fn rules(&self) -> Vec<(Regex, &'static str)> {
-        let longest_first = |set: &BTreeSet<String>| {
-            let mut texts: Vec<&String> = set.iter().collect();
-            texts.sort_by_key(|t| std::cmp::Reverse(t.len()));
-            texts.into_iter().map(|t| word(t)).collect::<Vec<_>>()
-        };
-        [
-            (&self.homes, HOME),
-            (&self.hosts, HOST),
-            (&self.users, USER),
-        ]
-        .into_iter()
-        .flat_map(|(set, to)| longest_first(set).into_iter().map(move |re| (re, to)))
-        .collect()
+        let mut rules = Vec::new();
+        for (set, to, spelled_to, _) in self.kinds() {
+            let mut texts: Vec<(String, &str)> = set
+                .iter()
+                .flat_map(|t| [(t.clone(), to), (claude_spelling(t), spelled_to)])
+                .collect();
+            texts.sort_by_key(|(t, _)| std::cmp::Reverse(t.len()));
+            texts.dedup_by(|a, b| a.0 == b.0);
+            rules.extend(texts.into_iter().map(|(t, to)| (word(&t), to)));
+        }
+        rules
+    }
+
+    /// Patterns that must not match after scrubbing: each found text, in both spellings, and
+    /// what each names.
+    fn denied(&self) -> Vec<(Regex, &'static str)> {
+        self.kinds()
+            .into_iter()
+            .flat_map(|(set, _, _, what)| {
+                set.iter()
+                    .flat_map(|t| [word(t), word(&claude_spelling(t))])
+                    .map(move |re| (re, what))
+            })
+            .collect()
     }
 }
 
@@ -225,15 +453,63 @@ fn header(entries: &[(usize, Entry)]) -> Option<Header> {
     })
 }
 
-/// Whether `text` holds an email address, other than one at a reserved example domain.
+/// Whether `domain` is reserved for examples: `example.<tld>`, its subdomains, `*.example`.
+fn is_example(domain: &str) -> bool {
+    let labels: Vec<&str> = domain.split('.').collect();
+    labels.last() == Some(&"example") || labels.iter().rev().nth(1) == Some(&"example")
+}
+
+/// Whether `text` holds an email address, other than one at an example domain.
 fn has_email(email: &Regex, text: &str) -> bool {
-    email.captures_iter(text).any(|m| {
-        let domain = m[1].to_lowercase();
-        let example = ["example.com", "example.net", "example.org"]
-            .iter()
-            .any(|d| domain == *d || domain.ends_with(&format!(".{d}")));
-        !(example || domain.ends_with(".example"))
-    })
+    email
+        .captures_iter(text)
+        .any(|m| !is_example(&m[1].to_lowercase()))
+}
+
+/// Whether a line may name `host`: an allowed one or its subdomain, an example or test
+/// domain, or a loopback address.
+fn allowed_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_lowercase();
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    ALLOWED_HOSTS
+        .iter()
+        .any(|a| host == *a || host.ends_with(&format!(".{a}")))
+        || is_example(host)
+        || host.ends_with(".test")
+        || ["127.0.0.1", "::1"].contains(&host)
+}
+
+/// Finds the hosts a line names: each URL's, and each bare `a.b.tld` with a [`HOST_TLDS`] tld.
+struct Hosts {
+    url: Regex,
+    bare: Regex,
+}
+
+impl Hosts {
+    fn new() -> Hosts {
+        Hosts {
+            url: Regex::new(
+                r#"(?i)\b[a-z][a-z0-9+.-]*://(?:[^/\s"'<>@]*@)?(\[[^\]]*\]|[^/\s"'<>:?#\\]*)"#,
+            )
+            .expect("a pattern"),
+            bare: Regex::new(r"(?i)\b(?:[a-z0-9-]+\.)+([a-z]{2,})\b").expect("a pattern"),
+        }
+    }
+
+    /// Whether `text` names a host that isn't allowed.
+    fn any_unknown(&self, text: &str) -> bool {
+        let urls = self
+            .url
+            .captures_iter(text)
+            .map(|m| m[1].to_string())
+            .filter(|h| !h.is_empty());
+        let bare = self
+            .bare
+            .captures_iter(text)
+            .filter(|m| HOST_TLDS.contains(&m[1].to_lowercase().as_str()))
+            .map(|m| m[0].to_string());
+        urls.chain(bare).any(|h| !allowed_host(&h))
+    }
 }
 
 fn main() {
@@ -241,7 +517,7 @@ fn main() {
     let text = std::fs::read_to_string(&args.input)
         .unwrap_or_else(|e| usage(format!("{}: {e}", args.input.display())));
 
-    // Read, and replace each FROM. A header already there is written again below.
+    // Read. A header already there is written again below.
     let mut entries = Vec::new();
     for (n, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -249,20 +525,32 @@ fn main() {
         }
         match Line::parse(line) {
             Ok(Line::Header(_)) => {}
-            Ok(Line::Entry(Entry { dir, msg })) => {
-                let msg = map_strings(msg, &|s| {
-                    args.replace
-                        .iter()
-                        .fold(s.to_string(), |s, (from, to)| s.replace(from, to))
-                });
-                entries.push((n + 1, Entry { dir, msg }));
-            }
+            Ok(Line::Entry(entry)) => entries.push((n + 1, entry)),
             Err(why) => {
                 eprintln!("acp-scrub: line {}: {why}", n + 1);
                 exit(1)
             }
         }
     }
+    // What scrubbing must leave alone.
+    let original_header = header(&entries);
+    let methods: Vec<Value> = entries
+        .iter()
+        .map(|(_, e)| e.msg["method"].clone())
+        .collect();
+
+    // Redact the identity, and replace each FROM.
+    let entries: Vec<(usize, Entry)> = entries
+        .into_iter()
+        .map(|(n, Entry { dir, msg })| {
+            let msg = map_strings(redact(msg), &|s| {
+                args.replace
+                    .iter()
+                    .fold(s.to_string(), |s, (from, to)| s.replace(from, to))
+            });
+            (n, Entry { dir, msg })
+        })
+        .collect();
 
     // Find the homes, hosts and users, and replace them.
     let mut texts = Vec::new();
@@ -286,11 +574,29 @@ fn main() {
     // Check every line, the header's too.
     let mut problems = Vec::new();
     let header = header(&entries);
-    if header.is_none() {
-        problems.push("no initialize answer gives the agent's name and version".to_string());
+    match (&original_header, &header) {
+        (None, _) => {
+            problems.push("no initialize answer gives the agent's name and version".to_string())
+        }
+        (Some(before), Some(after)) if before == after => {}
+        _ => problems.push("the header's name or version changed while scrubbing".to_string()),
+    }
+    for ((n, e), method) in entries.iter().zip(&methods) {
+        if e.msg["method"] != *method {
+            problems.push(format!("line {n}: its method changed while scrubbing"));
+        }
     }
     let email = Regex::new(r"(?i)[a-z0-9._%+-]+@([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})\b")
         .expect("a pattern");
+    let hosts = Hosts::new();
+    let mut denied = found.denied();
+    denied.extend(args.replace.iter().map(|(from, _)| {
+        let re = RegexBuilder::new(&regex::escape(from))
+            .case_insensitive(true)
+            .build()
+            .expect("an escaped pattern");
+        (re, "a --replace FROM")
+    }));
     let mut lines = Vec::new();
     if let Some(header) = &header {
         let value = serde_json::to_value(header).expect("a header is JSON");
@@ -307,13 +613,27 @@ fn main() {
         let line = value.to_string();
         let mut texts = vec![line.as_str()];
         strings(value, &mut texts);
+        let matches = |re: &Regex| texts.iter().any(|t| re.is_match(t));
         for (pattern, re) in &args.deny {
-            if texts.iter().any(|t| re.is_match(t)) {
+            if matches(re) {
                 problems.push(format!("{name}: matches --deny {pattern:?}"));
             }
         }
+        let still: BTreeSet<&str> = denied
+            .iter()
+            .filter(|(re, _)| matches(re))
+            .map(|(_, what)| *what)
+            .collect();
+        for what in still {
+            problems.push(format!("{name}: still holds {what}, in another spelling"));
+        }
         if texts.iter().any(|t| has_email(&email, t)) {
             problems.push(format!("{name}: holds an email address"));
+        }
+        if texts.iter().any(|t| hosts.any_unknown(t)) {
+            problems.push(format!(
+                "{name}: names a host outside the allowed ones (--replace it)"
+            ));
         }
         out.push_str(&line);
         out.push('\n');
