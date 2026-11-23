@@ -61,12 +61,14 @@ fn prompt(brain: &BrainArgs, text: String) -> Result<(), String> {
 }
 
 fn cancel(brain: &BrainArgs) -> Result<(), String> {
-    let done = send_routed(
-        brain.brain.as_deref(),
-        Op::ConsoleCancel(Default::default()),
-    )?;
-    println!("{}", done.text);
-    Ok(())
+    running(brain, false, |_, mut client| async move {
+        let done = client
+            .call(Op::ConsoleCancel(Default::default()))
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("{}", done.text);
+        Ok(())
+    })
 }
 
 fn feed(brain: &BrainArgs, n: usize) -> Result<(), String> {
@@ -85,9 +87,7 @@ fn feed(brain: &BrainArgs, n: usize) -> Result<(), String> {
                 rows.push(row);
             }
         }
-        rows.sort_by_key(|r| r.id);
-        let skip = rows.len().saturating_sub(n);
-        for line in render(&rows[skip..], &TimeZone::system()) {
+        for line in render(&last(rows, n), &TimeZone::system()) {
             println!("{line}");
         }
         if let Some(s) = state {
@@ -95,6 +95,13 @@ fn feed(brain: &BrainArgs, n: usize) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// The newest `n` of `rows`, oldest first.
+fn last(mut rows: Vec<FeedRow>, n: usize) -> Vec<FeedRow> {
+    rows.sort_by_key(|r| r.id);
+    let skip = rows.len().saturating_sub(n);
+    rows.split_off(skip)
 }
 
 fn phase_line(s: &MoaRow) -> String {
@@ -176,6 +183,19 @@ mod tests {
     }
 
     #[test]
+    fn the_last_n_rows_come_oldest_first() {
+        let ids = |rows: Vec<FeedRow>| rows.iter().map(|r| r.id).collect::<Vec<_>>();
+        let rows = |ids: &[i64]| {
+            ids.iter()
+                .map(|&i| row(i, "you", json!({"text": "x"}), None))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(last(rows(&[2, 1]), 5)), [1, 2]);
+        assert_eq!(ids(last(rows(&[3, 1, 4, 2]), 2)), [3, 4]);
+        assert!(last(rows(&[1]), 0).is_empty());
+    }
+
+    #[test]
     fn render_says_each_kind_on_one_line() {
         let tz = TimeZone::UTC; // 1_700_000_000 s is 22:13:20 UTC
         let rows = [
@@ -189,6 +209,8 @@ mod tests {
             ),
             row(4, "system", json!({"text": "new thread"}), None),
             row(5, "error", json!({"text": "it broke"}), None),
+            row(6, "thought", json!({"text": "hmm\nmore"}), None),
+            row(7, "plan", json!({"entries": [{}, {}]}), None),
         ];
         assert_eq!(
             render(&rows, &tz),
@@ -198,6 +220,8 @@ mod tests {
                 "22:16 ⚙ Read Lantern · completed",
                 "22:17 · new thread",
                 "22:18 ✗ it broke",
+                "22:19 ~ hmm …",
+                "22:20 plan, 2 steps",
             ]
         );
     }
