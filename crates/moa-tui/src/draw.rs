@@ -1,6 +1,7 @@
 //! A [`Screen`] drawn into a ratatui [`Buffer`]: the rounded frame and its title, the
-//! picture's tabs, brand, rule and strip, the picker's head, the body's lines with the
-//! selection bar and the hover mark, the chips, and the footer.
+//! picture's tabs, brand, rule and strip, the picker's and the console's head, the body's
+//! lines with the selection bar and the hover mark, the chips, the console's input line and
+//! bar, and the footer.
 //!
 //! Every string is placed by `moa_view::text`'s display width, so a wide glyph (💤, CJK) takes
 //! two cells and is never split: the cell it covers is left as ratatui leaves it, empty, and a
@@ -36,6 +37,21 @@ pub fn draw(buf: &mut Buffer, area: Rect, screen: &Screen, theme: &Theme) {
         }
     }
     draw_body(&mut canvas, g.body, &screen.body, theme);
+    if let Some(palette) = g.palette {
+        for (line, y) in screen.palette.iter().zip(palette.y..palette.y + palette.h) {
+            draw_line(&mut canvas, palette, y, line, Mark::Plain, theme);
+        }
+    }
+    if let (Some(input), Some(line)) = (g.input, &screen.input)
+        && input.h > 0
+    {
+        draw_line(&mut canvas, input, input.y, line, Mark::Plain, theme);
+    }
+    if let Some(bar) = g.bar {
+        for (line, y) in screen.bar.iter().zip(bar.y..bar.y + bar.h) {
+            draw_line(&mut canvas, bar, y, line, Mark::Plain, theme);
+        }
+    }
     if let Some(strip) = g.strip {
         // The rule is the line just above the strip.
         if let (Some(rule), Some(y)) = (&screen.rule, strip.y.checked_sub(1)) {

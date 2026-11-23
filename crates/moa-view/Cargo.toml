@@ -16,6 +16,7 @@ unicode-width.workspace = true
 unicode-segmentation.workspace = true
 textwrap.workspace = true
 pulldown-cmark.workspace = true
+shell-words.workspace = true
 
 [features]
 # `fixture::lantern`: the data every view test draws from.

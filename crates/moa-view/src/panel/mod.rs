@@ -14,18 +14,20 @@ use crate::data::{Data, SessionRow};
 use crate::editor::{Edited, Editor};
 use crate::geometry::{Geometry, Rect, Size, geometry};
 use crate::keys::{self, Action, Key};
-use crate::line::{Button, Item, Line, Span, Tone, debug_lines};
-use crate::list::ListState;
+use crate::line::{Item, Line, Span, Tone, debug_lines};
+use crate::list::{ListState, WHEEL};
 use crate::text::{self, clean};
-use crate::views::console::{self, ConsoleUi};
+use crate::views::console::{ConsoleUi, ConsoleView, Palette, Window};
 use crate::views::{self, ViewUi, picker, picture, tree};
 
 mod ask;
+mod console_keys;
 mod pick_keys;
 mod term_keys;
 mod tree_keys;
 
 use ask::Ask;
+pub use console_keys::{CONSOLE_MANAGED, ERROR_AGAIN_MS, PAGE, STILL_WAITING};
 
 /// What a panel asks its loop to do.
 // One is built per key, click or reply, so boxing the op buys nothing.
@@ -74,10 +76,10 @@ pub struct Screen {
     pub tabs: Option<(Vec<&'static str>, usize)>,
     /// The picture's `moa` mark at the right of its tabs.
     pub brand: Option<Span>,
-    /// The picker's head lines: its query and a rule.
+    /// The picker's head lines: its query and a rule. The console's head line.
     pub head: Vec<Line>,
     /// The cell the terminal's cursor stands in, when the view types into its head (the
-    /// picker's query).
+    /// picker's query) or its input line (the console's).
     pub cursor: Option<(u16, u16)>,
     /// The visible lines, each with its mark.
     pub body: Vec<(Line, Mark)>,
@@ -85,6 +87,12 @@ pub struct Screen {
     pub rule: Option<Line>,
     /// The picture's activity strip.
     pub strip: Vec<Line>,
+    /// The console's input line.
+    pub input: Option<Line>,
+    /// The console's `/` palette, one line a row.
+    pub palette: Vec<Line>,
+    /// The console's bar, as many lines as it has rows.
+    pub bar: Vec<Line>,
     /// The footer, as one span. Only the editor is fitted to the footer here (its end is
     /// kept, with a cell left for the cursor); drawing clips the rest.
     pub footer: Span,
@@ -94,9 +102,10 @@ pub struct Screen {
     pub wake_at: Option<UtcMs>,
 }
 
-/// The screen as text, for snapshots: the picture's tabs and brand; the picker's head; the
-/// body's lines as [`debug_lines`] prints them, each after `> ` when selected, `~ ` when
-/// hovered and two spaces otherwise; the picture's rule and strip; then the footer.
+/// The screen as text, for snapshots: the picture's tabs and brand; the picker's or the
+/// console's head; the body's lines as [`debug_lines`] prints them, each after `> ` when
+/// selected, `~ ` when hovered and two spaces otherwise; the picture's rule and strip; the
+/// console's input and bar; then the footer.
 pub fn debug_screen(screen: &Screen) -> String {
     let mut out = String::new();
     if let Some((_, shown)) = &screen.tabs {
@@ -124,6 +133,18 @@ pub fn debug_screen(screen: &Screen) -> String {
     }
     for line in &screen.strip {
         out.push_str("strip: ");
+        out.push_str(&debug_lines(std::slice::from_ref(line)));
+    }
+    if let Some(line) = &screen.input {
+        out.push_str("input: ");
+        out.push_str(&debug_lines(std::slice::from_ref(line)));
+    }
+    for line in &screen.palette {
+        out.push_str("palette: ");
+        out.push_str(&debug_lines(std::slice::from_ref(line)));
+    }
+    for line in &screen.bar {
+        out.push_str("bar: ");
         out.push_str(&debug_lines(std::slice::from_ref(line)));
     }
     let bold = if screen.footer.bold { "*" } else { "" };
@@ -172,7 +193,7 @@ pub struct Panel {
     view: View,
     ui: ViewUi,
     list: ListState,
-    /// The lines of the last build.
+    /// The lines of the last build; none for the console, whose build is `built`.
     lines: Vec<Line>,
     prompt: Option<Prompt>,
     confirm: Option<Confirm>,
@@ -200,12 +221,16 @@ pub struct Panel {
     pick_tag: Option<u64>,
     /// The picker's matches, kept while the data's revision and the query stay.
     picks: Option<Picks>,
-    /// What the console keeps: its paged-in rows, cards and errors.
+    /// What the console keeps: its paged-in rows, cards, errors, input, scroll and waits.
     console: ConsoleUi,
-    /// The buttons of the console's last build (the text's, then the bar's), and the bar's
-    /// lines.
-    buttons: Vec<Button>,
-    bar: Vec<Line>,
+    /// The console's last build, its bar cut to the rows it has; `lines` stays empty.
+    built: ConsoleView,
+    /// What the console's feed showed of it.
+    window: Window,
+    /// The console's `/` palette for the last build's draft, if open.
+    palette: Option<Palette>,
+    /// The loop's connection isn't up: the console's head line says so.
+    link_down: bool,
 }
 
 /// The picker's matches for one revision of the data and one query.
@@ -267,8 +292,10 @@ impl Panel {
             pick_tag: None,
             picks: None,
             console: ConsoleUi::default(),
-            buttons: Vec::new(),
-            bar: Vec::new(),
+            built: ConsoleView::default(),
+            window: Window::default(),
+            palette: None,
+            link_down: false,
         }
     }
 
@@ -327,6 +354,11 @@ impl Panel {
         self.managed = managed;
     }
 
+    /// Whether the loop's connection is up, as the console's head line says.
+    pub fn set_link_up(&mut self, up: bool) {
+        self.link_down = !up;
+    }
+
     /// Marks the panel as drawn in a tmux popup (S8), which tmux frames, so it draws no frame
     /// of its own (S11).
     pub fn set_popup(&mut self, popup: bool) {
@@ -358,17 +390,30 @@ impl Panel {
         self.forget_pick();
     }
 
-    /// The connection ended: the pick's reply won't come, so another Enter may pick.
-    pub fn forget_pick(&mut self) {
+    /// The pick's reply is in, or won't come: another Enter may pick.
+    fn forget_pick(&mut self) {
         self.picking = None;
         self.pick_tag = None;
     }
 
+    /// The connection ended, or an op couldn't be sent: no reply the panel waits on will
+    /// come. Another Enter may pick, the console may ask for a page again, and its draft
+    /// stays as it is.
+    pub fn forget_replies(&mut self) {
+        self.forget_pick();
+        self.console.asked = None;
+        self.console.waits.clear();
+    }
+
     /// An op the panel asked to send went out under `tag`. The first one after a pick is the
-    /// pick's: its reply is the one that closes the view.
+    /// pick's: its reply is the one that closes the view. One the console asked for is
+    /// waited on by its tag.
     pub fn sent(&mut self, tag: u64) {
         if self.picking.is_some() && self.pick_tag.is_none() {
             self.pick_tag = Some(tag);
+        }
+        if let Some(asked) = self.console.asked.take() {
+            self.console.waits.insert(tag, asked);
         }
     }
 
@@ -380,6 +425,17 @@ impl Panel {
             None
         } else {
             Some(Out::Quit)
+        }
+    }
+
+    /// The frame's title: the view's label; the console's names the brain (B9).
+    fn title(&self, data: &Data) -> String {
+        let label = self.view.label();
+        match &data.brain {
+            Some(brain) if self.view == View::Console => {
+                format!("{label} · {}", clean(&brain.name))
+            }
+            _ => label.to_string(),
         }
     }
 
@@ -414,17 +470,15 @@ impl Panel {
     /// Rebuilds the lines from `data`, keeps the selection on its item (V8) and the view on
     /// the selection, and drops a hover whose item left the list.
     fn refresh(&mut self, data: &Data, ctx: &Ctx, size: Size) -> Geometry {
-        let g = geometry(self.view, self.view.framed() && !self.popup, size);
+        let mut g = geometry(self.view, self.view.framed() && !self.popup, size);
         let was = self.selected().cloned();
         let width = build_width(&g);
         self.lines = if self.view == View::Picker {
             let m = picks(&mut self.picks, data, &self.ui.query);
             picker::lines(m, &self.ui.query, ctx, width)
         } else if self.view == View::Console {
-            let built = console::build(data, ctx, &self.console, width);
-            self.buttons = built.buttons;
-            self.bar = built.bar;
-            built.lines
+            g = self.console_refresh(data, ctx, g);
+            Vec::new()
         } else {
             views::build(self.view, data, ctx, &self.ui, width)
         };
@@ -473,6 +527,9 @@ impl Panel {
         if self.view == View::Picker {
             return self.pick_key(k, data, body);
         }
+        if self.view == View::Console {
+            return self.console_key(k, data, ctx, body);
+        }
         let tab = self.ui.tab;
         let mut out = Vec::new();
         // The picture's rows follow its tab's keys (V21).
@@ -502,7 +559,7 @@ impl Panel {
             }
             Mouse::Click { x, y } => {
                 self.pointer = Some((x, y));
-                if let Some(command) = self.button_at(g.body, x, y) {
+                if let Some(command) = self.button_at(&g, x, y) {
                     // Like any other click: a question is answered no, a prompt ignores it.
                     if self.confirm.take().is_some() {
                         return Handled { out, redraw: true };
@@ -512,7 +569,7 @@ impl Panel {
                     }
                     // A click on a button presses it.
                     self.message = None;
-                    let out = vec![Out::Send(Op::ConsoleCommand { line: command })];
+                    let out = self.press(command, ctx.now);
                     return Handled { out, redraw: true };
                 }
                 let hit = self.row_at(g.body, x, y);
@@ -533,6 +590,12 @@ impl Panel {
                     }
                 }
             }
+            Mouse::WheelUp | Mouse::WheelDown if self.view == View::Console => {
+                let by = isize::try_from(WHEEL).unwrap_or(isize::MAX);
+                let by = if m == Mouse::WheelDown { by } else { -by };
+                self.console_scroll(usize::from(g.body.h), by);
+                return Handled { out, redraw: true };
+            }
             Mouse::WheelUp | Mouse::WheelDown => {
                 let down = m == Mouse::WheelDown;
                 self.list.wheel(&self.lines, usize::from(g.body.h), down);
@@ -544,18 +607,6 @@ impl Panel {
             out,
             redraw: was != self.hover,
         }
-    }
-
-    /// The command of the console's button drawn at screen cell (`x`, `y`), if any.
-    fn button_at(&self, body: Rect, x: u16, y: u16) -> Option<String> {
-        if self.view != View::Console || !body.contains(x, y) {
-            return None;
-        }
-        let line = self.lines.get(self.list.top + usize::from(y - body.y))?;
-        let button = console::button_at(line, usize::from(x - body.x))?;
-        self.buttons
-            .get(usize::from(button))
-            .map(|b| b.command.clone())
     }
 
     /// The selectable line drawn at screen cell (`x`, `y`), if any.
@@ -601,12 +652,16 @@ impl Panel {
         }
     }
 
-    /// Pasted text goes to the prompt being answered, else into the picker's query.
+    /// Pasted text goes to the prompt being answered, else into the picker's query or the
+    /// console's input.
     pub fn paste(&mut self, text: &str) {
         if let Some(prompt) = &mut self.prompt {
             prompt.editor.paste(text);
         } else if self.view == View::Picker {
             self.edit_query(|e| e.paste(text));
+        } else if self.view == View::Console {
+            self.console.draft.paste(text);
+            self.reopen_if_edited();
         }
     }
 
@@ -615,6 +670,10 @@ impl Panel {
     /// footer, the view still open (S7). Only the reply to the pick's own send (`tag`, see
     /// [`Panel::sent`]) counts: another op's reply neither closes nor frees the pick.
     pub fn replied(&mut self, tag: u64, result: Result<Done, String>) -> Option<Out> {
+        if let Some(asked) = self.console.waits.remove(&tag) {
+            self.console_replied(asked, result);
+            return None;
+        }
         let ok = self.show(result);
         if self.picking.is_some() && self.pick_tag == Some(tag) {
             self.forget_pick();
@@ -644,6 +703,16 @@ impl Panel {
     /// until the next key.
     pub fn note(&mut self, text: &str) {
         self.message = Some(Message::sticky(text));
+    }
+
+    /// An error the daemon told of at `now`: the footer's, as [`note`](Panel::note); the
+    /// console also shows it in its feed, the same text at most once in
+    /// [`ERROR_AGAIN_MS`] (B10).
+    pub fn error(&mut self, text: &str, now: UtcMs) {
+        self.note(text);
+        if self.view == View::Console {
+            self.console_error(text, now);
+        }
     }
 
     /// A broadcast event that came at `now`: the footer shows it, dim, for
@@ -678,6 +747,9 @@ impl Panel {
                 body: Vec::new(),
                 rule: None,
                 strip: Vec::new(),
+                input: None,
+                palette: Vec::new(),
+                bar: Vec::new(),
                 footer: Span::new("", Tone::Dim),
                 animate: false,
                 wake_at: None,
@@ -690,12 +762,25 @@ impl Panel {
             .enumerate()
             .skip(self.list.top)
             .take(usize::from(g.body.h));
-        let body: Vec<(Line, Mark)> = shown.map(|(i, l)| (l.clone(), self.mark(i))).collect();
+        let mut body: Vec<(Line, Mark)> = shown.map(|(i, l)| (l.clone(), self.mark(i))).collect();
         let mut tabs = None;
         let mut brand = None;
         let mut head = Vec::new();
         let mut cursor = None;
-        if let Some(r) = g.head.filter(|r| r.h > 0 && r.w > 0) {
+        let mut input = None;
+        let mut bar = Vec::new();
+        let mut palette = Vec::new();
+        if self.view == View::Console {
+            let parts = self.console_parts(data, ctx, &g);
+            (head, body, cursor, input, palette, bar) = (
+                parts.head,
+                parts.body,
+                parts.cursor,
+                parts.input,
+                parts.palette,
+                parts.bar,
+            );
+        } else if let Some(r) = g.head.filter(|r| r.h > 0 && r.w > 0) {
             let m = picks(&mut self.picks, data, &self.ui.query);
             let built = picker::head(m, &self.ui.query, build_width(&g));
             head = built.lines.into_iter().take(usize::from(r.h)).collect();
@@ -719,7 +804,13 @@ impl Panel {
             }
         }
         // Only what is on screen moves or changes (V10).
-        let visible = || body.iter().map(|(l, _)| l).chain(&strip).chain(&brand);
+        let visible = || {
+            body.iter()
+                .map(|(l, _)| l)
+                .chain(&strip)
+                .chain(&brand)
+                .chain(&head)
+        };
         let animate = visible().any(|l| l.animated);
         // An event in the footer goes at its deadline.
         let footer_ends = if self.typing() {
@@ -734,7 +825,7 @@ impl Panel {
             .filter(|t| *t > ctx.now)
             .min();
         Screen {
-            title: g.framed.then(|| self.view.label().to_string()),
+            title: g.framed.then(|| self.title(data)),
             tabs,
             brand: brand.and_then(|l| l.spans.into_iter().next()),
             head,
@@ -742,6 +833,9 @@ impl Panel {
             body,
             rule,
             strip,
+            input,
+            palette,
+            bar,
             footer: self.footer(data, ctx.now, g.footer.w),
             animate,
             wake_at,

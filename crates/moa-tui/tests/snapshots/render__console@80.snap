@@ -2,19 +2,19 @@
 source: crates/moa-tui/tests/render.rs
 expression: screen_text(&buf)
 ---
-╭─ ◆ moa ──────────────────────────────────────────────────────────────────────╮
-│ › What did Kite do today?                                                    │
-│ ◆ moa  17:41                                                                 │
-│ │ Kite finished the release notes draft. [/brief] has the rest.              │
+╭─ ◆ moa · default ────────────────────────────────────────────────────────────╮
+│ thread 0193b4f0 · ⠸ thinking… Esc cancels                                    │
+│ ↑ 35 more                                                                    │
 │                                                                              │
-│ ── Fri 13 Nov · thread 0193b4f0 ──                                           │
-│ ◆ moa  08:00 · on its own                                                    │
-│ │ Checking the sessions first. …                                             │
-│ │ Good morning. Three things:                                                │
-│ │                                                                            │
-│ │ • Fix login needs you                                                      │
-│ │ • Kite's release notes are done ✓                                          │
-│ │ • [/attention] lists the rest                                              │
+│ › Why did Migrate DB fail?                                                   │
+│ ◆ moa  09:51                                                                 │
+│ │ ✗ moa's agent stopped answering                                            │
+│                                                                              │
+│ › Check the deploy                                                           │
+│ ◆ moa  09:58                                                                 │
+│ │ ⚙ Terminal: tail -n 50 deploy.log ⠸                                        │
+│ › ask moa, or / for commands                                                 │
+│ [/brief] [/attention] [/ls] [/help]                                          │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯

@@ -1,0 +1,13 @@
+---
+source: crates/moa-view/tests/console.rs
+expression: debug_lines(&lines)
+---
+[dim]connecting…
+[dim]thread 0193b4f0 · [dim]○ off · type to start moa
+[dim]thread 0193b4f0 · [work]◌ starting
+[dim]thread 0193b4f0 · [work]⠸ thinking…[dim] Esc cancels
+[dim]thread 0193b4f0 · [ok]● ready
+[dim]thread 0193b4f0 · [fail]✗ moa's agent exited (code 1) see moa.log
+[dim]thread 0193b4f0 · [fail]✗ failed
+[dim]thread 0193b4f0 · [dim]waking
+[dim]thread 0193b4f0 · [work]⠸ thinking…[dim] Esc cancels[dim] · [work]↓ 12 new

@@ -2,6 +2,9 @@
 
 use crate::line::{Item, Line};
 
+/// How many lines the wheel scrolls.
+pub const WHEEL: usize = 3;
+
 /// Where a list is scrolled and what it has selected.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ListState {
@@ -146,15 +149,15 @@ impl ListState {
         };
     }
 
-    /// The wheel: three lines of scroll. A selection scrolled out of view comes along to the
+    /// The wheel: [`WHEEL`] lines of scroll. A selection scrolled out of view comes along to the
     /// nearest visible item, since keys act on what can be seen; the view stays where it was
     /// scrolled until the next key.
     pub fn wheel(&mut self, lines: &[Line], body: usize, down: bool) {
         let body = body.max(1);
         self.top = if down {
-            self.top.saturating_add(3).min(max_top(lines, body))
+            self.top.saturating_add(WHEEL).min(max_top(lines, body))
         } else {
-            self.top.min(max_top(lines, body)).saturating_sub(3)
+            self.top.min(max_top(lines, body)).saturating_sub(WHEEL)
         };
         let shown: Vec<usize> = selectable(lines)
             .into_iter()

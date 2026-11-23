@@ -262,3 +262,92 @@ fn the_editor_erases_and_shows_by_display_width() {
     let e = Editor::new("t:", "語語語");
     assert_eq!(e.shown(5), "語語", "a wide character never splits");
 }
+
+/// B7: the console's input moves its cursor (Left, Right, Home, End) by grapheme; typing and
+/// a paste go in at the cursor and Backspace, Ctrl-w and Ctrl-u erase before it. A ZWJ
+/// sequence is one grapheme. `view` keeps the cursor in sight, cleaned for drawing.
+#[test]
+fn editor_moves_its_cursor() {
+    let mut e = Editor::new("", "held");
+    assert_eq!(e.at, 4, "a prefill leaves the cursor at its end");
+    for _ in 0..2 {
+        assert!(e.step(Key::Left));
+    }
+    typed(&mut e, "XY");
+    assert_eq!((e.text.as_str(), e.at), ("heXYld", 4));
+    e.key(Key::Backspace);
+    assert_eq!(
+        (e.text.as_str(), e.at),
+        ("heXld", 3),
+        "erases before the cursor"
+    );
+    assert!(e.step(Key::Home));
+    assert_eq!(e.at, 0);
+    e.key(Key::Backspace);
+    assert_eq!(e.text, "heXld", "nothing before the cursor");
+    assert!(e.step(Key::Left));
+    assert_eq!(e.at, 0, "the start stops it");
+    assert!(e.step(Key::End));
+    assert_eq!(e.at, 5);
+    e.step(Key::Right);
+    assert_eq!(e.at, 5, "the end stops it");
+    assert!(!e.step(Key::Up), "Up isn't the cursor's");
+
+    // A family emoji (ZWJ) is one grapheme: one step over it, one Backspace erases it.
+    let family = "👨\u{200d}👩\u{200d}👧";
+    let mut e = Editor::new("", format!("a{family}b"));
+    assert_eq!(e.at, 3);
+    e.step(Key::Left);
+    e.step(Key::Left);
+    assert_eq!(e.at, 1);
+    e.step(Key::Right);
+    e.key(Key::Backspace);
+    assert_eq!((e.text.as_str(), e.at), ("ab", 1));
+
+    // Ctrl-w drops the word before the cursor, Ctrl-u all before it; a paste goes in there.
+    let mut e = Editor::new("", "one two three");
+    for _ in 0..5 {
+        e.step(Key::Left);
+    }
+    e.key(Key::Ctrl('w'));
+    assert_eq!((e.text.as_str(), e.at), ("one three", 4));
+    e.paste("x\ny ");
+    assert_eq!((e.text.as_str(), e.at), ("one x y three", 8));
+    e.key(Key::Ctrl('u'));
+    assert_eq!((e.text.as_str(), e.at), ("three", 0));
+
+    // The view keeps the cursor in sight: the start goes when it is past the edge.
+    let e = Editor::new("", "abcdefghij");
+    assert_eq!(e.view(20), ("abcdefghij".to_string(), 10));
+    assert_eq!(
+        e.view(5),
+        ("ghij".to_string(), 4),
+        "a cell is kept for the cursor"
+    );
+    let mut e = Editor::new("", "abcdefghij");
+    e.step(Key::Home);
+    assert_eq!(e.view(5), ("abcde".to_string(), 0));
+    let e = Editor::new("", format!("{family}\u{1b}x"));
+    assert_eq!(
+        e.view(10),
+        ("👨 x".to_string(), 4),
+        "cleaned, the ZWJ sequence one glyph"
+    );
+}
+
+/// The footer's prompts keep their cursor at the end: what they type, erase and show is as
+/// before the cursor came.
+#[test]
+fn the_footer_prompts_still_work() {
+    let mut e = Editor::new("title:", "old");
+    typed(&mut e, " name");
+    assert_eq!(e.text, "old name");
+    assert_eq!(e.at, 8);
+    e.key(Key::Ctrl('w'));
+    assert_eq!(e.text, "old ");
+    e.key(Key::Left);
+    typed(&mut e, "x");
+    assert_eq!(e.text, "old x", "key() never moves the cursor");
+    assert_eq!(e.shown(40), "title: old x");
+    assert_eq!(e.key(Key::Enter), Edited::Done("old x".into()));
+}

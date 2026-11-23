@@ -803,6 +803,57 @@ fn the_picture_has_tabs_a_strip_and_a_footer() {
     );
 }
 
+/// The console's head line, feed, input line and bar, however many rows the bar asks for:
+/// one under the other, without overlap, filling what the feed had, the feed keeping a row
+/// while it has one; the bar has the rows asked for while the feed has more to give.
+fn console_parts_tile(g: moa_view::geometry::Geometry, view: View) {
+    if view != View::Console {
+        assert_eq!(g.with_bar_rows(3), g, "{view:?} has no bar");
+        assert_eq!(g.with_palette_rows(3), g, "{view:?} has no palette");
+        return;
+    }
+    let total = |g: &moa_view::geometry::Geometry| {
+        [g.head, Some(g.body), g.input, g.bar]
+            .iter()
+            .map(|r| r.unwrap_or_default().h)
+            .sum::<u16>()
+    };
+    for rows in 0..=4 {
+        let grown = g.with_bar_rows(rows);
+        assert_eq!(total(&grown), total(&g), "{rows} rows: {grown:?}");
+        let bar = grown.bar.unwrap_or_default();
+        let input = grown.input.unwrap_or_default();
+        if bar.h > 0 {
+            assert_eq!(bar.y, input.y + input.h, "{rows}: {grown:?}");
+            if grown.body.h > 0 {
+                assert_eq!(input.y, grown.body.y + grown.body.h, "{rows}: {grown:?}");
+            }
+            let want = rows
+                .max(1)
+                .min(g.bar.unwrap().h + g.body.h.saturating_sub(1));
+            assert_eq!(bar.h, want, "{rows}: {grown:?}");
+        }
+        assert!(grown.body.h > 0 || g.body.h == 0, "{rows}: {grown:?}");
+    }
+    // The palette (F16) takes its rows from the feed, directly above the input line.
+    let all = |g: &moa_view::geometry::Geometry| total(g) + g.palette.unwrap_or_default().h;
+    for rows in 0..=10 {
+        let open = g.with_bar_rows(2).with_palette_rows(rows);
+        assert_eq!(
+            all(&open),
+            all(&g.with_bar_rows(2)),
+            "{rows} rows: {open:?}"
+        );
+        assert!(open.body.h > 0 || g.body.h == 0, "{rows}: {open:?}");
+        let p = open.palette.unwrap_or_default();
+        assert!(p.h <= rows);
+        if p.h > 0 {
+            assert_eq!(p.y + p.h, open.input.unwrap().y, "{rows}: {open:?}");
+            assert_eq!(open.body.y + open.body.h, p.y, "{rows}: {open:?}");
+        }
+    }
+}
+
 #[test]
 fn any_size_lays_out_inside_itself() {
     let inside = |r: Rect, size: Size| {
@@ -812,14 +863,24 @@ fn any_size_lays_out_inside_itself() {
                 && u32::from(r.x) + u32::from(r.w) <= u32::from(size.w)
                 && u32::from(r.y) + u32::from(r.h) <= u32::from(size.h))
     };
-    for view in [View::Tree, View::Picture, View::EmptySlot] {
+    for view in [View::Tree, View::Picture, View::EmptySlot, View::Console] {
         for w in 0..12 {
             for h in 0..14 {
                 let size = Size { w, h };
                 let g = geometry(view, view.framed(), size);
-                for r in [Some(g.body), Some(g.footer), g.tabs, g.strip]
-                    .into_iter()
-                    .flatten()
+                console_parts_tile(g, view);
+                for r in [
+                    Some(g.body),
+                    Some(g.footer),
+                    g.tabs,
+                    g.strip,
+                    g.head,
+                    g.input,
+                    g.bar,
+                    g.palette,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     assert!(inside(r, size), "{view:?} {size:?}: {r:?}");
                 }
