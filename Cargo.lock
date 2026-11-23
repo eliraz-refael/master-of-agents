@@ -1505,6 +1505,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "shell-words",
  "textwrap",
  "unicode-segmentation",
  "unicode-width",

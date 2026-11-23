@@ -809,6 +809,7 @@ fn the_picture_has_tabs_a_strip_and_a_footer() {
 fn console_parts_tile(g: moa_view::geometry::Geometry, view: View) {
     if view != View::Console {
         assert_eq!(g.with_bar_rows(3), g, "{view:?} has no bar");
+        assert_eq!(g.with_palette_rows(3), g, "{view:?} has no palette");
         return;
     }
     let total = |g: &moa_view::geometry::Geometry| {
@@ -833,6 +834,23 @@ fn console_parts_tile(g: moa_view::geometry::Geometry, view: View) {
             assert_eq!(bar.h, want, "{rows}: {grown:?}");
         }
         assert!(grown.body.h > 0 || g.body.h == 0, "{rows}: {grown:?}");
+    }
+    // The palette (F16) takes its rows from the feed, directly above the input line.
+    let all = |g: &moa_view::geometry::Geometry| total(g) + g.palette.unwrap_or_default().h;
+    for rows in 0..=10 {
+        let open = g.with_bar_rows(2).with_palette_rows(rows);
+        assert_eq!(
+            all(&open),
+            all(&g.with_bar_rows(2)),
+            "{rows} rows: {open:?}"
+        );
+        assert!(open.body.h > 0 || g.body.h == 0, "{rows}: {open:?}");
+        let p = open.palette.unwrap_or_default();
+        assert!(p.h <= rows);
+        if p.h > 0 {
+            assert_eq!(p.y + p.h, open.input.unwrap().y, "{rows}: {open:?}");
+            assert_eq!(open.body.y + open.body.h, p.y, "{rows}: {open:?}");
+        }
     }
 }
 
@@ -859,6 +877,7 @@ fn any_size_lays_out_inside_itself() {
                     g.head,
                     g.input,
                     g.bar,
+                    g.palette,
                 ]
                 .into_iter()
                 .flatten()

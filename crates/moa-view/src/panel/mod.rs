@@ -89,6 +89,8 @@ pub struct Screen {
     pub strip: Vec<Line>,
     /// The console's input line.
     pub input: Option<Line>,
+    /// The console's `/` palette, one line a row.
+    pub palette: Vec<Line>,
     /// The console's bar, as many lines as it has rows.
     pub bar: Vec<Line>,
     /// The footer, as one span. Only the editor is fitted to the footer here (its end is
@@ -135,6 +137,10 @@ pub fn debug_screen(screen: &Screen) -> String {
     }
     if let Some(line) = &screen.input {
         out.push_str("input: ");
+        out.push_str(&debug_lines(std::slice::from_ref(line)));
+    }
+    for line in &screen.palette {
+        out.push_str("palette: ");
         out.push_str(&debug_lines(std::slice::from_ref(line)));
     }
     for line in &screen.bar {
@@ -738,6 +744,7 @@ impl Panel {
                 rule: None,
                 strip: Vec::new(),
                 input: None,
+                palette: Vec::new(),
                 bar: Vec::new(),
                 footer: Span::new("", Tone::Dim),
                 animate: false,
@@ -758,10 +765,12 @@ impl Panel {
         let mut cursor = None;
         let mut input = None;
         let mut bar = Vec::new();
+        let mut palette = Vec::new();
         if self.view == View::Console {
             let parts = self.console_parts(data, ctx, &g);
             (head, body, cursor, input, bar) =
                 (parts.head, parts.body, parts.cursor, parts.input, parts.bar);
+            palette = parts.palette;
         } else if let Some(r) = g.head.filter(|r| r.h > 0 && r.w > 0) {
             let m = picks(&mut self.picks, data, &self.ui.query);
             let built = picker::head(m, &self.ui.query, build_width(&g));
@@ -816,6 +825,7 @@ impl Panel {
             rule,
             strip,
             input,
+            palette,
             bar,
             footer: self.footer(data, ctx.now, g.footer.w),
             animate,

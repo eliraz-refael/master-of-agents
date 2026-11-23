@@ -56,6 +56,9 @@ pub struct Geometry {
     pub input: Option<Rect>,
     /// The console's button bar, under its input line (B5).
     pub bar: Option<Rect>,
+    /// The console's `/` palette, directly above its input line (B11). Empty while it is
+    /// closed.
+    pub palette: Option<Rect>,
     /// One line for the editor, a question, a message or the key hints.
     pub footer: Rect,
 }
@@ -71,7 +74,8 @@ pub const STRIP: u16 = 7;
 /// without a frame is laid out like the empty slot: the spike's margins, the body at x 2,
 /// y 1, and the footer on the last line. The picker's head takes the first [`HEAD`] lines of
 /// its body, framed or not. The console's body is, from the top: its head line, the feed, its
-/// input line and its bar, a line each but the feed; a body too short for all of them keeps
+/// input line and its bar, a line each but the feed (an open palette takes rows above the
+/// input line, from the feed); a body too short for all of them keeps
 /// the input first, then the head line, then the bar. Parts too small to have cells are empty.
 pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
     let mut g = layout(view, framed, size);
@@ -90,6 +94,7 @@ pub fn geometry(view: View, framed: bool, size: Size) -> Geometry {
         g.body = Rect::new(b.x, b.y + head, b.w, feed);
         g.input = Some(Rect::new(b.x, b.y + head + feed, b.w, input));
         g.bar = Some(Rect::new(b.x, b.y + head + feed + input, b.w, bar));
+        g.palette = Some(Rect::default());
     }
     g
 }
@@ -110,6 +115,22 @@ impl Geometry {
         self.body = Rect::new(b.x, b.y, b.w, b.h - more);
         self.input = Some(Rect::new(input.x, input.y - more, input.w, input.h));
         self.bar = Some(Rect::new(bar.x, bar.y - more, bar.w, bar.h + more));
+        self
+    }
+}
+
+impl Geometry {
+    /// The console's palette `rows` high, directly above its input line, its rows taken from
+    /// the bottom of the feed, which keeps at least one row while it has one (F16). Its other
+    /// views are as they are.
+    pub fn with_palette_rows(mut self, rows: u16) -> Geometry {
+        if self.palette.is_none() {
+            return self;
+        }
+        let b = self.body;
+        let more = rows.min(b.h.saturating_sub(1));
+        self.body = Rect::new(b.x, b.y, b.w, b.h - more);
+        self.palette = Some(Rect::new(b.x, b.y + b.h - more, b.w, more));
         self
     }
 }
@@ -141,6 +162,7 @@ fn layout(view: View, framed: bool, size: Size) -> Geometry {
             strip,
             input: None,
             bar: None,
+            palette: None,
             footer,
         };
     }
@@ -158,6 +180,7 @@ fn layout(view: View, framed: bool, size: Size) -> Geometry {
             strip: None,
             input: None,
             bar: None,
+            palette: None,
             footer,
         };
     }
@@ -176,6 +199,7 @@ fn layout(view: View, framed: bool, size: Size) -> Geometry {
         strip: None,
         input: None,
         bar: None,
+        palette: None,
         footer,
     }
 }

@@ -37,6 +37,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, screen: &Screen, theme: &Theme) {
         }
     }
     draw_body(&mut canvas, g.body, &screen.body, theme);
+    if let Some(palette) = g.palette {
+        for (line, y) in screen.palette.iter().zip(palette.y..palette.y + palette.h) {
+            draw_line(&mut canvas, palette, y, line, Mark::Plain, theme);
+        }
+    }
     if let (Some(input), Some(line)) = (g.input, &screen.input)
         && input.h > 0
     {

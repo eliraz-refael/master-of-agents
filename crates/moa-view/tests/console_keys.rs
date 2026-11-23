@@ -4,7 +4,7 @@
 use moa_core::UtcMs;
 use moa_core::op::{Done, NoParams, Op};
 use moa_core::panel::View;
-use moa_core::publish::{BarRow, FeedRow, MoaRow};
+use moa_core::publish::{BarRow, FeedRow, LayoutRow, MoaRow};
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
 use moa_view::fixture::lantern;
@@ -787,4 +787,212 @@ fn a_long_bar_wraps_onto_three_rows() {
             line: "/focus kite-release-notes".into()
         })]
     );
+}
+
+/// The palette's lines, as text, the chosen one marked with `*`.
+fn palette(c: &mut C) -> Vec<String> {
+    let screen = c.screen();
+    screen
+        .palette
+        .iter()
+        .map(|l| {
+            let star = l.spans.iter().any(|s| s.reversed);
+            format!("{}{}", if star { "*" } else { "" }, text(l).trim())
+        })
+        .collect()
+}
+
+fn layouts(c: &mut C, names: &[&str]) {
+    c.data.layouts.clear();
+    for (index, name) in names.iter().enumerate() {
+        c.data.layouts.insert(
+            name.to_string(),
+            LayoutRow {
+                name: name.to_string(),
+                index,
+                leaves: Vec::new(),
+                current: index == 0,
+                error: None,
+            },
+        );
+    }
+    c.data.touch();
+}
+
+/// The id of the live session titled `title`.
+fn id_of(c: &C, title: &str) -> String {
+    let row = c
+        .data
+        .sessions
+        .values()
+        .find(|r| r.session.title.as_deref() == Some(title))
+        .unwrap();
+    row.session.id.to_string()
+}
+
+/// B11: `/` shows the commands (not the hidden ones), at most 8 lines, directly above the
+/// input line; `/re` narrows them to `/resume`.
+#[test]
+fn slash_opens_the_palette() {
+    let mut c = C::new(notes(1..=20), SIZE);
+    assert!(palette(&mut c).is_empty());
+    c.typed("/");
+    let lines = palette(&mut c);
+    assert_eq!(lines.len(), 8, "{lines:#?}");
+    assert!(lines[0].starts_with("*/attention"), "{lines:#?}");
+    let g = c.screen().geometry;
+    let (p, input) = (g.palette.unwrap(), g.input.unwrap());
+    assert_eq!((p.h, p.y + p.h), (8, input.y), "right above the input");
+    // The hidden command is in no list, even typed in full.
+    c.typed("sugg");
+    let lines = palette(&mut c);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert!(lines[0].contains("/suggestions"), "{lines:#?}");
+    c.key(Key::Ctrl('u'));
+    c.typed("/re");
+    let lines = palette(&mut c);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert!(lines[0].starts_with("*/resume"), "{lines:#?}");
+    // A line that isn't a command opens nothing.
+    c.key(Key::Ctrl('u'));
+    c.typed("re");
+    assert!(palette(&mut c).is_empty());
+}
+
+/// B11, F9: `/resume ` lists the live sessions' titles, narrowed by what is typed; layout
+/// names come after `/layout apply ` and `/layout show `, not after a bare `/layout `.
+#[test]
+fn after_resume_it_lists_sessions() {
+    let mut c = C::new(Vec::new(), SIZE);
+    layouts(&mut c, &["Work", "Review"]);
+    c.typed("/resume ");
+    let lines = palette(&mut c);
+    assert_eq!(lines.len(), 8, "{lines:#?}");
+    assert!(
+        lines.iter().all(|l| !l.contains("Gone")),
+        "archived: {lines:#?}"
+    );
+    c.typed("rel");
+    let lines = palette(&mut c);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert!(lines[0].contains("Release notes"), "{lines:#?}");
+    // Only the first argument of /resume is a session.
+    c.key(Key::Ctrl('u'));
+    c.typed("/resume x rel");
+    assert!(palette(&mut c).is_empty());
+    // /archive takes several.
+    c.key(Key::Ctrl('u'));
+    c.typed("/archive x rel");
+    assert_eq!(palette(&mut c).len(), 1);
+
+    for open in ["/layout apply ", "/layout show "] {
+        c.key(Key::Ctrl('u'));
+        c.typed(open);
+        let lines = palette(&mut c);
+        assert_eq!(lines.len(), 2, "{open}: {lines:#?}");
+        assert!(lines[0].contains("Work") && lines[1].contains("Review"));
+    }
+    c.typed("rev");
+    let lines = palette(&mut c);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    for bare in ["/layout ", "/layout list ", "/layout set "] {
+        c.key(Key::Ctrl('u'));
+        c.typed(bare);
+        assert!(palette(&mut c).is_empty(), "{bare}");
+    }
+}
+
+/// B11: Tab puts the chosen entry in the word's place, Up and Down choose; for a session the
+/// text is its id, quoted only if needed.
+#[test]
+fn tab_completes_and_up_down_choose() {
+    let mut c = C::new(Vec::new(), SIZE);
+    layouts(&mut c, &["Work", "my layout"]);
+    c.typed("/re");
+    assert!(c.key(Key::Tab).is_empty());
+    assert_eq!(c.input(), "› /resume ", "a name leads on to its argument");
+    assert_eq!(palette(&mut c).len(), 8, "now the sessions");
+
+    c.typed("release");
+    assert!(c.key(Key::Tab).is_empty());
+    let id = id_of(&c, "Release notes");
+    assert_eq!(c.input(), format!("› /resume {id}"));
+    assert!(palette(&mut c).is_empty(), "a finished word closes it");
+
+    // Down and Up choose, and wrap.
+    c.key(Key::Ctrl('u'));
+    c.typed("/layout apply ");
+    assert_eq!(palette(&mut c), ["*Work  current", "my layout"]);
+    c.key(Key::Down);
+    assert_eq!(palette(&mut c), ["Work  current", "*my layout"]);
+    c.key(Key::Down);
+    assert!(palette(&mut c)[0].starts_with('*'), "wraps");
+    c.key(Key::Up);
+    assert!(palette(&mut c)[1].starts_with('*'), "wraps back");
+    assert!(c.key(Key::Tab).is_empty());
+    assert_eq!(
+        c.input(),
+        "› /layout apply 'my layout'",
+        "quoted: it has a space"
+    );
+
+    // Up and Down walk the history again once it is closed.
+    assert!(palette(&mut c).is_empty());
+    c.key(Key::Ctrl('u'));
+    c.typed("/ls");
+    let outs = c.key(Key::Enter);
+    let (tag, _) = c.send(outs);
+    c.reply(tag, Ok(done("ok")));
+    c.key(Key::Up);
+    assert_eq!(c.input(), "› /ls");
+    assert!(palette(&mut c).is_empty(), "a recalled line opens none");
+}
+
+/// B11: Esc closes the palette first, then does what it did before (clears the draft); typing
+/// opens it again.
+#[test]
+fn esc_closes_the_palette_first() {
+    let mut c = C::new(Vec::new(), SIZE);
+    c.typed("/re");
+    assert_eq!(palette(&mut c).len(), 1);
+    assert!(c.key(Key::Esc).is_empty());
+    assert!(palette(&mut c).is_empty());
+    assert_eq!(c.input(), "› /re", "the draft stays");
+    // While closed, Tab and Up leave the palette alone.
+    c.key(Key::Esc);
+    assert_eq!(
+        c.input(),
+        "› ask moa, or / for commands",
+        "the second Esc clears"
+    );
+    c.typed("/re");
+    assert_eq!(palette(&mut c).len(), 1, "reopens");
+    c.key(Key::Esc);
+    c.typed("s");
+    assert_eq!(palette(&mut c).len(), 1, "typing opens it again");
+
+    // While moa thinks, the open palette still takes Esc before the cancel.
+    c.phase("thinking");
+    assert!(c.key(Key::Esc).is_empty());
+    assert_eq!(
+        c.key(Key::Esc),
+        vec![Out::Send(Op::ConsoleCancel(NoParams))]
+    );
+}
+
+/// F16: the palette takes rows from the feed, and the feed keeps one.
+#[test]
+fn the_palette_leaves_the_feed_a_row() {
+    let mut c = C::new(notes(1..=20), Size { w: 80, h: 11 });
+    c.typed("/");
+    let g = c.screen().geometry;
+    assert!(g.body.h >= 1, "{g:?}");
+    let p = g.palette.unwrap();
+    assert_eq!(p.y + p.h, g.input.unwrap().y);
+    assert_eq!(palette(&mut c).len(), usize::from(p.h));
+    // Down to the last of the commands: the chosen line is always drawn.
+    for _ in 0..4 {
+        c.key(Key::Down);
+    }
+    assert!(palette(&mut c).iter().any(|l| l.starts_with('*')));
 }

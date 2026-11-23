@@ -36,6 +36,7 @@ pub(super) struct Parts {
     pub body: Vec<(Line, Mark)>,
     pub cursor: Option<(u16, u16)>,
     pub input: Option<Line>,
+    pub palette: Vec<Line>,
     pub bar: Vec<Line>,
 }
 
@@ -67,6 +68,8 @@ impl Panel {
         let mut built = console::build(data, ctx, ui, build_width(&g));
         let rows = u16::try_from(built.bar.len()).unwrap_or(u16::MAX);
         let g = g.with_bar_rows(rows);
+        let open = console::palette(data, ui).map_or(0, |p| p.entries.len());
+        let g = g.with_palette_rows(u16::try_from(open).unwrap_or(u16::MAX));
         built.bar.truncate(usize::from(g.bar.map_or(0, |r| r.h)));
         let focus = ui.focused.as_ref().and_then(|f| built.find(f));
         if focus != ui.focus {
@@ -102,6 +105,9 @@ impl Panel {
         if self.console.draft.step(k) {
             return Vec::new();
         }
+        if self.palette_key(k, data) {
+            return Vec::new();
+        }
         let page = isize::try_from(rows.saturating_sub(1).max(1)).unwrap_or(isize::MAX);
         match k {
             Key::Enter => {
@@ -135,12 +141,42 @@ impl Panel {
             Key::PageDown => self.console_scroll(rows, page),
             _ => {
                 self.console.draft.key(k);
+                self.console.pick = 0;
+                self.console.closed = None;
                 if !self.console.draft.text.is_empty() {
                     self.focus(None);
                 }
             }
         }
         Vec::new()
+    }
+
+    /// A key while the palette is open: Tab completes the word with the chosen entry, Up and
+    /// Down (and BackTab) choose, Esc closes it until the draft changes. Whether the palette
+    /// took the key.
+    fn palette_key(&mut self, k: Key, data: &Data) -> bool {
+        let Some(p) = console::palette(data, &self.console) else {
+            return false;
+        };
+        let ui = &mut self.console;
+        let n = p.entries.len();
+        let pick = ui.pick.min(n - 1);
+        match k {
+            Key::Tab => {
+                let e = &p.entries[pick];
+                let mut text = ui.draft.text[..p.from].to_string();
+                text.push_str(&e.insert);
+                ui.draft.set(text);
+                ui.pick = 0;
+                // A name leads on to its arguments; an id or a name ends the word.
+                ui.closed = (!e.chain).then(|| ui.draft.text.clone());
+            }
+            Key::Up | Key::BackTab => ui.pick = (pick + n - 1) % n,
+            Key::Down => ui.pick = (pick + 1) % n,
+            Key::Esc => ui.closed = Some(ui.draft.text.clone()),
+            _ => return false,
+        }
+        true
     }
 
     /// Focuses button `focus` of the last build, or none.
@@ -244,12 +280,15 @@ impl Panel {
         if let Some(i) = next {
             ui.hist_at = Some(i);
             ui.draft.set(ui.history[i].clone());
+            // A recalled line isn't one being typed: no palette for it.
+            ui.closed = Some(ui.draft.text.clone());
         }
     }
 
     fn clear_draft(&mut self) {
         let ui = &mut self.console;
         ui.draft = Editor::default();
+        ui.pick = 0;
         ui.hist_at = None;
         ui.history.clear();
     }
@@ -337,6 +376,10 @@ impl Panel {
             .head
             .filter(|r| r.h > 0)
             .map(|_| console::head(data, ctx, !self.link_down, w.new, width));
+        let palette = console::palette(data, &self.console)
+            .zip(g.palette)
+            .map(|(p, r)| console::palette_lines(&p, self.console.pick, usize::from(r.h), r.w))
+            .unwrap_or_default();
         let (input, cursor) = match g.input.filter(|r| r.h > 0 && r.w > 0) {
             Some(r) => {
                 let (line, col) = console::input(&self.console, width);
@@ -350,6 +393,7 @@ impl Panel {
             body,
             cursor,
             input,
+            palette,
             bar: self.built.bar.clone(),
         }
     }

@@ -815,6 +815,24 @@ proptest! {
             prop_assert!(win.end - win.top + usize::from(win.more > 0) <= rows);
         }
         console::history(&data, &ui);
+        // The palette (F23), for any draft, session names and width: at most its rows, and
+        // each line within the width, whatever rows the screen gives it.
+        let typed = ui.draft.text.clone();
+        for draft in ["/".to_string(), "/resume ".into(), "/layout apply ".into(), format!("/{typed}"), format!("/archive {typed}"), format!("/focus '{typed}")] {
+            ui.draft.set(draft.clone());
+            let Some(p) = console::palette(&data, &ui) else { continue };
+            prop_assert!(!p.entries.is_empty() && p.entries.len() <= console::PALETTE_ROWS);
+            prop_assert!(draft.is_char_boundary(p.from));
+            for rows in [0, 1, 3, 8, 20] {
+                for pick in [0, 2, usize::MAX] {
+                    let lines = console::palette_lines(&p, pick, rows, w);
+                    prop_assert!(lines.len() <= rows.min(p.entries.len()));
+                    for line in &lines {
+                        check_line(line, usize::from(w), "a palette line")?;
+                    }
+                }
+            }
+        }
     }
 
     /// The terminals view, for 0 to 60 terminals with odd names at any width from 20 to 200:

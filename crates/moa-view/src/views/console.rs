@@ -86,6 +86,10 @@ pub struct ConsoleUi {
     pub shown: HashMap<String, UtcMs>,
     /// The data's revision when the topic's rows were last kept in `older`.
     pub kept_at: Option<u64>,
+    /// The palette's chosen entry.
+    pub pick: usize,
+    /// The draft Esc closed the palette at: it stays shut until the draft changes.
+    pub closed: Option<String>,
 }
 
 impl Default for ConsoleUi {
@@ -109,6 +113,8 @@ impl Default for ConsoleUi {
             exhausted: false,
             shown: HashMap::new(),
             kept_at: None,
+            pick: 0,
+            closed: None,
         }
     }
 }
@@ -444,6 +450,130 @@ pub fn input(ui: &ConsoleUi, width: u16) -> (Line, usize) {
     };
     let line = Line::new(cut_spans(vec![lead, rest], w));
     (line, (w - room) + at)
+}
+
+/// The most rows the palette shows (B11).
+pub const PALETTE_ROWS: usize = 8;
+
+/// One thing the palette offers.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Choice {
+    pub label: String,
+    pub help: String,
+    /// What Tab puts in the word's place.
+    pub insert: String,
+    /// More is typed after it, so the palette stays open (a command's name).
+    pub chain: bool,
+}
+
+/// The palette (B11, spec 6.11): the commands for a `/word`; the live sessions' titles after
+/// `/resume`, `/focus`, `/close` and each argument of `/archive`; the layouts' names after
+/// `/layout apply` and `/layout show`. `from` is the byte where the word being typed starts.
+/// It narrows as the word grows, and is `None` while it offers nothing, while the draft isn't
+/// a command, or after Esc closed it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Palette {
+    pub from: usize,
+    pub entries: Vec<Choice>,
+}
+
+pub fn palette(data: &Data, ui: &ConsoleUi) -> Option<Palette> {
+    let t = ui.draft.text.as_str();
+    if !t.starts_with('/') || ui.closed.as_deref() == Some(t) {
+        return None;
+    }
+    let Some(sp) = t.find(char::is_whitespace) else {
+        let word = t[1..].to_lowercase();
+        let entries: Vec<Choice> = COMMANDS
+            .iter()
+            .filter(|c| !c.hidden && c.name.starts_with(&word))
+            .map(|c| Choice {
+                label: format!("/{}", c.name),
+                help: c.help.to_string(),
+                insert: format!("/{} ", c.name),
+                chain: true,
+            })
+            .take(PALETTE_ROWS)
+            .collect();
+        return (!entries.is_empty()).then_some(Palette { from: 0, entries });
+    };
+    let from = t
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let word = t[from..].trim_start_matches(['\'', '"']).to_lowercase();
+    let done: Vec<&str> = t[sp..from].split_whitespace().collect();
+    let entries = match (&t[1..sp], done.as_slice()) {
+        ("resume" | "focus" | "close", []) | ("archive", _) => sessions(data, &word),
+        ("layout", ["apply" | "show"]) => layouts(data, &word),
+        _ => Vec::new(),
+    };
+    (!entries.is_empty()).then_some(Palette { from, entries })
+}
+
+/// The live sessions (not archived) whose name or id has `word`, the latest first; Tab puts
+/// in the id, quoted if the shell would split it.
+fn sessions(data: &Data, word: &str) -> Vec<Choice> {
+    let mut live: Vec<&SessionRow> = data
+        .sessions
+        .values()
+        .filter(|r| r.session.archived_at.is_none())
+        .collect();
+    live.sort_by_key(|r| std::cmp::Reverse(r.session.activity_at));
+    live.into_iter()
+        .filter_map(|r| {
+            let (name, id) = (label(r), r.session.id.to_string());
+            (name.to_lowercase().contains(word) || id.starts_with(word)).then(|| Choice {
+                label: name,
+                help: r.handle.clone(),
+                insert: shell_words::quote(&id).into_owned(),
+                chain: false,
+            })
+        })
+        .take(PALETTE_ROWS)
+        .collect()
+}
+
+/// The layouts whose name has `word`, in their order.
+fn layouts(data: &Data, word: &str) -> Vec<Choice> {
+    let mut all: Vec<_> = data.layouts.values().collect();
+    all.sort_by_key(|l| l.index);
+    all.into_iter()
+        .filter(|l| l.name.to_lowercase().contains(word))
+        .map(|l| Choice {
+            label: clean(&l.name),
+            help: if l.current { "current" } else { "" }.to_string(),
+            insert: shell_words::quote(&l.name).into_owned(),
+            chain: false,
+        })
+        .take(PALETTE_ROWS)
+        .collect()
+}
+
+/// The palette's `rows` lines, `width` cells: the chosen entry reversed, kept in sight when
+/// the screen has fewer rows than entries.
+pub fn palette_lines(p: &Palette, pick: usize, rows: usize, width: u16) -> Vec<Line> {
+    let w = usize::from(width);
+    let pick = pick.min(p.entries.len().saturating_sub(1));
+    let first = (pick + 1).saturating_sub(rows);
+    p.entries
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(i, e)| {
+            let chosen = i == pick;
+            let mut spans = vec![
+                Span::bold(format!("  {}", clean(&e.label)), Tone::Text),
+                Span::new(format!("  {}", clean(&e.help)), Tone::Dim),
+            ];
+            for span in &mut spans {
+                span.reversed = chosen;
+            }
+            Line::new(cut_spans(spans, w))
+        })
+        .collect()
 }
 
 /// The button drawn at cell `col` of `line`, if any.
