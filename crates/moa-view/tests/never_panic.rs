@@ -14,7 +14,8 @@ use moa_core::model::{
     SuggestionStatus, Task, TaskId, TaskStatus, Who,
 };
 use moa_core::panel::View;
-use moa_core::publish::{BrainRow, LayoutRow, TermRow};
+use moa_core::publish::{BrainRow, EventRow, FeedRow, LayoutRow, TermRow};
+use moa_core::state::EventWhat;
 use moa_view::ctx::Ctx;
 use moa_view::data::{Data, SessionRow};
 use moa_view::geometry::Size;
@@ -22,10 +23,12 @@ use moa_view::keys::Key;
 use moa_view::line::{Line, Span};
 use moa_view::panel::{Mouse, Panel, Screen};
 use moa_view::text::width;
+use moa_view::views::console::{self, Card, ConsoleUi};
 use proptest::collection::vec;
 use proptest::option;
 use proptest::prelude::*;
 use proptest::sample::select;
+use serde_json::{Value, json};
 
 /// Thu 19 Nov 2026, 10:00 UTC.
 const NOW: i64 = 1_795_082_400_000;
@@ -595,8 +598,161 @@ fn term_row() -> impl Strategy<Value = TermRow> {
     })
 }
 
+/// Any JSON, its object keys the ones a `feed` body is read by.
+fn json_value() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::from),
+        any::<i64>().prop_map(Value::from),
+        any::<f64>().prop_map(Value::from),
+        text().prop_map(Value::from),
+    ];
+    let keys = vec![
+        "text", "title", "input", "command", "entries", "content", "status",
+    ];
+    leaf.prop_recursive(3, 24, 4, move |inner| {
+        prop_oneof![
+            vec(inner.clone(), 0..4).prop_map(Value::from),
+            vec((select(keys.clone()), inner), 0..4)
+                .prop_map(|kv| Value::Object(kv.into_iter().map(|(k, v)| (s(k), v)).collect())),
+        ]
+    })
+}
+
+/// A `feed` row's body: any JSON, or one shaped as a text, tool or plan row with odd text.
+fn feed_body() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        2 => json_value(),
+        2 => text().prop_map(|t| json!({ "text": t })),
+        2 => (text(), text(), any::<bool>()).prop_map(|(title, command, raw)| {
+            let input = json!({ "command": command });
+            let input = if raw { input } else { Value::from(input.to_string()) };
+            json!({ "title": title, "kind": "execute", "input": input })
+        }),
+        1 => vec((text(), select(vec!["pending", "in_progress", "completed", "?"])), 0..5)
+            .prop_map(|entries| {
+                let entries: Vec<Value> = entries
+                    .into_iter()
+                    .map(|(content, status)| json!({ "content": content, "status": status }))
+                    .collect();
+                json!({ "entries": entries })
+            }),
+    ]
+}
+
+/// A `feed` row of any kind (one nobody knows too), state and thread.
+fn feed_row() -> impl Strategy<Value = FeedRow> {
+    let kinds = vec![
+        "you", "moa", "thought", "tool", "plan", "system", "error", "nope", "",
+    ];
+    let states = vec![
+        "pending",
+        "in_progress",
+        "completed",
+        "failed",
+        "cancelled",
+        "?",
+    ];
+    let thread = prop_oneof![4 => select(vec![s("0193ab12-a"), s("0193b4f0-b")]), 1 => text()];
+    (
+        select(kinds),
+        feed_body(),
+        option::of(select(states)),
+        any::<bool>(),
+        thread,
+        at(),
+    )
+        .prop_map(|(kind, body, state, automatic, thread, at)| FeedRow {
+            id: 0,
+            thread,
+            at: at.0,
+            kind: s(kind),
+            message_id: None,
+            automatic,
+            body,
+            state: state.map(s),
+        })
+}
+
+fn event_row() -> impl Strategy<Value = EventRow> {
+    let whats = vec![
+        EventWhat::Started,
+        EventWhat::Ended,
+        EventWhat::NeedsYou,
+        EventWhat::Finished,
+        EventWhat::Asleep,
+    ];
+    (0u8..16, select(whats), at()).prop_map(|(n, what, at)| EventRow {
+        seq: 0,
+        at: at.0,
+        session: session_id(n),
+        what,
+    })
+}
+
+/// The console's data and panel memory: sessions, rows (some paged in, overlapping the
+/// tail), session events, cards and errors.
+fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {
+    (
+        vec(session(), 0..6),
+        vec(feed_row(), 0..40),
+        vec(event_row(), 0..20),
+        vec((at(), text(), text()), 0..4),
+        vec((at(), text()), 0..4),
+        0usize..40,
+    )
+        .prop_map(|(sessions, rows, events, cards, errors, paged)| {
+            let mut data = Data::default();
+            for (n, mut row) in (0u8..).zip(sessions) {
+                row.session.id = session_id(n);
+                data.sessions.insert(row.session.id, row);
+            }
+            let mut ui = ConsoleUi::default();
+            for (id, mut row) in (1i64..).zip(rows) {
+                row.id = id;
+                if id <= paged as i64 {
+                    ui.older.insert(id, row.clone());
+                }
+                if id + 5 > paged as i64 {
+                    data.feed.insert(id, row);
+                }
+            }
+            for (seq, mut e) in (1u64..).zip(events) {
+                e.seq = seq;
+                data.events.insert(seq, e);
+            }
+            data.touch();
+            ui.cards = cards
+                .into_iter()
+                .map(|(at, line, text)| Card { at, line, text })
+                .collect();
+            ui.errors = errors;
+            (data, ui)
+        })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The console, for random kinds, bodies, threads, events, cards and errors, at any width
+    /// from 10 to 200: no panic, no control character, no line over the width, and every
+    /// button a span names is one it made.
+    #[test]
+    fn console_never_panics(
+        (data, ui) in console_data(),
+        ctx in ctx(),
+        w in 10u16..=200,
+    ) {
+        let view = console::build(&data, &ctx, &ui, w);
+        for line in &view.lines {
+            check_line(line, usize::from(w), "a console line")?;
+            let cells: usize = line.spans.iter().map(|s| width(&s.text)).sum();
+            prop_assert!(cells <= usize::from(w), "spans over {w}: {:?}", line.text());
+            for span in &line.spans {
+                prop_assert!(span.button.is_none_or(|b| usize::from(b) < view.buttons.len()));
+            }
+        }
+    }
 
     /// The terminals view, for 0 to 60 terminals with odd names at any width from 20 to 200:
     /// no panic, no control character, no line over the width, and a wake-up never in the

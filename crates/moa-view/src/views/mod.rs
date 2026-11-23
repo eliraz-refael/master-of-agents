@@ -13,6 +13,7 @@ use crate::line::{Item, Line, Tone};
 use crate::text::{self, SPIN, clean, cut, short_account};
 
 pub mod activity;
+pub mod console;
 pub mod empty_slot;
 pub mod help;
 pub mod picker;
@@ -48,7 +49,8 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Terms => terms::lines(data, ctx, width),
         View::EmptySlot => empty_slot::build(width),
         View::Help => help::build(data, ctx, width),
-        View::Console | View::Setup => {
+        View::Console => console::build(data, ctx, &console::ConsoleUi::default(), width).lines,
+        View::Setup => {
             let words = not_yet(view).unwrap_or_default();
             vec![Line::plain(cut(words, usize::from(width)), Tone::Dim)]
         }
@@ -59,9 +61,9 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
 /// opens it.
 pub fn not_yet(view: View) -> Option<&'static str> {
     match view {
-        View::Console => Some("the console isn't in this build yet"),
         View::Setup => Some("setup isn't in this build yet"),
-        View::EmptySlot
+        View::Console
+        | View::EmptySlot
         | View::Tree
         | View::Plan
         | View::Status

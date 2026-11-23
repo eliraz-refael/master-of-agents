@@ -72,6 +72,13 @@ pub const CHROME: &[(&str, usize)] = &[
     ("┤", 1),
     ("┴", 1),
     ("┘", 1),
+    // the console (`views::console`): prompts, tool calls, session lines, cards
+    ("›", 1),
+    ("⚙", 1),
+    ("⊘", 1),
+    ("▶", 1),
+    ("↩", 1),
+    ("┊", 1),
     // the spinner (`SPIN`)
     ("⠋", 1),
     ("⠙", 1),
@@ -394,6 +401,11 @@ pub fn wrap_spans(spans: &[Span], w: usize) -> Vec<Vec<Span>> {
         lines.push(Vec::new());
     }
     lines
+}
+
+/// The cells `spans` take, side by side.
+pub fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| width(&s.text)).sum()
 }
 
 /// A day, in milliseconds.

@@ -17,6 +17,7 @@ use crate::keys::{self, Action, Key};
 use crate::line::{Item, Line, Span, Tone, debug_lines};
 use crate::list::ListState;
 use crate::text::{self, clean};
+use crate::views::console::{self, ConsoleUi};
 use crate::views::{self, ViewUi, picker, picture, tree};
 
 mod ask;
@@ -199,6 +200,8 @@ pub struct Panel {
     pick_tag: Option<u64>,
     /// The picker's matches, kept while the data's revision and the query stay.
     picks: Option<Picks>,
+    /// What the console keeps: its paged-in rows, cards and errors.
+    console: ConsoleUi,
 }
 
 /// The picker's matches for one revision of the data and one query.
@@ -259,6 +262,7 @@ impl Panel {
             picking: None,
             pick_tag: None,
             picks: None,
+            console: ConsoleUi::default(),
         }
     }
 
@@ -271,9 +275,9 @@ impl Panel {
         self.managed
     }
 
-    /// Shows another view, from its top, with nothing asked or said. Whether moa manages
-    /// the panel, whether it is a popup, and what its row last said of its tab and its
-    /// sheet's open stay as they are.
+    /// Shows another view, from its top, with nothing asked or said and nothing the console
+    /// kept. Whether moa manages the panel, whether it is a popup, and what its row last said
+    /// of its tab and its sheet's open stay as they are.
     pub fn set_view(&mut self, view: View) {
         if view != self.view {
             let (managed, popup, in_tab, open) = (self.managed, self.popup, self.in_tab, self.open);
@@ -410,6 +414,8 @@ impl Panel {
         self.lines = if self.view == View::Picker {
             let m = picks(&mut self.picks, data, &self.ui.query);
             picker::lines(m, &self.ui.query, ctx, width)
+        } else if self.view == View::Console {
+            console::build(data, ctx, &self.console, width).lines
         } else {
             views::build(self.view, data, ctx, &self.ui, width)
         };

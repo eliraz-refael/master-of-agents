@@ -333,17 +333,14 @@ fn the_strip_flashes_rows_under_4_seconds() {
 #[test]
 fn unknown_views_say_not_yet() {
     let (data, ctx) = lantern();
-    let cases = [
-        (View::Console, "the console isn't in this build yet"),
-        (View::Setup, "setup isn't in this build yet"),
-    ];
+    let cases = [(View::Setup, "setup isn't in this build yet")];
     for (view, words) in cases {
         let lines = views::build(view, &data, &ctx, &ViewUi::default(), 80);
         assert_eq!(debug_lines(&lines), format!("[dim]{words}\n"), "{view:?}");
         let narrow = views::build(view, &data, &ctx, &ViewUi::default(), 10);
         assert_eq!(narrow[0].text(), words[..10], "{view:?}");
     }
-    for view in [View::EmptySlot, View::Picker, View::Help] {
+    for view in [View::EmptySlot, View::Picker, View::Help, View::Console] {
         assert_eq!(views::not_yet(view), None, "{view:?}");
     }
 }

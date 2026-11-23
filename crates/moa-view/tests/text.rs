@@ -53,7 +53,7 @@ fn clean_simplifies_emoji_sequences() {
 
 #[test]
 fn the_chrome_glyph_set_has_one_width_each() {
-    let ones = "⚠ ! ? ✓ ✗ ◐ ◌ ● ○ ★ ▸ ▾ ◷ ✦ ⧗ ◆ ▤ ☀ ≡ ▦ ◉ ◫ ⌨ ⏎ ↵ · … ─ │ ├ └ ╭ ╮ ╰ ╯ ▌ • ◦ ▪ ☑ ☐ ┌ ┬ ┐ ┼ ┤ ┴ ┘";
+    let ones = "⚠ ! ? ✓ ✗ ◐ ◌ ● ○ ★ ▸ ▾ ◷ ✦ ⧗ ◆ ▤ ☀ ≡ ▦ ◉ ◫ ⌨ ⏎ ↵ · … ─ │ ├ └ ╭ ╮ ╰ ╯ ▌ • ◦ ▪ ☑ ☐ ┌ ┬ ┐ ┼ ┤ ┴ ┘ › ⚙ ⊘ ▶ ↩ ┊";
     let mut expected: Vec<(&str, usize)> = ones.split(' ').map(|g| (g, 1)).collect();
     expected.extend(SPIN.iter().map(|g| (*g, 1)));
     expected.push(("💤", 2));

@@ -334,22 +334,9 @@ impl Render<'_> {
         }
         let code = clean(t);
         let bold = self.bold > 0;
-        let index = u16::try_from(self.buttons.len()).ok();
-        let span = match (self.find)(&code).zip(index) {
-            Some((button, index)) => {
-                let label = clean(&button.label);
-                let span = Span {
-                    button: Some(index),
-                    ..Span::styled(format!("[{label}]"), Tone::Work, bold)
-                };
-                self.buttons.push(Button {
-                    label,
-                    command: button.command,
-                });
-                span
-            }
-            None => Span::styled(code, Tone::Work, bold),
-        };
+        let span = (self.find)(&code)
+            .and_then(|button| button_span(self.buttons, button, bold))
+            .unwrap_or_else(|| Span::styled(code, Tone::Work, bold));
         self.push(span);
     }
 
@@ -477,7 +464,7 @@ impl Render<'_> {
         let mut widths = vec![0; cols];
         for row in &table.rows {
             for (c, cell) in row.iter().enumerate() {
-                widths[c] = widths[c].max(spans_width(cell));
+                widths[c] = widths[c].max(text::spans_width(cell));
             }
         }
         if widths.iter().map(|w| w + 3).sum::<usize>() < self.room(0) {
@@ -522,7 +509,7 @@ impl Render<'_> {
                 spans.push(Span::new("│", Tone::Dim));
                 spans.push(Span::new(" ", Tone::Text));
                 spans.extend_from_slice(cell);
-                let pad = w - spans_width(cell) + 1;
+                let pad = w - text::spans_width(cell) + 1;
                 spans.push(Span::new(" ".repeat(pad), Tone::Text));
             }
             spans.push(Span::new("│", Tone::Dim));
@@ -532,8 +519,21 @@ impl Render<'_> {
     }
 }
 
-fn spans_width(spans: &[Span]) -> usize {
-    spans.iter().map(|s| width(&s.text)).sum()
+/// `button` pushed on `buttons` (its label cleaned), and the span that draws it: `[label]` in
+/// the Work tone, bold when `bold`, holding its index. `None`, and nothing pushed, once the
+/// index would pass `u16::MAX`.
+pub fn button_span(buttons: &mut Vec<Button>, button: Button, bold: bool) -> Option<Span> {
+    let index = u16::try_from(buttons.len()).ok()?;
+    let label = clean(&button.label);
+    let span = Span {
+        button: Some(index),
+        ..Span::styled(format!("[{label}]"), Tone::Work, bold)
+    };
+    buttons.push(Button {
+        label,
+        command: button.command,
+    });
+    Some(span)
 }
 
 /// The last `w` cells of `spans`: what's left of an indent once its outer columns go.
