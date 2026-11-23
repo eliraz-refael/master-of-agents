@@ -91,6 +91,20 @@ pub enum AcpCmd {
     },
 }
 
+impl AcpCmd {
+    /// The run of the agent it is for.
+    pub fn generation(&self) -> u64 {
+        match self {
+            AcpCmd::Start { generation, .. }
+            | AcpCmd::Open { generation, .. }
+            | AcpCmd::Prompt { generation, .. }
+            | AcpCmd::Cancel { generation, .. }
+            | AcpCmd::Permission { generation, .. }
+            | AcpCmd::Stop { generation } => *generation,
+        }
+    }
+}
+
 /// What the host tells the core.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum AcpIn {

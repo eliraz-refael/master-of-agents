@@ -162,9 +162,10 @@ pub(super) fn error_event(message: &str) -> Held {
 
 /// The drain's callers are told it wasn't saved, and nothing it would have said is said:
 /// every held reply (a read may have seen the failed state) becomes `line`, and held
-/// publishes and views for the terminal server are dropped.
+/// publishes, views for the terminal server and prompts for moa's agent (whose rows weren't
+/// saved) are dropped.
 pub(super) fn fail_held(held: &mut Vec<Held>, line: String) {
-    held.retain(|h| !matches!(h, Held::Publish(_) | Held::Tmux { .. }));
+    held.retain(|h| !matches!(h, Held::Publish(_) | Held::Tmux { .. } | Held::Acp(_)));
     for h in held.iter_mut() {
         if let Held::Reply { result, .. } = h {
             *result = Err(OpError(line.clone()));

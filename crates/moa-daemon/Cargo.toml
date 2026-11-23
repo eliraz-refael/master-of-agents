@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-moa-agents = { path = "../moa-agents" }
+moa-agents = { path = "../moa-agents", features = ["acp"] }
 moa-core = { path = "../moa-core" }
 moa-platform = { path = "../moa-platform" }
 moa-proto = { path = "../moa-proto" }

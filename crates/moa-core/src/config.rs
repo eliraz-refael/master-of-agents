@@ -103,6 +103,7 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "service",
     "panel",
     "pick",
+    "console",
     "hook",
     "help",
     "ls",

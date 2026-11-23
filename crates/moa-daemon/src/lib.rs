@@ -1,7 +1,8 @@
 //! The moa daemon: the core task (group commit), the wall-clock scheduler, the supervisor
-//! that restarts a panicking actor, the terminal link, and the process around them (lock,
-//! socket, sessions).
+//! that restarts a panicking actor, the terminal link, the link to moa's agent, and the
+//! process around them (lock, socket, sessions).
 
+mod acp;
 pub mod clock;
 pub mod core_task;
 pub mod inspect;

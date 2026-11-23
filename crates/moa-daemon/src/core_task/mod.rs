@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use jiff::tz::TimeZone;
 use moa_agents::claude;
+use moa_core::central::wire::AcpCmd;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Input, Publish, TmuxToken};
 use moa_core::hook::{HookEnvelope, HookLine};
@@ -28,6 +29,7 @@ use moa_store::{Store, StoreError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::task::TaskTracker;
 
+use crate::acp;
 use crate::clock::Clock;
 use crate::scheduler::{self, SchedCmd, Wake};
 use crate::tmux::{self, TmuxCmd, TmuxLink};
@@ -170,6 +172,9 @@ enum Held {
         cmds: Vec<Cmd>,
         token: Option<TmuxToken>,
     },
+    /// A prompt for moa's agent, sent once its `you` row is saved (and a cancel that came
+    /// after it in the drain, so the two arrive in order).
+    Acp(AcpCmd),
     Barrier(oneshot::Sender<()>),
     Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
@@ -195,6 +200,9 @@ pub struct CoreHandle {
     spool: Option<PathBuf>,
     /// Asks the spool's drainer for another drain; `None` without a spool.
     drains: Option<mpsc::UnboundedSender<()>>,
+    /// Tests only: the link to moa's agent, to crash it.
+    #[cfg(test)]
+    acp: mpsc::UnboundedSender<acp::AcpMsg>,
 }
 
 type SharedStore = Arc<Mutex<StoreHandle>>;
@@ -227,7 +235,7 @@ impl CoreHandle {
         store: Store,
         faults: Vec<Fault>,
     ) -> Result<CoreHandle, DaemonError> {
-        Self::start_inner(opts, store, faults, None, 0).await
+        Self::start_inner(opts, store, faults, None, None, 0).await
     }
 
     /// Like `start_with_store`, with the first `panics` inputs after `Startup` (the spool's
@@ -238,16 +246,17 @@ impl CoreHandle {
         store: Store,
         panics: u32,
     ) -> Result<CoreHandle, DaemonError> {
-        Self::start_inner(opts, store, Vec::new(), None, panics).await
+        Self::start_inner(opts, store, Vec::new(), None, None, panics).await
     }
 
-    /// `link`, when given, stands in for the terminal link that `opts.tmux` would start
-    /// (tests that watch what the core sends it).
+    /// `link`, when given, stands in for the terminal link that `opts.tmux` would start, and
+    /// `agent` for the link to moa's agent (tests that watch what the core sends them).
     pub(crate) async fn start_inner(
         mut opts: CoreOptions,
         store: Store,
         faults: Vec<Fault>,
         link: Option<mpsc::UnboundedSender<TmuxCmd>>,
+        agent: Option<mpsc::UnboundedSender<acp::AcpMsg>>,
         drain_panics: u32,
     ) -> Result<CoreHandle, DaemonError> {
         let store = StoreHandle::spawn(store, opts.backups.clone());
@@ -309,11 +318,26 @@ impl CoreHandle {
             })
         });
 
+        // Weak for the same reason. Always there: it does nothing until a prompt starts moa's
+        // agent.
+        let acp = agent.unwrap_or_else(|| {
+            let heard = inbox.downgrade();
+            acp::start(
+                move |input| {
+                    if let Some(inbox) = heard.upgrade() {
+                        let _ = inbox.send(Item::Input(Input::Acp(input)));
+                    }
+                },
+                report_failure(&inbox),
+            )
+        });
+
         let spool = opts.spool.take();
         let conns = Conns::default();
         let core = Core {
             inbox: inbox.downgrade(),
             link,
+            acp: acp.clone(),
             state,
             store: store.clone(),
             clock: opts.clock,
@@ -354,6 +378,8 @@ impl CoreHandle {
             panic_next,
             spool: spool.clone(),
             drains: spool.is_some().then_some(drains),
+            #[cfg(test)]
+            acp,
         };
         // Startup is the first item, so this answers after its commit, not after its daily
         // backup (the store thread is busy copying; `barrier()` and `stop()` wait for it). If

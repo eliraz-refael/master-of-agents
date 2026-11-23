@@ -8,7 +8,7 @@ use clap::Args;
 use moa_client::{Client, ClientError, ClientOptions, OnMismatch, own_exe};
 use moa_core::config::{BrainName, Config, caller_store};
 use moa_core::live::DisplayState;
-use moa_core::op::Op;
+use moa_core::op::{Done, Op};
 use moa_core::publish::word;
 use moa_core::route::{Route, route};
 use moa_core::state::CallerInfo;
@@ -20,7 +20,7 @@ use moa_proto::cli::{Moactl, VerbCtx, VerbError};
 pub struct BrainArgs {
     /// Which brain; the default is the one this folder and account belong to.
     #[arg(long)]
-    brain: Option<String>,
+    pub(crate) brain: Option<String>,
 }
 
 #[derive(Args)]
@@ -144,7 +144,7 @@ pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|e| format!("can't start: {e}"))
 }
 
-fn finish(result: Result<(), String>) -> ExitCode {
+pub(crate) fn finish(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(line) => {
@@ -184,20 +184,33 @@ fn verb(m: &Moactl) -> Result<(), String> {
         }
         op => pick_brain(&here, &config, None, op.writes())?,
     };
+    let done = send(&here, brain, op)?;
+    if m.json {
+        println!("{}", done.data);
+    } else {
+        println!("{}", done.text);
+    }
+    Ok(())
+}
+
+/// Runs `op` on `brain`'s daemon, starting it (or restarting it on another build) first.
+pub(crate) fn send(here: &Here, brain: BrainName, op: Op) -> Result<Done, String> {
     let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let mut opts = here.options(brain);
     opts.autostart = Some(exe);
     opts.on_mismatch = OnMismatch::Restart;
     runtime()?.block_on(async {
         let mut client = Client::connect(opts).await.map_err(|e| e.to_string())?;
-        let done = client.call(op).await.map_err(|e| e.to_string())?;
-        if m.json {
-            println!("{}", done.data);
-        } else {
-            println!("{}", done.text);
-        }
-        Ok(())
+        client.call(op).await.map_err(|e| e.to_string())
     })
+}
+
+/// `op` on the brain `flag` (`--brain`) or the usual routing picks.
+pub(crate) fn send_routed(flag: Option<&str>, op: Op) -> Result<Done, String> {
+    let here = Here::new()?;
+    let config = here.config()?;
+    let brain = pick_brain(&here, &config, flag, op.writes())?;
+    send(&here, brain, op)
 }
 
 /// `open`'s folder: made when it's missing, as the spike did, then in its canonical form.
@@ -267,7 +280,11 @@ pub fn shutdown(args: &BrainArgs) -> ExitCode {
 /// Connects to the brain's daemon without starting one and runs `then` on it. Both callers
 /// are allowed on a mismatched build. When nothing is running that is an error, unless
 /// `fine_if_stopped` (`shutdown`: it is already what was asked), which just says so.
-fn running<F, Fut>(args: &BrainArgs, fine_if_stopped: bool, then: F) -> Result<(), String>
+pub(crate) fn running<F, Fut>(
+    args: &BrainArgs,
+    fine_if_stopped: bool,
+    then: F,
+) -> Result<(), String>
 where
     F: FnOnce(BrainName, Client) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,

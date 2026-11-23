@@ -46,6 +46,9 @@ const STOP_WAIT: Duration = Duration::from_secs(2);
 /// How long `stop` then waits for `SIGKILL` to take.
 const KILL_WAIT: Duration = Duration::from_secs(1);
 
+/// Why the agent is gone when its connection ended first.
+const CLOSED: &str = "moa's agent closed its connection";
+
 /// Where the host's messages go: the core's input, which never blocks.
 pub type ToCore = Arc<dyn Fn(AcpIn) + Send + Sync>;
 
@@ -59,25 +62,34 @@ pub struct Adapter {
     cx: ConnectionTo<Agent>,
     waiting: Waiting,
     process: Process,
+    exit: Arc<Exit>,
 }
 
 /// The agent's process and the task that reads it. Dropped without `stop`, it still sends the
 /// agent's process group `SIGTERM` (unless the agent has gone already) and, if the agent is
 /// still there after `STOP_WAIT`, `SIGKILL`; once the agent leaves, its reaper ends the rest
-/// of the group.
+/// of the group. Dropped while the agent is still starting (a cancelled `start`), it sends
+/// `SIGKILL` at once: such an agent has nothing to save, and its host may be about to exit
+/// before a later `SIGKILL` could be sent.
 struct Process {
     reaper: Reaper,
     driver: Option<JoinHandle<()>>,
+    starting: bool,
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
+        let first = if self.starting {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
         let mut signalled = false;
         self.reaper.kill_unless_exited(|group| {
             signalled = true;
-            kill_group(group, libc::SIGTERM);
+            kill_group(group, first);
         });
-        if signalled {
+        if signalled && !self.starting {
             // An agent that ignores `SIGTERM` would otherwise outlive its host.
             let reaper = self.reaper.clone();
             std::thread::spawn(move || {
@@ -234,6 +246,7 @@ impl Adapter {
         let mut process = Process {
             reaper,
             driver: None,
+            starting: true,
         };
         let failed = |why: String| {
             exit.failed();
@@ -265,7 +278,7 @@ impl Adapter {
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
                     let _ = cx_tx.send(cx.clone());
                     cx.incoming_closed().await;
-                    closed.say("moa's agent closed its connection");
+                    closed.say(CLOSED);
                     Ok(())
                 })
                 .await;
@@ -292,12 +305,14 @@ impl Adapter {
             caps: convert::caps(&init),
         });
         exit.live();
+        process.starting = false;
         Ok(Adapter {
             generation,
             to_core,
             cx,
             waiting,
             process,
+            exit,
         })
     }
 
@@ -400,7 +415,9 @@ impl Adapter {
     }
 
     /// Sends `req` so that its answer reaches `done` after every message the agent sent
-    /// before it. A request that can't be sent reaches `done` as an error at once.
+    /// before it. A request that can't be sent reaches `done` as an error at once. One that
+    /// fails because the connection is gone says the run's `Exited` first, so the core hears
+    /// that the agent went away, in plain words, before the request's own failure.
     fn request<Req>(
         &self,
         req: Req,
@@ -411,19 +428,29 @@ impl Adapter {
     {
         let slot = Arc::new(Mutex::new(Some(done)));
         let answered = Arc::clone(&slot);
+        let exit = Arc::clone(&self.exit);
+        let failed = move |e: &agent_client_protocol::Error| {
+            if agent_client_protocol::is_incoming_transport_closed(e)
+                || agent_client_protocol::is_connection_terminated(e)
+            {
+                exit.say(CLOSED);
+            }
+            convert::error_text(e)
+        };
+        let failed_to_send = failed.clone();
         let sent = self
             .cx
             .prepare_request(req)
             .on_receiving_result(move |result| async move {
                 if let Some(done) = lock(&answered).take() {
-                    done(result.map_err(|e| convert::error_text(&e)));
+                    done(result.map_err(|e| failed(&e)));
                 }
                 Ok(())
             });
         if let Err(e) = sent
             && let Some(done) = lock(&slot).take()
         {
-            done(Err(convert::error_text(&e)));
+            done(Err(failed_to_send(&e)));
         }
     }
 }

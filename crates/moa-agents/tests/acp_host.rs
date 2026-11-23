@@ -470,52 +470,61 @@ async fn stderr_lines_reach_the_log_cut_to_500() {
     adapter.stop().await;
 }
 
+/// An agent that dies mid-turn says `Exited` once, and before its turn's failed end, however
+/// the host notices (its exit, or its connection's end failing the prompt): the core then
+/// tells the user that moa's agent stopped, never the connection's own error. Run a few times,
+/// since which comes first is a race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_dead_adapter_says_so_once() {
-    let dir = folder(&[say("last words", None), StubStep::Die]);
-    let (adapter, mut events, _) = start_in(dir.path()).await;
-    let thread = open_new(&adapter, &mut events, dir.path()).await;
-    adapter.prompt(&thread, 5, "go");
+async fn a_dead_adapter_says_so_once_before_its_turn_ends() {
+    for _ in 0..5 {
+        let dir = folder(&[say("last words", None), StubStep::Die]);
+        let (adapter, mut events, _) = start_in(dir.path()).await;
+        let thread = open_new(&adapter, &mut events, dir.path()).await;
+        adapter.prompt(&thread, 5, "go");
 
-    let mut got = Vec::new();
-    let (mut exited, mut turn_ended) = (false, false);
-    while !(exited && turn_ended) {
-        let m = next(&mut events).await;
-        exited |= matches!(m, AcpIn::Exited { .. });
-        turn_ended |= matches!(m, AcpIn::TurnEnded { .. });
-        got.push(m);
-    }
-    // Stopping waits for every part of the host, so nothing can come after.
-    adapter.stop().await;
-    got.extend(drain(&mut events));
-
-    let exits: Vec<&AcpIn> = got
-        .iter()
-        .filter(|m| matches!(m, AcpIn::Exited { .. }))
-        .collect();
-    assert_eq!(exits.len(), 1, "{got:?}");
-    assert!(matches!(
-        exits[0],
-        AcpIn::Exited {
-            generation: GEN,
-            ..
+        let mut got = Vec::new();
+        let (mut exited, mut turn_ended) = (false, false);
+        while !(exited && turn_ended) {
+            let m = next(&mut events).await;
+            exited |= matches!(m, AcpIn::Exited { .. });
+            turn_ended |= matches!(m, AcpIn::TurnEnded { .. });
+            got.push(m);
         }
-    ));
-    let turn_end = got
-        .iter()
-        .find(|m| matches!(m, AcpIn::TurnEnded { .. }))
-        .unwrap();
-    assert!(
-        matches!(
-            turn_end,
-            AcpIn::TurnEnded {
+        // Stopping waits for every part of the host, so nothing can come after.
+        adapter.stop().await;
+        got.extend(drain(&mut events));
+
+        let exits: Vec<usize> = got
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| matches!(m, AcpIn::Exited { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(exits.len(), 1, "{got:?}");
+        assert!(matches!(
+            got[exits[0]],
+            AcpIn::Exited {
                 generation: GEN,
-                prompt: 5,
-                result: Err(_)
+                ..
             }
-        ),
-        "{turn_end:?}"
-    );
+        ));
+        let turn_end = got
+            .iter()
+            .position(|m| matches!(m, AcpIn::TurnEnded { .. }))
+            .unwrap();
+        assert!(
+            matches!(
+                got[turn_end],
+                AcpIn::TurnEnded {
+                    generation: GEN,
+                    prompt: 5,
+                    result: Err(_)
+                }
+            ),
+            "{got:?}"
+        );
+        assert!(exits[0] < turn_end, "Exited comes first: {got:?}");
+    }
 }
 
 /// The pid the stub's `Spawn` or `SpawnStubborn` child wrote, once it is there.
