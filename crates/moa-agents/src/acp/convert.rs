@@ -197,3 +197,62 @@ pub(super) fn error_text(e: &Error) -> String {
         _ => e.message.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use agent_client_protocol::v1::schema::{
+        AudioContent, EmbeddedResource, EmbeddedResourceResource, ImageContent, ResourceLink,
+        TextResourceContents,
+    };
+
+    use super::*;
+
+    /// moa's agent says `block` as a piece of its answer, then as a piece of its thinking.
+    fn said(block: ContentBlock) -> [Update; 2] {
+        let answer = SessionUpdate::AgentMessageChunk(ContentChunk::new(block.clone()));
+        let thinking = SessionUpdate::AgentThoughtChunk(ContentChunk::new(block));
+        [answer, thinking].map(|u| notification(SessionNotification::new("th-1", u)).1)
+    }
+
+    #[test]
+    fn blocks_that_arent_text_are_named() {
+        let resource = TextResourceContents::new("the notes", "file:///r/notes.md");
+        let embedded = EmbeddedResourceResource::TextResourceContents(resource);
+        let blocks = [
+            (
+                ContentBlock::Image(ImageContent::new("iVBORw0KGgo=", "image/png")),
+                "[image]",
+            ),
+            (
+                ContentBlock::Audio(AudioContent::new("UklGRg==", "audio/wav")),
+                "[audio]",
+            ),
+            (
+                ContentBlock::ResourceLink(ResourceLink::new("notes", "file:///r/notes.md")),
+                "[resource]",
+            ),
+            (
+                ContentBlock::Resource(EmbeddedResource::new(embedded)),
+                "[resource]",
+            ),
+            (text("plain words"), "plain words"),
+        ];
+        for (block, want) in blocks {
+            let [answer, thinking] = said(block);
+            assert_eq!(
+                answer,
+                Update::Message {
+                    id: None,
+                    text: want.into()
+                }
+            );
+            assert_eq!(
+                thinking,
+                Update::Thought {
+                    id: None,
+                    text: want.into()
+                }
+            );
+        }
+    }
+}

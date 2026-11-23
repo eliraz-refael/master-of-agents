@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
+use moa_core::central::wire::{AcpCmd, AcpIn};
 use moa_core::change::Change;
 use moa_core::effect::{
     Down, Effect, Input, LogLevel, LogLine, Publish, TmuxIn, TmuxToken, check_order,
@@ -383,6 +384,8 @@ impl Core {
                 // `open`'s new window, which starts an agent for a session the commit saves.
                 // The link's plumbing ran above.
                 Effect::Tmux { conn, cmds, token } => held.push(Held::Tmux { conn, cmds, token }),
+                // Nothing hosts moa's agent yet: no prompt is sent, since none can start it.
+                Effect::Acp(_) => tracing::debug!("no host for moa's agent: a command was dropped"),
                 // Handled above.
                 Effect::SetTimer { .. }
                 | Effect::CancelTimer(_)
@@ -424,6 +427,15 @@ impl Core {
                 cmds,
                 token: Some(token),
             } => self.to_link(conn, cmds, Some(token)),
+            // Nothing hosts moa's agent yet: a start fails at once, so the prompt that asked
+            // for it is told.
+            Effect::Acp(AcpCmd::Start { generation, .. }) => {
+                if let Some(inbox) = self.inbox.upgrade() {
+                    let why = "this build of moa can't run moa's agent yet".to_string();
+                    let exited = AcpIn::Exited { generation, why };
+                    let _ = inbox.send(Item::Input(Input::Acp(exited)));
+                }
+            }
             _ => {}
         }
     }
@@ -608,5 +620,6 @@ fn kind(input: &Input) -> &'static str {
         Input::Tmux(_) => "Tmux",
         Input::Hook { .. } => "Hook",
         Input::StartDrained => "StartDrained",
+        Input::Acp(_) => "Acp",
     }
 }

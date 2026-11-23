@@ -246,6 +246,17 @@ pub enum Op {
     /// is missing from it. `agent` is the agent spot.
     #[serde(rename = "goto")]
     Goto { panel: Leaf },
+    /// Says `text` to moa. Answered `moa has it` once it is saved; with `wait`, with moa's
+    /// answer once its turn ends. Refused while moa is answering, or still starting.
+    #[serde(rename = "console.prompt")]
+    ConsolePrompt {
+        text: String,
+        #[serde(default)]
+        wait: bool,
+    },
+    /// Cancels moa's turn under way.
+    #[serde(rename = "console.cancel")]
+    ConsoleCancel(NoParams),
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -401,6 +412,8 @@ impl Op {
         "layout.set",
         "layout.apply",
         "goto",
+        "console.prompt",
+        "console.cancel",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -431,7 +444,8 @@ impl Op {
             | Op::Suggest { .. }
             | Op::SuggestionAnswer { .. }
             | Op::LayoutSet { .. }
-            | Op::LayoutApply { .. } => true,
+            | Op::LayoutApply { .. }
+            | Op::ConsolePrompt { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -450,6 +464,7 @@ impl Op {
             | Op::LayoutList(_)
             | Op::LayoutShow { .. }
             | Op::Goto { .. }
+            | Op::ConsoleCancel(_)
             | Op::DebugPanic => false,
         }
     }
@@ -500,6 +515,8 @@ impl Op {
             Op::LayoutSet { .. } => "layout.set",
             Op::LayoutApply { .. } => "layout.apply",
             Op::Goto { .. } => "goto",
+            Op::ConsolePrompt { .. } => "console.prompt",
+            Op::ConsoleCancel(_) => "console.cancel",
             Op::DebugPanic => "debug.panic",
         }
     }

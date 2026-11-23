@@ -212,6 +212,10 @@ impl Paths {
     pub fn backups(&self, b: &str) -> PathBuf {
         self.brain_dir(b).join("backups")
     }
+    /// moa's own agent's folder: it runs there, with its settings and `bin/moactl`.
+    pub fn agent_dir(&self, b: &str) -> PathBuf {
+        self.brain_dir(b).join("agent")
+    }
     pub fn state_dir(&self) -> PathBuf {
         self.home.join(".local/state/moa")
     }

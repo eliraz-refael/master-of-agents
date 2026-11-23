@@ -128,7 +128,7 @@ The most important come first.
    `acp = "<path>"` in `moa.toml` overrides it. That's how tests run `stub-acp`, and how the
    dev-shell try-it runs the real one. A plain `cargo` build knows no adapter, and says so
    (A2).
-7. **The constitution** is embedded (adapted from the spike's master `CLAUDE.md`, at most 8 KB),
+7. **The constitution** is embedded (adapted from the spike's master `CLAUDE.md`, at most 10 KB),
    and `~/.config/moa/constitution.md` replaces it when present. The scope file is
    `~/.config/moa/<brain>.md`. Without the `systemPrompt` capability, the constitution and the
    scope go into the agent dir's `CLAUDE.md`, and the brief rides on the first prompt (A9).
@@ -497,7 +497,7 @@ agent_dir, scope_file, constitution_file}` and their test defaults under `/tmp`)
   - `the_allow_list_is_exact`: two folders, one holding a space, give exactly A3's JSON.
   - `the_system_text_is_constitution_scope_and_brief` (with and without a scope file).
   - `a_constitution_file_replaces_the_embedded_one`.
-  - `the_embedded_constitution_is_short_and_anonymous`: ≤ 8,192 bytes; no `/Users/`,
+  - `the_embedded_constitution_is_short_and_anonymous`: ≤ 10,240 bytes; no `/Users/`,
     `/home/`, `@`, or `.claude-` in it.
   - Config: `acp_parses_and_expands` (`~` expanded; a relative path refused with
     `launcher`'s wording).

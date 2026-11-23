@@ -129,6 +129,20 @@ pub enum AcpIn {
     },
 }
 
+impl AcpIn {
+    /// The run of the agent that said it.
+    pub fn generation(&self) -> u64 {
+        match self {
+            AcpIn::Started { generation, .. }
+            | AcpIn::Opened { generation, .. }
+            | AcpIn::Update { generation, .. }
+            | AcpIn::Permission { generation, .. }
+            | AcpIn::TurnEnded { generation, .. }
+            | AcpIn::Exited { generation, .. } => *generation,
+        }
+    }
+}
+
 /// One update from the agent, in a thread.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Update {
@@ -195,4 +209,18 @@ pub enum StopReason {
     Cancelled,
     /// A reason this build doesn't know, by its name.
     Other(String),
+}
+
+impl StopReason {
+    /// The protocol's name for it (`end_turn`, `max_tokens`, ...).
+    pub fn name(&self) -> &str {
+        match self {
+            StopReason::EndTurn => "end_turn",
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::MaxTurnRequests => "max_turn_requests",
+            StopReason::Refusal => "refusal",
+            StopReason::Cancelled => "cancelled",
+            StopReason::Other(name) => name,
+        }
+    }
 }

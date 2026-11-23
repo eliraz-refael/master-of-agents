@@ -615,6 +615,20 @@ pub(crate) fn thread(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<MoaThread>
     Some(t)
 }
 
+/// A feed row. It has no closed-set column, so nothing is noted.
+pub(crate) fn feed(r: &SrcRow) -> FeedEntry {
+    FeedEntry {
+        id: r.int("id").unwrap_or(0),
+        thread_id: txt_or_empty(r, "thread_id"),
+        at: ms(r, "at"),
+        kind: txt_or_empty(r, "kind"),
+        message_id: txt(r, "message_id"),
+        automatic: flag(r, "automatic"),
+        body: txt_or_empty(r, "body"),
+        state: txt(r, "state"),
+    }
+}
+
 pub(crate) const META: &[&str] = &["key", "value"];
 
 const R_META_NULL: &str = "value was missing; loaded as empty";
@@ -714,7 +728,7 @@ const EVENTS: &[&str] = &[
     "detail",
 ];
 
-const FEED: &[&str] = &[
+pub(crate) const FEED: &[&str] = &[
     "id",
     "thread_id",
     "at",

@@ -2,6 +2,8 @@
 //! the ops on tabs are tested against.
 #![allow(dead_code)]
 
+pub mod central;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;

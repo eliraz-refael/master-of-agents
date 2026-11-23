@@ -417,3 +417,13 @@ fn the_sandbox_lives_under_local_state() {
         Path::new("/home/u/.local/state/moa-sandbox")
     );
 }
+
+#[test]
+fn agent_dir_is_in_the_brain_dir() {
+    let x = p("/r");
+    assert_eq!(
+        x.agent_dir("work"),
+        Path::new("/r/.local/share/moa/work/agent")
+    );
+    assert_eq!(x.agent_dir("work"), x.brain_dir("work").join("agent"));
+}

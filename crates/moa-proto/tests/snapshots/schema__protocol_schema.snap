@@ -175,7 +175,8 @@ expression: all
           "brain",
           "panels",
           "layouts",
-          "terms"
+          "terms",
+          "feed"
         ]
       },
       "Op": {
@@ -1365,6 +1366,52 @@ expression: all
               "method",
               "params"
             ]
+          },
+          {
+            "description": "Says `text` to moa. Answered `moa has it` once it is saved; with `wait`, with moa's\nanswer once its turn ends. Refused while moa is answering, or still starting.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.prompt"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "wait": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Cancels moa's turn under way.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.cancel"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
           }
         ]
       },
@@ -1708,6 +1755,10 @@ expression: all
             "type": "array",
             "items": true
           },
+          "feed": {
+            "type": "array",
+            "items": true
+          },
           "groups": {
             "type": "array",
             "items": true
@@ -1779,6 +1830,10 @@ expression: all
             "type": "array",
             "items": true
           },
+          "feed": {
+            "type": "array",
+            "items": true
+          },
           "groups": {
             "type": "array",
             "items": true
@@ -1834,6 +1889,12 @@ expression: all
             }
           },
           "brain": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feed": {
             "type": "array",
             "items": {
               "type": "string"

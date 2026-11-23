@@ -372,6 +372,31 @@ fn empty_store_launcher_and_spike_db_are_errors() {
 }
 
 #[test]
+fn acp_parses_and_expands() {
+    let base = "[accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n";
+    let c = Config::parse(&format!("{base}acp = \"~/bin/claude-agent-acp\"\n"), home()).unwrap();
+    assert_eq!(
+        c.accounts[&account("acct-a")].acp,
+        Some(PathBuf::from("/h/bin/claude-agent-acp"))
+    );
+    let c = Config::parse(base, home()).unwrap();
+    assert_eq!(c.accounts[&account("acct-a")].acp, None);
+    // Refused as `launcher` is.
+    assert_eq!(
+        err(&format!("{base}acp = \"bin/acp\"\n")),
+        "moa.toml: the acp bin/acp in accounts.acct-a must start with / or ~"
+    );
+    assert_eq!(
+        err(&format!("{base}launcher = \"bin/claude\"\n")),
+        "moa.toml: the launcher bin/claude in accounts.acct-a must start with / or ~"
+    );
+    assert_eq!(
+        err(&format!("{base}acp = \"\"\n")),
+        "moa.toml: the acp in accounts.acct-a is empty; it must start with / or ~"
+    );
+}
+
+#[test]
 fn two_accounts_cannot_share_a_store() {
     assert_eq!(
         err(
@@ -465,6 +490,15 @@ fn a_brain_named_like_a_verb_is_refused() {
     }
     // A word that only looks like one is fine.
     Config::parse("[brains.briefs]\n", home()).unwrap();
+}
+
+/// Its scope file, `constitution.md`, would be moa's constitution file.
+#[test]
+fn a_brain_named_constitution_is_refused() {
+    assert_eq!(
+        err("[brains.constitution]\n"),
+        "moa.toml: a brain can't be called constitution; moa's constitution file has that name"
+    );
 }
 
 /// R17: how long an idle session waits before it goes to sleep, per brain. Absent is 6 hours,

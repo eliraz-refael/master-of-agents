@@ -520,6 +520,11 @@ fn op_methods_match_the_variants() {
             pane: "%3".into(),
             view: moa_core::panel::View::Plan,
         },
+        Op::ConsolePrompt {
+            text: "what's open in Kite?".into(),
+            wait: true,
+        },
+        Op::ConsoleCancel(NoParams),
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
     // be serialized or parsed.
@@ -568,6 +573,7 @@ const WRITES: &[&str] = &[
     "suggestion.answer",
     "layout.set",
     "layout.apply",
+    "console.prompt",
 ];
 
 #[test]
@@ -581,6 +587,15 @@ fn session_ops_take_their_flags_as_optional() {
             q: "x".into(),
             title: None,
             group: None
+        }
+    );
+    let prompt: Op =
+        serde_json::from_str(r#"{"method":"console.prompt","params":{"text":"hi"}}"#).unwrap();
+    assert_eq!(
+        prompt,
+        Op::ConsolePrompt {
+            text: "hi".into(),
+            wait: false
         }
     );
     let open: Op =

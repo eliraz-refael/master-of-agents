@@ -11,6 +11,14 @@ use crate::{Store, StoreError, rows};
 /// How many of the newest activity rows a snapshot carries: what the state keeps.
 const ACTIVITY_TAIL: usize = moa_core::publish::ACTIVITY_SHOWN;
 
+/// How many of the newest feed rows a snapshot carries: what the state keeps.
+const FEED_TAIL: usize = moa_core::publish::FEED_SHOWN;
+
+/// The threads that are some account's newest (by start, then id): the ones moa can still resume.
+const NEWEST_THREADS: &str = "thread_id IN (SELECT t.thread_id FROM moa_threads t WHERE NOT EXISTS \
+    (SELECT 1 FROM moa_threads u WHERE u.account = t.account \
+     AND (u.started_at, u.thread_id) > (t.started_at, t.thread_id)))";
+
 fn store_error(e: ImportError) -> StoreError {
     match e {
         ImportError::Store(e) => e,
@@ -23,8 +31,9 @@ fn store_error(e: ImportError) -> StoreError {
 }
 
 impl Store {
-    /// Every row of every table except `events` and `feed` (the core doesn't hold them), the
-    /// newest 300 activity rows, the open terminals, and the next id of each integer-id table
+    /// Every row of every table except `events` (the core doesn't hold them), the newest 300
+    /// activity rows, the newest 100 feed rows and the `message_id`s of each account's newest
+    /// thread, the open terminals, and the next id of each integer-id table
     /// (closed terminals' ids included). Text this build doesn't know loads as the import's
     /// default and is listed in `unknown`.
     pub fn load_snapshot(&self) -> Result<Snapshot, StoreError> {
@@ -111,6 +120,29 @@ impl Store {
         .collect();
         activity_tail.reverse();
 
+        let mut feed_tail: Vec<_> =
+            rows_of("feed", rows::FEED, &format!("id DESC LIMIT {FEED_TAIL}"))?
+                .iter()
+                .map(rows::feed)
+                .collect();
+        feed_tail.reverse();
+        let feed_keys = src
+            .rows(
+                "feed",
+                &["thread_id", "message_id"],
+                Some(&format!("message_id IS NOT NULL AND {NEWEST_THREADS}")),
+                "id",
+            )
+            .map_err(store_error)?
+            .iter()
+            .filter_map(|r| {
+                Some((
+                    r.text_cow("thread_id")?.into_owned(),
+                    r.text_cow("message_id")?.into_owned(),
+                ))
+            })
+            .collect();
+
         let meta = rows_of("meta", rows::META, "key")?
             .iter()
             .filter_map(|r| rows::meta(r, n))
@@ -131,6 +163,8 @@ impl Store {
             nags,
             terminals,
             activity_tail,
+            feed_tail,
+            feed_keys,
             meta,
             next_ids: self.next_ids()?,
             unknown,

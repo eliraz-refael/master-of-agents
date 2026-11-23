@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::central::{self, Waiter};
 use crate::change::Change;
 use crate::cockpit;
 use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn, TmuxToken};
@@ -125,6 +126,8 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx.extend(ops::launch::lost_opens(state));
             // The reload may have dropped a reconcile's changes: the panes are looked at again.
             fx.extend(reconcile::ask_if_due(state, now));
+            // moa's prompt whose row it lost was never sent.
+            fx.extend(central::reload(state));
             fx
         }
         Input::Tmux(t) => {
@@ -400,9 +403,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         }
         // The checks at the end of every input do the work.
         Input::Timer(TimerKey::Sleep | TimerKey::Terminals) => Vec::new(),
-        // Its waiters are dropped; a launch it asked for goes on, and a terminal's tab still
-        // gets its tags (R26). A panel on it goes, and `panels` says so; a popup's going may
-        // nudge tmux to reap it.
+        // Its waiters are dropped; a launch it asked for goes on, as does moa's turn, and a
+        // terminal's tab still gets its tags (R26). A panel on it goes, and `panels` says so;
+        // a popup's going may nudge tmux to reap it.
         Input::ClientGone(conn) => {
             // A panel moa placed keeps its connection for life: once it goes, its program
             // has ended, and a listing shows whether its pane is dead (L12).
@@ -412,6 +415,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 .is_some_and(|r| r.placed && r.pane.is_some());
             state.tmux.client_gone(conn);
             state.term_ls.retain(|(c, _)| *c != conn);
+            central::client_gone(state, conn);
             cockpit::run::client_gone(state, conn);
             let mut fx = panel::gone(state, conn);
             if ended {
@@ -600,6 +604,20 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::SessionLs { all },
             ..
         } if link::ready(state).is_ok() => ops::sessions::start_ls(state, now, conn, req, all),
+        // Answered once the prompt's row is saved, or with `wait` when moa's turn ends.
+        Input::Client {
+            conn,
+            req,
+            op: Op::ConsolePrompt { text, wait },
+            ..
+        } => central::send(state, now, text, false, Some(Waiter { conn, req, wait })),
+        Input::Client {
+            conn,
+            req,
+            op: Op::ConsoleCancel(_),
+            ..
+        } => central::cancel(state, conn, req),
+        Input::Acp(heard) => central::heard(state, now, heard),
         Input::Client {
             conn,
             req,

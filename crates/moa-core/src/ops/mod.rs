@@ -68,7 +68,7 @@ pub(crate) fn run(
         Op::TermName { target, name } => term::name(state, tx, &target, &name),
         Op::TermNote { target, note } => term::note(state, tx, &target, &note),
         Op::TermTimeout { target, after_ms } => term::timeout(state, tx, now, &target, after_ms),
-        // `handle` answers these with the link; they are never run as ops.
+        // `handle` answers these with the link, or moa's agent; they are never run as ops.
         Op::TmuxEnsure { .. }
         | Op::SessionOpen { .. }
         | Op::SessionFocus { .. }
@@ -87,7 +87,9 @@ pub(crate) fn run(
         | Op::LayoutShow { .. }
         | Op::LayoutSet { .. }
         | Op::LayoutApply { .. }
-        | Op::Goto { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::Goto { .. }
+        | Op::ConsolePrompt { .. }
+        | Op::ConsoleCancel(_) => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

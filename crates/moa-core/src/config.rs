@@ -86,6 +86,10 @@ name_type!(
     "letters, digits, ., - and _"
 );
 
+/// The name of moa's constitution file in moa's config folder, `constitution.md`. A brain
+/// can't be called this: its scope file, `<brain>.md` in the same folder, would be that file.
+pub const CONSTITUTION_NAME: &str = "constitution";
+
 /// Words a brain can't be called, since `moa <word>` already means a command: `moa`'s
 /// subcommands (clap's `help` among them) and every `moactl` verb (T18). Tests in `moa` and
 /// `moa-proto` check that each one is here.
@@ -192,6 +196,9 @@ pub struct AccountConfig {
     pub kind: AgentKind,
     pub store: PathBuf,
     pub launcher: Option<PathBuf>,
+    /// The program that runs moa's agent for this account (`acp`), over the one moa was
+    /// built with.
+    pub acp: Option<PathBuf>,
     pub brain: Option<BrainName>,
     pub except: Vec<PathBuf>,
     pub only: Vec<PathBuf>,
@@ -286,6 +293,7 @@ struct RawAccount {
     kind: Option<String>,
     store: Option<String>,
     launcher: Option<String>,
+    acp: Option<String>,
     brain: Option<String>,
     #[serde(default)]
     except: Vec<String>,
@@ -414,6 +422,11 @@ impl Config {
         };
         for (name, b) in &raw.brains {
             let name = BrainName::parse(name)?;
+            if name.as_str() == CONSTITUTION_NAME {
+                return Err(problem(format_args!(
+                    "a brain can't be called {name}; moa's constitution file has that name"
+                )));
+            }
             if RESERVED_BRAIN_NAMES.contains(&name.as_str()) {
                 return Err(problem(format_args!(
                     "a brain can't be called {name}; moa uses that word for a command"
@@ -488,6 +501,11 @@ impl Config {
                         .launcher
                         .as_deref()
                         .map(|s| expand_one(s, "launcher", &place, home))
+                        .transpose()?,
+                    acp: a
+                        .acp
+                        .as_deref()
+                        .map(|s| expand_one(s, "acp", &place, home))
                         .transpose()?,
                     brain,
                     except: expand_all(&a.except, "folder", &format!("{place}.except"), home)?,

@@ -38,6 +38,8 @@
               fileset = pkgs.lib.fileset.unions [
                 (craneLib.fileset.commonCargoSources ./.)
                 (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap" || f.hasExt "tpl" || f.hasExt "json" || f.hasExt "proptest-regressions") ./crates)
+                # moa's embedded constitution (`include_str!`)
+                ./crates/moa-core/src/central/constitution.md
                 # read by a DDL check test; removed with the spike
                 # nextest's overrides (the hook budget test runs alone)
                 ./.config/nextest.toml

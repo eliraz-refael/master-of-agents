@@ -7,6 +7,7 @@ use jiff::civil::Date;
 
 use crate::Now;
 use crate::UtcMs;
+use crate::central::wire::{AcpCmd, AcpIn};
 use crate::change::Change;
 use crate::hook::HookEnvelope;
 use crate::model::SessionId;
@@ -90,6 +91,8 @@ pub enum Input {
     /// The daemon's start drain of the hook spool has run, whether its commit landed or its
     /// `.draining` file was kept for later (or there was no spool). Sent once per start.
     StartDrained,
+    /// What moa's agent, or its host, said.
+    Acp(AcpIn),
 }
 
 /// What the tmux link reports. `conn` numbers the link's connections; anything from an
@@ -216,14 +219,19 @@ pub enum Effect {
         text: String,
         req: Option<(ConnId, ReqId)>,
     },
+    /// A command for moa's agent. A `Prompt` is sent once its `you` row is saved, so it
+    /// waits for the commit and is dropped with a failed one; every other command runs at
+    /// once.
+    Acp(AcpCmd),
 }
 
 impl Effect {
-    /// Timers, logs and the link's plumbing don't wait for a commit; everything else does.
-    /// The plumbing reveals nothing about saved state, and held behind a failed commit it
-    /// would be lost while the link waits for its answer. An `open`'s new window is not
-    /// plumbing: the agent it starts sends events for a session that must be saved first.
-    /// Held behind a failed commit it is dropped, and the reload answers the open.
+    /// Timers, logs, the link's plumbing and moa's agent's commands but a prompt don't wait
+    /// for a commit; everything else does. The plumbing reveals nothing about saved state,
+    /// and held behind a failed commit it would be lost while the link waits for its answer.
+    /// An `open`'s new window is not plumbing: the agent it starts sends events for a
+    /// session that must be saved first. Held behind a failed commit it is dropped, and the
+    /// reload answers the open. So is a prompt to moa: it goes once its row is saved.
     pub fn runs_at_once(&self) -> bool {
         matches!(
             self,
@@ -240,11 +248,12 @@ impl Effect {
                     ),
                     ..
                 }
-        )
+        ) || matches!(self, Effect::Acp(c) if !matches!(c, AcpCmd::Prompt { .. }))
     }
 
     /// Whether this tells the world about saved state, or starts something that will: a
-    /// `Publish`, a `Reply`, a view (an untokened `Tmux`), or an `open`'s new window.
+    /// `Publish`, a `Reply`, a view (an untokened `Tmux`), an `open`'s new window, or a
+    /// prompt to moa (its answer lands in the feed after its row).
     pub fn is_heard(&self) -> bool {
         matches!(
             self,
@@ -254,6 +263,7 @@ impl Effect {
                     token: None | Some(TmuxToken::Open(_)),
                     ..
                 }
+                | Effect::Acp(AcpCmd::Prompt { .. })
         )
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jiff::tz::TimeZone;
-use moa_core::config::{BrainName, Config, UiConfig};
+use moa_core::config::{BrainName, CONSTITUTION_NAME, Config, UiConfig};
 use moa_core::model::AgentKind;
 use moa_core::state::{Deps, PanelLaunch};
 use moa_platform::fs::write_if_changed;
@@ -269,6 +269,11 @@ async fn bring_up(
             read_text,
             layouts_file: paths.config_dir().join("layouts.json"),
             panel: launch,
+            // The daemon doesn't host moa's agent yet, so it knows no built-in one.
+            acp_adapter: None,
+            agent_dir: paths.agent_dir(b),
+            scope_file: paths.config_dir().join(format!("{b}.md")),
+            constitution_file: paths.config_dir().join(format!("{CONSTITUTION_NAME}.md")),
         };
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),
