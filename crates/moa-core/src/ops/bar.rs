@@ -23,7 +23,7 @@ fn check(line: &str, state: &State) -> Result<(), String> {
             "{line}: a button's command is at most {MAX_LENGTH} characters"
         ));
     }
-    match console::parse(line, None, state.deps()) {
+    match console::parse_button(line, state.deps()) {
         Ok(Parsed::Run(Op::BarSet { .. })) => Err(format!("{line}: a button can't set the bar")),
         Ok(_) => Ok(()),
         Err(why) => Err(format!("{line}: {why}")),

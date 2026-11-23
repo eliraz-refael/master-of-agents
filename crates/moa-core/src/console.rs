@@ -99,6 +99,17 @@ pub enum Parsed {
 /// Parses a `/command` line without running it. A relative path is relative to `cwd`, else
 /// home.
 pub fn parse(line: &str, cwd: Option<&Path>, deps: &Deps) -> Result<Parsed, String> {
+    parse_with(line, cwd, deps, false)
+}
+
+/// Checks `line` as a button's command without running it. A button is pressed later, from
+/// wherever the console is, so its folder must be a full path, and whether the folder is
+/// there is checked when it's pressed.
+pub fn parse_button(line: &str, deps: &Deps) -> Result<Parsed, String> {
+    parse_with(line, None, deps, true)
+}
+
+fn parse_with(line: &str, cwd: Option<&Path>, deps: &Deps, button: bool) -> Result<Parsed, String> {
     let Some(rest) = line.trim().strip_prefix('/') else {
         return Err("a command starts with /".into());
     };
@@ -132,6 +143,9 @@ pub fn parse(line: &str, cwd: Option<&Path>, deps: &Deps) -> Result<Parsed, Stri
                 },
                 _ => SuggestionAction { verb: name, args },
             };
+            if button {
+                return grammar(&verb, None, &deps.home).map(Parsed::Run);
+            }
             let home = Some(deps.home.as_path()).filter(|h| !h.as_os_str().is_empty());
             let op = grammar(&verb, cwd.or(home), &deps.home)?;
             folder_checked(op, deps).map(Parsed::Run)

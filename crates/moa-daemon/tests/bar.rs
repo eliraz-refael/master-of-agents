@@ -110,6 +110,17 @@ async fn a_bad_bar_is_refused() {
             "{entry}"
         );
     }
+    // A button is pressed later, from wherever the console is: its folder is a full path,
+    // and whether the folder is there is checked when it's pressed.
+    assert_eq!(
+        refusal(&set(&mut c, &["/term sub"], false)),
+        "/term sub: use a full path"
+    );
+    assert!(
+        set(&mut c, &["/open /tmp/moa-not-made-yet"], false)
+            .get("result")
+            .is_some()
+    );
     // The valid extras are taken: `/help` and `/new`.
     assert!(
         set(&mut c, &["/help", "/new"], false)
