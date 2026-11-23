@@ -31,7 +31,10 @@ fn console(steps: &[StubStep]) -> Console {
         .find(|p| p.tag == "console")
         .expect("the console's pane")
         .id;
-    Console { term, tb, pane }
+    let c = Console { term, tb, pane };
+    // Keys sent before the panel draws its input line could be lost.
+    c.shows(&["ask moa, or / for commands"]);
+    c
 }
 
 impl Console {
@@ -95,7 +98,6 @@ fn end() -> StubStep {
 #[test]
 fn typing_in_the_console_reaches_moa() {
     let c = console(&[say("hello from the stub", "m1"), end()]);
-    c.shows(&["ask moa, or / for commands"]);
 
     c.say("hello");
 
@@ -110,13 +112,30 @@ fn a_button_runs_its_command() {
     let ls = run(&c.tb, &["ls"], &[]);
     assert!(ls.status.success(), "{}{}", out(&ls), err(&ls));
 
+    // The card's own title line, which the button's `[/ls]` isn't.
+    let card = "▸ /ls";
+    assert!(!screen_of(&c.tb, &c.pane).contains(card));
+
     // The first Tab focuses the newest text button, which is `/ls`.
     c.keys(&["Tab", "Enter"]);
 
     // The card carries `moactl ls`'s own text.
     let want = out(&ls);
     let first = want.lines().next().expect("ls prints a header");
-    c.shows(&[first.trim_end()]);
+    c.shows(&[card, first.trim_end()]);
+}
+
+#[test]
+fn a_typed_command_runs() {
+    let c = console(&[]);
+
+    c.say("/ls");
+
+    let ls = run(&c.tb, &["ls"], &[]);
+    assert!(ls.status.success(), "{}{}", out(&ls), err(&ls));
+    let want = out(&ls);
+    let first = want.lines().next().expect("ls prints a header");
+    c.shows(&["▸ /ls", first.trim_end()]);
 }
 
 #[test]
@@ -141,6 +160,8 @@ fn closing_the_console_leaves_the_turn() {
         end(),
     ]);
     c.say("are you there");
+    // The turn is open, and the stub only ends it once the gate file exists, so it is
+    // in `Wait` until the gate opens below.
     c.feed_has("you are you there");
     c.shows(&["thinking… Esc cancels"]);
 
