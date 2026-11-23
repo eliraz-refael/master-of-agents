@@ -1487,6 +1487,38 @@ expression: all
               "method",
               "params"
             ]
+          },
+          {
+            "description": "Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from\n`moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "bar.set"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "commands": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "user": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "commands"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
           }
         ]
       },

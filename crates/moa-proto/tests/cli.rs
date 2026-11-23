@@ -197,6 +197,7 @@ const EACH_VERB: &[&[&str]] = &[
     &["find", "q"],
     &["set", "x"],
     &["archive", "x"],
+    &["bar"],
     &["group", "add", "A"],
     &["note", "x"],
     &["project", "x"],

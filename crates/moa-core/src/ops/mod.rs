@@ -2,6 +2,7 @@
 //! one `tx.commit`: an `Err` has applied nothing.
 
 pub mod adopt;
+pub mod bar;
 pub mod groups;
 pub mod launch;
 pub mod layout;
@@ -32,6 +33,7 @@ pub(crate) fn run(
         Op::GroupRename { old, new } => groups::rename(state, tx, now, &old, &new),
         Op::GroupRm { path } => groups::rm(state, tx, &path),
         Op::GroupFold { path, collapsed } => groups::fold(state, tx, &path, collapsed),
+        Op::BarSet { commands, user } => bar::set(state, tx, commands, user),
         Op::SessionLs { all } => sessions::ls(state, now, all),
         Op::SessionSet { q, title, group } => {
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())

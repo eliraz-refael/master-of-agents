@@ -531,6 +531,10 @@ fn op_methods_match_the_variants() {
         },
         Op::ConsoleNew(NoParams),
         Op::ConsoleCommand { line: "/ls".into() },
+        Op::BarSet {
+            commands: vec!["/ls".into()],
+            user: true,
+        },
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
     // be serialized or parsed.
@@ -582,6 +586,7 @@ const WRITES: &[&str] = &[
     "console.prompt",
     "console.new",
     "console.command",
+    "bar.set",
 ];
 
 #[test]

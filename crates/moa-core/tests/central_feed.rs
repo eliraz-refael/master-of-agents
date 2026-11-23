@@ -51,8 +51,8 @@ fn the_tail_keeps_the_newest_100() {
     let all: Vec<_> = (1..=150).map(|i| entry(i, None)).collect();
     let st = start(all, vec![]);
     let rows = st.model().topics[&Topic::Feed].clone();
-    // 100 rows and the `state` row.
-    assert_eq!(rows.len(), FEED_SHOWN + 1);
+    // 100 rows, the `state` row and the `bar` row.
+    assert_eq!(rows.len(), FEED_SHOWN + 2);
     assert!(rows.contains_key("#150") && rows.contains_key("#51"));
     assert!(!rows.contains_key("#50"));
 }
@@ -61,7 +61,8 @@ fn the_tail_keeps_the_newest_100() {
 fn the_state_row_says_off_at_start() {
     let st = start(vec![], vec![]);
     let rows = st.model().topics[&Topic::Feed].clone();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows["bar"]["by"], "default");
     assert_eq!(rows["state"]["phase"], "off");
     assert_eq!(rows["state"]["thread"], json!(null));
     assert_eq!(rows["state"]["why"], json!(null));

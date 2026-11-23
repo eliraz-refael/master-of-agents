@@ -46,6 +46,10 @@ pub const COMMANDS: &[Command] = &[
     ),
     shown("close", "SESSION: close a session's agent"),
     shown("archive", "SESSION…: archive sessions"),
+    shown(
+        "bar",
+        "[COMMAND…]: set the button bar; none puts moa's back",
+    ),
     shown("new", "the next prompt starts a new thread"),
     shown("auto", "moa reads reports on its own (later)"),
     shown("sleep", "idle sessions go to sleep (later)"),
@@ -109,6 +113,11 @@ pub fn parse(line: &str, cwd: Option<&Path>, deps: &Deps) -> Result<Parsed, Stri
         "help" | "new" if !args.is_empty() => Err(format!("/{name} takes nothing after it")),
         "help" => Ok(Parsed::Help),
         "new" => Ok(Parsed::Run(Op::ConsoleNew(NoParams))),
+        // The op checks each entry, as it does for `moactl bar`.
+        "bar" => Ok(Parsed::Run(Op::BarSet {
+            commands: args,
+            user: true,
+        })),
         // The console closes its own panel; a `/quit` sent here has nothing to close.
         "quit" => Err("/quit is the console's own: it closes the console's panel".into()),
         n if LATER.contains(&n) => Err(format!("/{n} comes in a later version of moa")),
@@ -186,7 +195,6 @@ mod tests {
         assert_eq!(no("ls"), "a command starts with /");
         assert_eq!(no("  "), "a command starts with /");
         assert_eq!(no("/nope"), "there's no /nope command; /help lists them");
-        assert_eq!(no("/bar /ls"), "there's no /bar command; /help lists them");
         assert_eq!(no("/auto on"), "/auto comes in a later version of moa");
         assert_eq!(no("/new now"), "/new takes nothing after it");
         assert_eq!(
@@ -197,6 +205,13 @@ mod tests {
         // Without the grammar, a verb can't be parsed.
         assert_eq!(no("/ls"), "console commands need the moactl grammar");
         assert_eq!(parse(" /help ", None, &deps), Ok(Parsed::Help));
+        assert_eq!(
+            parse("/bar /ls \"/focus x\"", None, &deps),
+            Ok(Parsed::Run(Op::BarSet {
+                commands: vec!["/ls".into(), "/focus x".into()],
+                user: true
+            }))
+        );
         assert_eq!(
             parse("/new", None, &deps),
             Ok(Parsed::Run(Op::ConsoleNew(NoParams)))

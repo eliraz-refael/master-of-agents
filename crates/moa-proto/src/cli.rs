@@ -107,6 +107,8 @@ pub enum Verb {
         #[arg(long)]
         group: Option<String>,
     },
+    /// Set the console's button bar: `/command` lines; none clears moa's list.
+    Bar { commands: Vec<String> },
     /// Archive sessions.
     Archive {
         #[arg(required = true)]
@@ -270,6 +272,7 @@ pub const VERB_NAMES: &[&str] = &[
     "find",
     "set",
     "archive",
+    "bar",
     "group",
     "note",
     "project",
@@ -399,6 +402,7 @@ impl Verb {
             Verb::Ls { .. } => "ls",
             Verb::Find { .. } => "find",
             Verb::Set { .. } => "set",
+            Verb::Bar { .. } => "bar",
             Verb::Archive { .. } => "archive",
             Verb::Group { .. } => "group",
             Verb::Note { .. } => "note",
@@ -438,6 +442,10 @@ impl Verb {
                 group: group.clone(),
             },
             Verb::Archive { ids } => Op::SessionArchive { qs: ids.clone() },
+            Verb::Bar { commands } => Op::BarSet {
+                commands: commands.clone(),
+                user: false,
+            },
             Verb::Group { op, args } => match (op, args.as_slice()) {
                 (GroupOp::Add, [p]) => Op::GroupAdd { path: p.clone() },
                 (GroupOp::Rename, [old, new]) => Op::GroupRename {

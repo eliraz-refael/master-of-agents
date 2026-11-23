@@ -225,6 +225,22 @@ pub struct MoaRow {
     pub why: Option<String>,
 }
 
+/// The `meta` keys of the console's button bar start with this: `.moa` holds the list moa set
+/// and `.you` the one you did, each as JSON.
+pub const BAR_KEY_PREFIX: &str = "console.bar.";
+
+/// The bar a brain has until moa or you set one.
+pub const DEFAULT_BAR: &[&str] = &["/brief", "/attention", "/ls", "/help"];
+
+/// The `feed` topic's row with key `bar`: the console's buttons, as `/command` lines. Yours
+/// wins over moa's, which wins over the default.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BarRow {
+    pub commands: Vec<String>,
+    /// `you`, `moa` or `default`.
+    pub by: String,
+}
+
 /// A `feed` row (key `ev:<seq>`): a session event (B3), from memory. The console folds them,
 /// one line per session.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -432,6 +448,25 @@ impl State {
             .collect()
     }
 
+    /// The console's bar: yours, else moa's, else the default. A stored list that doesn't parse,
+    /// or is empty, counts as none.
+    pub fn bar(&self) -> BarRow {
+        let stored = |by: &str| {
+            let list: Vec<String> =
+                serde_json::from_str(self.meta(&format!("{BAR_KEY_PREFIX}{by}"))?).ok()?;
+            (!list.is_empty()).then(|| BarRow {
+                commands: list,
+                by: by.into(),
+            })
+        };
+        stored("you")
+            .or_else(|| stored("moa"))
+            .unwrap_or_else(|| BarRow {
+                commands: DEFAULT_BAR.iter().map(|c| c.to_string()).collect(),
+                by: "default".into(),
+            })
+    }
+
     fn feed_rows(&self) -> BTreeMap<String, Value> {
         let mut rows: BTreeMap<String, Value> = self
             .feed_tail()
@@ -447,6 +482,7 @@ impl State {
             (key, v)
         }));
         rows.insert("state".into(), keyed("state", &self.central.row()));
+        rows.insert("bar".into(), keyed("bar", &self.bar()));
         rows
     }
 

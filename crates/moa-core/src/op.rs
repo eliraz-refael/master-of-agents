@@ -272,6 +272,14 @@ pub enum Op {
     /// (`moa_core::console`). The reply is that op's reply.
     #[serde(rename = "console.command")]
     ConsoleCommand { line: String },
+    /// Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from
+    /// `moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.
+    #[serde(rename = "bar.set")]
+    BarSet {
+        commands: Vec<String>,
+        #[serde(default)]
+        user: bool,
+    },
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -440,6 +448,7 @@ impl Op {
         "console.page",
         "console.new",
         "console.command",
+        "bar.set",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -473,6 +482,7 @@ impl Op {
             | Op::LayoutApply { .. }
             | Op::ConsolePrompt { .. }
             | Op::ConsoleNew(_)
+            | Op::BarSet { .. }
             // It may run a write (`/archive`, `/open`), so it is counted as one. A read-only
             // command still answers while writes are refused: the core refuses only at a
             // commit, and a read never commits.
@@ -551,6 +561,7 @@ impl Op {
             Op::ConsoleCancel(_) => "console.cancel",
             Op::ConsolePage { .. } => "console.page",
             Op::ConsoleNew(_) => "console.new",
+            Op::BarSet { .. } => "bar.set",
             Op::ConsoleCommand { .. } => "console.command",
             Op::DebugPanic => "debug.panic",
         }
