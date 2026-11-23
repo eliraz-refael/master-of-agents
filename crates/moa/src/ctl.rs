@@ -20,7 +20,7 @@ use moa_proto::cli::{Moactl, VerbCtx, VerbError};
 pub struct BrainArgs {
     /// Which brain; the default is the one this folder and account belong to.
     #[arg(long)]
-    brain: Option<String>,
+    pub(crate) brain: Option<String>,
 }
 
 #[derive(Args)]
@@ -144,7 +144,7 @@ pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|e| format!("can't start: {e}"))
 }
 
-fn finish(result: Result<(), String>) -> ExitCode {
+pub(crate) fn finish(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(line) => {
@@ -267,7 +267,11 @@ pub fn shutdown(args: &BrainArgs) -> ExitCode {
 /// Connects to the brain's daemon without starting one and runs `then` on it. Both callers
 /// are allowed on a mismatched build. When nothing is running that is an error, unless
 /// `fine_if_stopped` (`shutdown`: it is already what was asked), which just says so.
-fn running<F, Fut>(args: &BrainArgs, fine_if_stopped: bool, then: F) -> Result<(), String>
+pub(crate) fn running<F, Fut>(
+    args: &BrainArgs,
+    fine_if_stopped: bool,
+    then: F,
+) -> Result<(), String>
 where
     F: FnOnce(BrainName, Client) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,

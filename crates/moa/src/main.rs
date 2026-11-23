@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use moa_proto::cli::{Moactl, VERB_NAMES};
 
 mod adopt;
+mod console;
 mod ctl;
 mod daemon;
 mod front;
@@ -45,6 +46,8 @@ enum Command {
     Shutdown(ctl::BrainArgs),
     /// A read-only SQL shell on a brain: one statement, or one per line on stdin.
     Sql(sql::SqlArgs),
+    /// Talk to moa's own agent: `console prompt`, `console cancel` or `console feed`.
+    Console(console::ConsoleArgs),
     /// Start a brain's moa at login: `service install` or `service uninstall`.
     Service(service::ServiceArgs),
 }
@@ -87,6 +90,7 @@ fn main() -> ExitCode {
         Some(Command::Panel(args)) => panel::panel(&args),
         Some(Command::Pick(args)) => panel::pick(&args),
         Some(Command::Sql(args)) => sql::sql(&args),
+        Some(Command::Console(args)) => return console::console(&args),
         Some(Command::Service(args)) => service::service(&args),
         None => {
             return front::front(&front::FrontArgs {
@@ -133,6 +137,41 @@ mod tests {
                 RESERVED_BRAIN_NAMES.contains(&name),
                 "{name} isn't reserved"
             );
+        }
+    }
+
+    #[test]
+    fn console_parses() {
+        let verb = |args: &[&str]| {
+            let mut v = vec!["moa", "console"];
+            v.extend(args);
+            match Cli::try_parse_from(v).unwrap().command {
+                Some(Command::Console(c)) => c,
+                _ => panic!("not console"),
+            }
+        };
+        let c = verb(&["prompt", "hello", "there"]);
+        assert!(
+            matches!(&c.verb, console::Verb::Prompt { text, .. } if text.join(" ") == "hello there")
+        );
+        let c = verb(&["prompt", "--", "-x"]);
+        assert!(matches!(&c.verb, console::Verb::Prompt { text, .. } if text == &["-x"]));
+        assert!(matches!(
+            verb(&["cancel"]).verb,
+            console::Verb::Cancel { .. }
+        ));
+        let c = verb(&["feed", "-n", "5"]);
+        assert!(matches!(c.verb, console::Verb::Feed { lines: 5, .. }));
+        for sub in ["prompt hi", "cancel", "feed"] {
+            let mut a = vec!["--brain", "B"];
+            a.splice(0..0, sub.split(' '));
+            let c = verb(&a);
+            let brain = match &c.verb {
+                console::Verb::Prompt { brain, .. }
+                | console::Verb::Cancel { brain }
+                | console::Verb::Feed { brain, .. } => brain,
+            };
+            assert_eq!(brain.brain.as_deref(), Some("B"));
         }
     }
 
