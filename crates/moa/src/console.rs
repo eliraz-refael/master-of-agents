@@ -10,7 +10,7 @@ use moa_core::op::Op;
 use moa_core::publish::{FeedRow, MoaRow, Topic};
 use serde_json::Value;
 
-use crate::ctl::{BrainArgs, finish, running};
+use crate::ctl::{BrainArgs, finish, running, send_routed};
 
 #[derive(Args)]
 pub struct ConsoleArgs {
@@ -52,23 +52,21 @@ pub fn console(args: &ConsoleArgs) -> ExitCode {
 }
 
 fn prompt(brain: &BrainArgs, text: String) -> Result<(), String> {
-    running(brain, false, |_, mut client| async move {
-        let op = Op::ConsolePrompt { text, wait: true };
-        let done = client.call(op).await.map_err(|e| e.to_string())?;
-        println!("{}", done.text);
-        Ok(())
-    })
+    let done = send_routed(
+        brain.brain.as_deref(),
+        Op::ConsolePrompt { text, wait: true },
+    )?;
+    println!("{}", done.text);
+    Ok(())
 }
 
 fn cancel(brain: &BrainArgs) -> Result<(), String> {
-    running(brain, false, |_, mut client| async move {
-        let done = client
-            .call(Op::ConsoleCancel(Default::default()))
-            .await
-            .map_err(|e| e.to_string())?;
-        println!("{}", done.text);
-        Ok(())
-    })
+    let done = send_routed(
+        brain.brain.as_deref(),
+        Op::ConsoleCancel(Default::default()),
+    )?;
+    println!("{}", done.text);
+    Ok(())
 }
 
 fn feed(brain: &BrainArgs, n: usize) -> Result<(), String> {
@@ -162,6 +160,19 @@ mod tests {
             body,
             state: state.map(Into::into),
         }
+    }
+
+    /// A prompt is routed as a write (starts moa, refuses an unlisted account); the brain pick
+    /// itself needs a config and folder, so it is covered by `pick_brain`'s own tests.
+    #[test]
+    fn a_prompt_is_a_write() {
+        assert!(
+            Op::ConsolePrompt {
+                text: "hi".into(),
+                wait: true
+            }
+            .writes()
+        );
     }
 
     #[test]
