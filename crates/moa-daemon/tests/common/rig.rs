@@ -126,6 +126,32 @@ impl Rig {
             .collect()
     }
 
+    /// The feed's rows as `(kind, body, state)`, oldest first: no ids, no times.
+    pub fn rows(&self) -> Vec<(String, Value, Option<String>)> {
+        let store = self.store();
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT kind, body, state FROM feed ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|(kind, body, state)| {
+            (
+                kind,
+                serde_json::from_str(&body).expect("a JSON body"),
+                state,
+            )
+        })
+        .collect()
+    }
+
     /// The feed's rows as `(kind, text)`, oldest first; a row without text has `""`.
     pub fn feed(&self) -> Vec<(String, String)> {
         let store = self.store();

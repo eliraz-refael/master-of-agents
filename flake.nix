@@ -59,6 +59,10 @@
       # moa's agent: nixpkgs' adapter without its wrapper, which would pull in the unfree
       # `claude-code`. moa launches the user's own `claude`, never one from the store.
       adapterFor = system: (pkgsFor system).claude-agent-acp.overrideAttrs (_: { postInstall = ""; });
+
+      # The recording of moa's agent the replay test plays (change it with the test's
+      # `recording()`); its first line says which adapter version made it.
+      recording = ./crates/moa-testkit/recordings/synthetic.jsonl;
     in
     {
       packages = forAllSystems (system:
@@ -95,6 +99,17 @@
             cargoClippyExtraArgs = "--all-targets -- -D warnings";
           });
           fmt = b.craneLib.cargoFmt { inherit (b.withArtifacts) pname version src; };
+          # The recording was made by the adapter moa packages: a new adapter needs a new one.
+          recording =
+            let want = (adapterFor system).version; in
+            b.pkgs.runCommand "recording" { nativeBuildInputs = [ b.pkgs.jq ]; } ''
+              have=$(head -n 1 ${recording} | jq -r '.version')
+              if [ "$have" != "${want}" ]; then
+                echo "the recording is from claude-agent-acp $have, but moa packages ${want}: record it again" >&2
+                exit 1
+              fi
+              touch $out
+            '';
           # The Linux sandbox has no time zone database and no /etc/localtime, which every
           # real system has; jiff reads TZDIR and TZ. --no-fail-fast reports every failure of
           # a run, not just the first.

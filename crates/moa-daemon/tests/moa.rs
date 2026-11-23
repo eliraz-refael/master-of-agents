@@ -58,6 +58,44 @@ fn child_pid(agent: &Path) -> u32 {
     .expect("the stub started its child")
 }
 
+/// The recording the replay test plays: the one line to change when it is another file.
+fn recording() -> PathBuf {
+    moa_testkit::recording::synthetic()
+}
+
+/// A recorded session, replayed by `stub-acp` through the real daemon: the feed it makes
+/// is the snapshot, and the log holds no error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recorded_session_replays() {
+    let (_, entries) = moa_testkit::recording::read(&recording()).expect("the recording");
+    let first = entries
+        .iter()
+        .find(|e| e.msg["method"] == "session/prompt")
+        .expect("a recorded prompt");
+    let text = first.msg["params"]["prompt"][0]["text"].as_str().unwrap();
+
+    let rig = Rig::new(&[]);
+    std::fs::copy(
+        recording(),
+        rig.agent.join(moa_testkit::recording::REPLAY_FILE),
+    )
+    .unwrap();
+    let up = rig.start().await;
+    let reply = prompt(&mut up.client(), text);
+    assert!(reply["result"].is_object(), "{reply}");
+    up.stop().await;
+
+    let rows: Vec<Value> = rig
+        .rows()
+        .into_iter()
+        .map(|(kind, body, state)| json!({"kind": kind, "body": body, "state": state}))
+        .collect();
+    insta::assert_json_snapshot!("a_recorded_session_replays", rows);
+    let log = std::fs::read_to_string(rig.paths.log("default")).unwrap_or_default();
+    assert!(log.contains(" INFO "), "the daemon logged: {log}");
+    assert!(!log.contains(" ERROR "), "{log}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prompt_lands_in_the_feed() {
     let rig = Rig::new(&[say("Hello from ", "m1"), say("the stub", "m1"), end()]);

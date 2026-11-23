@@ -26,6 +26,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 moa-client = { path = "../moa-client" }
 moa-testkit = { path = "../moa-testkit" }
+insta.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util", "net", "io-util", "sync"] }
 

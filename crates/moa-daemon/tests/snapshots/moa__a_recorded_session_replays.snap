@@ -1,0 +1,20 @@
+---
+source: crates/moa-daemon/tests/moa.rs
+expression: rows
+---
+[
+  {
+    "kind": "you",
+    "body": {
+      "text": "hello"
+    },
+    "state": null
+  },
+  {
+    "kind": "moa",
+    "body": {
+      "text": "Hello! I'm moa. Ask me about your sessions, or tell me what to start."
+    },
+    "state": null
+  }
+]
