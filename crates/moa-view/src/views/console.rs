@@ -499,7 +499,8 @@ pub struct Palette {
 
 pub fn palette(data: &Data, ui: &ConsoleUi) -> Option<Palette> {
     let t = ui.draft.text.as_str();
-    if !t.starts_with('/') || ui.closed.as_deref() == Some(t) {
+    // It completes the last word, so it shows only while the cursor is at the end.
+    if !t.starts_with('/') || ui.closed.as_deref() == Some(t) || !ui.draft.at_end() {
         return None;
     }
     let Some(sp) = t.find(char::is_whitespace) else {

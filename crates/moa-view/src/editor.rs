@@ -45,6 +45,11 @@ impl Editor {
     }
 
     /// The byte where the cursor stands (its end when `at` is past it).
+    /// Whether the cursor is after the last grapheme.
+    pub fn at_end(&self) -> bool {
+        self.at == self.text.graphemes(true).count()
+    }
+
     fn cursor(&self) -> usize {
         self.text
             .grapheme_indices(true)

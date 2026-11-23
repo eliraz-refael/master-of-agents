@@ -892,6 +892,24 @@ fn slash_opens_the_palette() {
     assert!(palette(&mut c).is_empty());
 }
 
+/// The palette completes the last word, so it shows only with the cursor at the end.
+#[test]
+fn the_palette_waits_for_the_cursor_at_the_end() {
+    let mut c = C::new(Vec::new(), SIZE);
+    c.typed("/re");
+    assert_eq!(palette(&mut c).len(), 1);
+    c.key(Key::Left);
+    assert!(palette(&mut c).is_empty());
+    c.key(Key::Tab);
+    assert_eq!(
+        c.input(),
+        "› /re",
+        "Tab completes nothing away from the end"
+    );
+    c.key(Key::End);
+    assert_eq!(palette(&mut c).len(), 1);
+}
+
 /// B11, F9: `/resume ` lists the live sessions' titles, narrowed by what is typed; layout
 /// names come after `/layout apply ` and `/layout show `, not after a bare `/layout `.
 #[test]
