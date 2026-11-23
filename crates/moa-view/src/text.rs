@@ -355,6 +355,11 @@ fn words(spans: &[Span], w: usize) -> Vec<Word> {
 /// `spans` wrapped at spaces to `w` cells, first fit as [`wrap`] does, each piece keeping its
 /// span's style: a word wider than a line is broken, but a button's span never is; it moves
 /// whole to the next line, and only one wider than the line is cut with `…`. Never empty.
+///
+/// It is not [`wrap`] over spans, on purpose; keep the two apart. Unlike [`wrap`] (textwrap's
+/// own `wrap`), it never breaks at a hyphen, measures by grapheme ([`width`]) where textwrap
+/// measures by char, splits only at ASCII spaces, and gives `\n` no meaning: its spans come
+/// cleaned, one paragraph run at a time. Only the first-fit choice of breaks is shared.
 pub fn wrap_spans(spans: &[Span], w: usize) -> Vec<Vec<Span>> {
     let w = w.max(1);
     let words: Vec<Word> = words(spans, w)
@@ -371,7 +376,9 @@ pub fn wrap_spans(spans: &[Span], w: usize) -> Vec<Vec<Span>> {
                     out.push(span.clone());
                 }
                 if i + 1 < line.len() && word.space > 0 {
-                    let last = out.spans.last().expect("a word has a span");
+                    let Some(last) = out.spans.last() else {
+                        continue;
+                    };
                     let space = " ".repeat(word.space);
                     out.push(if last.button.is_some() {
                         Span::new(space, Tone::Text)
