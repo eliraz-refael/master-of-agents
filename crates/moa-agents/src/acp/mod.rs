@@ -68,20 +68,28 @@ pub struct Adapter {
 /// The agent's process and the task that reads it. Dropped without `stop`, it still sends the
 /// agent's process group `SIGTERM` (unless the agent has gone already) and, if the agent is
 /// still there after `STOP_WAIT`, `SIGKILL`; once the agent leaves, its reaper ends the rest
-/// of the group.
+/// of the group. Dropped while the agent is still starting (a cancelled `start`), it sends
+/// `SIGKILL` at once: such an agent has nothing to save, and its host may be about to exit
+/// before a later `SIGKILL` could be sent.
 struct Process {
     reaper: Reaper,
     driver: Option<JoinHandle<()>>,
+    starting: bool,
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
+        let first = if self.starting {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
         let mut signalled = false;
         self.reaper.kill_unless_exited(|group| {
             signalled = true;
-            kill_group(group, libc::SIGTERM);
+            kill_group(group, first);
         });
-        if signalled {
+        if signalled && !self.starting {
             // An agent that ignores `SIGTERM` would otherwise outlive its host.
             let reaper = self.reaper.clone();
             std::thread::spawn(move || {
@@ -238,6 +246,7 @@ impl Adapter {
         let mut process = Process {
             reaper,
             driver: None,
+            starting: true,
         };
         let failed = |why: String| {
             exit.failed();
@@ -296,6 +305,7 @@ impl Adapter {
             caps: convert::caps(&init),
         });
         exit.live();
+        process.starting = false;
         Ok(Adapter {
             generation,
             to_core,
