@@ -724,8 +724,8 @@ fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {
                     e.seq = seq;
                     data.events.insert(seq, e);
                 }
-                // The bar's commands are odd text too, and the focus is one of them (or not).
-                ui.focus = focus.map(|i| bar.get(i).cloned().unwrap_or_else(|| "/ls".into()));
+                // The bar's commands are odd text too, and the focus is any index (in range or not).
+                ui.focus = focus.map(|i| u16::try_from(i).unwrap_or(0));
                 data.bar = Some(moa_core::publish::BarRow {
                     commands: bar,
                     by: "you".into(),

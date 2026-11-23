@@ -503,6 +503,13 @@ impl Panel {
             Mouse::Click { x, y } => {
                 self.pointer = Some((x, y));
                 if let Some(command) = self.button_at(g.body, x, y) {
+                    // Like any other click: a question is answered no, a prompt ignores it.
+                    if self.confirm.take().is_some() {
+                        return Handled { out, redraw: true };
+                    }
+                    if self.prompt.is_some() {
+                        return Handled { out, redraw: false };
+                    }
                     // A click on a button presses it.
                     self.message = None;
                     let out = vec![Out::Send(Op::ConsoleCommand { line: command })];

@@ -47,9 +47,9 @@ pub struct ConsoleUi {
     pub older: BTreeMap<i64, FeedRow>,
     pub cards: Vec<Card>,
     pub errors: Vec<(UtcMs, String)>,
-    /// The button Tab is on, by its command: every button pressing it is drawn reversed. By
-    /// identity, so a rebuild (a rename, a new line) keeps it.
-    pub focus: Option<String>,
+    /// The button Tab is on, as an index into `ConsoleView.buttons`: that one is drawn
+    /// reversed, and no other, whatever its command.
+    pub focus: Option<u16>,
 }
 
 /// The console's lines, and the buttons their spans press.
@@ -194,8 +194,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView 
     let buttons = draw.buttons;
     if let Some(focus) = &ui.focus {
         for span in lines.iter_mut().chain(&mut bar).flat_map(|l| &mut l.spans) {
-            let pressed = span.button.and_then(|b| buttons.get(usize::from(b)));
-            span.reversed |= pressed.is_some_and(|b| b.command == *focus);
+            span.reversed |= span.button.is_some() && span.button == Some(*focus);
         }
     }
     ConsoleView {
@@ -618,9 +617,10 @@ impl<'a> Draw<'a> {
         let commands = self.data.bar.iter().flat_map(|b| &b.commands);
         let mut spans = Vec::new();
         for command in commands {
+            let command = clean(command);
             let button = Button {
                 label: command.clone(),
-                command: command.clone(),
+                command,
             };
             if let Some(span) = button_span(&mut self.buttons, button, false) {
                 if !spans.is_empty() {

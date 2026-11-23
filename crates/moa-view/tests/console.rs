@@ -9,7 +9,7 @@ use moa_core::state::EventWhat;
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
 use moa_view::fixture::{THREAD_TODAY, console_rows, lantern, session};
-use moa_view::line::{Line, Tone, debug_lines};
+use moa_view::line::{Line, debug_lines};
 use moa_view::text::width;
 use moa_view::views::console::{Card, ConsoleUi, ConsoleView, build, button_at};
 use moa_view::views::{self, ViewUi};
@@ -344,7 +344,11 @@ fn commands_in_text_become_buttons() {
     let line = &view.lines[1];
     assert!(line.text().contains("[/brief]"), "{}", line.text());
     assert!(line.text().contains("[↩ Lantern · Rust scaffold]"));
-    assert!(line.text().contains("`moactl ls --all`") || line.text().contains("moactl ls --all"));
+    for code in ["moactl ls --all", "/nope", "moactl focus --all"] {
+        assert!(line.text().contains(code), "{code} stays: {}", line.text());
+        assert!(!line.text().contains(&format!("[{code}]")), "{code}");
+    }
+    assert_eq!(view.buttons.len(), 2);
 }
 
 /// A session button is built from the sessions every time: a rename shows at once.
@@ -473,34 +477,31 @@ fn the_tab_order_is_reading_order() {
     assert_eq!(view.order(0..0).first().map(command), Some(s("/help")));
 }
 
-/// The focused button is drawn reversed, text's or bar's, and no other.
+/// The focused button is drawn reversed, text's or bar's, and exactly one: a text `/ls` and a
+/// bar `/ls` are two buttons.
 #[test]
 fn the_focused_button_is_reversed() {
-    let ui = ConsoleUi {
-        focus: Some(s("/attention")),
-        ..ConsoleUi::default()
-    };
-    let (_, view) = says("go `/ls`", &["/help", "/attention"], &ui, 80);
-    let reversed: Vec<&str> = view
-        .lines
-        .iter()
-        .chain(&view.bar)
-        .flat_map(|l| &l.spans)
-        .filter(|s| s.reversed)
-        .map(|s| s.text.as_str())
-        .collect();
-    assert_eq!(reversed, ["[/attention]"]);
-    let ui = ConsoleUi {
-        focus: Some(s("/ls")),
-        ..ConsoleUi::default()
-    };
-    let (_, view) = says("go `/ls`", &["/help"], &ui, 80);
-    assert!(
-        view.lines[1]
-            .spans
+    let reversed = |view: &ConsoleView| -> Vec<(usize, String)> {
+        view.lines
             .iter()
-            .any(|s| s.reversed && s.tone == Tone::Work)
-    );
+            .chain(&view.bar)
+            .flat_map(|l| &l.spans)
+            .filter(|s| s.reversed)
+            .map(|s| (usize::from(s.button.expect("a button")), s.text.clone()))
+            .collect()
+    };
+    for focus in [0u16, 1, 2] {
+        let ui = ConsoleUi {
+            focus: Some(focus),
+            ..ConsoleUi::default()
+        };
+        let (_, view) = says("go `/ls`", &["/ls", "/help"], &ui, 80);
+        // Button 0 is the text's `/ls`, 1 the bar's `/ls`, 2 the bar's `/help`.
+        assert_eq!(reversed(&view).len(), 1, "focus {focus}");
+        assert_eq!(reversed(&view)[0].0, usize::from(focus));
+    }
+    let (_, view) = says("go `/ls`", &["/ls"], &ConsoleUi::default(), 80);
+    assert!(reversed(&view).is_empty());
 }
 
 /// Cards and the console's own errors never split a turn either: one timed inside a turn is
