@@ -1,0 +1,11 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"**bold** and ~~struck~~ and *emphasis* and `inline code` and \\\n         [a link](https://example.com) and ![alt text](x.png) and <b>html</b>\")"
+---
+── 40 ──
+[text*]bold [text]and struck and emphasis and [work]inline
+[work]code [text]and a link and [dim][image] [text]and  ‹more›
+[text]<b>html</b>  ‹more›
+── 80 ──
+[text*]bold [text]and struck and emphasis and [work]inline code [text]and a link and [dim][image] [text]and
+[text]<b>html</b>  ‹more›

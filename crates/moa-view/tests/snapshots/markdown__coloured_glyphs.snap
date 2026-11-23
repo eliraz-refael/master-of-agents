@@ -1,0 +1,9 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"✓ built ✗ failed ⚠ careful ● working **✓ bold**\")"
+---
+── 40 ──
+[ok]✓ [text]built [fail]✗ [text]failed [warn]⚠ [text]careful [work]● [text]working [ok*]✓
+[text*]bold  ‹more›
+── 80 ──
+[ok]✓ [text]built [fail]✗ [text]failed [warn]⚠ [text]careful [work]● [text]working [ok*]✓ [text*]bold

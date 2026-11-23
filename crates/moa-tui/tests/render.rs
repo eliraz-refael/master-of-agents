@@ -8,7 +8,7 @@ use moa_tui::draw::draw;
 use moa_tui::theme::{ColorMode, Theme};
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
-use moa_view::fixture::{lantern, terminals};
+use moa_view::fixture::{console_rows, lantern, terminals};
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
 use moa_view::panel::{Mark, Mouse, Panel, Screen};
@@ -19,7 +19,7 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const VIEWS: [(&str, View); 7] = [
+const VIEWS: [(&str, View); 8] = [
     ("tree", View::Tree),
     ("plan", View::Plan),
     ("status", View::Status),
@@ -27,6 +27,7 @@ const VIEWS: [(&str, View); 7] = [
     ("projects", View::Projects),
     ("activity", View::Activity),
     ("picture", View::Picture),
+    ("console", View::Console),
 ];
 
 const WIDTHS: [u16; 5] = [40, 60, 80, 120, 200];
@@ -54,8 +55,12 @@ struct T {
 }
 
 impl T {
+    /// The view on the fixture; the console's with its made-up day in the `feed` topic.
     fn new(view: View) -> T {
-        let (data, ctx) = lantern();
+        let (mut data, ctx) = lantern();
+        if view == View::Console {
+            console_rows(&mut data);
+        }
         T {
             panel: Panel::new(view),
             data,

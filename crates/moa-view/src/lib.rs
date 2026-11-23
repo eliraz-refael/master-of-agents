@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod keys;
 pub mod line;
 pub mod list;
+pub mod markdown;
 pub mod panel;
 pub mod text;
 pub mod views;

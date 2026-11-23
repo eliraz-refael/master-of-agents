@@ -1,0 +1,16 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"- one\\n  - two\\n    - three\\n      - four\\n- back out\")"
+---
+── 40 ──
+[dim]• [text]one
+[text]  [dim]◦ [text]two
+[text]    [dim]▪ [text]three
+[text]      [dim]• [text]four
+[dim]• [text]back out
+── 80 ──
+[dim]• [text]one
+[text]  [dim]◦ [text]two
+[text]    [dim]▪ [text]three
+[text]      [dim]• [text]four
+[dim]• [text]back out

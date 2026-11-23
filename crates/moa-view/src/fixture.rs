@@ -555,3 +555,167 @@ pub fn terminals(data: &mut Data, ctx: &Ctx) {
     scratch["opened_at"] = json!(at(3 * HOUR));
     data.upsert(Topic::Terms, vec![dev, kite, harbor, scratch]);
 }
+
+/// Yesterday's thread in [`console_rows`].
+pub const THREAD_BEFORE: &str = "0193ab12-7c4e-7d21-9a3f-5b6c7d8e9f01";
+/// Today's thread in [`console_rows`].
+pub const THREAD_TODAY: &str = "0193b4f0-2d6e-7a10-8c3b-1e2f3a4b5c6d";
+
+/// A `feed` row of the conversation, as the daemon publishes it.
+fn feed(id: i64, thread: &str, at: UtcMs, kind: &str, body: Value, state: Option<&str>) -> Value {
+    json!({
+        "key": format!("#{id}"), "id": id, "thread": thread, "at": at.0, "kind": kind,
+        "message_id": null, "automatic": false, "body": body, "state": state,
+    })
+}
+
+fn tool(id: i64, at: UtcMs, title: &str, input: Value, state: &str) -> Value {
+    let body = json!({"title": title, "kind": "execute", "input": input.to_string()});
+    feed(id, THREAD_TODAY, at, "tool", body, Some(state))
+}
+
+/// A made-up day of moa's conversation, as the `feed` topic carries it: yesterday's thread with
+/// one exchange; then today's, with moa's own morning brief (an automatic prompt, a thought
+/// and an answer), a plan and a run of five tool calls, a turn you cancelled, one that failed,
+/// and one still running a tool. Then the sessions' events (Migrate DB started, Old spike fell
+/// asleep, Closed thing ended, Rust scaffold finished 3 turns, Fix login needs you), moa
+/// thinking, and the default bar.
+pub fn console_rows(data: &mut Data) {
+    let day = date(2026, 11, 13);
+    let at = |h: i8, m: i8| local(day, h, m);
+    let yesterday = |h: i8, m: i8| local(date(2026, 11, 12), h, m);
+    let text = |t: &str| json!({ "text": t });
+    let today =
+        |id: i64, at: UtcMs, kind: &str, body: Value| feed(id, THREAD_TODAY, at, kind, body, None);
+    let mut morning = today(3, at(8, 0), "you", text("Morning brief"));
+    morning["automatic"] = json!(true);
+    let rows = vec![
+        feed(
+            1,
+            THREAD_BEFORE,
+            yesterday(17, 40),
+            "you",
+            text("What did Kite do today?"),
+            None,
+        ),
+        feed(
+            2,
+            THREAD_BEFORE,
+            yesterday(17, 41),
+            "moa",
+            text("Kite finished the **release notes** draft. `/brief` has the rest."),
+            None,
+        ),
+        morning,
+        today(
+            4,
+            at(8, 0),
+            "thought",
+            text("Checking the sessions first.\nThen the plan."),
+        ),
+        today(
+            5,
+            at(8, 1),
+            "moa",
+            text(
+                "Good morning. Three things:\n\n\
+                 - **Fix login** needs you\n\
+                 - Kite's release notes are done ✓\n\
+                 - `/attention` lists the rest",
+            ),
+        ),
+        today(
+            6,
+            at(9, 10),
+            "you",
+            text("Run the Lantern tests and tell me what fails"),
+        ),
+        today(
+            7,
+            at(9, 10),
+            "plan",
+            json!({"entries": [
+                {"content": "Find the test command", "status": "completed", "priority": "high"},
+                {"content": "Run the tests", "status": "in_progress", "priority": "high"},
+                {"content": "Sum up what fails", "status": "pending", "priority": "medium"},
+            ]}),
+        ),
+        tool(
+            8,
+            at(9, 11),
+            "Read Cargo.toml",
+            json!({"file_path": "/h/private/lantern/Cargo.toml"}),
+            "completed",
+        ),
+        tool(
+            9,
+            at(9, 12),
+            "Terminal",
+            json!({"command": "cargo test -p lantern"}),
+            "completed",
+        ),
+        tool(
+            10,
+            at(9, 13),
+            "Terminal",
+            json!({"command": "cargo test --doc"}),
+            "failed",
+        ),
+        tool(
+            11,
+            at(9, 14),
+            "Search",
+            json!({"pattern": "fn login"}),
+            "cancelled",
+        ),
+        tool(
+            12,
+            at(9, 15),
+            "Read src/auth.rs",
+            json!({"file_path": "src/auth.rs"}),
+            "completed",
+        ),
+        today(
+            13,
+            at(9, 16),
+            "moa",
+            text(
+                "Two tests fail in `auth::login`: the session cookie expires before the redirect.",
+            ),
+        ),
+        today(14, at(9, 30), "you", text("Stop for now")),
+        today(15, at(9, 30), "system", text("you cancelled moa's turn")),
+        today(16, at(9, 50), "you", text("Why did Migrate DB fail?")),
+        today(
+            17,
+            at(9, 51),
+            "error",
+            text("moa's agent stopped answering"),
+        ),
+        today(18, at(9, 58), "you", text("Check the deploy")),
+        tool(
+            19,
+            at(9, 58),
+            "Terminal",
+            json!({"command": "tail -n 50 deploy.log"}),
+            "in_progress",
+        ),
+    ];
+    let event = |seq: u64, at: UtcMs, n: u8, what: &str| json!({"key": format!("ev:{seq}"), "seq": seq, "at": at.0, "session": session(n), "what": what});
+    let events = vec![
+        event(1, at(8, 30), 6, "started"),
+        event(2, at(8, 45), 9, "asleep"),
+        event(3, at(9, 0), 2, "started"),
+        event(4, at(9, 5), 10, "ended"),
+        event(5, at(9, 20), 2, "finished"),
+        event(6, at(9, 35), 2, "finished"),
+        event(7, at(9, 40), 1, "needs_you"),
+        event(8, at(9, 45), 2, "finished"),
+    ];
+    let state = json!({"key": "state", "phase": "thinking", "thread": THREAD_TODAY, "why": null});
+    let bar = json!({"key": "bar", "commands": ["/brief", "/attention", "/ls", "/help"], "by": "default"});
+    data.upsert(
+        Topic::Feed,
+        rows.into_iter().chain(events).chain([state, bar]).collect(),
+    );
+}

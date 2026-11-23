@@ -1126,3 +1126,52 @@ fn ctrl_a_dollar_from_a_terminal_row_uses_its_folder() {
     assert!(t.panel.select(&pane), "the terminal isn't listed");
     assert_eq!(t.panel.here(&t.data), Some("/h/private/kite".to_string()));
 }
+
+/// A click on a console button presses it, as `Op::ConsoleCommand`; a click beside it does
+/// nothing.
+#[test]
+fn a_click_on_a_button_presses_it() {
+    use moa_core::publish::FeedRow;
+    let (mut data, ctx) = lantern();
+    let row = FeedRow {
+        id: 1,
+        thread: "t".into(),
+        at: 1_000,
+        kind: "moa".into(),
+        message_id: None,
+        automatic: false,
+        body: json!({"text": "go `/brief` now"}),
+        state: None,
+    };
+    data.feed = [(1, row)].into_iter().collect();
+    data.touch();
+    let mut panel = Panel::new(View::Console);
+    let screen = panel.screen(&data, &ctx, SIZE);
+    // Find the button's cells on screen.
+    let (row, text) = screen
+        .body
+        .iter()
+        .enumerate()
+        .map(|(i, (l, _))| (i, l.text()))
+        .find(|(_, t)| t.contains("[/brief]"))
+        .expect("the button is drawn");
+    let col = text[..text.find('[').expect("[")].chars().count();
+    let (x0, y) = (
+        screen.geometry.body.x + u16::try_from(col).unwrap(),
+        screen.geometry.body.y + u16::try_from(row).unwrap(),
+    );
+    for dx in [0, 3, 7] {
+        let handled = panel.mouse(Mouse::Click { x: x0 + dx, y }, &data, &ctx, SIZE);
+        assert_eq!(
+            handled.out,
+            send(Op::ConsoleCommand {
+                line: "/brief".into()
+            }),
+            "dx {dx}"
+        );
+    }
+    for x in [x0 - 1, x0 + 8, x0 + 30] {
+        let handled = panel.mouse(Mouse::Click { x, y }, &data, &ctx, SIZE);
+        assert!(handled.out.is_empty(), "x {x}");
+    }
+}

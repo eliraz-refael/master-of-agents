@@ -1,0 +1,20 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"```rust\\nfn main() {\\n\\tprintln!(\\\"a line far wider than forty columns, cut and never wrapped\\\");\\n}\\n```\\n\\\n         after\\n\\n    indented code\")"
+---
+── 40 ──
+[dim]fn main() {
+[dim]    println!("a line far wider than fort
+[dim]}
+
+[text]after
+
+[dim]indented code
+── 80 ──
+[dim]fn main() {
+[dim]    println!("a line far wider than forty columns, cut and never wrapped");
+[dim]}
+
+[text]after
+
+[dim]indented code

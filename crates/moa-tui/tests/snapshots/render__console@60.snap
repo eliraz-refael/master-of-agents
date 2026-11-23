@@ -1,0 +1,20 @@
+---
+source: crates/moa-tui/tests/render.rs
+expression: screen_text(&buf)
+---
+╭─ ◆ moa ──────────────────────────────────────────────────╮
+│ › What did Kite do today?                                │
+│ ◆ moa  17:41                                             │
+│ │ Kite finished the release notes draft. [/brief] has the│
+│ │ rest.                                                  │
+│                                                          │
+│ ── Fri 13 Nov · thread 0193b4f0 ──                       │
+│ ◆ moa  08:00 · on its own                                │
+│ │ Checking the sessions first. …                         │
+│ │ Good morning. Three things:                            │
+│ │                                                        │
+│ │ • Fix login needs you                                  │
+│ │ • Kite's release notes are done ✓                      │
+│                                                          │
+│                                                          │
+╰──────────────────────────────────────────────────────────╯

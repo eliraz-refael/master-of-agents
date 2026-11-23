@@ -1,0 +1,8 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: debug_lines(&lines)
+---
+[dim]• [text*]Project [dim]· [text*]State [dim]· [text*]Next
+[dim]• [text]Lantern [dim]· [ok]✓ [text]green, all checks [dim]· [text]ship
+[text]  it, then [work#0][/brief]  ‹more›
+[dim]• [text]Kite [dim]· [warn]⚠ [text]waiting on you [dim]· [text]review

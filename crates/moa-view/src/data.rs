@@ -9,7 +9,9 @@ use moa_core::model::{
     ActivityId, ActivityRow, Group, Project, ProjectId, Session, SessionId, Suggestion,
     SuggestionId, Task, TaskId,
 };
-use moa_core::publish::{BrainRow, LayoutFileRow, LayoutRow, PanelRow, TermRow, Topic};
+use moa_core::publish::{
+    BarRow, BrainRow, EventRow, FeedRow, LayoutFileRow, LayoutRow, MoaRow, PanelRow, TermRow, Topic,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +28,7 @@ pub const TOPICS: &[Topic] = &[
     Topic::Panels,
     Topic::Layouts,
     Topic::Terms,
+    Topic::Feed,
 ];
 
 /// A `sessions` row: the session and what the core adds to it.
@@ -66,6 +69,14 @@ pub struct Data {
     pub layouts: BTreeMap<String, LayoutRow>,
     /// Why `layouts.json` doesn't parse (the `layouts` row keyed `""`), while it doesn't.
     pub layouts_error: Option<String>,
+    /// moa's conversation (the `feed` topic's `#<id>` rows, its newest), by id.
+    pub feed: BTreeMap<i64, FeedRow>,
+    /// Whether moa's agent runs, and on which thread (the `feed` row `state`).
+    pub moa: Option<MoaRow>,
+    /// The console's button bar (the `feed` row `bar`).
+    pub bar: Option<BarRow>,
+    /// The session events the daemon keeps (the `feed` rows `ev:<seq>`), by seq.
+    pub events: BTreeMap<u64, EventRow>,
     /// The keys of rows that didn't decode, by topic.
     unreadable: BTreeSet<(Topic, String)>,
     /// See [`Data::revision`].
@@ -85,6 +96,27 @@ fn key_of(row: &Value) -> String {
 
 fn int_key(key: &str) -> Option<i64> {
     key.parse().ok()
+}
+
+/// What a `feed` row's key names: a line of the conversation (`#<id>`), a session event
+/// (`ev:<seq>`), moa's state or the bar.
+enum FeedKey {
+    Line(i64),
+    Event(u64),
+    State,
+    Bar,
+}
+
+fn feed_key(key: &str) -> Option<FeedKey> {
+    match key {
+        "state" => Some(FeedKey::State),
+        "bar" => Some(FeedKey::Bar),
+        _ => match (key.strip_prefix('#'), key.strip_prefix("ev:")) {
+            (Some(id), _) => int_key(id).map(FeedKey::Line),
+            (_, Some(seq)) => seq.parse().ok().map(FeedKey::Event),
+            _ => None,
+        },
+    }
 }
 
 /// Puts the decoded row under `key`. A row that doesn't decode, or a key that isn't one,
@@ -145,7 +177,13 @@ impl Data {
                 self.layouts.clear();
                 self.layouts_error = None;
             }
-            Topic::Asks | Topic::Status | Topic::Feed => {}
+            Topic::Feed => {
+                self.feed.clear();
+                self.moa = None;
+                self.bar = None;
+                self.events.clear();
+            }
+            Topic::Asks | Topic::Status => {}
         }
         self.unreadable.retain(|(t, _)| *t != topic);
         self.upsert(topic, rows);
@@ -188,7 +226,20 @@ impl Data {
                 self.layouts_error.is_some()
             }
             Topic::Layouts => put(&mut self.layouts, Some(key.to_string()), row),
-            Topic::Asks | Topic::Status | Topic::Feed => true,
+            Topic::Feed => match feed_key(key) {
+                Some(FeedKey::Line(id)) => put(&mut self.feed, Some(id), row),
+                Some(FeedKey::Event(seq)) => put(&mut self.events, Some(seq), row),
+                Some(FeedKey::State) => {
+                    self.moa = serde_json::from_value(row).ok();
+                    self.moa.is_some()
+                }
+                Some(FeedKey::Bar) => {
+                    self.bar = serde_json::from_value(row).ok();
+                    self.bar.is_some()
+                }
+                None => false,
+            },
+            Topic::Asks | Topic::Status => true,
         }
     }
 
@@ -214,7 +265,14 @@ impl Data {
                 Topic::Terms => drop_key(&mut self.terms, Some(key.clone())),
                 Topic::Layouts if key.is_empty() => self.layouts_error = None,
                 Topic::Layouts => drop_key(&mut self.layouts, Some(key.clone())),
-                Topic::Asks | Topic::Status | Topic::Feed => {}
+                Topic::Feed => match feed_key(key) {
+                    Some(FeedKey::Line(id)) => drop_key(&mut self.feed, Some(id)),
+                    Some(FeedKey::Event(seq)) => drop_key(&mut self.events, Some(seq)),
+                    Some(FeedKey::State) => self.moa = None,
+                    Some(FeedKey::Bar) => self.bar = None,
+                    None => {}
+                },
+                Topic::Asks | Topic::Status => {}
             }
             self.unreadable.remove(&(topic, key.clone()));
         }

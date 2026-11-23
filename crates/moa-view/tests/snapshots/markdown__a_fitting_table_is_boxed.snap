@@ -1,0 +1,10 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: debug_lines(&lines)
+---
+[dim]┌─────────┬─────────────────────┬────────────────────────┐
+[dim]│[text] [text*]Project[text] [dim]│[text] [text*]State[text]               [dim]│[text] [text*]Next[text]                   [dim]│
+[dim]├─────────┼─────────────────────┼────────────────────────┤
+[dim]│[text] Lantern [dim]│[text] [ok]✓[text] green, all checks [dim]│[text] ship it, then [work#0][/brief][text] [dim]│
+[dim]│[text] Kite    [dim]│[text] [warn]⚠[text] waiting on you    [dim]│[text] review                 [dim]│
+[dim]└─────────┴─────────────────────┴────────────────────────┘

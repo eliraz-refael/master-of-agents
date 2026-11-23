@@ -1,0 +1,21 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"# The plan for Lantern today, with a heading long enough to wrap\\n\\n\\\n         ## Kite\\n\\n### Harbor `/brief`\\n\\nText under it.\")"
+---
+── 40 ──
+[head*]▌ The plan for Lantern today, with a
+[text]  [head*]heading long enough to wrap  ‹more›
+
+[text*]▌ Kite
+
+[text*]▌ Harbor [work*#0][/brief]
+
+[text]Text under it.
+── 80 ──
+[head*]▌ The plan for Lantern today, with a heading long enough to wrap
+
+[text*]▌ Kite
+
+[text*]▌ Harbor [work*#0][/brief]
+
+[text]Text under it.

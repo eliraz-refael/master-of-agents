@@ -1,0 +1,17 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: "both(\"> a quote long enough to wrap at forty columns, **bold** inside\\n>\\n> > nested\\n\\n\\\n         after\")"
+---
+── 40 ──
+[dim]│ a quote long enough to wrap at forty
+[dim]│ columns, [dim*]bold [dim]inside  ‹more›
+[dim]│
+[dim]│ │ nested
+
+[text]after
+── 80 ──
+[dim]│ a quote long enough to wrap at forty columns, [dim*]bold [dim]inside
+[dim]│
+[dim]│ │ nested
+
+[text]after

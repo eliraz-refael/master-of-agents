@@ -1,0 +1,11 @@
+---
+source: crates/moa-view/tests/markdown.rs
+expression: debug_lines(&lines)
+---
+[dim]• [text]a bullet long enough to wrap twice at
+[text]  forty columns, under its text  ‹more›
+[dim]☐ [text]a task long enough to wrap twice at
+[text]  forty columns, under its text  ‹more›
+
+[dim]12. [text]a numbered item long enough to wrap
+[text]    at forty columns, under its text  ‹more›
