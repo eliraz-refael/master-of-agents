@@ -8,7 +8,8 @@ mod common;
 use std::time::Duration;
 
 use common::Client;
-use common::rig::{Rig, WAIT, ago, answer, end, gate, prompt, refusal, say, session_stop};
+use common::hooks::ago;
+use common::rig::{Rig, WAIT, answer, end, gate, prompt, refusal, say, session_stop};
 use moa_platform::{kill_term, spawn};
 use moa_testkit::{StubStep, stub_moa_toml_two_accounts, wait_for};
 use serde_json::{Value, json};
@@ -100,7 +101,7 @@ async fn a_permission_waits_and_y_goes_on() {
     // The turn waits for you: its prompt has no answer, and moa's agent hears nothing.
     assert!(!asked.is_finished(), "the prompt was answered early");
     assert!(rig.logged("permission.outcome").is_empty());
-    assert_eq!(up.moa_state()["phase"], "thinking");
+    up.wait_state("phase", json!("thinking"));
 
     let reply = up
         .client()
@@ -114,7 +115,7 @@ async fn a_permission_waits_and_y_goes_on() {
     let reply = asked.join().expect("the prompt's thread");
     assert_eq!(answer(&reply), "understood");
     rig.wait_permission("allow_once");
-    assert_eq!(up.moa_state()["asking"], json!([]));
+    up.wait_state("asking", json!([]));
     up.stop().await;
 }
 
@@ -231,7 +232,7 @@ async fn a_crash_while_asking_clears_the_card() {
         "{reply}"
     );
     rig.wait_permission("cancelled");
-    assert_eq!(up.moa_state()["asking"], json!([]));
+    up.wait_state("asking", json!([]));
     assert!(rig.logged("permission.outcome").is_empty());
     up.stop().await;
 }
@@ -241,7 +242,7 @@ async fn a_crash_while_asking_clears_the_card() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reports_wake_moa_in_batches() {
     let rig = Rig::new(&[end(), end()]);
-    rig.seed_sessions(10);
+    let ids = rig.seed_sessions(10);
     let up = rig.start().await;
     for i in 1..=10 {
         up.hook(&session_stop(
@@ -263,6 +264,12 @@ async fn reports_wake_moa_in_batches() {
     rig.time.advance(Duration::from_secs(180));
     let sent = wait_prompts(&rig, 2);
     assert_eq!(sections(&sent[1]), 2, "{}", sent[1]);
+    // Each session is in one wake-up, and only one: its heading names its handle.
+    for id in ids {
+        let heading = format!(" · session {} · ", up.handle(id));
+        let carried: usize = sent.iter().map(|p| p.matches(&heading).count()).sum();
+        assert_eq!(carried, 1, "{heading:?} in {sent:#?}");
+    }
     up.wait_queued(0);
     assert_eq!(you_automatic(&rig), [true, true]);
     up.stop().await;

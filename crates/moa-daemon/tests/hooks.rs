@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::rig::{self, ago, hook_notice, session_rows, spike_tab};
+use common::hooks::{ago, hook_notice, session_rows, spike_tab};
 use common::{Client, Daemon, boot, boot_with, request};
 use jiff::tz::TimeZone;
 use moa_agents::claude::{last_assistant_text, normalize};
@@ -62,7 +62,7 @@ fn seed_db(paths: &Paths) {
 
 /// A raw hook line for the seeded session, at `at_ms`.
 fn hook_line(event: &str, at_ms: i64, seq: u32) -> Value {
-    rig::hook_line(S, C, event, at_ms, seq)
+    common::hooks::hook_line(S, C, event, at_ms, seq)
 }
 
 fn with_id(id: i64, line: &Value) -> String {

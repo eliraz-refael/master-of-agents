@@ -274,6 +274,31 @@ async fn a_permission_outcome_is_logged() {
 }
 
 #[tokio::test]
+async fn fail_answers_the_prompt_with_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let fail = StubStep::Fail {
+        message: "Authentication required".into(),
+    };
+    write_stub_script(dir.path(), &[fail, say("again", None), end(None)]);
+    let mut child = spawn_stub(dir.path());
+    let (failed, stop, events) = run_client(&mut child, async |cx, mut events| {
+        initialize(&cx).await?;
+        let session = new_session(&cx, dir.path()).await?;
+        let failed = prompt(&cx, &session, "one")?.await.expect("answered");
+        // `Fail` ends its turn: the next prompt plays the next one.
+        let stop = prompt(&cx, &session, "two")?.await.expect("answered")?;
+        Ok((failed, stop, drain(&mut events)))
+    })
+    .await
+    .unwrap();
+    let error = failed.expect_err("the prompt fails");
+    assert_eq!(i32::from(error.code), -32000);
+    assert_eq!(error.message, "Authentication required");
+    assert_eq!(stop, StopReason::EndTurn);
+    assert_eq!(events, ["say  again"]);
+}
+
+#[tokio::test]
 async fn hang_ends_on_cancel_and_hang_hard_does_not() {
     let dir = tempfile::tempdir().unwrap();
     write_stub_script(
@@ -393,6 +418,7 @@ async fn the_log_records_env_cwd_and_system_prompt() {
         .env("CLAUDE_AGENT_ACP_PROTOCOL", "1")
         .env_remove("CLAUDE_CONFIG_DIR");
     let mut child = spawn(stub);
+    let pid = child.id().expect("the stub runs");
     run_client(&mut child, async |cx, _events| {
         initialize(&cx).await?;
         let system = SystemPrompt::new(vec![ContentBlock::Text(TextContent::new("Be moa."))])
@@ -412,6 +438,7 @@ async fn the_log_records_env_cwd_and_system_prompt() {
     assert_eq!(env["CLAUDE_CODE_EXECUTABLE"], "/tmp/fake-claude");
     assert_eq!(env["CLAUDE_AGENT_ACP_PROTOCOL"], "1");
     assert_eq!(env["PATH"], std::env::var("PATH").unwrap());
+    assert_eq!(init["pid"], pid, "the stub's own pid");
     let cwd = std::path::PathBuf::from(init["cwd"].as_str().unwrap());
     assert_eq!(
         cwd.canonicalize().unwrap(),

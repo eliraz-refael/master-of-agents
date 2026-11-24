@@ -1,6 +1,7 @@
 //! A running daemon on a short `/tmp` root and a raw line client for it.
 #![allow(dead_code)]
 
+pub mod hooks;
 pub mod rig;
 
 use std::io::{BufRead, BufReader, Write};
