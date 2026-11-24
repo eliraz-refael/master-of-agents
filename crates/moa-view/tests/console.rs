@@ -582,6 +582,7 @@ fn the_head_line_at_each_phase() {
                 phase: phase.into(),
                 thread: thread.clone(),
                 why: why.map(str::to_string),
+                queued: 0,
             });
             let line = head(&data, &ctx, up, new, w);
             assert_eq!(line.animated, up && phase == "thinking", "{phase}");

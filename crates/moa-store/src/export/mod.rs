@@ -117,9 +117,14 @@ impl ExportReport {
 mod tables;
 
 /// Things v1 holds that the spike has no place for: `(table, key, reason)`.
-const NOT_EXPORTED: [(&str, &str, &str); 13] = [
+const NOT_EXPORTED: [(&str, &str, &str); 14] = [
     ("feed", "all", "the console feed is not exported"),
     ("nags", "all", "nags are not exported"),
+    (
+        "reports",
+        "all",
+        "session reports waiting for moa are not exported",
+    ),
     (
         "conversations",
         "all",

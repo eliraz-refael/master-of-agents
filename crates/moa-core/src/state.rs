@@ -22,7 +22,7 @@ use crate::model::*;
 use crate::op::{ConnId, Op, ReqId};
 use crate::panel::{PanelReg, View};
 use crate::prompt::Asking;
-use crate::publish::{ACTIVITY_SHOWN, FEED_SHOWN, Model};
+use crate::publish::{ACTIVITY_SHOWN, FEED_SHOWN, MoaRow, Model};
 use crate::terminals::Closing;
 use crate::tmux::ids::{Generation, PaneId};
 use crate::tmux::link::{Link, TmuxState};
@@ -42,6 +42,9 @@ pub struct NextIds {
     pub activity: i64,
     pub feed: i64,
     pub terminal: i64,
+    /// A restart reuses the ids of reports deleted since the highest one: harmless, since
+    /// a report is only ever named while it waits.
+    pub report: i64,
 }
 
 impl Default for NextIds {
@@ -56,6 +59,7 @@ impl Default for NextIds {
             activity: 1,
             feed: 1,
             terminal: 1,
+            report: 1,
         }
     }
 }
@@ -72,6 +76,7 @@ pub enum Table {
     Activity,
     Feed,
     Terminal,
+    Report,
 }
 
 /// A row loaded with a default for text this build doesn't know. `key` is what
@@ -98,6 +103,7 @@ pub struct Snapshot {
     pub spike_panes: Vec<SpikePane>,
     pub threads: Vec<MoaThread>,
     pub nags: Vec<Nag>,
+    pub reports: Vec<Report>,
     /// The open terminals only: a closed one's row stays on disk, as history.
     pub terminals: Vec<Terminal>,
     pub activity_tail: Vec<ActivityRow>,
@@ -345,6 +351,8 @@ pub struct State {
     spike_panes: BTreeMap<SessionId, SpikePane>,
     threads: BTreeMap<String, MoaThread>,
     nags: BTreeMap<(TaskId, Date, Date), Nag>,
+    /// The session reports waiting for a wake-up, by id: [`State::reports`] sorts them.
+    reports: BTreeMap<i64, Report>,
     /// The open terminals: applying a closed one drops it, as a load leaves it out.
     pub(crate) terminals: BTreeMap<TermId, Terminal>,
     pub(crate) activity: BTreeMap<ActivityId, ActivityRow>,
@@ -455,6 +463,7 @@ impl State {
             spike_panes: BTreeMap::new(),
             threads: BTreeMap::new(),
             nags: BTreeMap::new(),
+            reports: BTreeMap::new(),
             terminals: BTreeMap::new(),
             activity: BTreeMap::new(),
             feed_tail: BTreeMap::new(),
@@ -616,6 +625,19 @@ impl State {
         self.sessions.get(&id)
     }
 
+    /// The `state` row of the `feed` topic: moa's agent, and how many reports wait.
+    pub(crate) fn moa_row(&self) -> MoaRow {
+        self.central.row(self.reports.len() as u32)
+    }
+
+    /// The session reports waiting, in line: oldest `queued_at` first, then by id. Spooled
+    /// hooks arrive out of order, so id order isn't line order.
+    pub fn reports(&self) -> impl Iterator<Item = &Report> {
+        let mut all: Vec<&Report> = self.reports.values().collect();
+        all.sort_by_key(|r| (r.queued_at, r.id));
+        all.into_iter()
+    }
+
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {
         self.tasks.values()
     }
@@ -729,6 +751,7 @@ impl State {
             Table::Activity => n.activity,
             Table::Feed => n.feed,
             Table::Terminal => n.terminal,
+            Table::Report => n.report,
         }
     }
 
@@ -828,6 +851,7 @@ impl State {
         self.spike_panes = by(snap.spike_panes, |r| r.session_id);
         self.threads = by(snap.threads, |r| r.thread_id.clone());
         self.nags = by(snap.nags, nag_key);
+        self.reports = by(snap.reports, |r| r.id);
         self.terminals = by(snap.terminals, |r| r.id);
         self.activity = by(snap.activity_tail, |r| r.id);
         self.trim_activity();
@@ -923,6 +947,13 @@ impl State {
             }
             Change::Nag(r) => {
                 self.nags.insert(nag_key(r), *r);
+            }
+            Change::Report(r) => {
+                Self::bump(&mut self.next_ids.report, r.id);
+                self.reports.insert(r.id, r.clone());
+            }
+            Change::DeleteReport(id) => {
+                self.reports.remove(id);
             }
             Change::Terminal(r) => {
                 Self::bump(&mut self.next_ids.terminal, r.id.0);

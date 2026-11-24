@@ -164,6 +164,17 @@ fn nag() -> Nag {
     }
 }
 
+fn report(id: i64, kind: ReportKind) -> Report {
+    Report {
+        id,
+        session_id: sid(1),
+        kind,
+        queued_at: UtcMs(100),
+        last_at: UtcMs(110),
+        turns: vec!["Merged PR #3".into(), "Tests green".into()],
+    }
+}
+
 fn pane_binding() -> PaneBinding {
     PaneBinding {
         session_id: sid(1),
@@ -296,6 +307,7 @@ fn one_of_each() -> Vec<Change> {
         Change::Thread(thread()),
         Change::Feed(feed()),
         Change::Nag(nag()),
+        Change::Report(report(1, ReportKind::TurnEnded)),
         Change::Terminal(terminal(1)),
         Change::Meta {
             key: "k".into(),
@@ -367,12 +379,14 @@ fn every_change_round_trips() {
     assert_eq!(s.asks, vec![ask()]);
     assert_eq!(s.threads, vec![thread()]);
     assert_eq!(s.nags, vec![nag()]);
+    assert_eq!(s.reports, vec![report(1, ReportKind::TurnEnded)]);
     assert_eq!(s.terminals, vec![terminal(1)]);
     assert_eq!(s.meta, vec![("k".to_string(), "v".to_string())]);
     assert!(s.unknown.is_empty(), "{:?}", s.unknown);
     assert_eq!(s.next_ids.event, 8);
     assert_eq!(s.next_ids.feed, 5);
     assert_eq!(s.next_ids.terminal, 2);
+    assert_eq!(s.next_ids.report, 2);
 
     // Events and feed are not in a snapshot; read them back from the tables.
     let (ev, detail): (EventId, String) = rig
@@ -507,6 +521,45 @@ fn a_second_write_to_a_key_replaces_the_row() {
     assert!(s.conversations.contains(&claude));
     assert_eq!(s.nags.len(), 2);
     assert_eq!(s.meta, vec![("k".to_string(), "w".to_string())]);
+}
+
+#[test]
+fn reports_load_and_change() {
+    let mut rig = empty();
+    let mut turn = report(1, ReportKind::TurnEnded);
+    let needs = report(2, ReportKind::NeedsYou);
+    rig.store
+        .apply(&[Change::Report(turn.clone()), Change::Report(needs.clone())])
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(s.reports, vec![turn.clone(), needs.clone()]);
+    assert_eq!(s.next_ids.report, 3);
+    assert!(s.unknown.is_empty(), "{:?}", s.unknown);
+
+    // An update keeps the row's id; the session's other kind is a row of its own.
+    turn.turns.push("Pushed".into());
+    turn.last_at = UtcMs(120);
+    rig.store.apply(&[Change::Report(turn.clone())]).unwrap();
+    assert_eq!(count(&rig.store, "reports"), 2);
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(s.reports, vec![turn.clone(), needs.clone()]);
+
+    rig.store.apply(&[Change::DeleteReport(1)]).unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(s.reports, vec![needs]);
+    // The next id is one past the highest row left, as a restart finds it.
+    assert_eq!(s.next_ids.report, 3);
+
+    // A kind this build doesn't know loads as a turn, with a note.
+    rig.store
+        .conn()
+        .execute("UPDATE reports SET kind = 'nagging'", [])
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(s.reports[0].kind, ReportKind::TurnEnded);
+    assert_eq!(s.unknown.len(), 1, "{:?}", s.unknown);
+    let LoadNote { table, key, .. } = &s.unknown[0];
+    assert_eq!((*table, key.as_str()), ("reports", "#2"));
 }
 
 #[test]

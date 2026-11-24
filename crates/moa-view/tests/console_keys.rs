@@ -68,6 +68,7 @@ impl C {
             phase: "ready".into(),
             thread: Some(THREAD.into()),
             why: None,
+            queued: 0,
         });
         data.touch();
         let mut c = C {

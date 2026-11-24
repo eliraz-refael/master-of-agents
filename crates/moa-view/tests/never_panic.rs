@@ -708,8 +708,14 @@ fn moa_row() -> impl Strategy<Value = MoaRow> {
         ],
         option::of(text()),
         option::of(text()),
+        0u32..5,
     )
-        .prop_map(|(phase, thread, why)| MoaRow { phase, thread, why })
+        .prop_map(|(phase, thread, why, queued)| MoaRow {
+            phase,
+            thread,
+            why,
+            queued,
+        })
 }
 
 fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {

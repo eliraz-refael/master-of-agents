@@ -52,6 +52,7 @@ fn new_db_is_at_the_current_version_with_every_table() {
             "notes",
             "pane_bindings",
             "projects",
+            "reports",
             "sessions",
             "spike_panes",
             "suggestions",

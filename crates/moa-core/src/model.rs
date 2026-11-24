@@ -158,6 +158,10 @@ str_enum!(ConversationReason, conversation_reason_round_trips, "conversation rea
     Adopt => "adopt" });
 str_enum!(ThreadKind, thread_kind_round_trips, "thread kind", { Daily => "daily", Manual => "manual" });
 str_enum!(
+    /// What a session report says: a turn that ended, or a session that needs you.
+    ReportKind, report_kind_round_trips, "report kind",
+    { TurnEnded => "turn_ended", NeedsYou => "needs_you" });
+str_enum!(
     /// Who opened a terminal: you, moa at your request, or nobody moa knows of (`found`: moa
     /// first saw it already open).
     OpenedBy, opened_by_round_trips, "opened by",
@@ -562,6 +566,21 @@ pub struct FeedEntry {
     pub automatic: bool,
     pub body: String,
     pub state: Option<String>,
+}
+
+/// What one session has to tell moa's agent, kept until a wake-up carries it. A session has at
+/// most one row of each kind.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Report {
+    pub id: i64,
+    pub session_id: SessionId,
+    pub kind: ReportKind,
+    /// When the first of its text was queued: its place in line, which later text keeps.
+    pub queued_at: UtcMs,
+    /// When the newest text was queued.
+    pub last_at: UtcMs,
+    /// The session's last messages, oldest first; a `needs_you` row holds only its newest.
+    pub turns: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

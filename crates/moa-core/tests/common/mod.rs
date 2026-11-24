@@ -12,7 +12,8 @@ use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Effect, Input, Publish, TimerKey, TmuxIn, TmuxToken, handle_checked};
-use moa_core::model::SessionId;
+use moa_core::hook::{HookEnvelope, HookKind};
+use moa_core::model::{AgentKind, SessionId};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::Topic;
 use moa_core::state::{CallerInfo, Deps, Snapshot, State};
@@ -46,6 +47,32 @@ pub fn loaded_with(b: &TypicalBrain, toml: &str, deps: Deps, snapshot: Snapshot)
     let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
     handle_checked(&mut st, Input::Startup(Box::new(snapshot)), b.now());
     st
+}
+
+/// A hook from `agent`'s session `slot`, in conversation `conversation`, at `at`: the
+/// `(pid, seq, at_ns)` that names it is `(100, seq, at)`, so each `seq` is a hook of its own.
+pub fn envelope(
+    slot: &str,
+    conversation: &str,
+    at: UtcMs,
+    seq: u32,
+    kind: HookKind,
+) -> HookEnvelope {
+    HookEnvelope {
+        agent: AgentKind::Claude,
+        slot: Some(slot.into()),
+        pane: None,
+        brain: Some("default".into()),
+        store_dir: None,
+        conversation_id: conversation.into(),
+        kind,
+        at,
+        at_ns: at.0 * 1_000_000,
+        pid: 100,
+        seq,
+        cwd: None,
+        transcript_path: None,
+    }
 }
 
 /// The typical brain's time zone.

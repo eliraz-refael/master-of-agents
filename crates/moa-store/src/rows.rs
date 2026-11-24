@@ -35,6 +35,7 @@ const R_REASON: &str = "reason isn't a known one; loaded as import";
 const R_ACTIVITY_WHO: &str = "who isn't a known one; loaded as brain";
 const R_ASK_TARGET: &str = "a session isn't moa or a session id; loaded as none";
 const R_ASK_STATUS: &str = "status isn't a known one; loaded as failed";
+const R_REPORT_KIND: &str = "kind isn't a known one; loaded as a turn that ended";
 const R_THREAD_KIND: &str = "kind isn't a known one; loaded as manual";
 const R_OPENED_BY: &str = "opened_by isn't a known one; loaded as found";
 const R_BAD_KEY: &str = "key isn't usable; row not loaded";
@@ -629,6 +630,36 @@ pub(crate) fn feed(r: &SrcRow) -> FeedEntry {
     }
 }
 
+pub(crate) const REPORTS: &[&str] = &["id", "session_id", "kind", "queued_at", "last_at", "turns"];
+
+/// `None` when the session isn't one or `turns` isn't a list of text: a report that can't be
+/// read is left on disk, and it is no use to moa's agent.
+pub(crate) fn report(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Report> {
+    let mut f = Flags::new(r);
+    let turns = r
+        .text_cow("turns")
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok());
+    let (Some(session_id), Some(turns)) = (f.session(r.text_cow("session_id").as_deref()), turns)
+    else {
+        unusable(notes, "reports", r.int("id").map(|id| format!("#{id}")));
+        return None;
+    };
+    let report = Report {
+        id: r.int("id").unwrap_or(0),
+        session_id,
+        kind: f.closed(
+            r.text_cow("kind").as_deref(),
+            ReportKind::TurnEnded,
+            R_REPORT_KIND,
+        ),
+        queued_at: ms(r, "queued_at"),
+        last_at: ms(r, "last_at"),
+        turns,
+    };
+    f.finish(notes, || Change::Report(report.clone()));
+    Some(report)
+}
+
 pub(crate) const META: &[&str] = &["key", "value"];
 
 const R_META_NULL: &str = "value was missing; loaded as empty";
@@ -940,6 +971,18 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
             tx.prepare_cached(&upsert("nags", NAGS, &["task_id", "due", "day"]))?
                 .execute(params![n.task_id.0, n.due.to_string(), n.day.to_string()])?;
         }
+        Change::Report(r) => {
+            let turns = serde_json::to_string(&r.turns).unwrap_or_else(|_| "[]".into());
+            tx.prepare_cached(&upsert("reports", REPORTS, &["id"]))?
+                .execute(params![
+                    r.id,
+                    r.session_id.to_string(),
+                    r.kind.as_str(),
+                    r.queued_at.0,
+                    r.last_at.0,
+                    turns
+                ])?;
+        }
         Change::Terminal(t) => {
             tx.prepare_cached(&upsert("terminals", TERMINALS, &["id"]))?
                 .execute(params![
@@ -979,6 +1022,10 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
         Change::DeleteSpikePane(id) => {
             tx.prepare_cached("DELETE FROM spike_panes WHERE session_id = ?1")?
                 .execute([id.to_string()])?;
+        }
+        Change::DeleteReport(id) => {
+            tx.prepare_cached("DELETE FROM reports WHERE id = ?1")?
+                .execute([id])?;
         }
         Change::DeleteGroup(path) => {
             tx.prepare_cached("DELETE FROM groups WHERE path = ?1")?

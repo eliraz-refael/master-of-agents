@@ -9,6 +9,7 @@
 pub mod feed;
 pub mod launch;
 pub mod prompt;
+pub mod reports;
 pub mod threads;
 mod turn;
 pub mod wire;
@@ -142,7 +143,7 @@ pub struct Moa {
 
 impl Moa {
     /// The `state` row of the `feed` topic.
-    pub fn row(&self) -> MoaRow {
+    pub fn row(&self, queued: u32) -> MoaRow {
         let (phase, why) = match &self.phase {
             Phase::Off => ("off", None),
             Phase::Starting => ("starting", None),
@@ -154,6 +155,7 @@ impl Moa {
             phase: phase.into(),
             thread: self.thread.as_ref().map(|o| o.row.thread_id.clone()),
             why,
+            queued,
         }
     }
 
