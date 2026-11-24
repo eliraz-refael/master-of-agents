@@ -8,8 +8,7 @@
 
 use serde_json::{Value, json};
 
-use super::feed::{self, TOOL_INPUT_MAX, body_text, kind, plan_body, text_body, tool_body};
-use crate::text::cut;
+use super::feed::{self, body_text, kind, plan_body, text_body, tool_body, tool_input};
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
 use super::{Moa, Phase, answer, warn};
 use crate::Now;
@@ -74,26 +73,24 @@ pub(super) fn update(state: &mut State, now: &Now, thread: &str, update: Update)
             title,
             status,
             input,
-        } => {
-            keyed(&state.central, kind::TOOL, &format!("tool:{id}")).map(|row| {
-                let mut row = row.clone();
-                if (title.is_some() || input.is_some())
-                    && let Ok(mut body) = serde_json::from_str::<Value>(&row.body)
-                {
-                    if let Some(title) = title {
-                        body["title"] = json!(title);
-                    }
-                    if let Some(input) = input {
-                        body["input"] = json!(cut(&input, TOOL_INPUT_MAX));
-                    }
-                    row.body = body.to_string();
+        } => keyed(&state.central, kind::TOOL, &format!("tool:{id}")).map(|row| {
+            let mut row = row.clone();
+            if (title.is_some() || input.is_some())
+                && let Ok(mut body) = serde_json::from_str::<Value>(&row.body)
+            {
+                if let Some(title) = title {
+                    body["title"] = json!(title);
                 }
-                if status.is_some() {
-                    row.state = status;
+                if let Some(input) = input {
+                    body["input"] = json!(tool_input(&input));
                 }
-                row
-            })
-        }
+                row.body = body.to_string();
+            }
+            if status.is_some() {
+                row.state = status;
+            }
+            row
+        }),
         // One plan row a turn; a replay's is the feed's already.
         Update::Plan { entries } if state.central.replaying.is_none() => {
             let body = plan_body(&entries);
