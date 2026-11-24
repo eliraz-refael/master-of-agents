@@ -129,7 +129,8 @@ pub fn read_ready(first_line: Option<&str>) -> ReadyLine {
 /// `PATH`, `USER`, `LANG`, `LC_*`, `MOA_LOG`, `TMUX_TMPDIR` (so both sides find the same
 /// tmux socket), `TZDIR` (where the zone database is, when it isn't in the usual place, as
 /// on NixOS); `TZ` only when sandboxed (a real home has the system zone);
-/// `MOA_REAL_HOME` only when not sandboxed.
+/// `MOA_REAL_HOME` only when not sandboxed; `MOA_AGENT_HOME` (the parent's real `HOME`,
+/// when it is a full path other than the sandbox) only when sandboxed, for moa's agent's login.
 pub fn daemon_env(
     parent: impl Iterator<Item = (OsString, OsString)>,
     paths: &Paths,
@@ -142,13 +143,22 @@ pub fn daemon_env(
     if sandboxed {
         env.push(("MOA_ROOT".into(), paths.home().into()));
     }
-    env.extend(parent.filter(|(k, _)| match k.to_str() {
+    let mut real_home = None;
+    env.extend(parent.filter(|(k, v)| match k.to_str() {
         Some("PATH" | "USER" | "LANG" | "MOA_LOG" | "TMUX_TMPDIR" | "TZDIR") => true,
         Some("TZ") => sandboxed,
         Some("MOA_REAL_HOME") => !sandboxed,
+        Some("HOME") => {
+            let home = Path::new(v);
+            if sandboxed && home.is_absolute() && home != paths.home() {
+                real_home = Some(v.clone());
+            }
+            false
+        }
         Some(k) => k.starts_with("LC_"),
         None => false,
     }));
+    env.extend(real_home.map(|h| ("MOA_AGENT_HOME".into(), h)));
     env
 }
 
@@ -640,6 +650,7 @@ mod tests {
             [
                 "HOME=/r",
                 "LC_ALL=C",
+                "MOA_AGENT_HOME=/real",
                 "MOA_ROOT=/r",
                 "PATH=/bin",
                 "TMPDIR=/tmp",
@@ -657,6 +668,27 @@ mod tests {
                 "TMPDIR=/tmp"
             ]
         );
+    }
+
+    /// A sandbox's agent gets the real home (when it is a full path other than the root);
+    /// nothing else does.
+    #[test]
+    fn daemon_env_passes_the_real_home_only_to_a_sandbox() {
+        let with_home = |home: &str| {
+            let mut p = parent();
+            p.retain(|(k, _)| k != "HOME");
+            p.push(("HOME".into(), home.into()));
+            p.into_iter()
+        };
+        let has = |env: &[String]| env.iter().any(|e| e.starts_with("MOA_AGENT_HOME="));
+        let sandboxed = Paths::with_root(Path::new("/r"));
+        let env = sorted(daemon_env(with_home("/real"), &sandboxed));
+        assert!(env.contains(&"MOA_AGENT_HOME=/real".to_string()), "{env:?}");
+        assert!(env.contains(&"HOME=/r".to_string()), "{env:?}");
+        assert!(!has(&sorted(daemon_env(with_home("/r"), &sandboxed))));
+        assert!(!has(&sorted(daemon_env(with_home("rel"), &sandboxed))));
+        let real = Paths::from_vars(None, Some("/home/u".into()), None, 501, true).unwrap();
+        assert!(!has(&sorted(daemon_env(with_home("/real"), &real))));
     }
 
     /// T20: with `-L` names, the daemon and the front door must find the same tmux socket.

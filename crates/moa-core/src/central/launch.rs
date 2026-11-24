@@ -68,6 +68,14 @@ pub fn spec(state: &State) -> Result<(AccountName, AdapterSpec), OpError> {
         Some(store) => env.push(var("CLAUDE_CONFIG_DIR", store)),
         None => unset.push("CLAUDE_CONFIG_DIR".to_string()),
     }
+    // In a sandbox, a store outside it is a real account's, whose login Claude finds through
+    // the real home, so moa's agent gets that home and nothing else of moa does.
+    if let Some(h) = &deps.agent_home {
+        let outside = !(deps.canonical)(&acct.store).starts_with((deps.canonical)(&deps.home));
+        if outside {
+            env.push(var("HOME", h.display().to_string()));
+        }
+    }
     env.extend(deps.panel.env.iter().cloned());
     unset.extend(UNSET.map(str::to_string));
 

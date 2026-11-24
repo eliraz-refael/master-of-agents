@@ -94,6 +94,31 @@ fn the_spec_runs_the_built_in_adapter_with_the_specs_env() {
 }
 
 #[test]
+fn a_store_outside_the_root_gets_the_agent_its_real_home() {
+    let b = TypicalBrain::new();
+    let with_home = Deps {
+        agent_home: Some(PathBuf::from("/tmp/moa-real-home")),
+        ..deps(&b)
+    };
+    let home = |store: &str, deps: Deps| {
+        let (_, spec) = spec(&state(&b, &toml(store, ""), deps)).unwrap();
+        let homes: Vec<_> = spec.env.iter().filter(|(k, _)| k == "HOME").collect();
+        assert!(spec.unset.iter().all(|k| k != "HOME"));
+        homes.first().map(|(_, v)| v.clone())
+    };
+    assert_eq!(
+        home("/tmp/other-store", with_home.clone()).as_deref(),
+        Some("/tmp/moa-real-home")
+    );
+    assert_eq!(home("~/.claude-acct-a", with_home), None);
+    let none = Deps {
+        agent_home: None,
+        ..deps(&b)
+    };
+    assert_eq!(home("/tmp/other-store", none), None);
+}
+
+#[test]
 fn an_accounts_acp_overrides_the_built_in() {
     let b = TypicalBrain::new();
     let st = state(
