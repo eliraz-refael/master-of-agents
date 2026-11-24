@@ -11,7 +11,9 @@ use moa_view::fixture::lantern;
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
 use moa_view::line::Line;
-use moa_view::panel::{CONSOLE_MANAGED, Mouse, Out, PAGE, Panel, STILL_WAITING, Screen};
+use moa_view::panel::{
+    CONSOLE_MANAGED, Mouse, NOT_OFFERED, Out, PAGE, Panel, STILL_WAITING, Screen,
+};
 use serde_json::json;
 
 /// 9 lines of feed between the head line and the input line.
@@ -1071,4 +1073,134 @@ fn a_closed_palette_leaves_tab_alone() {
     c.key(Key::Ctrl('u'));
     c.key(Key::Tab);
     assert!(c.focused().is_some());
+}
+
+/// A `permission` row, `pending`, offering `kinds`.
+fn asking(id: i64, title: &str, kinds: &[&str]) -> FeedRow {
+    let options: Vec<_> = kinds
+        .iter()
+        .map(|k| json!({ "kind": k, "name": format!("{k} name") }))
+        .collect();
+    FeedRow {
+        kind: "permission".into(),
+        body: json!({ "title": title, "options": options }),
+        state: Some("pending".into()),
+        ..row(id, "permission", "")
+    }
+}
+
+const ALL: [&str; 4] = ["allow_once", "allow_always", "reject_once", "reject_always"];
+
+impl C {
+    /// moa thinking, with requests `ids` waiting for an answer, oldest first.
+    fn asking(&mut self, ids: &[i64]) {
+        let moa = self.data.moa.as_mut().unwrap();
+        moa.phase = "thinking".into();
+        moa.asking = ids.to_vec();
+        self.data.touch();
+    }
+}
+
+/// K12: with the input empty, y, a and n press the oldest waiting card's button of that
+/// kind; the newer card waits its turn.
+#[test]
+fn y_a_and_n_press_the_oldest_card() {
+    let rows = vec![
+        row(1, "you", "tidy the Harbor"),
+        asking(2, "Write note.txt", &ALL),
+        asking(3, "Edit Cargo.toml", &ALL),
+    ];
+    let mut c = C::new(rows, SIZE);
+    c.asking(&[2, 3]);
+    for (key, answer) in [('y', "once"), ('a', "always"), ('n', "no")] {
+        let outs = c.key(Key::Char(key));
+        let (tag, op) = c.send(outs);
+        let line = format!("/permission 2 {answer}");
+        assert_eq!(op, Op::ConsoleCommand { line });
+        assert_eq!(c.input(), "› ask moa, or / for commands", "nothing typed");
+        c.reply(tag, Ok(done("allowed once")));
+    }
+    // The core answered 2: y now answers 3. `n` falls back to `reject_always`.
+    c.asking(&[3]);
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 3 once".into()
+        }
+    );
+    c.add(vec![asking(4, "Fetch", &["allow_once", "reject_always"])]);
+    c.asking(&[4]);
+    let outs = c.key(Key::Char('n'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 4 no".into()
+        }
+    );
+}
+
+/// A `y` typed into a draft that isn't empty is text, as is one while nothing waits; `Y` is
+/// always text.
+#[test]
+fn y_in_a_draft_is_text() {
+    let mut c = C::new(vec![asking(2, "Write note.txt", &ALL)], SIZE);
+    c.asking(&[2]);
+    assert!(c.typed("ok y").is_empty());
+    assert_eq!(c.input(), "› ok y");
+    for _ in 0..4 {
+        c.key(Key::Backspace);
+    }
+    c.asking(&[]);
+    assert!(c.typed("y").is_empty());
+    assert_eq!(c.input(), "› y");
+    c.key(Key::Backspace);
+    c.asking(&[2]);
+    assert!(c.typed("Yes").is_empty());
+    assert_eq!(c.input(), "› Yes");
+}
+
+/// K12: `a` on a card that offers no `allow_always` sends nothing and says so in the footer;
+/// nothing is typed.
+#[test]
+fn a_kind_not_offered_says_so() {
+    let mut c = C::new(
+        vec![asking(2, "cargo publish", &["allow_once", "reject_once"])],
+        SIZE,
+    );
+    c.asking(&[2]);
+    assert!(c.key(Key::Char('a')).is_empty());
+    assert_eq!(c.footer(), NOT_OFFERED);
+    assert_eq!(c.input(), "› ask moa, or / for commands");
+    assert_eq!(NOT_OFFERED, "moa's agent didn't offer that");
+}
+
+/// A click on a card's `[y once]` presses it.
+#[test]
+fn a_click_on_y_answers() {
+    let mut c = C::new(vec![asking(2, "Write note.txt", &ALL)], SIZE);
+    c.asking(&[2]);
+    let screen = c.screen();
+    let (y, line) = screen
+        .body
+        .iter()
+        .enumerate()
+        .find(|(_, (l, _))| l.text().contains("[y once]"))
+        .map(|(y, (l, _))| (y, l.text()))
+        .expect("the card's buttons are drawn");
+    let col = line[..line.find("[y once]").unwrap()].chars().count();
+    let b = screen.geometry.body;
+    let at = Mouse::Click {
+        x: b.x + u16::try_from(col).unwrap(),
+        y: b.y + u16::try_from(y).unwrap(),
+    };
+    let handled = c.panel.mouse(at, &c.data, &c.ctx, SIZE);
+    assert_eq!(
+        handled.out,
+        vec![Out::Send(Op::ConsoleCommand {
+            line: "/permission 2 once".into()
+        })]
+    );
 }

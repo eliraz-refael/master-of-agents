@@ -3,7 +3,7 @@
 //! screen (B9).
 
 use moa_core::UtcMs;
-use moa_core::op::{Done, NoParams, Op};
+use moa_core::op::{Done, NoParams, Op, PermAnswer};
 use moa_core::panel::View;
 use moa_core::publish::FeedRow;
 use serde_json::Value;
@@ -15,7 +15,7 @@ use crate::editor::Editor;
 use crate::geometry::Geometry;
 use crate::keys::Key;
 use crate::line::Line;
-use crate::views::console::{self, Asked, Card};
+use crate::views::console::{self, Asked, Card, Waiting};
 
 /// The same error text is drawn in the console at most once in this many milliseconds (B10).
 pub const ERROR_AGAIN_MS: i64 = 30_000;
@@ -25,6 +25,8 @@ pub const CONSOLE_MANAGED: &str = "the console is part of this layout; switch la
 pub const PAGE: u16 = 100;
 /// What Enter says while a typed line waits for its reply.
 pub const STILL_WAITING: &str = "still waiting for the reply to the last line";
+/// What y, a or n says when the oldest waiting request doesn't offer that answer.
+pub const NOT_OFFERED: &str = "moa's agent didn't offer that";
 /// The console keeps its newest this many error lines.
 const ERRORS_KEPT: usize = 50;
 /// The history keeps the newest this many lines sent from the panel.
@@ -98,7 +100,8 @@ impl Panel {
     }
 
     /// A key in the console, after Ctrl-c, a question and a prompt have had theirs. Every
-    /// printable key is typed (letters never move the feed); Enter sends the draft, or with
+    /// printable key is typed (letters never move the feed), but y, a and n answer moa's
+    /// agent while a request waits and the input is empty; Enter sends the draft, or with
     /// none presses the focused button; Esc cancels moa's turn while it thinks, else clears
     /// the draft; Tab and BTab move the focus while the draft is empty; Up and Down walk the
     /// history; PgUp and PgDn scroll `rows` lines less one, and PgUp at the top asks for a
@@ -124,6 +127,13 @@ impl Panel {
         }
         if self.palette_key(k) {
             return Vec::new();
+        }
+        if let Key::Char(c) = k
+            && self.console.draft.text.is_empty()
+            && let Some(answer) = console::answer_of(c)
+            && let Some(waiting) = console::waiting(data)
+        {
+            return self.answer(&waiting, answer, ctx.now);
         }
         let page = isize::try_from(rows.saturating_sub(1).max(1)).unwrap_or(isize::MAX);
         match k {
@@ -209,6 +219,15 @@ impl Panel {
     /// A button pressed, by Enter or a click (B13): its command, sent; its reply is a card.
     pub(super) fn press(&mut self, command: String, now: UtcMs) -> Vec<Out> {
         self.send_line(command, false, now)
+    }
+
+    /// y, a or n with the input empty (K12): the oldest waiting card's button of that kind,
+    /// pressed; one it doesn't offer is said in the footer.
+    fn answer(&mut self, waiting: &Waiting, answer: PermAnswer, now: UtcMs) -> Vec<Out> {
+        if !waiting.offered.contains(&answer) {
+            return self.say(NOT_OFFERED);
+        }
+        self.press(console::answer_line(waiting.id, answer), now)
     }
 
     /// Sends `line`, `typed` in the input or pressed: a `/command` as `console.command`, else

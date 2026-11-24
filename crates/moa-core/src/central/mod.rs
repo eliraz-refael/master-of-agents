@@ -23,7 +23,7 @@ use serde_json::json;
 use self::channel::Source;
 use self::feed::{kind, text_body};
 use self::threads::{How, choose, new_thread};
-use self::wire::{AcpCmd, AcpIn, Caps, Opened, PermKind, PermOption, ThreadHow};
+use self::wire::{AcpCmd, AcpIn, Caps, Opened, PermOption, ThreadHow};
 use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, post_commit};
@@ -408,12 +408,8 @@ pub fn answer_permission(
 /// The option `answer` stands for: `allow_once`, `allow_always`, or `reject_once` falling back
 /// to `reject_always`.
 fn chosen(options: &[PermOption], answer: PermAnswer) -> Option<&PermOption> {
-    let kinds: &[PermKind] = match answer {
-        PermAnswer::Once => &[PermKind::AllowOnce],
-        PermAnswer::Always => &[PermKind::AllowAlways],
-        PermAnswer::No => &[PermKind::RejectOnce, PermKind::RejectAlways],
-    };
-    kinds
+    answer
+        .kinds()
         .iter()
         .find_map(|k| options.iter().find(|o| o.kind == *k))
 }

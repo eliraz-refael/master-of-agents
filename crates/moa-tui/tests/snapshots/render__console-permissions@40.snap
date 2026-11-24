@@ -1,0 +1,21 @@
+---
+source: crates/moa-tui/tests/render.rs
+assertion_line: 265
+expression: text
+---
+╭─ ◆ moa · default ────────────────────╮
+│ ⚠ answer y/a/n Esc cancels           │
+│ ↑ 14 more                            │
+│ ◆ moa  09:51                         │
+│ │ ⚠ moa asks: Write                  │
+│ │   ~/private/kite/RELEASE.md        │
+│ │ ┊ [y once] [a always] [n no]       │
+│ │ ┊ always: Always allow edits in    │
+│ │ ┊         ~/private/kite           │
+│ │ ⚠ moa asks: cargo publish -p kite  │
+│ │ ┊ [y once] [n no]                  │
+│ › ask moa, or / for commands         │
+│                                      │
+│                                      │
+│                                      │
+╰──────────────────────────────────────╯

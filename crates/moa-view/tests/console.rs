@@ -8,7 +8,7 @@ use moa_core::publish::{EventRow, FeedRow, Topic};
 use moa_core::state::EventWhat;
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
-use moa_view::fixture::{THREAD_TODAY, console_rows, lantern, session};
+use moa_view::fixture::{THREAD_TODAY, console_rows, lantern, permission_rows, session};
 use moa_view::line::{Line, debug_lines};
 use moa_view::text::width;
 use moa_view::views::console::{Card, ConsoleUi, ConsoleView, build, button_at};
@@ -592,4 +592,98 @@ fn the_head_line_at_each_phase() {
         assert_fits(&lines, w);
         insta::assert_snapshot!(format!("head@{w}"), debug_lines(&lines));
     }
+}
+
+/// The permission fixture: a turn of answered requests (and one a restart left `pending`),
+/// then two still waiting, moa thinking.
+fn asked() -> (Data, Ctx) {
+    let (mut data, ctx) = lantern();
+    permission_rows(&mut data);
+    (data, ctx)
+}
+
+/// K12: each request is a card. Answered: `✓ allowed once`, `✓ allowed always`, `✗ refused`,
+/// and `⊘ not answered` for a cancelled one and for one still `pending` that nothing waits
+/// on. Waiting: `⚠ moa asks: <title>`, its buttons behind the card's gutter for the answers
+/// offered, and the name moa's agent gives `always`.
+#[test]
+fn permission_cards_at_40_and_80() {
+    let (data, ctx) = asked();
+    assert_eq!(data.unreadable(), 0);
+    for w in [40, 80] {
+        let view = build(&data, &ctx, &ConsoleUi::default(), w);
+        assert_fits(&view.lines, w);
+        insta::assert_snapshot!(format!("permissions@{w}"), debug_lines(&view.lines));
+    }
+    let view = build(&data, &ctx, &ConsoleUi::default(), 80);
+    assert_eq!(
+        pressed(&view),
+        [
+            ("y once", "/permission 8 once"),
+            ("a always", "/permission 8 always"),
+            ("n no", "/permission 8 no"),
+            ("y once", "/permission 9 once"),
+            ("n no", "/permission 9 no"),
+        ]
+    );
+}
+
+/// A row still `pending` whose request isn't in `asking` (the daemon restarted, or moa's
+/// state hasn't come) can never be answered: `⊘ not answered`, with no buttons.
+#[test]
+fn a_stale_pending_row_is_not_answered() {
+    let (mut data, ctx) = asked();
+    let text = |data: &Data| -> Vec<String> {
+        let view = build(data, &ctx, &ConsoleUi::default(), 80);
+        assert!(view.buttons.is_empty(), "no buttons: {:?}", view.buttons);
+        view.lines.iter().map(Line::text).collect()
+    };
+    data.moa.as_mut().unwrap().asking.clear();
+    data.touch();
+    let lines = text(&data);
+    assert!(lines.contains(&s("│ ⊘ not answered: Delete ~/private/harbor/old.log")));
+    assert!(lines.contains(&s("│ ⊘ not answered: Write ~/private/kite/RELEASE.md")));
+    assert!(lines.contains(&s("│ ⊘ not answered: cargo publish -p kite")));
+    assert!(!lines.iter().any(|l| l.contains("moa asks")));
+    data.moa = None;
+    data.touch();
+    assert!(text(&data).contains(&s("│ ⊘ not answered: cargo publish -p kite")));
+}
+
+/// K12: while a request waits, the head line's state says which keys answer the oldest:
+/// `⚠ answer y/a/n`, or only the letters it offers, and it doesn't spin. None once nothing
+/// waits, or while the link is down.
+#[test]
+fn the_head_says_answer() {
+    use moa_view::views::console::head;
+    let (mut data, ctx) = asked();
+    let line = |data: &Data, up: bool, w: u16| head(data, &ctx, up, 0, w);
+    for w in [40, 80] {
+        let all = line(&data, true, w);
+        assert_fits(std::slice::from_ref(&all), w);
+        assert!(
+            all.text().contains("⚠ answer y/a/n Esc cancels"),
+            "{w}: {:?}",
+            all.text()
+        );
+        assert!(
+            !all.text().contains("thinking") && !all.animated,
+            "{w}: {:?}",
+            all.text()
+        );
+        let warn = all.spans.iter().find(|s| s.text.contains("⚠ answer"));
+        assert_eq!(warn.map(|s| s.tone), Some(moa_view::line::Tone::Warn));
+    }
+    data.moa.as_mut().unwrap().asking = vec![9];
+    data.touch();
+    let only = line(&data, true, 80).text();
+    assert!(
+        only.contains("⚠ answer y/n") && !only.contains("y/a/n"),
+        "{only:?}"
+    );
+    assert!(!line(&data, false, 80).text().contains("answer"));
+    data.moa.as_mut().unwrap().asking.clear();
+    data.touch();
+    let thinking = line(&data, true, 80);
+    assert!(!thinking.text().contains("answer") && thinking.animated);
 }

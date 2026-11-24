@@ -1,16 +1,19 @@
 //! The console (B6): moa's conversation, the newest at the bottom. Your prompts; moa's turns,
 //! each under a header and behind a gutter (its answers as Markdown, its thoughts, tool calls,
-//! plans and notes); the sessions' events, one line per session (B3); your commands' cards;
-//! errors; and a separator where the thread changes (B2). A row it can't read is one dim line
-//! (B10): nothing here panics, whatever the daemon sends.
+//! plans and notes, and its permission requests as cards you answer, K12); the sessions'
+//! events, one line per session (B3); your commands' cards; errors; and a separator where the
+//! thread changes (B2). A row it can't read is one dim line (B10): nothing here panics,
+//! whatever the daemon sends.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use moa_core::UtcMs;
 use moa_core::central::feed::kind;
+use moa_core::central::wire::PermKind;
 use moa_core::console::COMMANDS;
 use moa_core::model::SessionId;
+use moa_core::op::PermAnswer;
 use moa_core::publish::{EventRow, FeedRow};
 use moa_core::state::EventWhat;
 use moa_core::time::local_format;
@@ -412,14 +415,29 @@ pub fn more(n: usize, width: u16) -> Line {
 }
 
 /// The head line (B9): moa's thread and state, and `↓ N new` when `new` lines came below a
-/// view scrolled up. `up` is whether the panel's connection is. The thread goes first when
-/// the width is short, then the end of the rest.
+/// view scrolled up. While a permission request waits, the state is `⚠ answer y/a/n`, the
+/// keys the oldest offers (K12). `up` is whether the panel's connection is. The thread goes
+/// first when the width is short, then the end of the rest.
 pub fn head(data: &Data, ctx: &Ctx, up: bool, new: usize, width: u16) -> Line {
     let dim = |s: &str| Span::new(s, Tone::Dim);
     let moa = data.moa.as_ref().filter(|_| up);
     let phase = moa.map_or("off", |m| m.phase.as_str());
+    let waiting = moa.and_then(|_| waiting(data));
     let mut spans = match phase {
         _ if !up => vec![dim("connecting…")],
+        _ if let Some(waiting) = &waiting => {
+            let keys: Vec<String> = waiting
+                .offered
+                .iter()
+                .map(|a| answer_key(*a).to_string())
+                .collect();
+            let answer = format!("⚠ answer {}", keys.join("/"));
+            let mut spans = vec![Span::new(answer.trim_end(), Tone::Warn)];
+            if phase == "thinking" {
+                spans.push(dim(" Esc cancels"));
+            }
+            spans
+        }
         "off" => vec![dim("○ off · type to start moa")],
         "starting" => vec![Span::new("◌ starting", Tone::Work)],
         "thinking" => vec![
@@ -449,8 +467,67 @@ pub fn head(data: &Data, ctx: &Ctx, up: bool, new: usize, width: u16) -> Line {
         }
     }
     let mut line = Line::new(cut_spans(spans, usize::from(width)));
-    line.animated = up && phase == "thinking";
+    line.animated = up && phase == "thinking" && waiting.is_none();
     line
+}
+
+/// The key that answers a waiting request with `answer`, as its card's button shows it:
+/// `[y once]`, `[a always]`, `[n no]`.
+fn answer_key(answer: PermAnswer) -> char {
+    match answer {
+        PermAnswer::Once => 'y',
+        PermAnswer::Always => 'a',
+        PermAnswer::No => 'n',
+    }
+}
+
+/// The answer key `c` gives, if it is one.
+pub fn answer_of(c: char) -> Option<PermAnswer> {
+    PermAnswer::ALL.into_iter().find(|a| answer_key(*a) == c)
+}
+
+/// The line a card's button sends to answer request `id` (the hidden `/permission`).
+pub fn answer_line(id: i64, answer: PermAnswer) -> String {
+    format!("/permission {id} {}", answer.name())
+}
+
+/// The options of a `permission` row's body.
+fn options(body: &Value) -> impl Iterator<Item = &Value> {
+    body.get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+/// The answers a `permission` row's body offers, in [`PermAnswer::ALL`]'s order.
+fn offered(body: &Value) -> Vec<PermAnswer> {
+    let kinds: Vec<&str> = options(body)
+        .filter_map(|o| o.get("kind")?.as_str())
+        .collect();
+    PermAnswer::ALL
+        .into_iter()
+        .filter(|a| a.kinds().iter().any(|k| kinds.contains(&k.name())))
+        .collect()
+}
+
+/// The oldest of moa's agent's permission requests waiting for your answer.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Waiting {
+    /// Its `feed` row.
+    pub id: i64,
+    /// The answers it offers; all of them when its row isn't loaded (moa's core refuses one it
+    /// doesn't).
+    pub offered: Vec<PermAnswer>,
+}
+
+/// The request y, a and n answer (K12): the oldest in moa's `asking`, if any.
+pub fn waiting(data: &Data) -> Option<Waiting> {
+    let id = *data.moa.as_ref()?.asking.first()?;
+    let offered = data
+        .feed
+        .get(&id)
+        .map_or_else(|| PermAnswer::ALL.to_vec(), |r| offered(&r.body));
+    Some(Waiting { id, offered })
 }
 
 /// What the input line says while it is empty.
@@ -1039,6 +1116,7 @@ impl<'a> Draw<'a> {
                 hanging(dim("· "), vec![dim(&clean(t))], room)
             }),
             kind::ERROR => text.map(|t| hanging(fail("✗ "), vec![fail(&clean(t))], room)),
+            kind::PERMISSION => self.permission(row, room),
             _ => None,
         };
         lines.unwrap_or_else(|| {
@@ -1085,6 +1163,65 @@ impl<'a> Draw<'a> {
         let mut line = Line::new(cut_spans(spans, room));
         line.animated = animated;
         Some(line)
+    }
+
+    /// A permission request (K12). While it waits: `⚠ moa asks: <title>`, then behind the
+    /// card's gutter a button for each answer it offers and the name moa's agent gives
+    /// `always`. Answered: `✓ allowed once`, `✓ allowed always` or `✗ refused`, and its title;
+    /// `⊘ not answered` when it was cancelled, or is `pending` with nothing waiting on it (a
+    /// restart lost it). `None` without a title.
+    fn permission(&mut self, row: &FeedRow, room: usize) -> Option<Vec<Line>> {
+        let title = clean(row.body.get("title")?.as_str()?);
+        let waits = row.state.as_deref() == Some("pending")
+            && self
+                .data
+                .moa
+                .as_ref()
+                .is_some_and(|m| m.asking.contains(&row.id));
+        if !waits {
+            let (glyph, done, tone) = match row.state.as_deref() {
+                Some("allow_once") => ("✓ ", "allowed once", Tone::Ok),
+                Some("allow_always") => ("✓ ", "allowed always", Tone::Ok),
+                Some("reject_once" | "reject_always") => ("✗ ", "refused", Tone::Fail),
+                _ => ("⊘ ", "not answered", Tone::Dim),
+            };
+            let text = Span::new(format!("{done}: {title}"), tone);
+            return Some(hanging(Span::new(glyph, tone), vec![text], room));
+        }
+        let warn = |s: &str| Span::new(s, Tone::Warn);
+        let mut lines = hanging(warn("⚠ "), vec![warn(&format!("moa asks: {title}"))], room);
+        if room <= width(CARD_GUTTER) {
+            return Some(lines);
+        }
+        let inner = room - width(CARD_GUTTER);
+        let mut buttons = Vec::new();
+        for answer in offered(&row.body) {
+            let button = Button {
+                label: format!("{} {}", answer_key(answer), answer.name()),
+                command: answer_line(row.id, answer),
+            };
+            if let Some(span) = button_span(&mut self.buttons, button, false) {
+                if !buttons.is_empty() {
+                    buttons.push(Span::new(" ", Tone::Text));
+                }
+                buttons.push(span);
+            }
+        }
+        let mut card: Vec<Line> = Vec::new();
+        if !buttons.is_empty() {
+            card.extend(wrap_spans(&buttons, inner).into_iter().map(Line::new));
+        }
+        let always = options(&row.body)
+            .find(|o| o.get("kind").and_then(Value::as_str) == Some(PermKind::AllowAlways.name()))
+            .and_then(|o| o.get("name")?.as_str())
+            .map(clean)
+            .filter(|name| !name.trim().is_empty());
+        if let Some(name) = always {
+            let dim = |s: &str| Span::new(s, Tone::Dim);
+            card.extend(hanging(dim("always: "), vec![dim(&name)], inner));
+        }
+        lines.extend(behind(CARD_GUTTER, card));
+        Some(lines)
     }
 
     /// A session's folded line (B3). When it needs you or finished a turn: a button to go to

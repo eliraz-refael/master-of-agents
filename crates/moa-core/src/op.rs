@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::central::wire::PermKind;
 use crate::layout::Leaf;
 use crate::panel::View;
 
@@ -328,16 +329,36 @@ pub enum PermAnswer {
     No,
 }
 
+impl PermAnswer {
+    pub const ALL: [PermAnswer; 3] = [PermAnswer::Once, PermAnswer::Always, PermAnswer::No];
+
+    /// Its word: `once`, `always` or `no`.
+    pub fn name(self) -> &'static str {
+        match self {
+            PermAnswer::Once => "once",
+            PermAnswer::Always => "always",
+            PermAnswer::No => "no",
+        }
+    }
+
+    /// The kinds of option it stands for, in the order they are tried.
+    pub fn kinds(self) -> &'static [PermKind] {
+        match self {
+            PermAnswer::Once => &[PermKind::AllowOnce],
+            PermAnswer::Always => &[PermKind::AllowAlways],
+            PermAnswer::No => &[PermKind::RejectOnce, PermKind::RejectAlways],
+        }
+    }
+}
+
 impl std::str::FromStr for PermAnswer {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, String> {
-        match s {
-            "once" => Ok(PermAnswer::Once),
-            "always" => Ok(PermAnswer::Always),
-            "no" => Ok(PermAnswer::No),
-            _ => Err("an answer is once, always or no".into()),
-        }
+        PermAnswer::ALL
+            .into_iter()
+            .find(|a| a.name() == s)
+            .ok_or_else(|| "an answer is once, always or no".into())
     }
 }
 
