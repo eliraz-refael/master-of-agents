@@ -1,15 +1,21 @@
 //! The session reports queue: what a session tells moa's agent, kept in the database until a
-//! wake-up carries it. A hook event that is applied (not history only, not a duplicate) may
-//! queue one report row; its rules are here, and the change goes in the hook's own commit, so
-//! a report is never queued for an event that wasn't saved.
+//! wake-up, or your prompt, carries it. A hook event that is applied (not history only, not a
+//! duplicate) may queue one report row; its rules are here, and the change goes in the hook's
+//! own commit, so a report is never queued for an event that wasn't saved. So are the texts
+//! that carry them (K11).
 
 use std::path::Path;
 
+use crate::Now;
 use crate::change::Change;
 use crate::core::Tx;
 use crate::hook::{HookEnvelope, HookKind};
-use crate::model::{Report, ReportKind, Session};
+use crate::model::{Report, ReportKind, Session, SessionId};
+use crate::ops::launch::title_of;
 use crate::state::{State, Table};
+use crate::text::cut;
+use crate::time::local_format;
+use crate::tmux::cmd::one_line;
 
 /// `text` cut to `n` characters, with a `…` after the cut: the stored text says it was cut.
 fn cut_marked(text: &str, n: usize) -> String {
@@ -85,6 +91,94 @@ pub(crate) fn queued(
         },
     };
     Some(Change::Report(row))
+}
+
+/// The most characters of a session's title, or its project's name, in a report's heading.
+const HEADING_FIELD_MAX: usize = 80;
+
+/// What one prompt carries: the queued reports in line, until `sessions` sessions, each
+/// with every report of its own.
+pub fn batch(state: &State, sessions: usize) -> Vec<&Report> {
+    let mut chosen: Vec<SessionId> = Vec::new();
+    state
+        .reports()
+        .filter(|r| {
+            if chosen.contains(&r.session_id) {
+                return true;
+            }
+            let room = chosen.len() < sessions;
+            if room {
+                chosen.push(r.session_id);
+            }
+            room
+        })
+        .collect()
+}
+
+/// A wake-up's prompt: `reports`, and what moa does with them.
+pub fn wake_text(state: &State, now: &Now, reports: &[&Report]) -> String {
+    format!(
+        "(moa · a wake-up, not typed by the user) {} session report(s) since your last look:\n\n\
+         {}\n\nUpdate the big picture (see \"Wake-ups\" in your instructions).",
+        reports.len(),
+        sections(state, now, reports)
+    )
+}
+
+/// What goes before your prompt's text: `reports`.
+pub fn prefix_text(state: &State, now: &Now, reports: &[&Report]) -> String {
+    format!(
+        "(moa · {} session report(s) since your last look, sent with the user's message)\n\n{}",
+        reports.len(),
+        sections(state, now, reports)
+    )
+}
+
+fn sections(state: &State, now: &Now, reports: &[&Report]) -> String {
+    let all: Vec<String> = reports.iter().map(|r| section(state, now, r)).collect();
+    all.join("\n\n")
+}
+
+/// One report: a heading line, then its turns, the earlier ones marked, as the queue keeps
+/// them (already cut).
+fn section(state: &State, now: &Now, r: &Report) -> String {
+    let session = state.session(r.session_id);
+    let title = match session {
+        Some(s) => title_of(state, s),
+        None => state.handle_of(r.session_id),
+    };
+    let project = session
+        .and_then(|s| s.project_id)
+        .and_then(|p| state.projects.get(&p))
+        .map_or_else(|| "(none)".to_string(), |p| heading_field(&p.name));
+    let what = match r.kind {
+        ReportKind::TurnEnded => "finished a turn",
+        ReportKind::NeedsYou => "needs the user",
+    };
+    let mut text = format!(
+        "### {} · project {project} · session {} · {what} at {}",
+        heading_field(&title),
+        state.handle_of(r.session_id),
+        local_format(r.last_at, &now.tz, "%H:%M"),
+    );
+    if r.turns.len() > 1 {
+        text += &format!(" ({} turns; earlier ones shortened)", r.turns.len());
+    }
+    if let Some((last, earlier)) = r.turns.split_last() {
+        let turns: Vec<String> = earlier
+            .iter()
+            .map(|t| format!("(earlier) {t}"))
+            .chain([last.clone()])
+            .collect();
+        text += "\n";
+        text += &turns.join("\n\n");
+    }
+    text
+}
+
+/// A name in a heading: one line, and at most [`HEADING_FIELD_MAX`] characters.
+fn heading_field(name: &str) -> String {
+    cut(&one_line(name), HEADING_FIELD_MAX)
 }
 
 /// Whether `session` works in moa's own agent's folder, or under it. Both paths are

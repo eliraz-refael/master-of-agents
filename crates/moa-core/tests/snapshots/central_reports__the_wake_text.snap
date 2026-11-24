@@ -1,0 +1,17 @@
+---
+source: crates/moa-core/tests/central_reports.rs
+expression: text
+---
+(moa · a wake-up, not typed by the user) 2 session report(s) since your last look:
+
+### Lantern · project (none) · session a1b2c300 · finished a turn at 03:02 (3 turns; earlier ones shortened)
+(earlier) first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first first fi…
+
+(earlier) second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second second sec…
+
+Merged PR #3; the release notes are next.
+
+### Kite · project Kite · session a1b2c301 · needs the user at 03:01
+Which branch should I push to?
+
+Update the big picture (see "Wake-ups" in your instructions).
