@@ -822,7 +822,8 @@ fn sleep_sets_the_threshold() {
     let mut r = World::new().up();
     let idle = r.s().activity_at.unwrap().0;
     let asleep = r.st.sessions().filter(|s| is_asleep(s)).count();
-    let after = |h: &str| format!("idle sessions go to sleep after {h} h · {asleep} asleep now");
+    let after =
+        |wait: &str| format!("idle sessions go to sleep after {wait} · {asleep} asleep now");
     let saved = |value: Option<String>| {
         vec![Change::Meta {
             key: SLEEP_KEY.into(),
@@ -837,7 +838,7 @@ fn sleep_sets_the_threshold() {
     };
 
     let fx = sleep_after(&mut r, 1, Some("2"));
-    assert_eq!(reply_text(&fx), after("2"));
+    assert_eq!(reply_text(&fx), after("2 h"));
     assert_eq!(
         changes(&fx),
         saved(Some((2 * HOUR).to_string()))
@@ -851,12 +852,12 @@ fn sleep_sets_the_threshold() {
 
     // Said, not changed.
     let fx = sleep_after(&mut r, 2, None);
-    assert_eq!(reply_text(&fx), after("2"));
+    assert_eq!(reply_text(&fx), after("2 h"));
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert!(timers(&fx, TimerKey::Sleep).is_empty(), "{fx:?}");
 
     let fx = sleep_after(&mut r, 3, Some("1.5"));
-    assert_eq!(reply_text(&fx), after("1.5"));
+    assert_eq!(reply_text(&fx), after("90 min"));
     assert_eq!(
         timers(&fx, TimerKey::Sleep),
         set(idle + 3 * HOUR / 2).iter().collect::<Vec<_>>()
@@ -877,7 +878,7 @@ fn sleep_sets_the_threshold() {
     assert!(slept(&fx).is_empty(), "{fx:?}");
 
     let fx = sleep_after(&mut r, 5, Some("on"));
-    assert_eq!(reply_text(&fx), after("6"));
+    assert_eq!(reply_text(&fx), after("6 h"));
     assert_eq!(changes(&fx), saved(None).iter().collect::<Vec<_>>());
     assert_eq!(
         timers(&fx, TimerKey::Sleep),
@@ -897,6 +898,25 @@ fn sleep_sets_the_threshold() {
     };
     let fx = send(&r.b, &mut r.st, 7, line);
     assert_eq!(replies(&fx), [(ReqId(7), usage)]);
+}
+
+/// `/sleep`'s reply says the wait as the watchdog's card does ([`moa_core::time::words`]):
+/// whole hours in hours, else minutes or seconds, so a tiny wait is never `0 h`.
+#[test]
+fn sleep_says_the_wait_in_words() {
+    for (value, wait) in [
+        ("1", "1 h"),
+        ("24", "24 h"),
+        ("2.5", "150 min"),
+        ("0.5", "30 min"),
+        ("0.001", "3 s"),
+    ] {
+        let mut r = World::new().up();
+        let fx = sleep_after(&mut r, 1, Some(value));
+        let text = reply_text(&fx);
+        let want = format!("idle sessions go to sleep after {wait} · ");
+        assert!(text.starts_with(&want), "{value}: {text}");
+    }
 }
 
 /// R15: a sleep the store can't save kills nothing.

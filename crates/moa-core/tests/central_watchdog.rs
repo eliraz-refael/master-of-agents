@@ -388,6 +388,81 @@ fn a_restart_whose_agent_cant_start_says_so() {
     next_prompt_opens_a_new_thread(&mut st, t + 7 * MIN);
 }
 
+/// The new agent starts, then goes before its thread is open: it couldn't start again, as
+/// moa's `Failed` phase says, and the card says the same.
+#[test]
+fn a_restart_whose_agent_goes_before_its_thread_opens_says_so() {
+    let b = TypicalBrain::new();
+    let (mut st, t) = turn(&b, false);
+    restarted(&mut st, t);
+    hear_at(&mut st, at(t + 6 * MIN), started(2, caps(true, true, true)));
+    let exit = AcpIn::Exited {
+        generation: 2,
+        why: "it crashed".into(),
+    };
+    hear_at(&mut st, at(t + 6 * MIN), exit);
+    assert_eq!(*phase(&st), Phase::Failed("it crashed".into()));
+    assert!(st.central().restarting.is_none());
+    assert_eq!(
+        card_text(&st),
+        format!(
+            "{CANCELLED} It still hadn't stopped 30 s later, so moa stopped moa's agent, and it \
+             couldn't start again; your next prompt starts it with a new thread."
+        )
+    );
+    next_prompt_opens_a_new_thread(&mut st, t + 7 * MIN);
+}
+
+/// A turn that began at 23:58 and hung past midnight: today has no thread to reopen, so the
+/// restart opens a new one for today. Nothing failed, so it carries no line saying so.
+#[test]
+fn a_restart_past_midnight_opens_todays_thread() {
+    let b = TypicalBrain::new();
+    // The typical brain's now is 12:00 local; 23:58 is 11 h 58 min on.
+    let t = b.now().wall.0 + 11 * 60 * MIN + 58 * MIN;
+    let mut st = moa_at(&b, "acct-a", "", b.snapshot(), at(t)).0;
+    send(&mut st, t, false, caps(true, true, true));
+    restarted(&mut st, t);
+    let today = at(t + 6 * MIN).local_day;
+    assert_ne!(at(t).local_day, today);
+    let fx = hear_at(&mut st, at(t + 6 * MIN), started(2, caps(true, true, true)));
+    assert!(
+        matches!(
+            &acps(&fx)[..],
+            [AcpCmd::Open {
+                how: ThreadHow::New { .. },
+                ..
+            }]
+        ),
+        "{fx:?}"
+    );
+    let fx = hear_at(&mut st, at(t + 6 * MIN), opened(2, "th-2", Opened::New));
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(*phase(&st), Phase::Ready);
+    assert_eq!(
+        card_text(&st),
+        format!("{CANCELLED}{KILLED}, with a new thread for today.")
+    );
+    let open = st
+        .central()
+        .thread
+        .clone()
+        .expect("today's new thread is open");
+    assert_eq!(open.row.thread_id, "th-2");
+    assert_eq!(open.row.kind, ThreadKind::Daily);
+    assert_eq!(open.row.day, today);
+    assert!(!open.reopen_failed);
+    assert!(!st.central().reopen_failed);
+
+    // Its first prompt goes to it and saves it, with no line about a failed reopen.
+    let fx = prompt_at(&mut st, at(t + 7 * MIN), 2, "go on", false);
+    assert_eq!(prompts_sent(&fx), ["go on"]);
+    assert_eq!(thread_rows(&fx).len(), 1);
+    let rows = feed_rows(&fx);
+    assert!(rows.iter().all(|r| r.thread_id == "th-2"), "{rows:?}");
+    assert!(rows.iter().all(|r| r.kind == "you"), "{rows:?}");
+}
+
 #[test]
 fn a_prompt_while_restarting_is_refused() {
     let b = TypicalBrain::new();

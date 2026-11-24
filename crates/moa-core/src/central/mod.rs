@@ -606,8 +606,9 @@ fn started(state: &mut State, now: &Now, caps: Caps) -> Vec<Effect> {
 }
 
 /// Asks for the waiting prompt's thread, or sends the prompt when its thread is open. With
-/// no prompt, after the watchdog's restart, it reopens today's thread, if there is one, or
-/// opens the new thread `console.new` asked for.
+/// no prompt, after the watchdog's restart, it reopens today's thread, or opens a new one:
+/// the one `console.new` asked for, or today's first when there is none yet (the stuck turn
+/// began before midnight).
 fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     let moa = &state.central;
     let (Some(account), Some(caps)) = (&moa.account, moa.caps) else {
@@ -617,9 +618,8 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
         Some(p) if p.reopen_failed => How::New,
         Some(_) => choose(state, account, now.local_day, caps),
         None if moa.restarting.is_some() => match choose(state, account, now.local_day, caps) {
-            how @ (How::Resume(_) | How::Load(_)) => how,
-            How::New if moa.new_thread => How::New,
-            How::Use(_) | How::New => return watchdog::reopened(state, now, Restarted::NoThread),
+            How::Use(_) => return watchdog::reopened(state, now, Restarted::NoThread),
+            how => how,
         },
         None => return Vec::new(),
     };
@@ -667,6 +667,7 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
         && let (Some(restart), Some(account)) = (&moa.restarting, moa.account.clone())
     {
         let brief = restart.brief.clone();
+        let asked = moa.new_thread;
         let mut unopened = None;
         let ended = match result {
             Ok((id, how)) => {
@@ -677,7 +678,8 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
                     reopen_failed: false,
                 };
                 match how {
-                    Opened::New => Restarted::New(open),
+                    Opened::New if asked => Restarted::New(open),
+                    Opened::New => Restarted::NewToday(open),
                     Opened::Resumed | Opened::Loaded => Restarted::Reopened(open),
                 }
             }
@@ -878,11 +880,6 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
         ),
         Phase::Ready | Phase::Thinking => (Phase::Off, stopped_text(&why), "moa's agent stopped"),
     };
-    // A restart's agent that goes before it has started couldn't start again.
-    let ended = match moa.caps {
-        Some(_) => Restarted::NoThread,
-        None => Restarted::NotStarted,
-    };
     moa.phase = phase;
     forget_run(moa);
     let pending = moa.pending.take();
@@ -912,8 +909,9 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     for w in waiters {
         fx.extend(answer(Some(w), Err(OpError(told.clone()))));
     }
-    // A restart that ends here opened no thread.
-    fx.extend(watchdog::reopened(state, now, ended));
+    // A restart's agent that goes before its thread is open couldn't start again: moa is
+    // `Failed`, as the card says.
+    fx.extend(watchdog::reopened(state, now, Restarted::NotStarted));
     // A start that failed may have failed for its account.
     if let Phase::Failed(why) = state.central.phase.clone() {
         fold_in(&mut fx, account::failed(state, now, &why));

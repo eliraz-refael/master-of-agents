@@ -16,7 +16,7 @@ use crate::model::{ActivityWho, AskStatus, AskTarget, Lifecycle, Location, Sessi
 use crate::op::{Done, OpError};
 use crate::ops::launch::title_of;
 use crate::state::State;
-use crate::time::HOUR;
+use crate::time::words;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::bound_pane;
 use crate::tmux::ids::PaneId;
@@ -277,11 +277,10 @@ pub(crate) fn set_after(
     let after = threshold(state);
     let asleep = state.sessions().filter(|s| is_asleep(s)).count();
     let text = match after {
-        Some(ms) => {
-            // Hours to two places, as typed: `2`, `1.5`.
-            let hours = (ms as f64 / HOUR as f64 * 100.0).round() / 100.0;
-            format!("idle sessions go to sleep after {hours} h · {asleep} asleep now")
-        }
+        Some(ms) => format!(
+            "idle sessions go to sleep after {} · {asleep} asleep now",
+            words(ms)
+        ),
         None => "idle sessions stay up (/sleep on)".into(),
     };
     Ok(Done {

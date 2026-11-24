@@ -1,7 +1,7 @@
 //! The watchdog (K6): a turn of moa's agent with no news for `watchdog_seconds` is cancelled,
 //! and one still under way `watchdog_kill_seconds` after that is cut short: moa's agent is
 //! restarted, and today's thread reopened with no prompt (or the new thread `/new` asked for
-//! opened). A `card` row in the turn's thread
+//! opened, or a new one for today when today has none yet). A `card` row in the turn's thread
 //! says what happened, and is updated in place at each step (K7, K11).
 //!
 //! Until the cancel it watches only while no request of moa's agent waits for you: you may
@@ -61,6 +61,8 @@ pub(super) enum Restarted {
     Reopened(Open),
     /// The new thread `/new` asked for is open.
     New(Open),
+    /// Today had no thread to reopen (the turn began before midnight): a new one is open.
+    NewToday(Open),
     /// moa's agent started again, but no thread could be opened.
     NoThread,
     /// moa's agent couldn't start again.
@@ -235,7 +237,9 @@ pub(super) fn reopened(state: &mut State, now: &Now, ended: Restarted) -> Vec<Ef
         moa.phase = Phase::Ready;
     }
     let (thread, failed) = match ended {
-        Restarted::Reopened(open) | Restarted::New(open) => (Some(open), false),
+        Restarted::Reopened(open) | Restarted::New(open) | Restarted::NewToday(open) => {
+            (Some(open), false)
+        }
         Restarted::NoThread | Restarted::NotStarted => (None, true),
     };
     moa.thread = thread;
@@ -273,6 +277,9 @@ fn killed_text(state: &State, ended: Option<&Restarted>) -> String {
         None => "so moa's agent was restarted.",
         Some(Restarted::Reopened(_)) => "so moa's agent was restarted and today's thread reopened.",
         Some(Restarted::New(_)) => "so moa's agent was restarted, with a new thread as you asked.",
+        Some(Restarted::NewToday(_)) => {
+            "so moa's agent was restarted, with a new thread for today."
+        }
         Some(Restarted::NoThread) => {
             "so moa's agent was restarted. Today's thread couldn't be reopened; your next prompt \
              starts a new one."

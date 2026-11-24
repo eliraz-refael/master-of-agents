@@ -139,10 +139,11 @@ pub fn span(ms: i64) -> String {
     }
 }
 
-/// How long a setting's `ms` is, in words a card says it in: `{n} min` when it is whole
-/// minutes, else `{n} s`.
+/// How long a setting's `ms` is, in words a card or a reply says it in: `{n} h` when it is
+/// whole hours, `{n} min` when it is whole minutes, else `{n} s`.
 pub fn words(ms: i64) -> String {
     match ms {
+        ms if ms >= HOUR && ms % HOUR == 0 => format!("{} h", ms / HOUR),
         ms if ms >= MINUTE && ms % MINUTE == 0 => format!("{} min", ms / MINUTE),
         ms => format!("{} s", ms / 1_000),
     }
@@ -284,6 +285,18 @@ mod tests {
             "23h"
         );
         assert_eq!(age(Some(UtcMs(now.0 - 49 * 3_600_000)), now), "2d");
+    }
+    /// `words`: whole hours in hours, whole minutes in minutes, else seconds; the watchdog's
+    /// `5 min` and `30 s` as they were.
+    #[test]
+    fn words_say_hours_minutes_or_seconds() {
+        assert_eq!(words(5 * MINUTE), "5 min");
+        assert_eq!(words(30_000), "30 s");
+        assert_eq!(words(120_000), "2 min");
+        assert_eq!(words(HOUR), "1 h");
+        assert_eq!(words(5 * HOUR / 2), "150 min");
+        assert_eq!(words(DAY), "24 h");
+        assert_eq!(words(3_600), "3 s");
     }
     /// `age`, `until` and the view's `ago` write one set of units: `time::span`.
     #[test]
