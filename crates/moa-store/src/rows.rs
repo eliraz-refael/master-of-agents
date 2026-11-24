@@ -35,7 +35,6 @@ const R_REASON: &str = "reason isn't a known one; loaded as import";
 const R_ACTIVITY_WHO: &str = "who isn't a known one; loaded as brain";
 const R_ASK_TARGET: &str = "a session isn't moa or a session id; loaded as none";
 const R_ASK_STATUS: &str = "status isn't a known one; loaded as failed";
-const R_REPORT_KIND: &str = "kind isn't a known one; loaded as a turn that ended";
 const R_THREAD_KIND: &str = "kind isn't a known one; loaded as manual";
 const R_OPENED_BY: &str = "opened_by isn't a known one; loaded as found";
 const R_BAD_KEY: &str = "key isn't usable; row not loaded";
@@ -644,14 +643,16 @@ pub(crate) fn report(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Report> {
         unusable(notes, "reports", r.int("id").map(|id| format!("#{id}")));
         return None;
     };
+    // A kind this build doesn't know can't be told from another row of its session: it is left
+    // on disk, unread.
+    let Some(kind) = r.text_cow("kind").and_then(|k| k.parse().ok()) else {
+        unusable(notes, "reports", r.int("id").map(|id| format!("#{id}")));
+        return None;
+    };
     let report = Report {
         id: r.int("id").unwrap_or(0),
         session_id,
-        kind: f.closed(
-            r.text_cow("kind").as_deref(),
-            ReportKind::TurnEnded,
-            R_REPORT_KIND,
-        ),
+        kind,
         queued_at: ms(r, "queued_at"),
         last_at: ms(r, "last_at"),
         turns,
@@ -973,6 +974,12 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
         }
         Change::Report(r) => {
             let turns = serde_json::to_string(&r.turns).unwrap_or_else(|_| "[]".into());
+            // A row this build couldn't read stays on disk under another id, and would
+            // clash with this one on (session, kind): the newer row replaces it.
+            tx.prepare_cached(
+                "DELETE FROM reports WHERE session_id = ?1 AND kind = ?2 AND id <> ?3",
+            )?
+            .execute(params![r.session_id.to_string(), r.kind.as_str(), r.id])?;
             tx.prepare_cached(&upsert("reports", REPORTS, &["id"]))?
                 .execute(params![
                     r.id,

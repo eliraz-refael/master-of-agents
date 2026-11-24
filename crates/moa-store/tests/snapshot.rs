@@ -550,16 +550,44 @@ fn reports_load_and_change() {
     // The next id is one past the highest row left, as a restart finds it.
     assert_eq!(s.next_ids.report, 3);
 
-    // A kind this build doesn't know loads as a turn, with a note.
+    // A kind this build doesn't know isn't loaded, and is noted.
     rig.store
         .conn()
         .execute("UPDATE reports SET kind = 'nagging'", [])
         .unwrap();
     let s = rig.store.load_snapshot().unwrap();
-    assert_eq!(s.reports[0].kind, ReportKind::TurnEnded);
+    assert!(s.reports.is_empty());
     assert_eq!(s.unknown.len(), 1, "{:?}", s.unknown);
     let LoadNote { table, key, .. } = &s.unknown[0];
     assert_eq!((*table, key.as_str()), ("reports", "#2"));
+}
+
+/// A row the loader skipped stays on disk; the session's next report, under a new id, must
+/// still be saved with the rest of its commit.
+#[test]
+fn a_stale_report_row_does_not_block_a_write() {
+    let mut rig = empty();
+    rig.store
+        .apply(&[Change::Report(report(1, ReportKind::TurnEnded))])
+        .unwrap();
+    rig.store
+        .conn()
+        .execute("UPDATE reports SET turns = 'not json'", [])
+        .unwrap();
+    assert!(rig.store.load_snapshot().unwrap().reports.is_empty());
+    let mut next = report(2, ReportKind::TurnEnded);
+    next.turns = vec!["Fresh".into()];
+    rig.store
+        .apply(&[
+            Change::Project(project(1, "Lantern")),
+            Change::Session(session(1)),
+            Change::Report(next.clone()),
+        ])
+        .unwrap();
+    let s = rig.store.load_snapshot().unwrap();
+    assert_eq!(s.reports, vec![next]);
+    assert_eq!(s.sessions, vec![session(1)]);
+    assert_eq!(count(&rig.store, "reports"), 1);
 }
 
 #[test]

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use jiff::tz::TimeZone;
-use moa_core::central::reports::{LAST_MAX, TURNS_KEPT};
+use moa_core::central::reports::{EARLIER_MAX, LAST_MAX, TURNS_KEPT};
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Effect, Input, handle_checked};
@@ -237,21 +237,36 @@ fn a_turn_and_a_question_queue_apart() {
 #[test]
 fn a_long_turn_is_cut_to_2600() {
     let mut st = lantern();
-    assert_eq!(LAST_MAX, 2600);
-    feed(&mut st, turn(1, 1_000, &"é".repeat(5_000)));
-    assert_eq!(waiting(&st)[0].turns[0].chars().count(), 2600);
+    assert_eq!((LAST_MAX, EARLIER_MAX), (2600, 500));
+    // Exactly the limit is kept whole; one more is cut, and says so.
+    feed(&mut st, turn(1, 1_000, &"é".repeat(2_600)));
+    assert_eq!(waiting(&st)[0].turns, vec!["é".repeat(2_600)]);
+    feed(&mut st, turn(2, 2_000, &"é".repeat(5_000)));
+    let turns = waiting(&st)[0].turns.clone();
+    // The first is an earlier turn now: cut to 500.
+    assert_eq!(turns[0], format!("{}…", "é".repeat(500)));
+    assert_eq!(turns[1], format!("{}…", "é".repeat(2_600)));
+    // An earlier turn of exactly 500 is kept whole.
+    let mut st = lantern();
+    feed(&mut st, turn(1, 1_000, &"a".repeat(500)));
+    feed(&mut st, turn(2, 2_000, "next"));
+    assert_eq!(
+        waiting(&st)[0].turns,
+        vec!["a".repeat(500), "next".to_string()]
+    );
+    // What a session needs is cut the same way.
     feed(
         &mut st,
         hook(
-            2,
-            2_000,
+            3,
+            3_000,
             HookKind::NeedsAnswer {
                 what: "x".repeat(5_000),
             },
         ),
     );
     let rows = waiting(&st);
-    assert_eq!(rows[1].turns[0].chars().count(), 2600);
+    assert_eq!(rows[1].turns, vec![format!("{}…", "x".repeat(2_600))]);
 }
 
 #[test]
@@ -270,6 +285,12 @@ fn not_every_event_is_a_report() {
     let mut st = lantern();
     let fx = feed(&mut st, turn(1, -1_000, "Old news"));
     assert!(saved(&fx).is_empty());
+    // Its history row was saved, so it was history only, not dropped.
+    assert!(
+        common::changes(&fx)
+            .iter()
+            .any(|c| matches!(c, Change::Event(_)))
+    );
     assert!(waiting(&st).is_empty());
     // Starting, a failure and a cleared need say nothing to moa either.
     for (seq, kind) in [

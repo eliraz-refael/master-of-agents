@@ -10,16 +10,23 @@ use crate::core::Tx;
 use crate::hook::{HookEnvelope, HookKind};
 use crate::model::{Report, ReportKind, Session};
 use crate::state::{State, Table};
-use crate::text::cut;
+
+/// `text` cut to `n` characters, with a `…` after the cut: the stored text says it was cut.
+fn cut_marked(text: &str, n: usize) -> String {
+    match text.char_indices().nth(n) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
+    }
+}
 
 /// How many turns a session's `turn_ended` row keeps: the newest.
 pub const TURNS_KEPT: usize = 6;
 
-/// The most characters of one turn's message that a report keeps for moa's wake-up to render:
-/// the earlier turns are cut shorter there ([`EARLIER_MAX`]).
+/// The most characters of the newest message a report keeps; a longer one ends in `…`.
 pub const LAST_MAX: usize = 2600;
 
-/// The most characters of an earlier turn that a wake-up shows.
+/// The most characters a report keeps of a turn once a newer one follows it; a longer one
+/// ends in `…`.
 pub const EARLIER_MAX: usize = 500;
 
 /// The report `env` adds for `session` (the session as the event leaves it), or `None` when
@@ -41,7 +48,7 @@ pub(crate) fn queued(
         HookKind::NeedsAnswer { what } => (ReportKind::NeedsYou, what.clone()),
         _ => return None,
     };
-    let text = cut(text.trim(), LAST_MAX);
+    let text = cut_marked(text.trim(), LAST_MAX);
     if text.is_empty() || is_moas_own(state, session) {
         return None;
     }
@@ -53,6 +60,10 @@ pub(crate) fn queued(
             let mut turns = old.turns.clone();
             match kind {
                 ReportKind::TurnEnded => {
+                    // The turn that was the newest is now an earlier one.
+                    if let Some(prev) = turns.last_mut() {
+                        *prev = cut_marked(&*prev, EARLIER_MAX);
+                    }
                     turns.push(text);
                     turns.drain(..turns.len().saturating_sub(TURNS_KEPT));
                 }

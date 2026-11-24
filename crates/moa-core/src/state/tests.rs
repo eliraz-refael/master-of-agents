@@ -336,6 +336,8 @@ fn changes_name_their_topics() {
     );
     assert_eq!(Change::DeleteGroup("g".into()).topics(), [Topic::Groups]);
     assert_eq!(Change::Terminal(terminal(1, None)).topics(), [Topic::Terms]);
+    assert_eq!(Change::Report(report(1, 1)).topics(), [Topic::Feed]);
+    assert_eq!(Change::DeleteReport(1).topics(), [Topic::Feed]);
     assert_eq!(
         Change::Meta {
             key: "k".into(),
