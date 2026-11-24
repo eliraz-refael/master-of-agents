@@ -52,11 +52,11 @@ pub fn configured(state: &State) -> Option<AccountName> {
     config.brain(state.brain()).unwrap_or_default().moa_account
 }
 
-/// The accounts moa.toml has that moa's agent can run on ([`spec_on`]), by name.
-pub fn runnable(state: &State) -> Vec<AccountName> {
+/// The accounts moa.toml has, but `on`, that moa's agent can run on ([`spec_on`]), by name.
+pub fn others(state: &State, on: &AccountName) -> Vec<AccountName> {
     let names = state.config().accounts.keys();
     names
-        .filter(|n| spec_on(state, n).is_ok())
+        .filter(|n| *n != on && spec_on(state, n).is_ok())
         .cloned()
         .collect()
 }

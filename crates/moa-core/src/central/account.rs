@@ -99,9 +99,8 @@ fn card_text(state: &State, account: &AccountName, why: &str) -> String {
     let why = cut(first.unwrap_or(""), WHY_MAX);
     // A why that ends its sentence isn't ended twice.
     let why = why.trim_end().trim_end_matches('.');
-    let others: Vec<String> = launch::runnable(state)
+    let others: Vec<String> = launch::others(state, account)
         .into_iter()
-        .filter(|a| a != account)
         .map(|a| format!("`/account {a}`"))
         .collect();
     let rest = match others.is_empty() {

@@ -372,9 +372,8 @@ pub fn switch_account(
 /// A bare `/account`: the account moa is on, and the others moa.toml has that it can run on.
 fn accounts(state: &State) -> Result<Done, OpError> {
     let on = launch::account(state).ok_or_else(|| launch::no_account(state))?;
-    let others: Vec<String> = launch::runnable(state)
+    let others: Vec<String> = launch::others(state, &on)
         .into_iter()
-        .filter(|a| *a != on)
         .map(|a| a.to_string())
         .collect();
     let text = match others.is_empty() {

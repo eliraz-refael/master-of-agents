@@ -193,7 +193,9 @@ fn restart(state: &mut State, now: &Now, card_id: i64) -> Vec<Effect> {
     let mut fx = vec![warn("moa's turn didn't stop; moa's agent is stopped")];
     fx.extend(turn::cut_short(state, tx, killed.clone()));
     let moa = &mut state.central;
-    moa.written.clear();
+    // Only the card stays written: its id, saved or not, is held until the restart's end
+    // updates it ([`reopened`]), so no new row (an account card, say) takes it meanwhile.
+    moa.written.retain(|id, _| *id == killed.id);
     let told = match ended {
         None => HUNG.to_string(),
         Some(_) => format!("moa's turn hung, {NOT_STARTED}"),
