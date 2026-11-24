@@ -13,7 +13,7 @@ use common::central::{Disk, acps, caps, hear_at, opened, prompt_at, prompts_sent
 use jiff::tz::TimeZone;
 use moa_core::central::channel::AUTO_KEY;
 use moa_core::central::reports::{EARLIER_MAX, LAST_MAX, TURNS_KEPT};
-use moa_core::central::wire::{AcpCmd, AcpIn, Opened, ThreadHow};
+use moa_core::central::wire::{AcpCmd, AcpIn, Opened, PermKind, PermOption, ThreadHow};
 use moa_core::central::{PROMPT_MAX, Phase};
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
@@ -23,7 +23,7 @@ use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, FeedEntry, Lifecycle, Location, Project,
     ProjectId, ProjectStatus, Report, ReportKind, Session, SessionId,
 };
-use moa_core::op::{ConnId, Op, ReqId};
+use moa_core::op::{ConnId, Op, PermAnswer, ReqId};
 use moa_core::publish::Topic;
 use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::{Now, UtcMs};
@@ -878,6 +878,51 @@ fn no_wake_while_moa_answers() {
     let fx = fire(&mut st, T + 45 * SEC);
     assert!(acps(&fx).is_empty(), "{fx:?}");
     // Due since T + 45 s: it goes with the turn's end.
+    let fx = end_turn(&mut st, T + 60 * SEC);
+    assert!(sent(&fx).starts_with(WAKE));
+    assert_eq!(st.reports().count(), 0);
+}
+
+#[test]
+fn no_wake_while_a_permission_waits() {
+    let mut st = moa_brain(1);
+    let fx = prompt_at(&mut st, at(T0), 1, "hello", false);
+    play(&mut st, T0, fx);
+    let turn = st.central().turn.as_ref().expect("a turn");
+    let ask = AcpIn::Permission {
+        generation: st.central().generation,
+        req: 7,
+        thread: turn.thread.clone(),
+        title: "Run git push".into(),
+        options: vec![PermOption {
+            id: "no".into(),
+            kind: PermKind::RejectOnce,
+            name: "No".into(),
+        }],
+    };
+    hear_at(&mut st, at(T0), ask);
+    assert_eq!(st.central().asking.len(), 1);
+    let fx = finished(&mut st, 0, T, "Merged PR #3");
+    assert_eq!(wake_timer(&fx), None);
+    let fx = fire(&mut st, T + 45 * SEC);
+    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+
+    // Answered, the turn goes on; its end lets the wake go.
+    let answer = Op::ConsolePermission {
+        id: None,
+        answer: PermAnswer::No,
+    };
+    let fx = handle_checked(
+        &mut st,
+        Input::Client {
+            conn: ConnId(1),
+            req: ReqId(2),
+            caller: Default::default(),
+            op: answer,
+        },
+        at(T + 50 * SEC),
+    );
+    assert!(st.central().asking.is_empty(), "{fx:?}");
     let fx = end_turn(&mut st, T + 60 * SEC);
     assert!(sent(&fx).starts_with(WAKE));
     assert_eq!(st.reports().count(), 0);

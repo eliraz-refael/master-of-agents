@@ -216,7 +216,7 @@ impl From<&FeedEntry> for FeedRow {
 }
 
 /// The `feed` topic's row with key `state`: whether moa's agent is running, which thread it is
-/// on, and why it failed.
+/// on, why it failed, and what waits for it or for you.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MoaRow {
     /// `off`, `starting`, `ready`, `thinking` or `failed`.
@@ -226,6 +226,10 @@ pub struct MoaRow {
     /// How many session reports wait for a wake-up. Absent from an older daemon's row: none.
     #[serde(default)]
     pub queued: u32,
+    /// The `feed` rows of moa's agent's permission requests that wait for your answer, oldest
+    /// first. Absent from an older daemon's row: none.
+    #[serde(default)]
+    pub asking: Vec<i64>,
 }
 
 /// The `meta` keys of the console's button bar start with this: `.moa` holds the list moa set

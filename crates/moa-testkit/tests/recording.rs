@@ -490,11 +490,19 @@ async fn replay_answers_in_order() {
             thread: thread.clone(),
             title: s(git_title),
             options: [
-                ("allow-once", PermKind::AllowOnce),
-                ("allow-with-updates", PermKind::AllowAlways),
-                ("reject", PermKind::RejectOnce),
+                ("allow-once", PermKind::AllowOnce, "Yes"),
+                (
+                    "allow-with-updates",
+                    PermKind::AllowAlways,
+                    "Yes, and don't ask again for `git status` commands in ~/private/harbor",
+                ),
+                ("reject", PermKind::RejectOnce, "No"),
             ]
-            .map(|(id, kind)| PermOption { id: s(id), kind })
+            .map(|(id, kind, name)| PermOption {
+                id: s(id),
+                kind,
+                name: s(name),
+            })
             .to_vec(),
         },
         tool_done(git, "failed"),

@@ -1,22 +1,24 @@
 //! What moa says in a turn lands in the feed as it comes (A5): each update is one commit,
 //! a chunk extending its row, a tool call's or the plan's row changed in place. The turn's
-//! end answers whoever waits (A6). A permission request is refused, by its options' kinds,
-//! until moa can ask you (6c).
+//! end answers whoever waits (A6). A permission request waits for your answer as a
+//! `permission` row (K5), until you answer it or nobody can any more.
 //!
 //! The rows a turn writes are kept as written ([`Moa::written`]), saved or not: a refused
 //! commit doesn't stop the turn, and its end still answers with moa's words.
 
 use serde_json::{Value, json};
 
-use super::feed::{self, body_text, kind, plan_body, text_body, tool_body, tool_input};
+use super::feed::{
+    self, body_text, kind, permission_body, plan_body, text_body, tool_body, tool_input,
+};
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
-use super::{Moa, Phase, answer, warn};
+use super::{Asking, Moa, Phase, answer, chosen, warn};
 use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::model::FeedEntry;
-use crate::op::{Done, OpError};
+use crate::op::{Done, OpError, PermAnswer};
 use crate::state::{State, Table};
 use crate::tmux::link::log;
 
@@ -115,9 +117,11 @@ pub(super) fn update(state: &mut State, now: &Now, thread: &str, update: Update)
     }
 }
 
-/// moa's agent asks before it goes on. moa can't ask you yet: the request is refused with
-/// its `reject_once` option, or, when it has none, the turn is cancelled and the request
-/// with it. Either way the turn says so in a `system` line.
+/// moa's agent asks before it goes on. In the turn under way the request waits for your
+/// answer: a `permission` row, `pending`, and an entry in [`Moa::asking`]; nothing is sent
+/// until you answer. One that offers nothing y, a or n could pick is cancelled at once, its
+/// row `cancelled`. Any other request (another thread, no turn, or a run that has exited)
+/// is cancelled at once, with no row.
 pub(super) fn permission(
     state: &mut State,
     now: &Now,
@@ -126,58 +130,100 @@ pub(super) fn permission(
     title: &str,
     options: &[PermOption],
 ) -> Vec<Effect> {
-    let generation = state.central.generation;
+    let moa = &state.central;
+    let live = moa
+        .turn
+        .as_ref()
+        .is_some_and(|t| t.thread == thread && t.exited.is_none());
+    let cancelled = Effect::Acp(AcpCmd::Permission {
+        generation: moa.generation,
+        req,
+        choice: None,
+    });
+    if !live {
+        return vec![cancelled];
+    }
     let title = match title.trim() {
         "" => "a tool call",
         _ => title,
     };
-    let refused = format!("moa wanted to {title}, and was refused: moa can't ask you yet");
-    let reject = options.iter().find(|o| o.kind == PermKind::RejectOnce);
-    let (line, cmds) = match reject {
-        Some(o) => (
-            refused,
-            vec![AcpCmd::Permission {
-                generation,
-                req,
-                choice: Some(o.id.clone()),
-            }],
-        ),
-        None => (
-            format!("{refused}; its turn was cancelled"),
-            vec![
-                AcpCmd::Cancel {
-                    generation,
-                    thread: thread.clone(),
-                },
-                AcpCmd::Permission {
-                    generation,
-                    req,
-                    choice: None,
-                },
-            ],
-        ),
+    let answerable = PermAnswer::ALL
+        .into_iter()
+        .any(|a| chosen(options, a).is_some());
+    let mut tx = Tx::new(now);
+    let body = permission_body(title, options);
+    let row_state = match answerable {
+        true => "pending",
+        false => "cancelled",
     };
-    let mut fx = Vec::new();
-    if in_turn(&state.central, &thread) {
-        if reject.is_none()
-            && let Some(turn) = &mut state.central.turn
-        {
-            turn.cancelled_for_permission = true;
-        }
-        let mut tx = Tx::new(now);
-        let row = new_row(
-            state,
-            &mut tx,
-            &thread,
-            kind::SYSTEM,
-            None,
-            text_body(&line),
-            None,
-        );
-        fx.extend(record(state, tx, vec![row]));
+    let row = new_row(
+        state,
+        &mut tx,
+        &thread,
+        kind::PERMISSION,
+        None,
+        body,
+        Some(row_state.to_string()),
+    );
+    if !answerable {
+        let mut fx = record(state, tx, vec![row]);
+        fx.push(cancelled);
+        return fx;
     }
+    let options = options.to_vec();
+    state.central.asking.insert(row.id, Asking { req, options });
+    record(state, tx, vec![row])
+}
+
+/// Request `id`'s row, answered with the option of `kind`: it says which.
+pub(super) fn answered_row(moa: &Moa, id: i64, kind: PermKind) -> Option<FeedEntry> {
+    asked_row(moa, id).map(|row| FeedEntry {
+        state: Some(kind.name().into()),
+        ..row.clone()
+    })
+}
+
+/// Nobody will answer the requests that wait any more (`console.cancel`): moa's agent hears
+/// each cancelled, and their rows say so.
+pub(super) fn unanswered(state: &mut State, now: &Now) -> Vec<Effect> {
+    let (rows, cmds) = forsaken(&mut state.central, true);
+    let mut fx = match rows.is_empty() {
+        true => Vec::new(),
+        false => record(state, Tx::new(now), rows),
+    };
     fx.extend(cmds.into_iter().map(Effect::Acp));
     fx
+}
+
+/// Takes every request that waits: their rows as `cancelled`, and, when moa's agent is
+/// there to hear it (`told`), each answered cancelled.
+fn forsaken(moa: &mut Moa, told: bool) -> (Vec<FeedEntry>, Vec<AcpCmd>) {
+    let asking = std::mem::take(&mut moa.asking);
+    let rows = asking
+        .keys()
+        .filter_map(|&id| asked_row(moa, id))
+        .map(|row| FeedEntry {
+            state: Some("cancelled".into()),
+            ..row.clone()
+        })
+        .collect();
+    let cmds = match told {
+        true => asking
+            .into_values()
+            .map(|a| AcpCmd::Permission {
+                generation: moa.generation,
+                req: a.req,
+                choice: None,
+            })
+            .collect(),
+        false => Vec::new(),
+    };
+    (rows, cmds)
+}
+
+/// The `permission` row with `id` the turn has written.
+fn asked_row(moa: &Moa, id: i64) -> Option<&FeedEntry> {
+    moa.written.get(&id).filter(|r| r.kind == kind::PERMISSION)
 }
 
 /// Turn `prompt` ended, as `result` says: whoever waits hears moa's words, or why it ended
@@ -199,9 +245,13 @@ pub(super) fn ended(
         moa.phase = Phase::Ready;
     }
     let mut fx: Vec<Effect> = unsaved(moa).into_iter().collect();
+    // What still waits for your answer can't be answered any more.
+    let (cards, cmds) = forsaken(moa, turn.exited.is_none());
+    moa.answered.clear();
     if turn.exited.is_some() {
         // Late updates after the exit may have started tool calls the exit didn't see.
-        let rows = cancelled_tools(&state.central);
+        let mut rows = cancelled_tools(&state.central);
+        rows.extend(cards);
         if !rows.is_empty() {
             fx.extend(write(state, Tx::new(now), rows).unwrap_or_default());
         }
@@ -226,9 +276,7 @@ pub(super) fn ended(
         }
         Ok(stop) => {
             let text = format!("moa's turn ended early: {}", stop.name());
-            // A permission cancel has said so already.
-            let line = (!turn.cancelled_for_permission).then(|| (kind::SYSTEM, text.clone()));
-            (line, Ok(Done { text, data }))
+            (Some((kind::SYSTEM, text.clone())), Ok(Done { text, data }))
         }
         Err(why) => {
             let text = format!("moa's turn failed: {why}");
@@ -240,6 +288,7 @@ pub(super) fn ended(
         Ok(StopReason::EndTurn) => Vec::new(),
         _ => cancelled_tools(moa),
     };
+    rows.extend(cards);
     let mut tx = Tx::new(now);
     if let Some((line_kind, text)) = line {
         let body = text_body(&text);
@@ -250,15 +299,18 @@ pub(super) fn ended(
         fx.extend(write(state, tx, rows).unwrap_or_default());
     }
     state.central.written.clear();
+    fx.extend(cmds.into_iter().map(Effect::Acp));
     fx.extend(answer(turn.waiter, reply));
     fx
 }
 
 /// moa's agent went away during the turn in `thread`, cutting it short: its running tool
-/// calls are cancelled, and an `error` line says so with `told`, the reason the waiter
-/// hears.
+/// calls and the requests that wait for your answer are cancelled, and an `error` line says
+/// so with `told`, the reason the waiter hears.
 pub(super) fn cut_short(state: &mut State, now: &Now, thread: &str, told: &str) -> Vec<Effect> {
     let mut rows = cancelled_tools(&state.central);
+    rows.extend(forsaken(&mut state.central, false).0);
+    state.central.answered.clear();
     let mut tx = Tx::new(now);
     let body = text_body(told);
     rows.push(new_row(
@@ -290,7 +342,8 @@ fn cancelled_tools(moa: &Moa) -> Vec<FeedEntry> {
 
 /// After a reload the rows are the store's. A row the reloaded tail holds is taken from it;
 /// a new row a failed commit lost (its id not yet the store's) is forgotten, so the updates
-/// stepped again after the reload write it once.
+/// stepped again after the reload write it once, as is a permission request it held. An
+/// answer whose commit failed is undone.
 ///
 /// An older row, gone from the tail, is kept as written: the snapshot carries only the
 /// newest [`crate::publish::FEED_SHOWN`] rows, and the core reads nothing else, so the store's
@@ -308,6 +361,16 @@ pub(super) fn reloaded(state: &mut State) {
             None => Some((id, row)),
         })
         .collect();
+    // A request whose row was lost is heard again, stepped after the reload. One you
+    // answered whose row is still `pending` lost its answer's commit, and the answer with it
+    // (it waits for the commit): it waits for you again.
+    let moa = &mut state.central;
+    moa.asking.retain(|id, _| moa.written.contains_key(id));
+    for (id, asked) in std::mem::take(&mut moa.answered) {
+        if asked_row(moa, id).is_some_and(|r| r.state.as_deref() == Some("pending")) {
+            moa.asking.insert(id, asked);
+        }
+    }
 }
 
 /// A piece of moa's answer or thinking. With a message id it extends that message's row;

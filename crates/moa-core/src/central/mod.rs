@@ -23,13 +23,13 @@ use serde_json::json;
 use self::channel::Source;
 use self::feed::{kind, text_body};
 use self::threads::{How, choose, new_thread};
-use self::wire::{AcpCmd, AcpIn, Caps, Opened, ThreadHow};
+use self::wire::{AcpCmd, AcpIn, Caps, Opened, PermOption, ThreadHow};
 use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
 use crate::model::{FeedEntry, MoaThread, ThreadKind};
-use crate::op::{ConnId, Done, OpError, ReqId};
+use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
 use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
 use crate::state::State;
@@ -111,8 +111,15 @@ pub struct Turn {
     pub waiter: Option<Waiter>,
     /// Why moa's agent went away during the turn. Its end may still come after.
     pub exited: Option<String>,
-    /// A permission request cancelled the turn, and said so: its cancelled end adds no line.
-    pub cancelled_for_permission: bool,
+}
+
+/// A permission request of moa's agent that waits for your answer, by its `feed` row's id.
+/// Kept in memory: the run's requests can't outlive its connection.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Asking {
+    /// The request's number, to answer it by.
+    pub req: u64,
+    pub options: Vec<PermOption>,
 }
 
 /// The core's state for moa's agent: its phase, which run of it (`generation`) the core is
@@ -148,6 +155,12 @@ pub struct Moa {
     pub last_wake: Option<UtcMs>,
     /// The deadline the `Wake` timer is armed at, if any, as `State::sleep_at` is.
     pub wake_armed: Option<UtcMs>,
+    /// The turn's permission requests that wait for your answer, by row id: oldest first.
+    pub asking: BTreeMap<i64, Asking>,
+    /// The turn's requests you answered, by row id, kept until the turn ends: when the commit
+    /// of an answer fails, its answer isn't sent and the reload finds its row still `pending`,
+    /// so it waits for you again.
+    pub answered: BTreeMap<i64, Asking>,
 }
 
 impl Moa {
@@ -165,6 +178,7 @@ impl Moa {
             thread: self.thread.as_ref().map(|o| o.row.thread_id.clone()),
             why,
             queued,
+            asking: self.asking.keys().copied().collect(),
         }
     }
 
@@ -292,8 +306,9 @@ pub fn heard(state: &mut State, now: &Now, input: AcpIn) -> Vec<Effect> {
     fx
 }
 
-/// `console.cancel`: moa's turn under way is cancelled; it ends as cancelled.
-pub fn cancel(state: &State, conn: ConnId, req: ReqId) -> Vec<Effect> {
+/// `console.cancel`: moa's turn under way is cancelled; it ends as cancelled. The requests
+/// that wait for your answer are cancelled with it.
+pub fn cancel(state: &mut State, now: &Now, conn: ConnId, req: ReqId) -> Vec<Effect> {
     let moa = &state.central;
     let mut fx = Vec::new();
     let result = match (&moa.phase, &moa.turn) {
@@ -302,6 +317,7 @@ pub fn cancel(state: &State, conn: ConnId, req: ReqId) -> Vec<Effect> {
                 generation: moa.generation,
                 thread: turn.thread.clone(),
             }));
+            fx.extend(turn::unanswered(state, now));
             Ok(Done {
                 text: "cancelling moa's turn".into(),
                 data: json!({}),
@@ -310,7 +326,95 @@ pub fn cancel(state: &State, conn: ConnId, req: ReqId) -> Vec<Effect> {
         _ => Err(OpError("moa isn't answering anything".into())),
     };
     fx.push(Effect::Reply { conn, req, result });
+    fx.extend(said(state));
     fx
+}
+
+/// What `console.permission` says when the request doesn't offer the answer given.
+pub const NOT_OFFERED: &str = "moa's agent didn't offer that answer";
+
+/// `console.permission`: answers request `id` (the oldest waiting when `None`) with the
+/// option of the kind `answer` names. Its row says which in a commit of its own, and the
+/// answer goes once that is saved; while writes are refused it is refused, and still waits.
+pub fn answer_permission(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    id: Option<i64>,
+    answer: PermAnswer,
+) -> Vec<Effect> {
+    let asking = &state.central.asking;
+    let found = match id {
+        Some(id) => asking.get_key_value(&id),
+        None => asking.first_key_value(),
+    };
+    let result = match (found, id) {
+        (Some((&id, asking)), _) => match chosen(&asking.options, answer) {
+            Some(option) => Ok((id, asking.req, option.clone())),
+            None => Err(NOT_OFFERED),
+        },
+        (None, Some(_)) => Err("that request isn't waiting any more"),
+        (None, None) => Err("nothing is waiting for an answer"),
+    };
+    let (id, asked, option) = match result {
+        Ok(found) => found,
+        Err(why) => {
+            return vec![Effect::Reply {
+                conn,
+                req,
+                result: Err(OpError(why.into())),
+            }];
+        }
+    };
+    let mut tx = Tx::new(now);
+    let row = turn::answered_row(&state.central, id, option.kind);
+    let changes = row.iter().cloned().map(Change::Feed).collect();
+    if let Err(e) = tx.commit(state, changes) {
+        return vec![Effect::Reply {
+            conn,
+            req,
+            result: Err(e),
+        }];
+    }
+    let moa = &mut state.central;
+    if let Some(row) = row {
+        moa.written.insert(row.id, row);
+    }
+    if let Some(asked) = moa.asking.remove(&id) {
+        moa.answered.insert(id, asked);
+    }
+    let mut fx = post_commit(state, tx);
+    fx.push(Effect::Acp(AcpCmd::Permission {
+        generation: state.central.generation,
+        req: asked,
+        choice: Some(option.id),
+    }));
+    let text = match answer {
+        PermAnswer::Once => "allowed once",
+        PermAnswer::Always => "allowed always",
+        PermAnswer::No => "refused",
+    };
+    let done = Done {
+        text: text.into(),
+        data: json!({ "id": id, "kind": option.kind.name() }),
+    };
+    fx.push(Effect::Reply {
+        conn,
+        req,
+        result: Ok(done),
+    });
+    fx.extend(said(state));
+    fx
+}
+
+/// The option `answer` stands for: `allow_once`, `allow_always`, or `reject_once` falling back
+/// to `reject_always`.
+fn chosen(options: &[PermOption], answer: PermAnswer) -> Option<&PermOption> {
+    answer
+        .kinds()
+        .iter()
+        .find_map(|k| options.iter().find(|o| o.kind == *k))
 }
 
 /// After a failed commit the rows are the store's again. A turn whose prompt's row was lost
@@ -550,7 +654,6 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         source: p.source,
         waiter: p.waiter.filter(|w| w.wait),
         exited: None,
-        cancelled_for_permission: false,
     });
     let generation = moa.generation;
     let mut fx = post_commit(state, tx);

@@ -1,0 +1,21 @@
+---
+source: crates/moa-view/tests/console.rs
+assertion_line: 616
+expression: debug_lines(&view.lines)
+---
+[you]› [you]Tidy the Harbor folder
+[brain*]◆ moa  09:21
+[dim]│ [ok]✓ [ok]allowed once: Write ~/private/harbor/note.txt
+[dim]│ [ok]✓ [ok]allowed always: Edit ~/private/harbor/Cargo.toml
+[dim]│ [fail]✗ [fail]refused: rm -rf ~/private/harbor/target
+[dim]│ [fail]✗ [fail]refused: git push --force
+[dim]│ [dim]⊘ [dim]not answered: Fetch the Beacon changelog
+[dim]│ [dim]⊘ [dim]not answered: Delete ~/private/harbor/old.log
+
+[you]› [you]Write Kite's release notes
+[brain*]◆ moa  09:51
+[dim]│ [warn]⚠ [warn]moa asks: Write ~/private/kite/RELEASE.md
+[dim]│ [dim]┊ [work#0][y once][text] [work#1][a always][text] [work#2][n no]
+[dim]│ [dim]┊ [dim]always: [dim]Always allow edits in ~/private/kite
+[dim]│ [warn]⚠ [warn]moa asks: cargo publish -p kite
+[dim]│ [dim]┊ [work#3][y once][text] [work#4][n no]

@@ -3,7 +3,8 @@
 //! screen (B9).
 
 use moa_core::UtcMs;
-use moa_core::op::{Done, NoParams, Op};
+use moa_core::central::NOT_OFFERED;
+use moa_core::op::{Done, NoParams, Op, PermAnswer};
 use moa_core::panel::View;
 use moa_core::publish::FeedRow;
 use serde_json::Value;
@@ -15,7 +16,7 @@ use crate::editor::Editor;
 use crate::geometry::Geometry;
 use crate::keys::Key;
 use crate::line::Line;
-use crate::views::console::{self, Asked, Card};
+use crate::views::console::{self, Asked, Card, Waiting};
 
 /// The same error text is drawn in the console at most once in this many milliseconds (B10).
 pub const ERROR_AGAIN_MS: i64 = 30_000;
@@ -56,6 +57,8 @@ impl Panel {
     /// it, so a row that leaves the topic's tail leaves no gap.
     pub(super) fn console_refresh(&mut self, data: &Data, ctx: &Ctx, g: Geometry) -> Geometry {
         let ui = &mut self.console;
+        let asking = data.moa.as_ref().map_or(&[][..], |m| m.asking.as_slice());
+        ui.answered.retain(|id| asking.contains(id));
         // `older` grows for the panel's life once it has paged: it is never cut.
         if !ui.older.is_empty() && ui.kept_at != Some(data.revision()) {
             ui.kept_at = Some(data.revision());
@@ -65,7 +68,7 @@ impl Panel {
                 }
             }
         }
-        let mut built = console::build(data, ctx, ui, build_width(&g));
+        let mut built = console::build(data, ctx, ui, !self.link_down, build_width(&g));
         let rows = u16::try_from(built.bar.len()).unwrap_or(u16::MAX);
         let g = g.with_bar_rows(rows);
         self.palette = console::palette(data, ui);
@@ -98,7 +101,8 @@ impl Panel {
     }
 
     /// A key in the console, after Ctrl-c, a question and a prompt have had theirs. Every
-    /// printable key is typed (letters never move the feed); Enter sends the draft, or with
+    /// printable key is typed (letters never move the feed), but y, a and n answer moa's
+    /// agent while a request waits and the input is empty; Enter sends the draft, or with
     /// none presses the focused button; Esc cancels moa's turn while it thinks, else clears
     /// the draft; Tab and BTab move the focus while the draft is empty; Up and Down walk the
     /// history; PgUp and PgDn scroll `rows` lines less one, and PgUp at the top asks for a
@@ -124,6 +128,18 @@ impl Panel {
         }
         if self.palette_key(k) {
             return Vec::new();
+        }
+        let up = !self.link_down;
+        if let Key::Char(c) = k
+            && !console::asking(data, up).is_empty()
+            && self.console.draft.text.is_empty()
+            && let Some(answer) = console::answer_of(c)
+        {
+            // Every waiting request answered from here already: their answers are on the way.
+            return match console::waiting(data, up, &self.console.answered) {
+                Some(waiting) => self.answer(&waiting, answer, ctx.now),
+                None => Vec::new(),
+            };
         }
         let page = isize::try_from(rows.saturating_sub(1).max(1)).unwrap_or(isize::MAX);
         match k {
@@ -211,8 +227,20 @@ impl Panel {
         self.send_line(command, false, now)
     }
 
+    /// y, a or n with the input empty (K12): the oldest waiting card's button of that kind
+    /// (skipping those answered from here whose answer moa's state doesn't show yet),
+    /// pressed; one it doesn't offer is said in the footer.
+    fn answer(&mut self, waiting: &Waiting, answer: PermAnswer, now: UtcMs) -> Vec<Out> {
+        if !waiting.offered.contains(&answer) {
+            return self.say(NOT_OFFERED);
+        }
+        self.press(console::answer_line(waiting.id, answer), now)
+    }
+
     /// Sends `line`, `typed` in the input or pressed: a `/command` as `console.command`, else
-    /// a prompt; `/quit` is the console's own (F10). The feed goes back to its bottom, where
+    /// a prompt; `/quit` is the console's own (F10). An answer to a permission request is
+    /// remembered until moa's state drops the request, and its reply makes no card: the
+    /// request's own card says it. The feed goes back to its bottom, where
     /// the answer comes. A typed line waits for its reply before another goes; the draft is
     /// cleared only once it is accepted (B7).
     fn send_line(&mut self, line: String, typed: bool, now: UtcMs) -> Vec<Out> {
@@ -225,14 +253,25 @@ impl Panel {
         }
         let ui = &mut self.console;
         let typing = |a: &Asked| match a {
-            Asked::Prompt { typed, .. } | Asked::Command { typed, .. } => *typed,
+            Asked::Prompt { typed, .. }
+            | Asked::Command { typed, .. }
+            | Asked::Answer { typed, .. } => *typed,
             Asked::Page { .. } => false,
         };
         if typed && ui.waits_on(typing) {
             return self.say(STILL_WAITING);
         }
         ui.to_bottom();
-        let (asked, op) = if line.starts_with('/') {
+        let (asked, op) = if let Some(id) = console::answer_id(&line) {
+            ui.answered.insert(id);
+            let asked = Asked::Answer {
+                id,
+                line: line.clone(),
+                at: now,
+                typed,
+            };
+            (asked, Op::ConsoleCommand { line })
+        } else if line.starts_with('/') {
             let asked = Asked::Command {
                 line: line.clone(),
                 at: now,
@@ -318,11 +357,15 @@ impl Panel {
 
     /// The reply to something the console sent: a page's rows join the older ones; an
     /// accepted line leaves the draft (if it is still what was sent) for the history; a
-    /// command's reply is a card. A refusal goes to the footer, the draft kept.
+    /// command's reply is a card, but an answer's isn't. A refusal goes to the footer, the
+    /// draft kept; a refused answer's request can be answered again.
     pub(super) fn console_replied(&mut self, asked: Asked, result: Result<Done, String>) {
         let done = match result {
             Ok(done) => done,
             Err(why) => {
+                if let Asked::Answer { id, .. } = asked {
+                    self.console.answered.remove(&id);
+                }
                 self.show(Err(why));
                 return;
             }
@@ -345,6 +388,13 @@ impl Panel {
                     self.accepted(text, at);
                 }
                 self.show(Ok(done));
+            }
+            Asked::Answer {
+                line, at, typed, ..
+            } => {
+                if typed {
+                    self.accepted(line, at);
+                }
             }
             Asked::Command { line, at, typed } => {
                 if typed {
@@ -397,10 +447,10 @@ impl Panel {
         }
         let shown = self.built.lines.get(w.top..w.end).unwrap_or_default();
         body.extend(shown.iter().map(|l| (l.clone(), Mark::Plain)));
-        let head = g
-            .head
-            .filter(|r| r.h > 0)
-            .map(|_| console::head(data, ctx, !self.link_down, w.new, width));
+        let head = g.head.filter(|r| r.h > 0).map(|_| {
+            let answered = &self.console.answered;
+            console::head(data, ctx, !self.link_down, answered, w.new, width)
+        });
         let palette = self
             .palette
             .as_ref()

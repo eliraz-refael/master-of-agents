@@ -49,7 +49,9 @@ pub fn build(view: View, data: &Data, ctx: &Ctx, ui: &ViewUi, width: u16) -> Vec
         View::Terms => terms::lines(data, ctx, width),
         View::EmptySlot => empty_slot::build(width),
         View::Help => help::build(data, ctx, width),
-        View::Console => console::build(data, ctx, &console::ConsoleUi::default(), width).lines,
+        View::Console => {
+            console::build(data, ctx, &console::ConsoleUi::default(), true, width).lines
+        }
         View::Setup => {
             let words = not_yet(view).unwrap_or_default();
             vec![Line::plain(cut(words, usize::from(width)), Tone::Dim)]

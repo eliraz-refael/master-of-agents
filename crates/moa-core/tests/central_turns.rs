@@ -1,5 +1,5 @@
 //! moa's turns in the core (A5–A7): everything moa says lands in the feed as it comes, the
-//! turn's end answers whoever waits, and permission requests are refused until moa can ask.
+//! turn's end answers whoever waits, and permission requests wait for your answer (K5).
 
 mod common;
 
@@ -15,12 +15,10 @@ use moa_core::central::wire::{
 };
 use moa_core::effect::{Effect, Input, LogLevel, RefuseWrites, handle_checked};
 use moa_core::model::FeedEntry;
-use moa_core::op::{ConnId, Done, NoParams, Op, OpError, ReqId};
+use moa_core::op::{ConnId, Done, NoParams, Op, OpError, PermAnswer, ReqId};
 use moa_core::state::{Snapshot, State};
 use moa_testkit::brain::TypicalBrain;
 use serde_json::{Value, json};
-
-const REFUSED: &str = "and was refused: moa can't ask you yet";
 
 /// moa with its first turn under way in thread `th-1`; request 1 waits for its end when
 /// `wait`.
@@ -104,6 +102,7 @@ fn option(id: &str, kind: PermKind) -> PermOption {
     PermOption {
         id: id.into(),
         kind,
+        name: format!("Name of {id}"),
     }
 }
 
@@ -449,8 +448,48 @@ fn cancel_with_no_turn_says_so() {
     assert!(acps(&fx).is_empty());
 }
 
+/// Request `req` on connection 1 answers moa's request `id` (the oldest when `None`).
+fn answer_with(
+    b: &TypicalBrain,
+    st: &mut State,
+    req: u64,
+    id: Option<i64>,
+    answer: PermAnswer,
+) -> Vec<Effect> {
+    send(b, st, req, Op::ConsolePermission { id, answer })
+}
+
+/// The ids of the requests waiting for you, as moa's `state` row has them.
+fn asking(st: &State) -> Value {
+    st.model().topics[&moa_core::publish::Topic::Feed]["state"]["asking"].clone()
+}
+
+/// The `permission` row `fx` saves.
+fn asked(fx: &[Effect]) -> FeedEntry {
+    match &feed_rows(fx)[..] {
+        [row] if row.kind == "permission" => (*row).clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The state of each `permission` row of the turn, oldest first.
+fn card_states(st: &State) -> Vec<Option<String>> {
+    rows_of_kind(st, "permission")
+        .into_iter()
+        .map(|r| r.state)
+        .collect()
+}
+
+fn three_options() -> Vec<PermOption> {
+    vec![
+        option("allow-1", PermKind::AllowOnce),
+        option("allow-all", PermKind::AllowAlways),
+        option("not-now", PermKind::RejectOnce),
+    ]
+}
+
 #[test]
-fn a_permission_is_refused_by_kind() {
+fn a_permission_waits_for_your_answer() {
     let b = TypicalBrain::new();
     let mut st = turn(&b, false);
     let options = vec![
@@ -459,78 +498,338 @@ fn a_permission_is_refused_by_kind() {
         option("not-now", PermKind::RejectOnce),
     ];
     let fx = hear(&b, &mut st, permission(7, "Run git push", options));
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    let row = asked(&fx);
+    assert_eq!(row.state.as_deref(), Some("pending"));
+    // Kinds as the protocol names them, and the names to show; the ids stay in the core.
     assert_eq!(
-        acps(&fx),
-        [&AcpCmd::Permission {
-            generation: 1,
-            req: 7,
-            choice: Some("not-now".into())
-        }]
+        body(&row),
+        json!({"title": "Run git push", "options": [
+            {"kind": "allow_once", "name": "Name of allow-1"},
+            {"kind": "reject_always", "name": "Name of never"},
+            {"kind": "reject_once", "name": "Name of not-now"},
+        ]})
     );
-    let line = format!("moa wanted to Run git push, {REFUSED}");
-    let rows = feed_rows(&fx);
-    assert_eq!(
-        (rows[0].kind.as_str(), text_of(rows[0])),
-        ("system", json!(line))
-    );
+    assert_eq!(published_state(&fx).unwrap()["asking"], json!([row.id]));
+    assert_eq!(asking(&st), json!([row.id]));
+    assert_eq!(*phase(&st), Phase::Thinking);
 
-    // A second one in the turn, its options in another order and no title: by kind again.
-    let options = vec![
-        option("not-now-2", PermKind::RejectOnce),
-        option("allow-2", PermKind::AllowAlways),
+    // One with no title still says what it is.
+    let fx = hear(&b, &mut st, permission(8, " ", three_options()));
+    assert_eq!(body(&asked(&fx))["title"], "a tool call");
+}
+
+#[test]
+fn each_answer_sends_its_kind() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let cases = [
+        (PermAnswer::Once, "allow-1", "allow_once", "allowed once"),
+        (
+            PermAnswer::Always,
+            "allow-all",
+            "allow_always",
+            "allowed always",
+        ),
+        (PermAnswer::No, "not-now", "reject_once", "refused"),
     ];
-    let fx = hear(&b, &mut st, permission(8, "", options));
-    assert_eq!(
-        acps(&fx),
-        [&AcpCmd::Permission {
-            generation: 1,
-            req: 8,
-            choice: Some("not-now-2".into())
-        }]
-    );
-    let systems = rows_of_kind(&st, "system");
-    assert_eq!(systems.len(), 2);
-    assert_eq!(
-        text_of(&systems[1]),
-        format!("moa wanted to a tool call, {REFUSED}")
-    );
+    for (n, (answer, choice, kind, said)) in cases.into_iter().enumerate() {
+        let req = 10 + n as u64;
+        let id = asked(&hear(
+            &b,
+            &mut st,
+            permission(req, "Edit notes.md", three_options()),
+        ))
+        .id;
+        let fx = answer_with(&b, &mut st, 2, Some(id), answer);
+        assert_eq!(
+            acps(&fx),
+            [&AcpCmd::Permission {
+                generation: 1,
+                req,
+                choice: Some(choice.into())
+            }],
+            "{answer:?}"
+        );
+        let saved = feed_rows(&fx);
+        assert_eq!((saved.len(), saved[0].id), (1, id));
+        assert_eq!(saved[0].state.as_deref(), Some(kind));
+        assert!(
+            matches!(&replies(&fx)[..], [(ReqId(2), Ok(d))] if d.text == said),
+            "{fx:?}"
+        );
+        assert_eq!(asking(&st), json!([]));
+    }
     assert_eq!(*phase(&st), Phase::Thinking);
 }
 
 #[test]
-fn no_reject_once_cancels_the_turn() {
+fn no_falls_back_to_reject_always() {
     let b = TypicalBrain::new();
-    let mut st = turn(&b, true);
+    let mut st = turn(&b, false);
     let options = vec![
         option("allow-1", PermKind::AllowOnce),
-        option("allow-all", PermKind::AllowAlways),
         option("never", PermKind::RejectAlways),
     ];
-    let fx = hear(&b, &mut st, permission(3, "Edit notes.md", options));
+    hear(&b, &mut st, permission(3, "Edit notes.md", options));
+    let fx = answer_with(&b, &mut st, 2, None, PermAnswer::No);
     assert_eq!(
         acps(&fx),
-        [
-            &AcpCmd::Cancel {
-                generation: 1,
-                thread: "th-1".into()
-            },
-            &AcpCmd::Permission {
-                generation: 1,
-                req: 3,
-                choice: None
-            }
-        ]
+        [&AcpCmd::Permission {
+            generation: 1,
+            req: 3,
+            choice: Some("never".into())
+        }]
     );
-    let rows = feed_rows(&fx);
+    assert_eq!(card_states(&st), [Some("reject_always".into())]);
+    assert!(matches!(&replies(&fx)[..], [(ReqId(2), Ok(d))] if d.text == "refused"));
+}
+
+#[test]
+fn an_answer_not_offered_is_refused() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let options = vec![
+        option("allow-1", PermKind::AllowOnce),
+        option("not-now", PermKind::RejectOnce),
+    ];
+    let id = asked(&hear(&b, &mut st, permission(3, "Edit notes.md", options))).id;
+    let fx = answer_with(&b, &mut st, 2, None, PermAnswer::Always);
+    let refused = Err(OpError("moa's agent didn't offer that answer".into()));
+    assert_eq!(replies(&fx), [(ReqId(2), refused)]);
+    assert!(acps(&fx).is_empty());
+    assert!(changes(&fx).is_empty());
+    // It still waits.
+    assert_eq!(asking(&st), json!([id]));
+    assert_eq!(card_states(&st), [Some("pending".into())]);
+}
+
+#[test]
+fn two_requests_queue_oldest_first() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let first = asked(&hear(&b, &mut st, permission(3, "Read a", three_options()))).id;
+    let second = asked(&hear(&b, &mut st, permission(4, "Read b", three_options()))).id;
+    assert_eq!(asking(&st), json!([first, second]));
+
+    // No id: the oldest.
+    let fx = answer_with(&b, &mut st, 2, None, PermAnswer::Once);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Permission { req: 3, .. }]));
+    assert_eq!(asking(&st), json!([second]));
+
+    // One answered already isn't waiting any more.
+    let fx = answer_with(&b, &mut st, 3, Some(first), PermAnswer::Once);
+    let gone = Err(OpError("that request isn't waiting any more".into()));
+    assert_eq!(replies(&fx), [(ReqId(3), gone)]);
+    assert!(acps(&fx).is_empty());
+
+    // The console's hidden command answers by id.
+    let line = format!("/permission {second} no");
+    let fx = send(&b, &mut st, 4, Op::ConsoleCommand { line });
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Permission { req: 4, .. }]));
+    assert!(matches!(&replies(&fx)[..], [(ReqId(4), Ok(d))] if d.text == "refused"));
     assert_eq!(
-        text_of(rows[0]),
-        format!("moa wanted to Edit notes.md, {REFUSED}; its turn was cancelled")
+        card_states(&st),
+        [Some("allow_once".into()), Some("reject_once".into())]
     );
 
-    // The cancelled end adds no second line, and the waiter still hears why.
+    let fx = answer_with(&b, &mut st, 5, None, PermAnswer::No);
+    let nothing = Err(OpError("nothing is waiting for an answer".into()));
+    assert_eq!(replies(&fx), [(ReqId(5), nothing)]);
+}
+
+#[test]
+fn an_answer_waits_while_writes_are_refused() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let id = asked(&hear(&b, &mut st, permission(3, "Read a", three_options()))).id;
+    refuse_writes(&b, &mut st);
+    let fx = answer_with(&b, &mut st, 2, None, PermAnswer::Once);
+    let refused = "moa can't save right now (the disk is full); nothing was changed";
+    assert_eq!(replies(&fx), [(ReqId(2), Err(OpError(refused.into())))]);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(asking(&st), json!([id]));
+    assert_eq!(card_states(&st), [Some("pending".into())]);
+}
+
+#[test]
+fn an_answer_whose_commit_fails_waits_again() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let id = asked(&hear(&b, &mut st, permission(3, "Read a", three_options()))).id;
+    let before = saved(&b, &st);
+    let fx = answer_with(&b, &mut st, 2, None, PermAnswer::Always);
+    // The answer goes once its row is saved: it waits for the commit.
+    let sent: Vec<&Effect> = fx.iter().filter(|e| matches!(e, Effect::Acp(_))).collect();
+    assert!(
+        matches!(sent[..], [e @ Effect::Acp(AcpCmd::Permission { choice: Some(_), .. })] if !e.runs_at_once() && e.is_heard()),
+        "{fx:?}"
+    );
+    assert_eq!(asking(&st), json!([]));
+
+    // Its commit fails: the reload finds the row still pending, and it waits again.
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(before),
+            refuse_writes: None,
+        },
+        b.now(),
+    );
+    assert_eq!(asking(&st), json!([id]));
+    let fx = answer_with(&b, &mut st, 3, None, PermAnswer::No);
+    assert_eq!(
+        acps(&fx),
+        [&AcpCmd::Permission {
+            generation: 1,
+            req: 3,
+            choice: Some("not-now".into())
+        }]
+    );
+    assert_eq!(card_states(&st), [Some("reject_once".into())]);
+
+    // Saved, an answer stays answered through a later reload.
+    let after = saved(&b, &st);
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(after),
+            refuse_writes: None,
+        },
+        b.now(),
+    );
+    assert_eq!(asking(&st), json!([]));
+}
+
+#[test]
+fn a_request_outside_the_turn_is_cancelled() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let mut elsewhere = permission(3, "Read a", three_options());
+    if let AcpIn::Permission { thread, .. } = &mut elsewhere {
+        *thread = "th-other".into();
+    }
+    let cancelled = |req| AcpCmd::Permission {
+        generation: 1,
+        req,
+        choice: None,
+    };
+    let fx = hear(&b, &mut st, elsewhere);
+    assert_eq!(acps(&fx), [&cancelled(3)]);
+    assert!(feed_rows(&fx).is_empty());
+    assert_eq!(asking(&st), json!([]));
+
+    // Nor once the turn is over.
+    end(&b, &mut st, Ok(StopReason::EndTurn));
+    let fx = hear(&b, &mut st, permission(4, "Read b", three_options()));
+    assert_eq!(acps(&fx), [&cancelled(4)]);
+    assert!(feed_rows(&fx).is_empty());
+    assert_eq!(asking(&st), json!([]));
+}
+
+/// A request that offers nothing y, a or n could pick can never be answered: it is cancelled
+/// at once, and its card says it wasn't answered.
+#[test]
+fn a_request_nothing_can_answer_is_cancelled() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let odd = vec![option("x", PermKind::Other), option("y", PermKind::Other)];
+    let fx = hear(&b, &mut st, permission(5, "Do a thing", odd));
+    assert_eq!(
+        acps(&fx),
+        [&AcpCmd::Permission {
+            generation: 1,
+            req: 5,
+            choice: None,
+        }]
+    );
+    assert_eq!(asked(&fx).state.as_deref(), Some("cancelled"));
+    assert_eq!(card_states(&st), [Some("cancelled".into())]);
+    assert_eq!(asking(&st), json!([]));
+    assert_eq!(*phase(&st), Phase::Thinking);
+}
+
+/// A request's title is cut as a tool's input is.
+#[test]
+fn a_huge_permission_title_is_cut() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let title = "é".repeat(5_000);
+    let fx = hear(&b, &mut st, permission(6, &title, three_options()));
+    let cut = body(&asked(&fx))["title"].as_str().unwrap().to_string();
+    assert_eq!(cut.chars().count(), 2_000);
+    assert!(title.starts_with(&cut));
+}
+
+#[test]
+fn a_cancel_clears_the_cards() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, true);
+    hear(&b, &mut st, permission(3, "Read a", three_options()));
+    hear(&b, &mut st, permission(4, "Read b", three_options()));
+    let fx = send_on(&b, &mut st, 2, 2, Op::ConsoleCancel(NoParams));
+    let none = |req| AcpCmd::Permission {
+        generation: 1,
+        req,
+        choice: None,
+    };
+    let cancel = AcpCmd::Cancel {
+        generation: 1,
+        thread: "th-1".into(),
+    };
+    assert_eq!(acps(&fx), [&cancel, &none(3), &none(4)]);
+    assert_eq!(
+        card_states(&st),
+        [Some("cancelled".into()), Some("cancelled".into())]
+    );
+    assert_eq!(persists(&fx), 1);
+    assert_eq!(published_state(&fx).unwrap()["asking"], json!([]));
+    assert!(matches!(&replies(&fx)[..], [(ReqId(2), Ok(d))] if d.text == "cancelling moa's turn"));
+
+    // The cancelled end says so once, and the waiter hears it.
     let fx = end(&b, &mut st, Ok(StopReason::Cancelled));
     assert_eq!(rows_of_kind(&st, "system").len(), 1);
     assert_eq!(done(&fx).text, "moa's turn ended early: cancelled");
+}
+
+#[test]
+fn an_exit_clears_the_cards() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    hear(&b, &mut st, permission(3, "Read a", three_options()));
+    let exit = AcpIn::Exited {
+        generation: 1,
+        why: "it crashed".into(),
+    };
+    let fx = hear(&b, &mut st, exit);
+    // Nobody is there to hear an answer.
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(card_states(&st), [Some("cancelled".into())]);
+    assert_eq!(persists(&fx), 1);
+    assert_eq!(asking(&st), json!([]));
+    // A request the run sends after its exit is cancelled too.
+    let fx = hear(&b, &mut st, permission(4, "Read b", three_options()));
+    assert!(feed_rows(&fx).is_empty());
+    assert_eq!(asking(&st), json!([]));
+}
+
+#[test]
+fn a_turn_end_clears_the_cards() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    hear(&b, &mut st, permission(3, "Read a", three_options()));
+    let fx = end(&b, &mut st, Ok(StopReason::EndTurn));
+    assert_eq!(
+        acps(&fx),
+        [&AcpCmd::Permission {
+            generation: 1,
+            req: 3,
+            choice: None
+        }]
+    );
+    assert_eq!(card_states(&st), [Some("cancelled".into())]);
+    assert_eq!(persists(&fx), 1);
+    assert_eq!(asking(&st), json!([]));
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::model::SuggestionAction;
-use crate::op::{Done, NoParams, Op};
+use crate::op::{Done, NoParams, Op, PermAnswer};
 use crate::ops::suggestions::split;
 use crate::state::Deps;
 
@@ -58,6 +58,11 @@ pub const COMMANDS: &[Command] = &[
     shown("help", "these commands"),
     shown("quit", "close the console"),
     Command {
+        name: "permission",
+        help: "ID once|always|no: answer moa's agent",
+        hidden: true,
+    },
+    Command {
         name: "suggestion",
         help: "yes|no|later ID: answer a suggestion",
         hidden: true,
@@ -81,6 +86,18 @@ pub const VERBS: &[&str] = &[
 
 /// Commands that come in a later version of moa.
 const LATER: &[&str] = &["auto", "sleep", "setup"];
+
+/// What a `/permission` line that isn't one is told.
+pub const PERMISSION_USAGE: &str = "/permission takes a request's id, then once, always or no";
+
+/// The request and the answer the words after `/permission` give: a request's id, then
+/// `once`, `always` or `no`, and nothing more.
+pub fn permission_args<S: AsRef<str>>(args: &[S]) -> Option<(i64, PermAnswer)> {
+    let [id, answer] = args else {
+        return None;
+    };
+    Some((id.as_ref().parse().ok()?, answer.as_ref().parse().ok()?))
+}
 
 /// What a command that isn't one is told.
 pub fn unknown(name: &str) -> String {
@@ -129,6 +146,14 @@ fn parse_with(line: &str, cwd: Option<&Path>, deps: &Deps, button: bool) -> Resu
             commands: args,
             user: true,
         })),
+        // A permission card's buttons send it.
+        "permission" => match permission_args(&args) {
+            Some((id, answer)) => Ok(Parsed::Run(Op::ConsolePermission {
+                id: Some(id),
+                answer,
+            })),
+            None => Err(PERMISSION_USAGE.into()),
+        },
         // The console closes its own panel; a `/quit` sent here has nothing to close.
         "quit" => Err("/quit is the console's own: it closes the console's panel".into()),
         n if LATER.contains(&n) => Err(format!("/{n} comes in a later version of moa")),
@@ -199,7 +224,7 @@ mod tests {
             .filter(|c| c.hidden)
             .map(|c| c.name)
             .collect();
-        assert_eq!(hidden, ["suggestion"]);
+        assert_eq!(hidden, ["permission", "suggestion"]);
     }
 
     #[test]
@@ -230,6 +255,34 @@ mod tests {
             parse("/new", None, &deps),
             Ok(Parsed::Run(Op::ConsoleNew(NoParams)))
         );
+    }
+
+    #[test]
+    fn permission_answers_a_request_by_id() {
+        let deps = Deps::default();
+        let answer = |id, answer| Ok(Parsed::Run(Op::ConsolePermission { id, answer }));
+        assert_eq!(
+            parse("/permission 12 once", None, &deps),
+            answer(Some(12), PermAnswer::Once)
+        );
+        assert_eq!(
+            parse("/permission 3 always", None, &deps),
+            answer(Some(3), PermAnswer::Always)
+        );
+        assert_eq!(
+            parse("/permission 3 no", None, &deps),
+            answer(Some(3), PermAnswer::No)
+        );
+        let usage = Err(PERMISSION_USAGE.to_string());
+        for line in [
+            "/permission",
+            "/permission 3",
+            "/permission x no",
+            "/permission 3 maybe",
+            "/permission 3 no now",
+        ] {
+            assert_eq!(parse(line, None, &deps), usage, "{line}");
+        }
     }
 
     /// A grammar that answers with the verb, its words and the folder it was given.

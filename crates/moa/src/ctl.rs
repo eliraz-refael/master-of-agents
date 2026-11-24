@@ -231,45 +231,50 @@ fn open_folder(path: &Path, json: bool) -> Result<PathBuf, String> {
 /// `moa status`. The terminal server's version and pid are in `--json` only.
 pub fn status(args: &StatusArgs) -> ExitCode {
     let json = args.json;
-    finish(running(&args.brain, false, |brain, client| async move {
-        let mut client = client;
-        let s = client.status().await.map_err(|e| e.to_string())?;
-        if json {
-            let text = serde_json::to_string(&s).map_err(|e| e.to_string())?;
-            println!("{text}");
-            return Ok(());
-        }
-        println!(
-            "moa {brain}: running, build {}, pid {}, {} launches",
-            s.build, s.pid, s.launches
-        );
-        println!("you are: {}", s.caller);
-        let live: Vec<String> = DisplayState::ALL
-            .iter()
-            .filter_map(|d| {
-                let w = word(*d);
-                let n = s.sessions.get(&w).copied().unwrap_or(0);
-                (n > 0).then(|| format!("{w} {n}"))
-            })
-            .collect();
-        if live.is_empty() {
-            println!("sessions: none");
-        } else {
-            println!("sessions: {}", live.join(", "));
-        }
-        let terminal = if s.tmux.is_some() {
-            "connected"
-        } else {
-            "not connected"
-        };
-        println!("terminal: {terminal}");
-        Ok(())
-    }))
+    finish(running(
+        &args.brain,
+        false,
+        false,
+        |brain, client| async move {
+            let mut client = client;
+            let s = client.status().await.map_err(|e| e.to_string())?;
+            if json {
+                let text = serde_json::to_string(&s).map_err(|e| e.to_string())?;
+                println!("{text}");
+                return Ok(());
+            }
+            println!(
+                "moa {brain}: running, build {}, pid {}, {} launches",
+                s.build, s.pid, s.launches
+            );
+            println!("you are: {}", s.caller);
+            let live: Vec<String> = DisplayState::ALL
+                .iter()
+                .filter_map(|d| {
+                    let w = word(*d);
+                    let n = s.sessions.get(&w).copied().unwrap_or(0);
+                    (n > 0).then(|| format!("{w} {n}"))
+                })
+                .collect();
+            if live.is_empty() {
+                println!("sessions: none");
+            } else {
+                println!("sessions: {}", live.join(", "));
+            }
+            let terminal = if s.tmux.is_some() {
+                "connected"
+            } else {
+                "not connected"
+            };
+            println!("terminal: {terminal}");
+            Ok(())
+        },
+    ))
 }
 
 /// `moa shutdown`.
 pub fn shutdown(args: &BrainArgs) -> ExitCode {
-    finish(running(args, true, |brain, client| async move {
+    finish(running(args, true, false, |brain, client| async move {
         let mut client = client;
         client.shutdown().await.map_err(|e| e.to_string())?;
         println!("moa {brain}: stopped");
@@ -280,9 +285,11 @@ pub fn shutdown(args: &BrainArgs) -> ExitCode {
 /// Connects to the brain's daemon without starting one and runs `then` on it. Both callers
 /// are allowed on a mismatched build. When nothing is running that is an error, unless
 /// `fine_if_stopped` (`shutdown`: it is already what was asked), which just says so.
+/// `writes` is whether `then` changes the brain, as [`pick_brain`] takes it.
 pub(crate) fn running<F, Fut>(
     args: &BrainArgs,
     fine_if_stopped: bool,
+    writes: bool,
     then: F,
 ) -> Result<(), String>
 where
@@ -291,7 +298,7 @@ where
 {
     let here = Here::new()?;
     let config = here.config()?;
-    let brain = pick_brain(&here, &config, args.brain.as_deref(), false)?;
+    let brain = pick_brain(&here, &config, args.brain.as_deref(), writes)?;
     let opts = here.options(brain.clone());
     runtime()?.block_on(async {
         match Client::connect(opts).await {

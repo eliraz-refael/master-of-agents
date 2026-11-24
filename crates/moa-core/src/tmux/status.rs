@@ -8,6 +8,7 @@ use super::cmd::Cmd;
 use super::focus::trusted_panes;
 use super::ids::WindowId;
 use super::link::Link;
+use crate::central::console_attached;
 use crate::effect::{Effect, TimerKey};
 use crate::live::{DisplayState, display_state};
 use crate::state::State;
@@ -34,17 +35,25 @@ fn colour(s: DisplayState) -> Option<&'static str> {
     })
 }
 
-/// The status line's summary: a coloured count per live state, most urgent first.
+/// What the status line starts with while moa's agent waits for your answer and no console
+/// would show it.
+const NEEDS_YOU: &str = "#[fg=#ebcb8b,bold]⚠ moa needs you#[nobold]";
+
+/// The status line's summary: a coloured count per live state, most urgent first, after
+/// [`NEEDS_YOU`] while moa's agent waits for an answer no console shows.
 pub fn counts_text(state: &State) -> String {
     let mut n: BTreeMap<DisplayState, usize> = BTreeMap::new();
     for s in state.sessions() {
         *n.entry(display_state(s, state.now).0).or_default() += 1;
     }
-    n.into_iter()
-        .filter_map(|(s, n)| {
+    let needs_you = !state.central.asking.is_empty() && !console_attached(state);
+    needs_you
+        .then(|| NEEDS_YOU.to_string())
+        .into_iter()
+        .chain(n.into_iter().filter_map(|(s, n)| {
             let c = colour(s)?;
             Some(format!("#[fg={c}]{} {n}", s.glyph()))
-        })
+        }))
         .collect::<Vec<_>>()
         .join("  ")
 }

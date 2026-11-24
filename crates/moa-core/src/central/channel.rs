@@ -67,16 +67,23 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
 /// newest), or once the oldest has waited `wake_gap`, whichever comes first, and never
 /// sooner than `wake_gap` after the last wake. `None` while nothing is queued, or while a
 /// wake can't go: `/auto` is off, or moa's agent failed to start, is starting, has a prompt
-/// under way or is replaying a thread. A turn whose agent exited is over for this: the
-/// wake's start takes it, as any prompt's does.
+/// under way, waits for your answer or is replaying a thread. A turn whose agent exited is
+/// over for this: the wake's start takes it, as any prompt's does.
 fn due(state: &State) -> Option<UtcMs> {
     let mut reports = state.reports().peekable();
     reports.peek()?;
     let moa = &state.central;
+    // A request waits for you only within a live turn, which shuts the gate too; `asking`
+    // shuts it on its own as well.
+    debug_assert!(
+        moa.asking.is_empty() || moa.turn.as_ref().is_some_and(|t| t.exited.is_none()),
+        "a permission request waits outside a live turn"
+    );
     let open = auto_on(state)
         && matches!(moa.phase, Phase::Off | Phase::Ready)
         && moa.pending.is_none()
         && moa.turn.as_ref().is_none_or(|t| t.exited.is_some())
+        && moa.asking.is_empty()
         && moa.replaying.is_none();
     if !open {
         return None;

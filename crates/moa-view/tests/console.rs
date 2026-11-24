@@ -2,13 +2,15 @@
 //! rows it can't read, the spinner of a running tool, and paged-in rows merged with the
 //! topic's.
 
+use std::collections::BTreeSet;
+
 use moa_core::UtcMs;
 use moa_core::panel::View;
 use moa_core::publish::{EventRow, FeedRow, Topic};
 use moa_core::state::EventWhat;
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
-use moa_view::fixture::{THREAD_TODAY, console_rows, lantern, session};
+use moa_view::fixture::{THREAD_TODAY, console_rows, lantern, permission_rows, session};
 use moa_view::line::{Line, debug_lines};
 use moa_view::text::width;
 use moa_view::views::console::{Card, ConsoleUi, ConsoleView, build, button_at};
@@ -70,7 +72,7 @@ fn only(rows: Vec<FeedRow>, ctx: &Ctx, w: u16) -> ConsoleView {
         data.feed.insert(r.id, r);
     }
     data.touch();
-    build(&data, ctx, &ConsoleUi::default(), w)
+    build(&data, ctx, &ConsoleUi::default(), true, w)
 }
 
 /// The day at 40, 80 and 120: yesterday's exchange, the separator, moa's own turn (`· on its
@@ -82,12 +84,12 @@ fn the_day_at_three_widths() {
     let (data, ctx) = day();
     assert_eq!(data.unreadable(), 0);
     for w in [40, 80, 120] {
-        let view = build(&data, &ctx, &ui(&ctx), w);
+        let view = build(&data, &ctx, &ui(&ctx), true, w);
         assert_fits(&view.lines, w);
         insta::assert_snapshot!(format!("console@{w}"), debug_lines(&view.lines));
     }
     // The buttons: the Markdown's two commands, the two session lines', then the bar's.
-    let view = build(&data, &ctx, &ui(&ctx), 80);
+    let view = build(&data, &ctx, &ui(&ctx), true, 80);
     let pressed: Vec<(&str, &str)> = view
         .buttons
         .iter()
@@ -116,7 +118,10 @@ fn the_day_at_three_widths() {
 fn the_panel_draws_the_console() {
     let (data, ctx) = day();
     let built = views::build(View::Console, &data, &ctx, &ViewUi::default(), 80);
-    assert_eq!(built, build(&data, &ctx, &ConsoleUi::default(), 80).lines);
+    assert_eq!(
+        built,
+        build(&data, &ctx, &ConsoleUi::default(), true, 80).lines
+    );
     assert!(built.iter().any(|l| l.text().starts_with("◆ moa  08:00")));
 }
 
@@ -235,7 +240,7 @@ fn session_lines_never_split_a_turn() {
     data.events.insert(1, event(1, 1, EventWhat::NeedsYou));
     data.events.insert(2, event(2, 6, EventWhat::Started));
     data.touch();
-    let text: Vec<String> = build(&data, &ctx, &ConsoleUi::default(), 80)
+    let text: Vec<String> = build(&data, &ctx, &ConsoleUi::default(), true, 80)
         .lines
         .iter()
         .map(Line::text)
@@ -269,7 +274,7 @@ fn paged_rows_merge_with_the_tail_once() {
         older: (1..=4).map(|id| (id, text(id))).collect(),
         ..ConsoleUi::default()
     };
-    let lines: Vec<String> = build(&data, &ctx, &ui, 80)
+    let lines: Vec<String> = build(&data, &ctx, &ui, true, 80)
         .lines
         .iter()
         .map(Line::text)
@@ -312,7 +317,7 @@ fn says(text: &str, bar: &[&str], ui: &ConsoleUi, w: u16) -> (Data, ConsoleView)
         by: s("you"),
     });
     data.touch();
-    let view = build(&data, &ctx, ui, w);
+    let view = build(&data, &ctx, ui, true, w);
     (data, view)
 }
 
@@ -361,7 +366,7 @@ fn session_buttons_follow_renames() {
     data.sessions.get_mut(&rust).expect("there").session.title = Some(s("Renamed"));
     data.touch();
     let (_, ctx) = lantern();
-    let view = build(&data, &ctx, &ConsoleUi::default(), 80);
+    let view = build(&data, &ctx, &ConsoleUi::default(), true, 80);
     assert_eq!(view.buttons[0].label, "↩ Lantern · Renamed");
     assert_eq!(view.buttons[0].command, format!("/resume {rust}"));
 }
@@ -399,7 +404,7 @@ fn odd_text_in_buttons() {
     )];
     data.feed = rows.into_iter().map(|r| (r.id, r)).collect();
     data.touch();
-    let view = build(&data, &ctx, &ConsoleUi::default(), 40);
+    let view = build(&data, &ctx, &ConsoleUi::default(), true, 40);
     assert_fits(&view.lines, 40);
     let spans: Vec<_> = view
         .lines
@@ -527,7 +532,7 @@ fn cards_and_errors_never_split_a_turn() {
         errors: vec![(UtcMs(1_003), s("it broke"))],
         ..ConsoleUi::default()
     };
-    let text: Vec<String> = build(&data, &ctx, &ui, 80)
+    let text: Vec<String> = build(&data, &ctx, &ui, true, 80)
         .lines
         .iter()
         .map(Line::text)
@@ -583,12 +588,120 @@ fn the_head_line_at_each_phase() {
                 thread: thread.clone(),
                 why: why.map(str::to_string),
                 queued: 0,
+                asking: Vec::new(),
             });
-            let line = head(&data, &ctx, up, new, w);
+            let line = head(&data, &ctx, up, &BTreeSet::new(), new, w);
             assert_eq!(line.animated, up && phase == "thinking", "{phase}");
             lines.push(line);
         }
         assert_fits(&lines, w);
         insta::assert_snapshot!(format!("head@{w}"), debug_lines(&lines));
     }
+}
+
+/// The permission fixture: a turn of answered requests (and one a restart left `pending`),
+/// then two still waiting, moa thinking.
+fn asked() -> (Data, Ctx) {
+    let (mut data, ctx) = lantern();
+    permission_rows(&mut data);
+    (data, ctx)
+}
+
+/// K12: each request is a card. Answered: `✓ allowed once`, `✓ allowed always`, `✗ refused`
+/// (once or always), and `⊘ not answered` for a cancelled one and for one still `pending` that nothing waits
+/// on. Waiting: `⚠ moa asks: <title>`, its buttons behind the card's gutter for the answers
+/// offered, and the name moa's agent gives `always`.
+#[test]
+fn permission_cards_at_40_and_80() {
+    let (data, ctx) = asked();
+    assert_eq!(data.unreadable(), 0);
+    for w in [40, 80] {
+        let view = build(&data, &ctx, &ConsoleUi::default(), true, w);
+        assert_fits(&view.lines, w);
+        insta::assert_snapshot!(format!("permissions@{w}"), debug_lines(&view.lines));
+    }
+    let view = build(&data, &ctx, &ConsoleUi::default(), true, 80);
+    assert_eq!(
+        pressed(&view),
+        [
+            ("y once", "/permission 9 once"),
+            ("a always", "/permission 9 always"),
+            ("n no", "/permission 9 no"),
+            ("y once", "/permission 10 once"),
+            ("n no", "/permission 10 no"),
+        ]
+    );
+}
+
+/// A row still `pending` whose request isn't in `asking` (the daemon restarted, or moa's
+/// state hasn't come) can never be answered: `⊘ not answered`, with no buttons.
+#[test]
+fn a_stale_pending_row_is_not_answered() {
+    let (mut data, ctx) = asked();
+    let text = |data: &Data| -> Vec<String> {
+        let view = build(data, &ctx, &ConsoleUi::default(), true, 80);
+        assert!(view.buttons.is_empty(), "no buttons: {:?}", view.buttons);
+        view.lines.iter().map(Line::text).collect()
+    };
+    data.moa.as_mut().unwrap().asking.clear();
+    data.touch();
+    let lines = text(&data);
+    assert!(lines.contains(&s("│ ⊘ not answered: Delete ~/private/harbor/old.log")));
+    assert!(lines.contains(&s("│ ⊘ not answered: Write ~/private/kite/RELEASE.md")));
+    assert!(lines.contains(&s("│ ⊘ not answered: cargo publish -p kite")));
+    assert!(!lines.iter().any(|l| l.contains("moa asks")));
+    data.moa = None;
+    data.touch();
+    assert!(text(&data).contains(&s("│ ⊘ not answered: cargo publish -p kite")));
+}
+
+/// K12: while a request waits, the head line's state says which keys answer the oldest:
+/// `⚠ answer y/a/n`, or only the letters it offers, and it doesn't spin. None once nothing
+/// waits, or while the link is down.
+#[test]
+fn the_head_says_answer() {
+    use moa_view::views::console::head;
+    let (mut data, ctx) = asked();
+    let none = BTreeSet::new();
+    let line = |data: &Data, up: bool, w: u16| head(data, &ctx, up, &none, 0, w);
+    for w in [40, 80] {
+        let all = line(&data, true, w);
+        assert_fits(std::slice::from_ref(&all), w);
+        assert!(
+            all.text().contains("⚠ answer y/a/n Esc cancels"),
+            "{w}: {:?}",
+            all.text()
+        );
+        assert!(
+            !all.text().contains("thinking") && !all.animated,
+            "{w}: {:?}",
+            all.text()
+        );
+        let warn = all.spans.iter().find(|s| s.text.contains("⚠ answer"));
+        assert_eq!(warn.map(|s| s.tone), Some(moa_view::line::Tone::Warn));
+    }
+    data.moa.as_mut().unwrap().asking = vec![10];
+    data.touch();
+    let only = line(&data, true, 80).text();
+    assert!(
+        only.contains("⚠ answer y/n") && !only.contains("y/a/n"),
+        "{only:?}"
+    );
+    assert!(!line(&data, false, 80).text().contains("answer"));
+    data.moa.as_mut().unwrap().asking.clear();
+    data.touch();
+    let thinking = line(&data, true, 80);
+    assert!(!thinking.text().contains("answer") && thinking.animated);
+}
+
+/// While the panel's connection is down, moa's state may be stale: no card waits, so none
+/// has buttons, and each one `pending` says it wasn't answered.
+#[test]
+fn a_card_waits_only_while_the_link_is_up() {
+    let (data, ctx) = asked();
+    let view = build(&data, &ctx, &ConsoleUi::default(), false, 80);
+    assert!(view.buttons.is_empty(), "no buttons: {:?}", view.buttons);
+    let lines: Vec<String> = view.lines.iter().map(Line::text).collect();
+    assert!(!lines.iter().any(|l| l.contains("moa asks")), "{lines:#?}");
+    assert!(lines.contains(&s("│ ⊘ not answered: cargo publish -p kite")));
 }

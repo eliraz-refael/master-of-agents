@@ -162,13 +162,23 @@ mod tests {
         ));
         let c = verb(&["feed", "-n", "5"]);
         assert!(matches!(c.verb, console::Verb::Feed { lines: 5, .. }));
-        for sub in ["prompt hi", "cancel", "feed"] {
+        assert!(matches!(
+            verb(&["answer", "always"]).verb,
+            console::Verb::Answer {
+                answer: moa_core::op::PermAnswer::Always,
+                ..
+            }
+        ));
+        let v = ["moa", "console", "answer", "maybe"];
+        assert!(Cli::try_parse_from(v).is_err());
+        for sub in ["prompt hi", "cancel", "answer no", "feed"] {
             let mut a = vec!["--brain", "B"];
             a.splice(0..0, sub.split(' '));
             let c = verb(&a);
             let brain = match &c.verb {
                 console::Verb::Prompt { brain, .. }
                 | console::Verb::Cancel { brain }
+                | console::Verb::Answer { brain, .. }
                 | console::Verb::Feed { brain, .. } => brain,
             };
             assert_eq!(brain.brain.as_deref(), Some("B"));

@@ -359,10 +359,12 @@ async fn a_permission_waits_for_its_answer() {
         PermOption {
             id: "o-yes".into(),
             kind: PermKind::AllowOnce,
+            name: "o-yes".into(),
         },
         PermOption {
             id: "o-no".into(),
             kind: PermKind::RejectOnce,
+            name: "o-no".into(),
         },
     ];
     let AcpIn::Permission {
@@ -408,6 +410,33 @@ async fn a_permission_waits_for_its_answer() {
             json!({"outcome": "cancelled"})
         ]
     );
+    adapter.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_option_name_reaches_the_core() {
+    // The stub names each option by its id.
+    let ask = StubStep::Ask {
+        title: "Edit notes.md".into(),
+        options: vec![("Yes, and don't ask again".into(), "allow_always".into())],
+    };
+    let dir = folder(&[ask, end()]);
+    let (adapter, mut events, _) = start_in(dir.path()).await;
+    let thread = open_new(&adapter, &mut events, dir.path()).await;
+    adapter.prompt(&thread, 3, "go");
+    let AcpIn::Permission { req, options, .. } = next(&mut events).await else {
+        panic!("a permission request");
+    };
+    assert_eq!(
+        options,
+        [PermOption {
+            id: "Yes, and don't ask again".into(),
+            kind: PermKind::AllowAlways,
+            name: "Yes, and don't ask again".into(),
+        }]
+    );
+    adapter.answer(req, None);
+    assert_eq!(turn(&mut events).await, [ended(3, Ok(StopReason::EndTurn))]);
     adapter.stop().await;
 }
 

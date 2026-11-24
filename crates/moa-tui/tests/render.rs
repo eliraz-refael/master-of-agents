@@ -8,7 +8,7 @@ use moa_tui::draw::draw;
 use moa_tui::theme::{ColorMode, Theme};
 use moa_view::ctx::Ctx;
 use moa_view::data::Data;
-use moa_view::fixture::{console_rows, lantern, terminals};
+use moa_view::fixture::{console_rows, lantern, permission_rows, terminals};
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
 use moa_view::panel::{Mark, Mouse, Panel, Screen};
@@ -63,6 +63,17 @@ impl T {
         }
         T {
             panel: Panel::new(view),
+            data,
+            ctx,
+        }
+    }
+
+    /// The console with moa's permission requests, answered and waiting.
+    fn permissions() -> T {
+        let (mut data, ctx) = lantern();
+        permission_rows(&mut data);
+        T {
+            panel: Panel::new(View::Console),
             data,
             ctx,
         }
@@ -242,7 +253,35 @@ fn the_empty_slot_at_40_and_80() {
     }
 }
 
+/// The console's permission cards (K12) at 40 and 80: the head line says which keys answer,
+/// and the newest cards, waiting, show their buttons.
+#[test]
+fn permission_cards_at_40_and_80() {
+    for width in [40, 80] {
+        let buf = T::permissions().drawn(width, HEIGHT);
+        let text = screen_text(&buf);
+        assert!(text.contains("⚠ answer y/a/n"), "{text}");
+        assert!(text.contains("[y once] [n no]"), "{text}");
+        insta::assert_snapshot!(format!("console-permissions@{width}"), text);
+    }
+}
+
 // ---------- cells at 80 (V12, V11) ----------
+
+/// A waiting card and the head line's `⚠ answer` are yellow; a refused one is red, one never
+/// answered dim.
+#[test]
+fn a_waiting_card_is_yellow() {
+    let buf = T::permissions().drawn(80, 30);
+    let fg = |needle: &str| {
+        let (x, y) = find(&buf, needle);
+        buf[(x, y)].fg
+    };
+    assert_eq!(fg("⚠ answer"), YELLOW);
+    assert_eq!(fg("⚠ moa asks: Write ~/private/kite"), YELLOW);
+    assert_eq!(fg("✗ refused"), RED);
+    assert_eq!(fg("⊘ not answered: Fetch"), DIM);
+}
 
 #[test]
 fn the_frame_uses_the_default_colour() {

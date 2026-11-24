@@ -615,7 +615,8 @@ fn json_value() -> impl Strategy<Value = Value> {
         text().prop_map(Value::from),
     ];
     let keys = vec![
-        "text", "title", "input", "command", "entries", "content", "status",
+        "text", "title", "input", "command", "entries", "content", "status", "options", "kind",
+        "name",
     ];
     leaf.prop_recursive(3, 24, 4, move |inner| {
         prop_oneof![
@@ -626,10 +627,31 @@ fn json_value() -> impl Strategy<Value = Value> {
     })
 }
 
-/// A `feed` row's body: any JSON, or one shaped as a text, tool or plan row with odd text.
+/// A `permission` row's body: an odd title, and options of any kind (one nobody knows too)
+/// with odd names, or a name missing.
+fn permission_body() -> impl Strategy<Value = Value> {
+    let kinds = vec![
+        "allow_once",
+        "allow_always",
+        "reject_once",
+        "reject_always",
+        "other",
+        "",
+    ];
+    let option = (select(kinds), option::of(text())).prop_map(|(kind, name)| match name {
+        Some(name) => json!({ "kind": kind, "name": name }),
+        None => json!({ "kind": kind }),
+    });
+    (text(), vec(option, 0..5))
+        .prop_map(|(title, options)| json!({ "title": title, "options": options }))
+}
+
+/// A `feed` row's body: any JSON, or one shaped as a text, tool, plan or permission row with
+/// odd text.
 fn feed_body() -> impl Strategy<Value = Value> {
     prop_oneof![
         2 => json_value(),
+        2 => permission_body(),
         2 => text().prop_map(|t| json!({ "text": t })),
         2 => (text(), text(), any::<bool>()).prop_map(|(title, command, raw)| {
             let input = json!({ "command": command });
@@ -650,7 +672,16 @@ fn feed_body() -> impl Strategy<Value = Value> {
 /// A `feed` row of any kind (one nobody knows too), state and thread.
 fn feed_row() -> impl Strategy<Value = FeedRow> {
     let kinds = vec![
-        "you", "moa", "thought", "tool", "plan", "system", "error", "nope", "",
+        "you",
+        "moa",
+        "thought",
+        "tool",
+        "plan",
+        "system",
+        "error",
+        "permission",
+        "nope",
+        "",
     ];
     let states = vec![
         "pending",
@@ -658,6 +689,10 @@ fn feed_row() -> impl Strategy<Value = FeedRow> {
         "completed",
         "failed",
         "cancelled",
+        "allow_once",
+        "allow_always",
+        "reject_once",
+        "reject_always",
         "?",
     ];
     let thread = prop_oneof![4 => select(vec![s("0193ab12-a"), s("0193b4f0-b")]), 1 => text()];
@@ -697,9 +732,7 @@ fn event_row() -> impl Strategy<Value = EventRow> {
     })
 }
 
-/// The console's data and panel memory: sessions, rows (some paged in, overlapping the
-/// tail), session events, cards and errors.
-/// moa's state row: every phase, an odd one, and odd threads and reasons.
+/// moa's state row: every phase, an odd one, odd threads and reasons, and requests waiting.
 fn moa_row() -> impl Strategy<Value = MoaRow> {
     (
         prop_oneof![
@@ -709,15 +742,20 @@ fn moa_row() -> impl Strategy<Value = MoaRow> {
         option::of(text()),
         option::of(text()),
         0u32..5,
+        // Rows' ids are 1 to 40: some it waits on are drawn, some not.
+        vec(-1i64..45, 0..4),
     )
-        .prop_map(|(phase, thread, why, queued)| MoaRow {
+        .prop_map(|(phase, thread, why, queued, asking)| MoaRow {
             phase,
             thread,
             why,
             queued,
+            asking,
         })
 }
 
+/// The console's data and panel memory: sessions, rows (some paged in, overlapping the
+/// tail), session events, cards and errors.
 fn console_data() -> impl Strategy<Value = (Data, ConsoleUi)> {
     (
         vec(session(), 0..6),
@@ -783,7 +821,7 @@ proptest! {
         ctx in ctx(),
         w in 10u16..=200,
     ) {
-        let view = console::build(&data, &ctx, &ui, w);
+        let view = console::build(&data, &ctx, &ui, true, w);
         for line in &view.lines {
             check_line(line, usize::from(w), "a console line")?;
             let cells: usize = line.spans.iter().map(|s| width(&s.text)).sum();
@@ -805,9 +843,11 @@ proptest! {
         // The head line (F23), up or not, with or without new lines below; the input line,
         // its cursor within it.
         for (up, new) in [(true, 0), (false, 0), (true, 3), (true, usize::MAX)] {
-            let head = console::head(&data, &ctx, up, new, w);
+            let head = console::head(&data, &ctx, up, &ui.answered, new, w);
             check_line(&head, usize::from(w), "the head line")?;
-            prop_assert_eq!(head.animated, up && data.moa.as_ref().is_some_and(|m| m.phase == "thinking"));
+            // While a request waits, the state is `⚠ answer`, which doesn't spin.
+            let spins = data.moa.as_ref().is_some_and(|m| m.phase == "thinking" && m.asking.iter().all(|id| ui.answered.contains(id)));
+            prop_assert_eq!(head.animated, up && spins);
         }
         let (input, at) = console::input(&ui, w);
         check_line(&input, usize::from(w), "the input line")?;

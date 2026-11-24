@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::wire::PlanEntry;
+use super::wire::{PermOption, PlanEntry};
 use crate::UtcMs;
 use crate::core::Tx;
 use crate::model::FeedEntry;
@@ -18,6 +18,7 @@ pub mod kind {
     pub const PLAN: &str = "plan";
     pub const SYSTEM: &str = "system";
     pub const ERROR: &str = "error";
+    pub const PERMISSION: &str = "permission";
 }
 
 /// The most of a tool's input a `tool` row keeps, in characters.
@@ -55,6 +56,17 @@ pub fn plan_body(entries: &[PlanEntry]) -> String {
         .map(|e| json!({ "content": e.content, "status": e.status, "priority": e.priority }))
         .collect();
     json!({ "entries": entries }).to_string()
+}
+
+/// The body of a `permission` row: `{"title", "options": [{"kind", "name"}]}`, its title
+/// (the tool call it asks about) cut as a tool's input is ([`tool_input`]). The options' ids
+/// stay in the core.
+pub fn permission_body(title: &str, options: &[PermOption]) -> String {
+    let options: Vec<Value> = options
+        .iter()
+        .map(|o| json!({ "kind": o.kind.name(), "name": o.name }))
+        .collect();
+    json!({ "title": tool_input(title), "options": options }).to_string()
 }
 
 /// A new row of `thread`, with the next id of the table (counting this transaction's). The

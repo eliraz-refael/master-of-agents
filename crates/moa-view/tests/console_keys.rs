@@ -2,6 +2,7 @@
 //! Tab over the buttons, scrolling and paging back, the errors it shows, and `/quit` (F10).
 
 use moa_core::UtcMs;
+use moa_core::central::NOT_OFFERED;
 use moa_core::op::{Done, NoParams, Op};
 use moa_core::panel::View;
 use moa_core::publish::{BarRow, FeedRow, LayoutRow, MoaRow};
@@ -69,6 +70,7 @@ impl C {
             thread: Some(THREAD.into()),
             why: None,
             queued: 0,
+            asking: Vec::new(),
         });
         data.touch();
         let mut c = C {
@@ -1070,4 +1072,253 @@ fn a_closed_palette_leaves_tab_alone() {
     c.key(Key::Ctrl('u'));
     c.key(Key::Tab);
     assert!(c.focused().is_some());
+}
+
+/// A `permission` row, `pending`, offering `kinds`.
+fn asking(id: i64, title: &str, kinds: &[&str]) -> FeedRow {
+    let options: Vec<_> = kinds
+        .iter()
+        .map(|k| json!({ "kind": k, "name": format!("{k} name") }))
+        .collect();
+    FeedRow {
+        kind: "permission".into(),
+        body: json!({ "title": title, "options": options }),
+        state: Some("pending".into()),
+        ..row(id, "permission", "")
+    }
+}
+
+const ALL: [&str; 4] = ["allow_once", "allow_always", "reject_once", "reject_always"];
+
+impl C {
+    /// moa thinking, with requests `ids` waiting for an answer, oldest first.
+    fn asking(&mut self, ids: &[i64]) {
+        let moa = self.data.moa.as_mut().unwrap();
+        moa.phase = "thinking".into();
+        moa.asking = ids.to_vec();
+        self.data.touch();
+    }
+}
+
+/// No line of the feed is an answer's reply card.
+fn no_answer_card(c: &mut C) {
+    let body = c.body();
+    assert!(
+        !body.iter().any(|l| l.contains("▸ /permission")),
+        "{body:#?}"
+    );
+}
+
+/// K12: with the input empty, y, a and n press the oldest waiting card's button of that
+/// kind; the newer card waits its turn. An answer's reply makes no card: a refusal goes to
+/// the footer, and the request can be answered again.
+#[test]
+fn y_a_and_n_press_the_oldest_card() {
+    let rows = vec![
+        row(1, "you", "tidy the Harbor"),
+        asking(2, "Write note.txt", &ALL),
+        asking(3, "Edit Cargo.toml", &ALL),
+    ];
+    let mut c = C::new(rows, SIZE);
+    c.asking(&[2, 3]);
+    for (key, answer) in [('y', "once"), ('a', "always")] {
+        let outs = c.key(Key::Char(key));
+        let (tag, op) = c.send(outs);
+        let line = format!("/permission 2 {answer}");
+        assert_eq!(op, Op::ConsoleCommand { line });
+        assert_eq!(c.input(), "› ask moa, or / for commands", "nothing typed");
+        c.reply(tag, Err("moa can't save right now".into()));
+        assert_eq!(c.footer(), "moa can't save right now");
+        no_answer_card(&mut c);
+    }
+    let outs = c.key(Key::Char('n'));
+    let (tag, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 2 no".into()
+        }
+    );
+    c.reply(tag, Ok(done("refused")));
+    no_answer_card(&mut c);
+    // The core answered 2: y now answers 3. `n` falls back to `reject_always`.
+    c.asking(&[3]);
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 3 once".into()
+        }
+    );
+    c.add(vec![asking(4, "Fetch", &["allow_once", "reject_always"])]);
+    c.asking(&[4]);
+    let outs = c.key(Key::Char('n'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 4 no".into()
+        }
+    );
+}
+
+/// A second y pressed before moa's state drops the first answer's request answers the next
+/// one; with every waiting request answered from here, y does nothing (and types nothing)
+/// until moa's state comes, or an answer is refused.
+#[test]
+fn a_quick_second_y_answers_the_next() {
+    let rows = vec![
+        asking(2, "Write note.txt", &ALL),
+        asking(3, "Edit Cargo.toml", &ALL),
+    ];
+    let mut c = C::new(rows, SIZE);
+    c.asking(&[2, 3]);
+    let line = |id: i64| Op::ConsoleCommand {
+        line: format!("/permission {id} once"),
+    };
+    let outs = c.key(Key::Char('y'));
+    let (first, op) = c.send(outs);
+    assert_eq!(op, line(2));
+    let outs = c.key(Key::Char('y'));
+    let (second, op) = c.send(outs);
+    assert_eq!(op, line(3));
+    assert!(c.key(Key::Char('y')).is_empty());
+    assert_eq!(c.input(), "› ask moa, or / for commands", "nothing typed");
+    c.reply(first, Ok(done("allowed once")));
+    c.asking(&[3]);
+    assert!(c.key(Key::Char('y')).is_empty(), "3's answer is on its way");
+    c.reply(second, Err("moa can't save right now".into()));
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(op, line(3), "refused, so it is answered again");
+}
+
+/// The head line names the keys of the request y, a and n will answer: after y on 9, and
+/// before moa's state drops 9, that is 10, which offers only y and n.
+#[test]
+fn the_head_follows_the_keys() {
+    let rows = vec![
+        asking(9, "Write RELEASE.md", &ALL),
+        asking(10, "cargo publish", &["allow_once", "reject_once"]),
+    ];
+    let mut c = C::new(rows, SIZE);
+    c.asking(&[9, 10]);
+    assert!(c.head().contains("⚠ answer y/a/n"), "{}", c.head());
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 9 once".into()
+        }
+    );
+    let head = c.head();
+    assert!(
+        head.contains("⚠ answer y/n") && !head.contains("y/a/n"),
+        "{head}"
+    );
+    // As the head says, `a` isn't offered.
+    assert!(c.key(Key::Char('a')).is_empty());
+    assert_eq!(c.footer(), NOT_OFFERED);
+}
+
+/// While the link is down, moa's state may be stale: no card has buttons, and y is text, as
+/// while nothing waits. Once it is up again, y answers.
+#[test]
+fn nothing_waits_while_the_link_is_down() {
+    let mut c = C::new(vec![asking(2, "Write note.txt", &ALL)], SIZE);
+    c.asking(&[2]);
+    c.panel.set_link_up(false);
+    let body = c.body();
+    assert!(!body.iter().any(|l| l.contains("[y once]")), "{body:#?}");
+    assert!(
+        c.screen()
+            .body
+            .iter()
+            .all(|(l, _)| l.spans.iter().all(|s| s.button.is_none()))
+    );
+    assert!(c.typed("y").is_empty());
+    assert_eq!(c.input(), "› y");
+    c.key(Key::Backspace);
+    c.panel.set_link_up(true);
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 2 once".into()
+        }
+    );
+}
+
+/// A `y` typed into a draft that isn't empty is text, as is one while nothing waits; `Y` is
+/// always text.
+#[test]
+fn y_in_a_draft_is_text() {
+    let mut c = C::new(vec![asking(2, "Write note.txt", &ALL)], SIZE);
+    c.asking(&[2]);
+    assert!(c.typed("ok y").is_empty());
+    assert_eq!(c.input(), "› ok y");
+    for _ in 0..4 {
+        c.key(Key::Backspace);
+    }
+    c.asking(&[]);
+    assert!(c.typed("y").is_empty());
+    assert_eq!(c.input(), "› y");
+    c.key(Key::Backspace);
+    c.asking(&[2]);
+    assert!(c.typed("Yes").is_empty());
+    assert_eq!(c.input(), "› Yes");
+}
+
+/// K12: `a` on a card that offers no `allow_always` sends nothing and says so in the footer;
+/// nothing is typed.
+#[test]
+fn a_kind_not_offered_says_so() {
+    let mut c = C::new(
+        vec![asking(2, "cargo publish", &["allow_once", "reject_once"])],
+        SIZE,
+    );
+    c.asking(&[2]);
+    assert!(c.key(Key::Char('a')).is_empty());
+    assert_eq!(c.footer(), NOT_OFFERED);
+    assert_eq!(c.input(), "› ask moa, or / for commands");
+    assert_eq!(NOT_OFFERED, "moa's agent didn't offer that answer");
+}
+
+/// A click on a card's `[y once]` presses it; its reply makes no card, and a refusal goes to
+/// the footer.
+#[test]
+fn a_click_on_y_answers() {
+    let mut c = C::new(vec![asking(2, "Write note.txt", &ALL)], SIZE);
+    c.asking(&[2]);
+    let screen = c.screen();
+    let (y, line) = screen
+        .body
+        .iter()
+        .enumerate()
+        .find(|(_, (l, _))| l.text().contains("[y once]"))
+        .map(|(y, (l, _))| (y, l.text()))
+        .expect("the card's buttons are drawn");
+    let col = line[..line.find("[y once]").unwrap()].chars().count();
+    let b = screen.geometry.body;
+    let at = Mouse::Click {
+        x: b.x + u16::try_from(col).unwrap(),
+        y: b.y + u16::try_from(y).unwrap(),
+    };
+    let once = Op::ConsoleCommand {
+        line: "/permission 2 once".into(),
+    };
+    let handled = c.panel.mouse(at, &c.data, &c.ctx, SIZE);
+    assert_eq!(handled.out, vec![Out::Send(once.clone())]);
+    let (tag, _) = c.send(handled.out);
+    c.reply(tag, Ok(done("allowed once")));
+    no_answer_card(&mut c);
+    let handled = c.panel.mouse(at, &c.data, &c.ctx, SIZE);
+    assert_eq!(handled.out, vec![Out::Send(once)]);
+    let (tag, _) = c.send(handled.out);
+    c.reply(tag, Err("that request isn't waiting any more".into()));
+    assert_eq!(c.footer(), "that request isn't waiting any more");
+    no_answer_card(&mut c);
 }

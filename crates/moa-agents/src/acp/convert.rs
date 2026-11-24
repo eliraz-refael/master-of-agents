@@ -173,6 +173,7 @@ fn perm_option(option: &PermissionOption) -> PermOption {
     PermOption {
         id: option.option_id.to_string(),
         kind,
+        name: option.name.clone(),
     }
 }
 

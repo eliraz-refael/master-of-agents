@@ -719,3 +719,102 @@ pub fn console_rows(data: &mut Data) {
         rows.into_iter().chain(events).chain([state, bar]).collect(),
     );
 }
+
+/// A `permission` row of today's thread, in `state`: `options` as (kind, name) pairs.
+fn permission(id: i64, at: UtcMs, title: &str, options: &[(&str, &str)], state: &str) -> Value {
+    let options: Vec<Value> = options
+        .iter()
+        .map(|(kind, name)| json!({ "kind": kind, "name": name }))
+        .collect();
+    let body = json!({ "title": title, "options": options });
+    feed(id, THREAD_TODAY, at, "permission", body, Some(state))
+}
+
+/// moa's permission requests in each state, as the `feed` topic carries them: a turn whose
+/// requests were allowed once, allowed always, refused once, refused always, cancelled, and
+/// one left `pending` by a daemon that restarted (not in `asking`); then a turn still
+/// thinking, with two requests waiting for your answer, the oldest offering all three answers
+/// (and naming `always`), the other only once and no.
+pub fn permission_rows(data: &mut Data) {
+    let at = |h: i8, m: i8| local(date(2026, 11, 13), h, m);
+    let text = |t: &str| json!({ "text": t });
+    let all = |always| {
+        [
+            ("allow_always", always),
+            ("allow_once", "Allow"),
+            ("reject_once", "Reject"),
+        ]
+    };
+    let (harbor, kite) = (
+        all("Always allow edits in ~/private/harbor"),
+        all("Always allow edits in ~/private/kite"),
+    );
+    let once_or_no = [("allow_once", "Allow"), ("reject_once", "Reject")];
+    let no_always = [("allow_once", "Allow"), ("reject_always", "Never allow")];
+    let you = |id: i64, at: UtcMs, t: &str| feed(id, THREAD_TODAY, at, "you", text(t), None);
+    let rows = vec![
+        you(1, at(9, 20), "Tidy the Harbor folder"),
+        permission(
+            2,
+            at(9, 21),
+            "Write ~/private/harbor/note.txt",
+            &harbor,
+            "allow_once",
+        ),
+        permission(
+            3,
+            at(9, 22),
+            "Edit ~/private/harbor/Cargo.toml",
+            &harbor,
+            "allow_always",
+        ),
+        permission(
+            4,
+            at(9, 23),
+            "rm -rf ~/private/harbor/target",
+            &harbor,
+            "reject_once",
+        ),
+        permission(
+            5,
+            at(9, 24),
+            "git push --force",
+            &no_always,
+            "reject_always",
+        ),
+        permission(
+            6,
+            at(9, 25),
+            "Fetch the Beacon changelog",
+            &once_or_no,
+            "cancelled",
+        ),
+        permission(
+            7,
+            at(9, 26),
+            "Delete ~/private/harbor/old.log",
+            &harbor,
+            "pending",
+        ),
+        you(8, at(9, 50), "Write Kite's release notes"),
+        permission(
+            9,
+            at(9, 51),
+            "Write ~/private/kite/RELEASE.md",
+            &kite,
+            "pending",
+        ),
+        permission(
+            10,
+            at(9, 52),
+            "cargo publish -p kite",
+            &once_or_no,
+            "pending",
+        ),
+    ];
+    let state = json!({
+        "key": "state", "phase": "thinking", "thread": THREAD_TODAY, "why": null,
+        "queued": 0, "asking": [9, 10],
+    });
+    data.upsert(Topic::Feed, rows.into_iter().chain([state]).collect());
+}
