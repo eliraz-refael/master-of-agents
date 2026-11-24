@@ -5,7 +5,7 @@
 //! thread changes (B2). A row it can't read is one dim line (B10): nothing here panics,
 //! whatever the daemon sends.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
 use moa_core::UtcMs;
@@ -95,6 +95,9 @@ pub struct ConsoleUi {
     pub closed: Option<String>,
     /// The rows the last build gave the palette: none, and it is as good as closed.
     pub palette_rows: u16,
+    /// The permission requests answered from here that moa's state still has waiting: y, a
+    /// and n skip them (K12).
+    pub answered: BTreeSet<i64>,
 }
 
 impl Default for ConsoleUi {
@@ -121,6 +124,7 @@ impl Default for ConsoleUi {
             pick: 0,
             closed: None,
             palette_rows: 0,
+            answered: BTreeSet::new(),
         }
     }
 }
@@ -138,6 +142,14 @@ pub enum Asked {
     },
     /// A command, typed or pressed at `at`: its reply is a card (B4).
     Command {
+        line: String,
+        at: UtcMs,
+        typed: bool,
+    },
+    /// An answer to permission request `id` (`/permission`, K12), typed or pressed at `at`:
+    /// its reply makes no card, as the request's own card says it.
+    Answer {
+        id: i64,
         line: String,
         at: UtcMs,
         typed: bool,
@@ -422,7 +434,7 @@ pub fn head(data: &Data, ctx: &Ctx, up: bool, new: usize, width: u16) -> Line {
     let dim = |s: &str| Span::new(s, Tone::Dim);
     let moa = data.moa.as_ref().filter(|_| up);
     let phase = moa.map_or("off", |m| m.phase.as_str());
-    let waiting = moa.and_then(|_| waiting(data));
+    let waiting = moa.and_then(|_| waiting(data, &BTreeSet::new()));
     let mut spans = match phase {
         _ if !up => vec![dim("connecting…")],
         _ if let Some(waiting) = &waiting => {
@@ -491,6 +503,16 @@ pub fn answer_line(id: i64, answer: PermAnswer) -> String {
     format!("/permission {id} {}", answer.name())
 }
 
+/// The request `line` answers, when it is an [`answer_line`].
+pub fn answer_id(line: &str) -> Option<i64> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let ["/permission", id, answer] = words[..] else {
+        return None;
+    };
+    answer.parse::<PermAnswer>().ok()?;
+    id.parse().ok()
+}
+
 /// The options of a `permission` row's body.
 fn options(body: &Value) -> impl Iterator<Item = &Value> {
     body.get("options")
@@ -520,9 +542,11 @@ pub struct Waiting {
     pub offered: Vec<PermAnswer>,
 }
 
-/// The request y, a and n answer (K12): the oldest in moa's `asking`, if any.
-pub fn waiting(data: &Data) -> Option<Waiting> {
-    let id = *data.moa.as_ref()?.asking.first()?;
+/// The request y, a and n answer (K12): the oldest in moa's `asking` but those in `skip`, if
+/// any.
+pub fn waiting(data: &Data, skip: &BTreeSet<i64>) -> Option<Waiting> {
+    let asking = &data.moa.as_ref()?.asking;
+    let id = *asking.iter().find(|id| !skip.contains(id))?;
     let offered = data
         .feed
         .get(&id)

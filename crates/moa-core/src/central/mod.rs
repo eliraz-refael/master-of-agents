@@ -330,6 +330,9 @@ pub fn cancel(state: &mut State, now: &Now, conn: ConnId, req: ReqId) -> Vec<Eff
     fx
 }
 
+/// What `console.permission` says when the request doesn't offer the answer given.
+pub const NOT_OFFERED: &str = "moa's agent didn't offer that answer";
+
 /// `console.permission`: answers request `id` (the oldest waiting when `None`) with the
 /// option of the kind `answer` names. Its row says which in a commit of its own, and the
 /// answer goes once that is saved; while writes are refused it is refused, and still waits.
@@ -349,7 +352,7 @@ pub fn answer_permission(
     let result = match (found, id) {
         (Some((&id, asking)), _) => match chosen(&asking.options, answer) {
             Some(option) => Ok((id, asking.req, option.clone())),
-            None => Err("moa's agent didn't offer that answer"),
+            None => Err(NOT_OFFERED),
         },
         (None, Some(_)) => Err("that request isn't waiting any more"),
         (None, None) => Err("nothing is waiting for an answer"),

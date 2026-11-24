@@ -2,6 +2,7 @@
 //! Tab over the buttons, scrolling and paging back, the errors it shows, and `/quit` (F10).
 
 use moa_core::UtcMs;
+use moa_core::central::NOT_OFFERED;
 use moa_core::op::{Done, NoParams, Op};
 use moa_core::panel::View;
 use moa_core::publish::{BarRow, FeedRow, LayoutRow, MoaRow};
@@ -11,9 +12,7 @@ use moa_view::fixture::lantern;
 use moa_view::geometry::Size;
 use moa_view::keys::Key;
 use moa_view::line::Line;
-use moa_view::panel::{
-    CONSOLE_MANAGED, Mouse, NOT_OFFERED, Out, PAGE, Panel, STILL_WAITING, Screen,
-};
+use moa_view::panel::{CONSOLE_MANAGED, Mouse, Out, PAGE, Panel, STILL_WAITING, Screen};
 use serde_json::json;
 
 /// 9 lines of feed between the head line and the input line.
@@ -1101,8 +1100,18 @@ impl C {
     }
 }
 
+/// No line of the feed is an answer's reply card.
+fn no_answer_card(c: &mut C) {
+    let body = c.body();
+    assert!(
+        !body.iter().any(|l| l.contains("▸ /permission")),
+        "{body:#?}"
+    );
+}
+
 /// K12: with the input empty, y, a and n press the oldest waiting card's button of that
-/// kind; the newer card waits its turn.
+/// kind; the newer card waits its turn. An answer's reply makes no card: a refusal goes to
+/// the footer, and the request can be answered again.
 #[test]
 fn y_a_and_n_press_the_oldest_card() {
     let rows = vec![
@@ -1112,14 +1121,26 @@ fn y_a_and_n_press_the_oldest_card() {
     ];
     let mut c = C::new(rows, SIZE);
     c.asking(&[2, 3]);
-    for (key, answer) in [('y', "once"), ('a', "always"), ('n', "no")] {
+    for (key, answer) in [('y', "once"), ('a', "always")] {
         let outs = c.key(Key::Char(key));
         let (tag, op) = c.send(outs);
         let line = format!("/permission 2 {answer}");
         assert_eq!(op, Op::ConsoleCommand { line });
         assert_eq!(c.input(), "› ask moa, or / for commands", "nothing typed");
-        c.reply(tag, Ok(done("allowed once")));
+        c.reply(tag, Err("moa can't save right now".into()));
+        assert_eq!(c.footer(), "moa can't save right now");
+        no_answer_card(&mut c);
     }
+    let outs = c.key(Key::Char('n'));
+    let (tag, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 2 no".into()
+        }
+    );
+    c.reply(tag, Ok(done("refused")));
+    no_answer_card(&mut c);
     // The core answered 2: y now answers 3. `n` falls back to `reject_always`.
     c.asking(&[3]);
     let outs = c.key(Key::Char('y'));
@@ -1140,6 +1161,37 @@ fn y_a_and_n_press_the_oldest_card() {
             line: "/permission 4 no".into()
         }
     );
+}
+
+/// A second y pressed before moa's state drops the first answer's request answers the next
+/// one; with every waiting request answered from here, y does nothing (and types nothing)
+/// until moa's state comes, or an answer is refused.
+#[test]
+fn a_quick_second_y_answers_the_next() {
+    let rows = vec![
+        asking(2, "Write note.txt", &ALL),
+        asking(3, "Edit Cargo.toml", &ALL),
+    ];
+    let mut c = C::new(rows, SIZE);
+    c.asking(&[2, 3]);
+    let line = |id: i64| Op::ConsoleCommand {
+        line: format!("/permission {id} once"),
+    };
+    let outs = c.key(Key::Char('y'));
+    let (first, op) = c.send(outs);
+    assert_eq!(op, line(2));
+    let outs = c.key(Key::Char('y'));
+    let (second, op) = c.send(outs);
+    assert_eq!(op, line(3));
+    assert!(c.key(Key::Char('y')).is_empty());
+    assert_eq!(c.input(), "› ask moa, or / for commands", "nothing typed");
+    c.reply(first, Ok(done("allowed once")));
+    c.asking(&[3]);
+    assert!(c.key(Key::Char('y')).is_empty(), "3's answer is on its way");
+    c.reply(second, Err("moa can't save right now".into()));
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(op, line(3), "refused, so it is answered again");
 }
 
 /// A `y` typed into a draft that isn't empty is text, as is one while nothing waits; `Y` is
@@ -1174,10 +1226,11 @@ fn a_kind_not_offered_says_so() {
     assert!(c.key(Key::Char('a')).is_empty());
     assert_eq!(c.footer(), NOT_OFFERED);
     assert_eq!(c.input(), "› ask moa, or / for commands");
-    assert_eq!(NOT_OFFERED, "moa's agent didn't offer that");
+    assert_eq!(NOT_OFFERED, "moa's agent didn't offer that answer");
 }
 
-/// A click on a card's `[y once]` presses it.
+/// A click on a card's `[y once]` presses it; its reply makes no card, and a refusal goes to
+/// the footer.
 #[test]
 fn a_click_on_y_answers() {
     let mut c = C::new(vec![asking(2, "Write note.txt", &ALL)], SIZE);
@@ -1196,11 +1249,18 @@ fn a_click_on_y_answers() {
         x: b.x + u16::try_from(col).unwrap(),
         y: b.y + u16::try_from(y).unwrap(),
     };
+    let once = Op::ConsoleCommand {
+        line: "/permission 2 once".into(),
+    };
     let handled = c.panel.mouse(at, &c.data, &c.ctx, SIZE);
-    assert_eq!(
-        handled.out,
-        vec![Out::Send(Op::ConsoleCommand {
-            line: "/permission 2 once".into()
-        })]
-    );
+    assert_eq!(handled.out, vec![Out::Send(once.clone())]);
+    let (tag, _) = c.send(handled.out);
+    c.reply(tag, Ok(done("allowed once")));
+    no_answer_card(&mut c);
+    let handled = c.panel.mouse(at, &c.data, &c.ctx, SIZE);
+    assert_eq!(handled.out, vec![Out::Send(once)]);
+    let (tag, _) = c.send(handled.out);
+    c.reply(tag, Err("that request isn't waiting any more".into()));
+    assert_eq!(c.footer(), "that request isn't waiting any more");
+    no_answer_card(&mut c);
 }

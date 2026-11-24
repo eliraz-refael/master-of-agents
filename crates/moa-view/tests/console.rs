@@ -602,8 +602,8 @@ fn asked() -> (Data, Ctx) {
     (data, ctx)
 }
 
-/// K12: each request is a card. Answered: `✓ allowed once`, `✓ allowed always`, `✗ refused`,
-/// and `⊘ not answered` for a cancelled one and for one still `pending` that nothing waits
+/// K12: each request is a card. Answered: `✓ allowed once`, `✓ allowed always`, `✗ refused`
+/// (once or always), and `⊘ not answered` for a cancelled one and for one still `pending` that nothing waits
 /// on. Waiting: `⚠ moa asks: <title>`, its buttons behind the card's gutter for the answers
 /// offered, and the name moa's agent gives `always`.
 #[test]
@@ -619,11 +619,11 @@ fn permission_cards_at_40_and_80() {
     assert_eq!(
         pressed(&view),
         [
-            ("y once", "/permission 8 once"),
-            ("a always", "/permission 8 always"),
-            ("n no", "/permission 8 no"),
             ("y once", "/permission 9 once"),
+            ("a always", "/permission 9 always"),
             ("n no", "/permission 9 no"),
+            ("y once", "/permission 10 once"),
+            ("n no", "/permission 10 no"),
         ]
     );
 }
@@ -674,7 +674,7 @@ fn the_head_says_answer() {
         let warn = all.spans.iter().find(|s| s.text.contains("⚠ answer"));
         assert_eq!(warn.map(|s| s.tone), Some(moa_view::line::Tone::Warn));
     }
-    data.moa.as_mut().unwrap().asking = vec![9];
+    data.moa.as_mut().unwrap().asking = vec![10];
     data.touch();
     let only = line(&data, true, 80).text();
     assert!(

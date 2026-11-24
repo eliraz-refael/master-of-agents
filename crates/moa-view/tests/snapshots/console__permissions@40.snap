@@ -11,6 +11,7 @@ expression: debug_lines(&view.lines)
 [dim]│ [text]  [ok]~/private/harbor/Cargo.toml  ‹more›
 [dim]│ [fail]✗ [fail]refused: rm -rf
 [dim]│ [text]  [fail]~/private/harbor/target  ‹more›
+[dim]│ [fail]✗ [fail]refused: git push --force
 [dim]│ [dim]⊘ [dim]not answered: Fetch the Beacon
 [dim]│ [text]  [dim]changelog  ‹more›
 [dim]│ [dim]⊘ [dim]not answered: Delete

@@ -3,6 +3,7 @@
 //! screen (B9).
 
 use moa_core::UtcMs;
+use moa_core::central::NOT_OFFERED;
 use moa_core::op::{Done, NoParams, Op, PermAnswer};
 use moa_core::panel::View;
 use moa_core::publish::FeedRow;
@@ -25,8 +26,6 @@ pub const CONSOLE_MANAGED: &str = "the console is part of this layout; switch la
 pub const PAGE: u16 = 100;
 /// What Enter says while a typed line waits for its reply.
 pub const STILL_WAITING: &str = "still waiting for the reply to the last line";
-/// What y, a or n says when the oldest waiting request doesn't offer that answer.
-pub const NOT_OFFERED: &str = "moa's agent didn't offer that";
 /// The console keeps its newest this many error lines.
 const ERRORS_KEPT: usize = 50;
 /// The history keeps the newest this many lines sent from the panel.
@@ -58,6 +57,8 @@ impl Panel {
     /// it, so a row that leaves the topic's tail leaves no gap.
     pub(super) fn console_refresh(&mut self, data: &Data, ctx: &Ctx, g: Geometry) -> Geometry {
         let ui = &mut self.console;
+        let asking = data.moa.as_ref().map_or(&[][..], |m| m.asking.as_slice());
+        ui.answered.retain(|id| asking.contains(id));
         // `older` grows for the panel's life once it has paged: it is never cut.
         if !ui.older.is_empty() && ui.kept_at != Some(data.revision()) {
             ui.kept_at = Some(data.revision());
@@ -128,12 +129,17 @@ impl Panel {
         if self.palette_key(k) {
             return Vec::new();
         }
+        let asking = data.moa.as_ref().is_some_and(|m| !m.asking.is_empty());
         if let Key::Char(c) = k
+            && asking
             && self.console.draft.text.is_empty()
             && let Some(answer) = console::answer_of(c)
-            && let Some(waiting) = console::waiting(data)
         {
-            return self.answer(&waiting, answer, ctx.now);
+            // Every waiting request answered from here already: their answers are on the way.
+            return match console::waiting(data, &self.console.answered) {
+                Some(waiting) => self.answer(&waiting, answer, ctx.now),
+                None => Vec::new(),
+            };
         }
         let page = isize::try_from(rows.saturating_sub(1).max(1)).unwrap_or(isize::MAX);
         match k {
@@ -221,7 +227,8 @@ impl Panel {
         self.send_line(command, false, now)
     }
 
-    /// y, a or n with the input empty (K12): the oldest waiting card's button of that kind,
+    /// y, a or n with the input empty (K12): the oldest waiting card's button of that kind
+    /// (skipping those answered from here whose answer moa's state doesn't show yet),
     /// pressed; one it doesn't offer is said in the footer.
     fn answer(&mut self, waiting: &Waiting, answer: PermAnswer, now: UtcMs) -> Vec<Out> {
         if !waiting.offered.contains(&answer) {
@@ -231,7 +238,9 @@ impl Panel {
     }
 
     /// Sends `line`, `typed` in the input or pressed: a `/command` as `console.command`, else
-    /// a prompt; `/quit` is the console's own (F10). The feed goes back to its bottom, where
+    /// a prompt; `/quit` is the console's own (F10). An answer to a permission request is
+    /// remembered until moa's state drops the request, and its reply makes no card: the
+    /// request's own card says it. The feed goes back to its bottom, where
     /// the answer comes. A typed line waits for its reply before another goes; the draft is
     /// cleared only once it is accepted (B7).
     fn send_line(&mut self, line: String, typed: bool, now: UtcMs) -> Vec<Out> {
@@ -244,14 +253,25 @@ impl Panel {
         }
         let ui = &mut self.console;
         let typing = |a: &Asked| match a {
-            Asked::Prompt { typed, .. } | Asked::Command { typed, .. } => *typed,
+            Asked::Prompt { typed, .. }
+            | Asked::Command { typed, .. }
+            | Asked::Answer { typed, .. } => *typed,
             Asked::Page { .. } => false,
         };
         if typed && ui.waits_on(typing) {
             return self.say(STILL_WAITING);
         }
         ui.to_bottom();
-        let (asked, op) = if line.starts_with('/') {
+        let (asked, op) = if let Some(id) = console::answer_id(&line) {
+            ui.answered.insert(id);
+            let asked = Asked::Answer {
+                id,
+                line: line.clone(),
+                at: now,
+                typed,
+            };
+            (asked, Op::ConsoleCommand { line })
+        } else if line.starts_with('/') {
             let asked = Asked::Command {
                 line: line.clone(),
                 at: now,
@@ -337,11 +357,15 @@ impl Panel {
 
     /// The reply to something the console sent: a page's rows join the older ones; an
     /// accepted line leaves the draft (if it is still what was sent) for the history; a
-    /// command's reply is a card. A refusal goes to the footer, the draft kept.
+    /// command's reply is a card, but an answer's isn't. A refusal goes to the footer, the
+    /// draft kept; a refused answer's request can be answered again.
     pub(super) fn console_replied(&mut self, asked: Asked, result: Result<Done, String>) {
         let done = match result {
             Ok(done) => done,
             Err(why) => {
+                if let Asked::Answer { id, .. } = asked {
+                    self.console.answered.remove(&id);
+                }
                 self.show(Err(why));
                 return;
             }
@@ -364,6 +388,13 @@ impl Panel {
                     self.accepted(text, at);
                 }
                 self.show(Ok(done));
+            }
+            Asked::Answer {
+                line, at, typed, ..
+            } => {
+                if typed {
+                    self.accepted(line, at);
+                }
             }
             Asked::Command { line, at, typed } => {
                 if typed {

@@ -27,7 +27,7 @@ mod term_keys;
 mod tree_keys;
 
 use ask::Ask;
-pub use console_keys::{CONSOLE_MANAGED, ERROR_AGAIN_MS, NOT_OFFERED, PAGE, STILL_WAITING};
+pub use console_keys::{CONSOLE_MANAGED, ERROR_AGAIN_MS, PAGE, STILL_WAITING};
 
 /// What a panel asks its loop to do.
 // One is built per key, click or reply, so boxing the op buys nothing.

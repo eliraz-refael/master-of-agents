@@ -8,6 +8,7 @@ expression: debug_lines(&view.lines)
 [dim]│ [ok]✓ [ok]allowed once: Write ~/private/harbor/note.txt
 [dim]│ [ok]✓ [ok]allowed always: Edit ~/private/harbor/Cargo.toml
 [dim]│ [fail]✗ [fail]refused: rm -rf ~/private/harbor/target
+[dim]│ [fail]✗ [fail]refused: git push --force
 [dim]│ [dim]⊘ [dim]not answered: Fetch the Beacon changelog
 [dim]│ [dim]⊘ [dim]not answered: Delete ~/private/harbor/old.log
 
