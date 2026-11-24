@@ -87,7 +87,7 @@ fn you_automatic(rig: &Rig) -> Vec<bool> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_permission_waits_and_y_goes_on() {
+async fn a_permission_waits_and_once_goes_on() {
     let rig = Rig::new(&[ask(), say("understood", "m1"), end()]);
     let up = rig.start().await;
     let sock = up.sock.clone();

@@ -112,7 +112,8 @@ impl Stub {
     }
 
     /// The `n`-th turn of the script (counting from 0): the steps up to and with the next
-    /// `End`, `Fail`, `Hang`, `HangHard` or `Die`. A script that has run out ends the turn at once.
+    /// `End`, `Fail`, `Hang`, `HangHard` or `Die`. A script that has run out ends the turn at
+    /// once.
     fn turn(&self, n: usize) -> Vec<StubStep> {
         let steps = self.script();
         let mut turns = steps

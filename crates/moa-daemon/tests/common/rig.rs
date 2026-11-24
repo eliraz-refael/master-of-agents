@@ -226,9 +226,16 @@ impl Up {
         Client::connect(&self.sock).write(&hook_notice(line));
     }
 
-    /// The `feed` topic's `state` row, as published now.
+    /// The `feed` topic's `state` row, as published now; `null` while it isn't.
     pub fn moa_state(&self) -> Value {
-        self.core.model().borrow().topics[&Topic::Feed]["state"].clone()
+        self.core
+            .model()
+            .borrow()
+            .topics
+            .get(&Topic::Feed)
+            .and_then(|feed| feed.get("state"))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Waits until the published `state` row's `key` is `want`. The model is published once
@@ -246,9 +253,13 @@ impl Up {
 
     /// The handle of session `id`, as the `sessions` topic publishes it.
     pub fn handle(&self, id: SessionId) -> String {
-        let model = self.core.model().borrow().clone();
-        model.topics[&Topic::Sessions][&id.to_string()]["handle"]
-            .as_str()
+        let model = self.core.model();
+        let model = model.borrow();
+        model
+            .topics
+            .get(&Topic::Sessions)
+            .and_then(|sessions| sessions.get(&id.to_string()))
+            .and_then(|session| session["handle"].as_str())
             .unwrap_or_else(|| panic!("session {id} isn't published"))
             .to_string()
     }
