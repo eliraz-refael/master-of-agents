@@ -296,6 +296,7 @@ async fn updates_reach_the_core_in_order_before_the_turn_ends() {
                     id: "t1".into(),
                     title: None,
                     status: Some("completed".into()),
+                    input: None,
                 }
             ),
             ended(41, Ok(StopReason::MaxTokens)),

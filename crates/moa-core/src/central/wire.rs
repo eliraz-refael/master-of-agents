@@ -179,6 +179,9 @@ pub enum Update {
         id: String,
         title: Option<String>,
         status: Option<String>,
+        /// The tool's input as JSON, when the update gives it: Claude's adapter starts a
+        /// call with `{}` and fills it in here.
+        input: Option<String>,
     },
     /// The whole plan, as it is now.
     Plan { entries: Vec<PlanEntry> },

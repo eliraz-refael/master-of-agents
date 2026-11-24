@@ -73,6 +73,7 @@ fn tool_update(id: &str, title: Option<&str>, status: Option<&str>) -> Update {
         id: id.into(),
         title: title.map(Into::into),
         status: status.map(Into::into),
+        input: None,
     }
 }
 
@@ -263,6 +264,47 @@ fn a_tool_call_row_follows_its_updates() {
     // A tool without input says so.
     say(&b, &mut st, tool("t2", "pending", None));
     assert_eq!(body(&rows_of_kind(&st, "tool")[1])["input"], Value::Null);
+}
+
+/// Claude's adapter starts a call with `{}` and gives the input in a later update: the row
+/// takes it, cut as a call's is.
+#[test]
+fn a_tool_update_fills_in_the_input() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    say(&b, &mut st, tool("t1", "pending", Some("{}")));
+    let input = json!({"command": "moactl ls"}).to_string();
+    say(
+        &b,
+        &mut st,
+        Update::ToolUpdate {
+            id: "t1".into(),
+            title: Some("moactl ls".into()),
+            status: None,
+            input: Some(input.clone()),
+        },
+    );
+    let row = &rows_of_kind(&st, "tool")[0];
+    assert_eq!(body(row)["title"], "moactl ls");
+    assert_eq!(body(row)["input"], input);
+
+    let long = json!({"command": "x".repeat(3_000)}).to_string();
+    say(
+        &b,
+        &mut st,
+        Update::ToolUpdate {
+            id: "t1".into(),
+            title: None,
+            status: None,
+            input: Some(long),
+        },
+    );
+    let cut = body(&rows_of_kind(&st, "tool")[0])["input"]
+        .as_str()
+        .unwrap()
+        .chars()
+        .count();
+    assert!(cut <= 2_000, "{cut}");
 }
 
 fn rows_of_kind(st: &State, kind: &str) -> Vec<FeedEntry> {

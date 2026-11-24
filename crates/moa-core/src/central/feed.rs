@@ -39,8 +39,13 @@ pub fn body_text(body: &str) -> String {
 /// The body of a `tool` row: `{"title", "kind", "input"}`, its input (JSON, as the agent
 /// gave it) cut to [`TOOL_INPUT_MAX`] characters.
 pub fn tool_body(title: &str, kind: &str, input: Option<&str>) -> String {
-    let input = input.map(|i| cut(i, TOOL_INPUT_MAX));
+    let input = input.map(tool_input);
     json!({ "title": title, "kind": kind, "input": input }).to_string()
+}
+
+/// A tool's input as a `tool` row keeps it: cut to [`TOOL_INPUT_MAX`] characters.
+pub fn tool_input(input: &str) -> String {
+    cut(input, TOOL_INPUT_MAX)
 }
 
 /// The body of a `plan` row: `{"entries": [{"content", "status", "priority"}]}`.

@@ -255,6 +255,10 @@ async fn bring_up(
             None
         };
         let session_plugin = write_session_plugin(paths, &exe)?;
+        // The client passes the real home on only from a sandbox, for moa's agent's login.
+        let agent_home = std::env::var_os("MOA_AGENT_HOME")
+            .map(PathBuf::from)
+            .filter(|h| paths.is_sandboxed() && h.is_absolute());
         let deps = Deps {
             parse_action: Some(moa_proto::cli::parse_action),
             parse_command: Some(moa_proto::cli::parse_command),
@@ -272,6 +276,7 @@ async fn bring_up(
             panel: launch,
             // Set only in the packaged build; a plain `cargo` build (every test's) knows none.
             acp_adapter: moa_agents::acp::BUILT_IN_ADAPTER.map(PathBuf::from),
+            agent_home,
             agent_dir: paths.agent_dir(b),
             scope_file: paths.config_dir().join(format!("{b}.md")),
             constitution_file: paths.config_dir().join(format!("{CONSTITUTION_NAME}.md")),

@@ -2,9 +2,13 @@
 //! prompt, so no test runs the real adapter. Like `fake-claude` it reads its script from its
 //! cwd and writes only inside it: a log of what it received, and what a restarted stub needs to
 //! go on (turn and session counters, each session's transcript).
+//!
+//! Or it replays a recording (`moa_testkit::recording`): the one `--replay <file>` names, else
+//! the cwd's `REPLAY_FILE`. Either wins over a script, which is then ignored.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -21,6 +25,7 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, Error};
 use moa_testkit::StubStep;
+use moa_testkit::recording::{self, Dir, Entry, Kind, REPLAY_FILE};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -33,6 +38,8 @@ const CHILD: &str = "--child";
 const CHILD_STUBBORN: &str = "--child-stubborn";
 /// The file in the stub's cwd that holds its child's pid.
 const CHILD_PID: &str = ".stub-acp.child";
+/// The argument that names a recording to replay.
+const REPLAY: &str = "--replay";
 
 /// What the stub keeps between handlers; everything else is on disk, inside `dir`.
 struct Stub {
@@ -285,6 +292,96 @@ async fn sleep_for_good() -> Result<(), Error> {
     Ok(())
 }
 
+/// Ends a replay that can't go on, saying why.
+fn out_of_step(why: impl std::fmt::Display) -> ! {
+    eprintln!("{why}");
+    std::process::exit(1)
+}
+
+/// The client's next request or answer; its notifications (`session/cancel`) are skipped,
+/// neither waited for nor checked. `None` once it has closed its end.
+fn next_from_client(input: &mut impl BufRead) -> Option<Value> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => return None,
+            Ok(_) if line.trim().is_empty() => {}
+            Ok(_) => {
+                let msg: Value = serde_json::from_str(&line)
+                    .unwrap_or_else(|_| out_of_step("replay got a line that isn't JSON"));
+                if !matches!(Kind::of(&msg), Kind::Notification(_)) {
+                    return Some(msg);
+                }
+            }
+        }
+    }
+}
+
+/// Plays `file` as the agent: the recorded agent messages go out in order, and each recorded
+/// request or answer from the client is waited for in turn. A request must be the method the
+/// recording has next, and an answer must answer the request it does, else the replay exits 1
+/// saying both; the recorded answer to a request goes out under the client's id. Once the
+/// recording runs out, the client's requests are refused the same way, and the replay exits
+/// when the client closes its end.
+fn replay(file: &Path) -> ! {
+    let (_, entries) = recording::read(file).unwrap_or_else(|e| out_of_step(e));
+    let mut input = std::io::stdin().lock();
+    let mut stdout = std::io::stdout().lock();
+    // The client's id for each recorded request id (as JSON text, so `1` isn't `"1"`).
+    let mut ids: HashMap<String, Value> = HashMap::new();
+    for Entry { dir, mut msg } in entries {
+        match (dir, Kind::of(&msg)) {
+            (Dir::In, Kind::Notification(_)) => {}
+            (Dir::In, want) => {
+                let Some(got) = next_from_client(&mut input) else {
+                    std::process::exit(0);
+                };
+                if Kind::of(&got) != want {
+                    out_of_step(format!(
+                        "replay expected {}, got {}",
+                        want.describe(),
+                        Kind::of(&got).describe()
+                    ));
+                }
+                match want {
+                    Kind::Request(_) => {
+                        ids.insert(msg["id"].to_string(), got["id"].clone());
+                    }
+                    // The agent's requests go out under their recorded ids, so the answer
+                    // must name the one the recording answers next.
+                    _ if got["id"] != msg["id"] => out_of_step(format!(
+                        "replay expected an answer to {}, got an answer to {}",
+                        msg["id"], got["id"]
+                    )),
+                    _ => {}
+                }
+            }
+            (Dir::Out, kind) => {
+                if kind == Kind::Answer {
+                    let Some(id) = ids.remove(&msg["id"].to_string()) else {
+                        out_of_step(format!(
+                            "replay has an answer to {} that never came",
+                            msg["id"]
+                        ));
+                    };
+                    msg["id"] = id;
+                }
+                let sent = writeln!(stdout, "{msg}").and_then(|()| stdout.flush());
+                if sent.is_err() {
+                    std::process::exit(0);
+                }
+            }
+        }
+    }
+    while let Some(got) = next_from_client(&mut input) {
+        if let Kind::Request(method) = Kind::of(&got) {
+            out_of_step(format!("replay expected the end, got {method}"));
+        }
+    }
+    std::process::exit(0)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     match std::env::args().nth(1).as_deref() {
@@ -299,10 +396,20 @@ async fn main() -> Result<(), Error> {
             publish_pid(&cwd, std::process::id()).expect("publish the pid");
             return sleep_for_good().await;
         }
+        Some(REPLAY) => {
+            let file = std::env::args_os()
+                .nth(2)
+                .unwrap_or_else(|| out_of_step("--replay needs a file"));
+            replay(Path::new(&file))
+        }
         _ => {}
     }
+    let dir = std::env::current_dir().expect("cwd");
+    if dir.join(REPLAY_FILE).exists() {
+        replay(&dir.join(REPLAY_FILE))
+    }
     let stub = Arc::new(Stub {
-        dir: std::env::current_dir().expect("cwd"),
+        dir,
         cancelled: Notify::new(),
     });
     let (s_init, s_new, s_resume, s_load, s_prompt, s_cancel) = (

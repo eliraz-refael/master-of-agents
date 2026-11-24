@@ -34,6 +34,8 @@ rusqlite = { version = "0.41", features = ["bundled", "backup", "hooks", "functi
 rusqlite_migration = "2.7"
 sha2 = "0.10"
 shell-words = "1"
+# acp-scrub's --deny patterns and the paths and addresses it looks for.
+regex = "1"
 toml = "1.2.1"
 schemars = "1"
 indexmap = { version = "2", features = ["serde"] }

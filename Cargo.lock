@@ -1379,6 +1379,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures-util",
+ "insta",
  "jiff 0.2.45",
  "moa-agents",
  "moa-client",
@@ -1451,6 +1452,7 @@ dependencies = [
  "moa-platform",
  "moa-store",
  "proptest",
+ "regex",
  "rusqlite",
  "rustix",
  "serde",

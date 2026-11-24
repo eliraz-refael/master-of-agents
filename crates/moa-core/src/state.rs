@@ -210,6 +210,9 @@ pub struct Deps {
     /// The program that runs moa's agent when its account names none: the one moa was
     /// built with (`moa_agents::acp::BUILT_IN_ADAPTER`), `None` in a build without it.
     pub acp_adapter: Option<PathBuf>,
+    /// The user's real home, for moa's agent alone, in a sandbox: Claude finds its login
+    /// through the real home, which the sandbox's `HOME` hides. `None` outside a sandbox.
+    pub agent_home: Option<PathBuf>,
     /// moa's agent's folder (`Paths::agent_dir`): it runs there, with its settings and
     /// `bin/moactl`.
     pub agent_dir: PathBuf,
@@ -265,6 +268,7 @@ impl Default for Deps {
             layouts_file: PathBuf::new(),
             panel: PanelLaunch::default(),
             acp_adapter: None,
+            agent_home: None,
             agent_dir: PathBuf::from("/tmp/moa-test-brain/agent"),
             scope_file: PathBuf::from("/tmp/moa-test-config/default.md"),
             constitution_file: PathBuf::from("/tmp/moa-test-config/constitution.md"),

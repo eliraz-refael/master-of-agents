@@ -1,6 +1,7 @@
 //! Test support for moa: a throwaway tmux server in an isolated home and environment.
 
 pub mod brain;
+pub mod recording;
 mod sandbox;
 pub mod spike_fixture;
 pub mod spike_gen;
