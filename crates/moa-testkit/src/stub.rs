@@ -11,7 +11,7 @@ fn yes() -> bool {
 }
 
 /// One step of a `stub-acp` script, a JSON line in `<cwd>/.stub-acp.jsonl`. The steps up to each
-/// `End`, `Hang`, `HangHard` or `Die` are one prompt's turn.
+/// `End`, `Fail`, `Hang`, `HangHard` or `Die` are one prompt's turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "do")]
 pub enum StubStep {
@@ -57,6 +57,8 @@ pub enum StubStep {
     Wait { file: String },
     /// End the turn with this stop reason (default `end_turn`).
     End { stop: Option<String> },
+    /// Fail the turn: the prompt's answer is a JSON-RPC error (code `-32000`) with `message`.
+    Fail { message: String },
     /// Wait for `session/cancel`, then end the turn `cancelled`.
     Hang,
     /// Never end the turn, whatever arrives.
@@ -78,7 +80,7 @@ pub fn write_stub_script(dir: &Path, steps: &[StubStep]) {
 /// What stub-acp has logged in `<dir>/.stub-acp.log`: every request and notification it
 /// received as `{"method", "params"}`, plus its own `permission.outcome` and `burst.done` lines.
 /// The `initialize` line also has `env` (a few variables' values), `env_names` (every
-/// variable's name) and `cwd`.
+/// variable's name), `cwd` and the stub's `pid`.
 pub fn stub_log(dir: &Path) -> Vec<Value> {
     std::fs::read_to_string(dir.join(".stub-acp.log"))
         .unwrap_or_default()

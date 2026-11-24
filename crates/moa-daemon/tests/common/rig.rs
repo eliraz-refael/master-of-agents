@@ -8,7 +8,13 @@ use std::time::Duration;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use moa_core::UtcMs;
+use moa_core::change::Change;
 use moa_core::config::BrainName;
+use moa_core::model::{
+    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Session, SessionId,
+    SpikePane,
+};
+use moa_core::publish::Topic;
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, DaemonError, Ready, RunOptions, load_config, run};
 use moa_platform::{Paths, ensure_private_dir};
@@ -42,7 +48,12 @@ pub struct Up {
 
 impl Rig {
     pub fn new(steps: &[StubStep]) -> Rig {
-        let tb = TempBrain::new(Some(&stub_moa_toml()));
+        Rig::with_toml(&stub_moa_toml(), steps)
+    }
+
+    /// [`Rig::new`], with `toml` as its `moa.toml`.
+    pub fn with_toml(toml: &str, steps: &[StubStep]) -> Rig {
+        let tb = TempBrain::new(Some(toml));
         let paths = tb.paths();
         let agent = paths.agent_dir("default");
         ensure_private_dir(&agent).expect("the agent folder");
@@ -98,6 +109,17 @@ impl Rig {
         std::fs::write(self.agent.join(file), "").expect("the gate opens");
     }
 
+    /// Waits for a permission row in state `state` (`pending`, `cancelled`, ...).
+    pub fn wait_permission(&self, state: &str) {
+        wait_for(WAIT, || {
+            self.rows()
+                .iter()
+                .any(|(kind, _, s)| kind == "permission" && s.as_deref() == Some(state))
+                .then_some(())
+        })
+        .unwrap_or_else(|| panic!("no {state} permission row: {:?}", self.rows()));
+    }
+
     /// Waits for a feed row of `kind` that says `text`.
     pub fn wait_saved(&self, kind: &str, text: &str) {
         wait_for(WAIT, || {
@@ -111,6 +133,30 @@ impl Rig {
 
     pub fn store(&self) -> Store {
         Store::open_read_only(&self.paths.db("default")).expect("the brain's db")
+    }
+
+    /// Saves `changes` in the brain, before the daemon starts.
+    pub fn write(&self, changes: &[Change]) {
+        let mut store = Store::open(&self.paths.db("default"), &self.paths.backups("default"))
+            .expect("the brain's db");
+        store.apply(changes).expect("the rows are saved");
+    }
+
+    /// Puts `n` live, idle sessions in the brain before the daemon starts, each with its
+    /// conversation and a spike tab (so they stay live), and returns their ids, oldest first.
+    /// [`session_stop`] sends one a `Stop`.
+    pub fn seed_sessions(&self, n: u32) -> Vec<SessionId> {
+        let ids: Vec<SessionId> = (1..=n).map(session_id).collect();
+        let changes: Vec<Change> = (1..=n)
+            .flat_map(|i| {
+                let id = session_id(i);
+                let mut rows = session_rows(id, &conversation_id(i));
+                rows.push(spike_tab(id, &format!("%{i}")));
+                rows
+            })
+            .collect();
+        self.write(&changes);
+        ids
     }
 
     /// The `moa_threads` rows' ids.
@@ -177,6 +223,22 @@ impl Up {
         c
     }
 
+    /// Sends hook `line` as a hook does: a notice, with no `hello`.
+    pub fn hook(&self, line: &Value) {
+        Client::connect(&self.sock).write(&hook_notice(line));
+    }
+
+    /// The `feed` topic's `state` row, as published now.
+    pub fn moa_state(&self) -> Value {
+        self.core.model().borrow().topics[&Topic::Feed]["state"].clone()
+    }
+
+    /// Waits until the `state` row says `n` session reports are queued.
+    pub fn wait_queued(&self, n: u64) {
+        wait_for(WAIT, || (self.moa_state()["queued"] == n).then_some(()))
+            .unwrap_or_else(|| panic!("{n} reports never queued: {}", self.moa_state()));
+    }
+
     /// Stops the daemon as `shutdown` does, and waits for `run` to return.
     pub async fn stop(self) {
         let mut c = self.client();
@@ -187,6 +249,29 @@ impl Up {
             .expect("no panic");
         assert!(ended.is_ok(), "{ended:?}");
     }
+}
+
+/// An answer chunk of message `id`.
+pub fn say(text: &str, id: &str) -> StubStep {
+    StubStep::Say {
+        text: text.into(),
+        id: Some(id.into()),
+    }
+}
+
+/// The turn ends `end_turn`.
+pub fn end() -> StubStep {
+    StubStep::End { stop: None }
+}
+
+/// The turn waits for `file`: [`Rig::open`] opens it.
+pub fn gate(file: &str) -> StubStep {
+    StubStep::Wait { file: file.into() }
+}
+
+/// `console.prompt` with `wait`: the whole reply line.
+pub fn prompt(c: &mut Client, text: &str) -> Value {
+    c.call("console.prompt", json!({"text": text, "wait": true}))
 }
 
 /// The reply's text, failing on an error.
@@ -203,4 +288,108 @@ pub fn refusal(reply: &Value) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("a refusal: {reply}"))
         .to_string()
+}
+
+/// The fake clock's now is the Typical brain's, in milliseconds; `ago` is before it.
+pub fn ago(ms: i64) -> i64 {
+    let now: Timestamp = TYPICAL_NOW.parse().unwrap();
+    now.as_millisecond() - ms
+}
+
+/// The id of seeded session `i` ([`Rig::seed_sessions`]).
+fn session_id(i: u32) -> SessionId {
+    format!("0195f3a2-1111-7000-8000-{i:012}")
+        .parse()
+        .expect("a session id")
+}
+
+/// The conversation of seeded session `i`.
+fn conversation_id(i: u32) -> String {
+    format!("a1b2c3d4-0000-4000-8000-{i:012}")
+}
+
+/// A live, idle Claude session `id` in `/work/Lantern`, and its conversation `conversation`,
+/// the one its hooks name.
+pub fn session_rows(id: SessionId, conversation: &str) -> Vec<Change> {
+    let session = Session {
+        id,
+        agent_kind: AgentKind::Claude,
+        account: Some("acct-a".into()),
+        cwd: Some("/work/Lantern".into()),
+        start_cwd: Some("/work/Lantern".into()),
+        project_id: None,
+        title: None,
+        title_locked: false,
+        group_path: None,
+        lifecycle: Lifecycle::Live,
+        activity: Activity::Idle,
+        activity_at: Some(UtcMs(1)),
+        activity_why: None,
+        last_prompt: None,
+        last_turn_end_at: None,
+        seen_at: Some(UtcMs(1)),
+        asleep_at: None,
+        archived_at: None,
+        location: Location::Here,
+        resume_failed: false,
+        created_at: UtcMs(1),
+        last_seen_at: Some(UtcMs(1)),
+    };
+    let conversation = Conversation {
+        agent_kind: AgentKind::Claude,
+        conversation_id: conversation.into(),
+        session_id: id,
+        store_dir: None,
+        spike_account: None,
+        reason: ConversationReason::Start,
+        first_seen_at: UtcMs(1),
+        last_seen_at: UtcMs(1),
+        transcript_path: None,
+        transcript_present: None,
+        transcript_checked_at: None,
+    };
+    vec![Change::Session(session), Change::Conversation(conversation)]
+}
+
+/// Session `id`'s tab `pane` on the spike's own server: the daemon's reconcile at start (no
+/// server here) leaves the session live, as these tests are about hooks, not tabs.
+pub fn spike_tab(id: SessionId, pane: &str) -> Change {
+    Change::SpikePane(SpikePane {
+        session_id: id,
+        pane_id: pane.into(),
+        tmux: Some("/tmp/tmux-501/spike".into()),
+        imported_at: UtcMs(1),
+    })
+}
+
+/// A raw hook line of session `session`, whose conversation is `conversation`, at `at_ms`.
+pub fn hook_line(session: &str, conversation: &str, event: &str, at_ms: i64, seq: u32) -> Value {
+    let mut payload = json!({"session_id": conversation, "hook_event_name": event});
+    if event == "UserPromptSubmit" {
+        payload["prompt"] = json!("light the Lantern");
+    }
+    json!({
+        "v": 1,
+        "agent": "claude",
+        "at_ns": at_ms * 1_000_000,
+        "pid": 100,
+        "seq": seq,
+        "env": {"moa_session": session, "moa_brain": "default", "claude_session_id": conversation},
+        "payload": payload,
+    })
+}
+
+/// A `Stop` of seeded session `i` ([`Rig::seed_sessions`]) at `at_ms`, whose turn's last
+/// message is `said`: it queues a session report. Its `seq` is `i`, so two sessions' lines at
+/// the same time aren't one line twice.
+pub fn session_stop(i: u32, at_ms: i64, said: &str) -> Value {
+    let session = session_id(i).to_string();
+    let mut line = hook_line(&session, &conversation_id(i), "Stop", at_ms, i);
+    line["payload"]["last_assistant_message"] = json!(said);
+    line
+}
+
+/// `line` as the hook notice a hook sends.
+pub fn hook_notice(line: &Value) -> String {
+    json!({"jsonrpc": "2.0", "method": "hook", "params": line}).to_string()
 }
