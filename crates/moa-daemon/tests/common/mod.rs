@@ -1,6 +1,7 @@
 //! A running daemon on a short `/tmp` root and a raw line client for it.
 #![allow(dead_code)]
 
+pub mod hooks;
 pub mod rig;
 
 use std::io::{BufRead, BufReader, Write};
@@ -158,8 +159,19 @@ impl Client {
 
     /// Sends a request and returns the reply that carries its id, skipping notices.
     pub fn call(&mut self, method: &str, params: Value) -> Value {
+        let id = self.send(method, params);
+        self.reply(id)
+    }
+
+    /// Sends a request and returns its id, for [`Client::reply`] later.
+    pub fn send(&mut self, method: &str, params: Value) -> i64 {
         let id = self.id();
         self.write(&request(id, method, params));
+        id
+    }
+
+    /// The reply that carries `id`, skipping notices and other replies.
+    pub fn reply(&mut self, id: i64) -> Value {
         loop {
             let v = self.read().expect("a reply");
             if v.get("id") == Some(&json!(id)) {

@@ -78,11 +78,29 @@ pub fn stub_moa_toml() -> String {
     moa_toml_with_adapter(&stub_acp())
 }
 
+/// [`stub_moa_toml`], with a second account `acct-b` set up the same way: one moa can switch
+/// to.
+pub fn stub_moa_toml_two_accounts() -> String {
+    format!(
+        "{}{}",
+        stub_moa_toml(),
+        claude_account("acct-b", &stub_acp())
+    )
+}
+
 /// [`stub_moa_toml`], with `adapter` as the account's ACP adapter.
 pub fn moa_toml_with_adapter(adapter: &Path) -> String {
     format!(
-        "[brains.default]\nmoa_account = \"acct-a\"\n\
-         [accounts.acct-a]\nkind = \"claude\"\nstore = \"~/.claude-acct-a\"\n\
+        "[brains.default]\nmoa_account = \"acct-a\"\n{}",
+        claude_account("acct-a", adapter)
+    )
+}
+
+/// The `moa.toml` table of Claude account `name`: store `~/.claude-<name>`, launcher
+/// `fake-claude`, and `adapter` as its ACP adapter.
+fn claude_account(name: &str, adapter: &Path) -> String {
+    format!(
+        "[accounts.{name}]\nkind = \"claude\"\nstore = \"~/.claude-{name}\"\n\
          launcher = \"{}\"\nacp = \"{}\"\n",
         fake_claude().display(),
         adapter.display()

@@ -8,7 +8,10 @@ use std::time::Duration;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use moa_core::UtcMs;
+use moa_core::change::Change;
 use moa_core::config::BrainName;
+use moa_core::model::SessionId;
+use moa_core::publish::Topic;
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, DaemonError, Ready, RunOptions, load_config, run};
 use moa_platform::{Paths, ensure_private_dir};
@@ -21,6 +24,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::Client;
+use super::hooks::{hook_line, hook_notice, session_rows, spike_tab};
 
 pub const WAIT: Duration = Duration::from_secs(10);
 
@@ -42,7 +46,12 @@ pub struct Up {
 
 impl Rig {
     pub fn new(steps: &[StubStep]) -> Rig {
-        let tb = TempBrain::new(Some(&stub_moa_toml()));
+        Rig::with_toml(&stub_moa_toml(), steps)
+    }
+
+    /// [`Rig::new`], with `toml` as its `moa.toml`.
+    pub fn with_toml(toml: &str, steps: &[StubStep]) -> Rig {
+        let tb = TempBrain::new(Some(toml));
         let paths = tb.paths();
         let agent = paths.agent_dir("default");
         ensure_private_dir(&agent).expect("the agent folder");
@@ -98,6 +107,17 @@ impl Rig {
         std::fs::write(self.agent.join(file), "").expect("the gate opens");
     }
 
+    /// Waits for a permission row in state `state` (`pending`, `cancelled`, ...).
+    pub fn wait_permission(&self, state: &str) {
+        wait_for(WAIT, || {
+            self.rows()
+                .iter()
+                .any(|(kind, _, s)| kind == "permission" && s.as_deref() == Some(state))
+                .then_some(())
+        })
+        .unwrap_or_else(|| panic!("no {state} permission row: {:?}", self.rows()));
+    }
+
     /// Waits for a feed row of `kind` that says `text`.
     pub fn wait_saved(&self, kind: &str, text: &str) {
         wait_for(WAIT, || {
@@ -111,6 +131,30 @@ impl Rig {
 
     pub fn store(&self) -> Store {
         Store::open_read_only(&self.paths.db("default")).expect("the brain's db")
+    }
+
+    /// Saves `changes` in the brain, before the daemon starts.
+    pub fn write(&self, changes: &[Change]) {
+        let mut store = Store::open(&self.paths.db("default"), &self.paths.backups("default"))
+            .expect("the brain's db");
+        store.apply(changes).expect("the rows are saved");
+    }
+
+    /// Puts `n` live, idle sessions in the brain before the daemon starts, each with its
+    /// conversation and a spike tab (so they stay live), and returns their ids, oldest first.
+    /// [`session_stop`] sends one a `Stop`.
+    pub fn seed_sessions(&self, n: u32) -> Vec<SessionId> {
+        let ids: Vec<SessionId> = (1..=n).map(session_id).collect();
+        let changes: Vec<Change> = (1..=n)
+            .flat_map(|i| {
+                let id = session_id(i);
+                let mut rows = session_rows(id, &conversation_id(i));
+                rows.push(spike_tab(id, &format!("%{i}")));
+                rows
+            })
+            .collect();
+        self.write(&changes);
+        ids
     }
 
     /// The `moa_threads` rows' ids.
@@ -177,6 +221,49 @@ impl Up {
         c
     }
 
+    /// Sends hook `line` as a hook does: a notice, with no `hello`.
+    pub fn hook(&self, line: &Value) {
+        Client::connect(&self.sock).write(&hook_notice(line));
+    }
+
+    /// The `feed` topic's `state` row, as published now; `null` while it isn't.
+    pub fn moa_state(&self) -> Value {
+        self.core
+            .model()
+            .borrow()
+            .topics
+            .get(&Topic::Feed)
+            .and_then(|feed| feed.get("state"))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Waits until the published `state` row's `key` is `want`. The model is published once
+    /// a commit is released, a moment after the rows reach the disk, so a test that has seen
+    /// the rows waits for it too.
+    pub fn wait_state(&self, key: &str, want: Value) {
+        wait_for(WAIT, || (self.moa_state()[key] == want).then_some(()))
+            .unwrap_or_else(|| panic!("{key} never became {want}: {}", self.moa_state()));
+    }
+
+    /// Waits until the `state` row says `n` session reports are queued.
+    pub fn wait_queued(&self, n: u64) {
+        self.wait_state("queued", json!(n));
+    }
+
+    /// The handle of session `id`, as the `sessions` topic publishes it.
+    pub fn handle(&self, id: SessionId) -> String {
+        let model = self.core.model();
+        let model = model.borrow();
+        model
+            .topics
+            .get(&Topic::Sessions)
+            .and_then(|sessions| sessions.get(&id.to_string()))
+            .and_then(|session| session["handle"].as_str())
+            .unwrap_or_else(|| panic!("session {id} isn't published"))
+            .to_string()
+    }
+
     /// Stops the daemon as `shutdown` does, and waits for `run` to return.
     pub async fn stop(self) {
         let mut c = self.client();
@@ -187,6 +274,29 @@ impl Up {
             .expect("no panic");
         assert!(ended.is_ok(), "{ended:?}");
     }
+}
+
+/// An answer chunk of message `id`.
+pub fn say(text: &str, id: &str) -> StubStep {
+    StubStep::Say {
+        text: text.into(),
+        id: Some(id.into()),
+    }
+}
+
+/// The turn ends `end_turn`.
+pub fn end() -> StubStep {
+    StubStep::End { stop: None }
+}
+
+/// The turn waits for `file`: [`Rig::open`] opens it.
+pub fn gate(file: &str) -> StubStep {
+    StubStep::Wait { file: file.into() }
+}
+
+/// `console.prompt` with `wait`: the whole reply line.
+pub fn prompt(c: &mut Client, text: &str) -> Value {
+    c.call("console.prompt", json!({"text": text, "wait": true}))
 }
 
 /// The reply's text, failing on an error.
@@ -203,4 +313,27 @@ pub fn refusal(reply: &Value) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("a refusal: {reply}"))
         .to_string()
+}
+
+/// The id of seeded session `i` ([`Rig::seed_sessions`]).
+fn session_id(i: u32) -> SessionId {
+    format!("0195f3a2-1111-7000-8000-{i:012}")
+        .parse()
+        .expect("a session id")
+}
+
+/// The conversation of seeded session `i`. Its first 8 characters, the session's handle, are
+/// its own.
+fn conversation_id(i: u32) -> String {
+    format!("a1b2c3{i:02}-0000-4000-8000-000000000001")
+}
+
+/// A `Stop` of seeded session `i` ([`Rig::seed_sessions`]) at `at_ms`, whose turn's last
+/// message is `said`: it queues a session report. Its `seq` is `i`, so two sessions' lines at
+/// the same time aren't one line twice.
+pub fn session_stop(i: u32, at_ms: i64, said: &str) -> Value {
+    let session = session_id(i).to_string();
+    let mut line = hook_line(&session, &conversation_id(i), "Stop", at_ms, i);
+    line["payload"]["last_assistant_message"] = json!(said);
+    line
 }

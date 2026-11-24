@@ -6,8 +6,7 @@ mod common;
 use std::process::{Child, Stdio};
 
 use moa_platform::ensure_private_dir;
-use moa_testkit::{StubStep, TempBrain, stub_log, stub_moa_toml, wait_for, write_stub_script};
-use serde_json::Value;
+use moa_testkit::{StubStep, TempBrain, stub_moa_toml, wait_for, write_stub_script};
 
 use common::*;
 
@@ -48,14 +47,6 @@ fn sql(tb: &TempBrain, query: &str) -> Vec<String> {
         .lines()
         .skip(1)
         .map(str::to_string)
-        .collect()
-}
-
-/// The stub's log lines for `method`.
-fn logged(tb: &TempBrain, method: &str) -> Vec<Value> {
-    stub_log(&tb.paths().agent_dir(B))
-        .into_iter()
-        .filter(|l| l["method"] == method)
         .collect()
 }
 
@@ -109,7 +100,7 @@ fn a_permission_is_answered_from_the_command_line() {
     });
     assert_eq!(said, "understood\n");
 
-    let outcome = logged(&tb, "permission.outcome");
+    let outcome = stub_logged(&tb, "permission.outcome");
     assert_eq!(outcome.len(), 1, "{outcome:?}");
     assert_eq!(outcome[0]["params"]["optionId"], "no", "{outcome:?}");
     let feed = ok(&tb, &["console", "feed"]);
@@ -131,8 +122,8 @@ fn the_thread_survives_a_daemon_restart() {
     ok(&tb, &["shutdown"]);
     assert_eq!(ok(&tb, &["console", "prompt", "second"]), "two\n");
 
-    assert_eq!(logged(&tb, "session/resume").len(), 1);
-    assert_eq!(logged(&tb, "session/new").len(), 1);
+    assert_eq!(stub_logged(&tb, "session/resume").len(), 1);
+    assert_eq!(stub_logged(&tb, "session/new").len(), 1);
     assert_eq!(sql(&tb, "SELECT count(*) FROM moa_threads"), ["1"]);
 }
 

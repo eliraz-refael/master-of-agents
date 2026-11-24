@@ -7,37 +7,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use common::rig::{Rig, WAIT, answer, refusal};
-use common::{Client, request};
+use common::Client;
+use common::rig::{Rig, WAIT, answer, end, gate, prompt, refusal, say};
 use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::model::{FeedEntry, MoaThread, ThreadKind};
 use moa_platform::proc::{children, running};
 use moa_platform::spawn;
-use moa_store::Store;
 use moa_store::actor::Fault;
 use moa_testkit::{StubStep, fake_claude, wait_for};
 use serde_json::{Value, json};
-
-fn say(text: &str, id: &str) -> StubStep {
-    StubStep::Say {
-        text: text.into(),
-        id: Some(id.into()),
-    }
-}
-
-fn end() -> StubStep {
-    StubStep::End { stop: None }
-}
-
-fn gate(file: &str) -> StubStep {
-    StubStep::Wait { file: file.into() }
-}
-
-/// `console.prompt` with `wait`: the whole reply line.
-fn prompt(c: &mut Client, text: &str) -> Value {
-    c.call("console.prompt", json!({"text": text, "wait": true}))
-}
 
 fn kinds(feed: &[(String, String)]) -> Vec<&str> {
     feed.iter().map(|(k, _)| k.as_str()).collect()
@@ -85,15 +64,7 @@ async fn a_recorded_session_replays() {
     std::thread::scope(|s| {
         // The recorded request waits for an answer: a second client says no.
         s.spawn(|| {
-            wait_for(WAIT, || {
-                rig.rows()
-                    .iter()
-                    .any(|(kind, _, state)| {
-                        kind == "permission" && state.as_deref() == Some("pending")
-                    })
-                    .then_some(())
-            })
-            .expect("a pending permission row");
+            rig.wait_permission("pending");
             let reply = answerer.call("console.permission", json!({"answer": "no"}));
             assert_eq!(answer(&reply), "refused");
         });
@@ -213,12 +184,10 @@ async fn a_hang_can_be_cancelled() {
     let rig = Rig::new(&[say("thinking", "m1"), StubStep::Hang]);
     let up = rig.start().await;
     let mut asker = up.client();
-    let id = asker.id();
-    asker.write(&request(
-        id,
+    let id = asker.send(
         "console.prompt",
         json!({"text": "take your time", "wait": true}),
-    ));
+    );
     // Its first words are saved: the stub's turn has begun, and waits for the cancel.
     rig.wait_saved("moa", "thinking");
 
@@ -226,12 +195,7 @@ async fn a_hang_can_be_cancelled() {
     let cancelled = other.call("console.cancel", json!({}));
     assert_eq!(answer(&cancelled), "cancelling moa's turn");
 
-    let reply = loop {
-        let v = asker.read().expect("the prompt's answer");
-        if v.get("id") == Some(&json!(id)) {
-            break v;
-        }
-    };
+    let reply = asker.reply(id);
     assert_eq!(answer(&reply), "moa's turn ended early: cancelled");
     assert_eq!(rig.logged("session/cancel").len(), 1);
     let nothing = other.call("console.cancel", json!({}));
@@ -244,12 +208,7 @@ async fn stopping_the_daemon_ends_the_adapter_and_its_children() {
     let rig = Rig::new(&[StubStep::Spawn, StubStep::HangHard]);
     let up = rig.start().await;
     let mut c = up.client();
-    let id = c.id();
-    c.write(&request(
-        id,
-        "console.prompt",
-        json!({"text": "go", "wait": true}),
-    ));
+    c.send("console.prompt", json!({"text": "go", "wait": true}));
     let child = child_pid(&rig.agent);
     // The stub is this process's child (the daemon runs here); its child is the stub's.
     let stub = children(std::process::id())
@@ -309,15 +268,7 @@ async fn an_answer_whose_commit_fails_is_never_sent() {
     let (mut asker, mut answerer) = (up.client(), up.client());
     std::thread::scope(|s| {
         s.spawn(|| {
-            let pending = || {
-                rig.rows()
-                    .iter()
-                    .any(|(kind, _, state)| {
-                        kind == "permission" && state.as_deref() == Some("pending")
-                    })
-                    .then_some(())
-            };
-            wait_for(WAIT, pending).expect("a pending permission row");
+            rig.wait_permission("pending");
             // The answer's commit fails: nothing reaches moa's agent, and the card waits.
             up.core.store_fault(Fault::FailNextCommit);
             let reply = answerer.call("console.permission", json!({"answer": "once"}));
@@ -408,20 +359,10 @@ async fn a_burst_of_5000_chunks_is_answered_in_time() {
     let rig = Rig::new(&[StubStep::Burst { n: 5000 }, end()]);
     let up = rig.start().await;
     let mut c = up.client();
-    let id = c.id();
-    c.write(&request(
-        id,
-        "console.prompt",
-        json!({"text": "count", "wait": true}),
-    ));
+    let id = c.send("console.prompt", json!({"text": "count", "wait": true}));
     rig.wait_logged("burst.done");
     let last = Instant::now();
-    let reply = loop {
-        let v = c.read().expect("the prompt's answer");
-        if v.get("id") == Some(&json!(id)) {
-            break v;
-        }
-    };
+    let reply = c.reply(id);
     assert!(last.elapsed() < WAIT, "answered after {:?}", last.elapsed());
 
     let words: String = (0..5000).map(|i| format!("{i} ")).collect();
@@ -436,8 +377,6 @@ impl Rig {
     /// Puts `n` feed rows (ids 1 to `n`) in the brain before the daemon starts: the first
     /// `split` in thread `th-a`, the rest in `th-b`.
     fn seed_feed(&self, n: i64, split: i64) {
-        let store = Store::open(&self.paths.db("default"), &self.paths.backups("default"))
-            .expect("the brain's db");
         let day = jiff::civil::date(2026, 11, 20);
         let mut changes: Vec<Change> = ["th-a", "th-b"]
             .iter()
@@ -464,8 +403,7 @@ impl Rig {
                 state: None,
             })
         }));
-        let mut store = store;
-        store.apply(&changes).expect("the rows are saved");
+        self.write(&changes);
     }
 }
 

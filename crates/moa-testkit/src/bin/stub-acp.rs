@@ -41,6 +41,10 @@ const CHILD_PID: &str = ".stub-acp.child";
 /// The argument that names a recording to replay.
 const REPLAY: &str = "--replay";
 
+/// How a turn ended: with a stop reason, or failed (`Fail`) with the error its prompt is
+/// answered with.
+type Ending = Result<StopReason, Error>;
+
 /// What the stub keeps between handlers; everything else is on disk, inside `dir`.
 struct Stub {
     dir: PathBuf,
@@ -108,7 +112,8 @@ impl Stub {
     }
 
     /// The `n`-th turn of the script (counting from 0): the steps up to and with the next
-    /// `End`, `Hang`, `HangHard` or `Die`. A script that has run out ends the turn at once.
+    /// `End`, `Fail`, `Hang`, `HangHard` or `Die`. A script that has run out ends the turn at
+    /// once.
     fn turn(&self, n: usize) -> Vec<StubStep> {
         let steps = self.script();
         let mut turns = steps
@@ -117,7 +122,11 @@ impl Stub {
             .fold(vec![Vec::new()], |mut turns, step| {
                 let last = matches!(
                     step,
-                    StubStep::End { .. } | StubStep::Hang | StubStep::HangHard | StubStep::Die
+                    StubStep::End { .. }
+                        | StubStep::Fail { .. }
+                        | StubStep::Hang
+                        | StubStep::HangHard
+                        | StubStep::Die
                 );
                 turns.last_mut().expect("a turn").push(step);
                 if last {
@@ -165,7 +174,7 @@ impl Stub {
         cx: &ConnectionTo<Client>,
         id: &SessionId,
         steps: Vec<StubStep>,
-    ) -> Result<StopReason, Error> {
+    ) -> Result<Ending, Error> {
         let chunk = |s: &str| ContentChunk::new(text(s));
         for step in steps {
             match step {
@@ -234,17 +243,18 @@ impl Stub {
                     }
                 }
                 StubStep::End { stop } => {
-                    return parse(stop.as_deref().unwrap_or("end_turn"));
+                    return parse(stop.as_deref().unwrap_or("end_turn")).map(Ok);
                 }
+                StubStep::Fail { message } => return Ok(Err(Error::new(-32000, message))),
                 StubStep::Hang => {
                     self.cancelled.notified().await;
-                    return Ok(StopReason::Cancelled);
+                    return Ok(Ok(StopReason::Cancelled));
                 }
                 StubStep::HangHard => std::future::pending().await,
                 StubStep::Die => std::process::exit(1),
             }
         }
-        Ok(StopReason::EndTurn)
+        Ok(Ok(StopReason::EndTurn))
     }
 }
 
@@ -258,7 +268,7 @@ fn append(path: &Path, line: &str) {
 }
 
 /// The initialize line's extra: the environment moa gave its agent (a few values, and the
-/// names of every variable), and the cwd.
+/// names of every variable), the cwd, and the stub's pid.
 fn launch_facts() -> Value {
     let var = |name: &str| std::env::var(name).ok();
     let names: Vec<String> = std::env::vars_os()
@@ -275,6 +285,7 @@ fn launch_facts() -> Value {
             "PATH": var("PATH"),
         },
         "cwd": std::env::current_dir().expect("cwd"),
+        "pid": std::process::id(),
     })
 }
 
@@ -502,8 +513,10 @@ async fn main() -> Result<(), Error> {
                         );
                     }
                     let steps = stub.turn(stub.bump("turns") - 1);
-                    let stop = stub.play(&task_cx, &req.session_id, steps).await?;
-                    responder.respond(PromptResponse::new(stop))
+                    match stub.play(&task_cx, &req.session_id, steps).await? {
+                        Ok(stop) => responder.respond(PromptResponse::new(stop)),
+                        Err(failed) => responder.respond_with_error(failed),
+                    }
                 })
             },
             agent_client_protocol::on_receive_request!(),

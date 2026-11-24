@@ -9,18 +9,15 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use common::hooks::{ago, hook_notice, session_rows, spike_tab};
 use common::{Client, Daemon, boot, boot_with, request};
-use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use moa_agents::claude::{last_assistant_text, normalize};
 use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::config::BrainName;
 use moa_core::hook::HookLine;
-use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, PaneBinding,
-    Session, SessionId, SpikePane,
-};
+use moa_core::model::PaneBinding;
 use moa_core::op::{Op, ReqId};
 use moa_core::publish::Topic;
 use moa_core::state::CallerInfo;
@@ -31,7 +28,7 @@ use moa_platform::Paths;
 use moa_platform::spool;
 use moa_store::Store;
 use moa_store::actor::Fault;
-use moa_testkit::brain::{TYPICAL_NOW, TYPICAL_TZ, TypicalBrain};
+use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
 use moa_testkit::wait_for;
 use serde_json::{Value, json};
 use tokio::time::timeout;
@@ -41,70 +38,20 @@ const C: &str = "a1b2c3d4-0000-4000-8000-000000000001";
 /// How long a test waits for something the daemon does on its own.
 const WAIT: Duration = Duration::from_secs(10);
 
-/// The fake clock's now is the Typical brain's, in milliseconds; `ago` is before it.
-fn ago(ms: i64) -> i64 {
-    let now: Timestamp = TYPICAL_NOW.parse().unwrap();
-    now.as_millisecond() - ms
-}
-
 /// A live, idle session, in the brain's store. Its spike tab is on the spike's own server,
 /// so the daemon's reconcile at start (no server here) leaves it live: these tests are
 /// about hooks, not tabs.
 fn seed(store: &mut Store) {
     seed_session(store);
-    let tab = SpikePane {
-        session_id: S.parse().unwrap(),
-        pane_id: "%1".into(),
-        tmux: Some("/tmp/tmux-501/spike".into()),
-        imported_at: UtcMs(1),
-    };
     store
-        .apply(&[Change::SpikePane(tab)])
+        .apply(&[spike_tab(S.parse().unwrap(), "%1")])
         .expect("the spike tab is saved");
 }
 
 /// A live, idle session, in the brain's store, with no tab anywhere.
 fn seed_session(store: &mut Store) {
-    let id: SessionId = S.parse().unwrap();
-    let session = Session {
-        id,
-        agent_kind: AgentKind::Claude,
-        account: Some("acct-a".into()),
-        cwd: Some("/work/Lantern".into()),
-        start_cwd: Some("/work/Lantern".into()),
-        project_id: None,
-        title: None,
-        title_locked: false,
-        group_path: None,
-        lifecycle: Lifecycle::Live,
-        activity: Activity::Idle,
-        activity_at: Some(UtcMs(1)),
-        activity_why: None,
-        last_prompt: None,
-        last_turn_end_at: None,
-        seen_at: Some(UtcMs(1)),
-        asleep_at: None,
-        archived_at: None,
-        location: Location::Here,
-        resume_failed: false,
-        created_at: UtcMs(1),
-        last_seen_at: Some(UtcMs(1)),
-    };
-    let conversation = Conversation {
-        agent_kind: AgentKind::Claude,
-        conversation_id: C.into(),
-        session_id: id,
-        store_dir: None,
-        spike_account: None,
-        reason: ConversationReason::Start,
-        first_seen_at: UtcMs(1),
-        last_seen_at: UtcMs(1),
-        transcript_path: None,
-        transcript_present: None,
-        transcript_checked_at: None,
-    };
     store
-        .apply(&[Change::Session(session), Change::Conversation(conversation)])
+        .apply(&session_rows(S.parse().unwrap(), C))
         .expect("the session is saved");
 }
 
@@ -115,23 +62,7 @@ fn seed_db(paths: &Paths) {
 
 /// A raw hook line for the seeded session, at `at_ms`.
 fn hook_line(event: &str, at_ms: i64, seq: u32) -> Value {
-    let mut payload = json!({"session_id": C, "hook_event_name": event});
-    if event == "UserPromptSubmit" {
-        payload["prompt"] = json!("light the Lantern");
-    }
-    json!({
-        "v": 1,
-        "agent": "claude",
-        "at_ns": at_ms * 1_000_000,
-        "pid": 100,
-        "seq": seq,
-        "env": {"moa_session": S, "moa_brain": "default", "claude_session_id": C},
-        "payload": payload,
-    })
-}
-
-fn notice(line: &Value) -> String {
-    json!({"jsonrpc": "2.0", "method": "hook", "params": line}).to_string()
+    common::hooks::hook_line(S, C, event, at_ms, seq)
 }
 
 fn with_id(id: i64, line: &Value) -> String {
@@ -194,7 +125,7 @@ fn spool_is_empty(paths: &Paths) -> bool {
 async fn a_hook_line_updates_the_session() {
     let d = boot_with(seed_db, |_| {}).await;
     let mut c = Client::connect(&d.sock);
-    c.write(&notice(&hook_line("UserPromptSubmit", ago(1000), 1)));
+    c.write(&hook_notice(&hook_line("UserPromptSubmit", ago(1000), 1)));
     // The hook needs no hello. `session.ls` does, and it is read after the hook.
     c.hello();
     assert_eq!(display(&mut c), "working");
@@ -212,7 +143,7 @@ async fn lines_from_hooks_that_already_left_all_arrive() {
         writeln!(
             s,
             "{}",
-            notice(&hook_line("UserPromptSubmit", at, i as u32))
+            hook_notice(&hook_line("UserPromptSubmit", at, i as u32))
         )
         .unwrap();
     }
@@ -267,7 +198,7 @@ async fn a_live_hook_drains_lines_spooled_while_the_daemon_was_up() {
         &[hook_line("UserPromptSubmit", t1, 1)],
     );
     let mut c = Client::connect(&d.sock);
-    c.write(&notice(&hook_line("Stop", t2, 2)));
+    c.write(&hook_notice(&hook_line("Stop", t2, 2)));
     let both = wait_for(WAIT, || {
         (event_times(&d.paths).len() == 2 && spool_is_empty(&d.paths)).then_some(())
     });
@@ -319,7 +250,7 @@ async fn a_bad_hook_line_is_refused_only_when_it_has_an_id() {
     assert_eq!(reply["id"], 5);
     assert_eq!(reply["error"]["code"], -32602);
     // Without an id nothing is said: the next thing read is the reply to what follows.
-    c.write(&notice(&json!({"x": 1})));
+    c.write(&hook_notice(&json!({"x": 1})));
     let id = c.id();
     c.write(&request(
         id,
