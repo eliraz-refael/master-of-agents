@@ -37,14 +37,19 @@ const UNSET: [&str; 5] = [
 pub const ACCOUNT_KEY: &str = "moa.account";
 
 /// The account moa's agent runs on: the one `/account` chose while moa.toml still has it,
-/// else moa.toml's `moa_account`.
+/// else moa.toml's ([`configured`]).
 pub fn account(state: &State) -> Option<AccountName> {
-    let config = state.config();
     let chosen = state
         .meta(ACCOUNT_KEY)
         .and_then(|n| AccountName::parse(n).ok())
-        .filter(|n| config.accounts.contains_key(n));
-    chosen.or_else(|| config.brain(state.brain()).unwrap_or_default().moa_account)
+        .filter(|n| state.config().accounts.contains_key(n));
+    chosen.or_else(|| configured(state))
+}
+
+/// moa.toml's `moa_account` for this brain: the account `/account` goes back to.
+pub fn configured(state: &State) -> Option<AccountName> {
+    let config = state.config();
+    config.brain(state.brain()).unwrap_or_default().moa_account
 }
 
 /// The accounts moa.toml has that moa's agent can run on ([`spec_on`]), by name.

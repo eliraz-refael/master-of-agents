@@ -426,7 +426,7 @@ fn account_switches_with_the_next_prompt() {
     let fx = account(&mut st, &now, 2, Some("acct-b"));
     assert_eq!(
         answered(&fx),
-        Ok("moa switches to acct-b with your next prompt, in a new thread".into())
+        Ok("moa switches to acct-b with your next prompt or wake-up, in a new thread".into())
     );
     assert_eq!(common::changes(&fx), [&account_meta(Some("acct-b"))]);
     assert_eq!(central::acps(&fx), [&AcpCmd::Stop { generation }]);
@@ -490,7 +490,7 @@ fn account_back_to_moa_toml_clears_meta() {
     let fx = account(&mut st, &now, 2, Some("acct-a"));
     assert_eq!(
         answered(&fx),
-        Ok("moa switches to acct-a with your next prompt, in a new thread".into())
+        Ok("moa switches to acct-a with your next prompt or wake-up, in a new thread".into())
     );
     assert_eq!(common::changes(&fx), [&account_meta(None)]);
     assert_eq!(spec(&st).unwrap().0.as_str(), "acct-a");

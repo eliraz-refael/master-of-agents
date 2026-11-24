@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::model::SuggestionAction;
 use crate::op::{Done, NoParams, Op, PermAnswer};
 use crate::ops::suggestions::split;
-use crate::sleep;
+use crate::sleep::{self, SLEEP_AFTER_USAGE};
 use crate::state::Deps;
 
 /// One console command.
@@ -97,9 +97,6 @@ pub const PERMISSION_USAGE: &str = "/permission takes a request's id, then once,
 
 /// What an `/auto` line that isn't one is told.
 pub const AUTO_USAGE: &str = "/auto takes on or off";
-
-/// What a `/sleep` line that isn't one is told, and `console.sleep_after` with a bad value.
-pub const SLEEP_AFTER_USAGE: &str = "/sleep takes on, off or a number of hours";
 
 /// What an `/account` line that isn't one is told.
 pub const ACCOUNT_USAGE: &str = "/account takes one account's name";

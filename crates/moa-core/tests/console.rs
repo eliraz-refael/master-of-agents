@@ -4,8 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use moa_core::console::{ACCOUNT_USAGE, AUTO_USAGE, Parsed, SLEEP_AFTER_USAGE, parse};
+use moa_core::console::{ACCOUNT_USAGE, AUTO_USAGE, Parsed, parse};
 use moa_core::op::Op;
+use moa_core::sleep::SLEEP_AFTER_USAGE;
 use moa_core::state::Deps;
 
 fn deps(home: &Path) -> Deps {

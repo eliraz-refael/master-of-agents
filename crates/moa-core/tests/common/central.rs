@@ -108,6 +108,14 @@ impl Disk {
         moa_at(b, "acct-a", &self.settings, self.snapshot(), now)
     }
 
+    /// The `meta` value of `key` on the disk now.
+    pub fn meta(&self, key: &str) -> Option<String> {
+        self.store
+            .conn()
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
+    }
+
     /// The bodies of every `you` row saved, read with SQL: every one, not a tail.
     pub fn you_bodies(&self) -> Vec<String> {
         let mut rows = self

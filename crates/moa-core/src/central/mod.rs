@@ -283,13 +283,19 @@ fn new_run(moa: &mut Moa, account: AccountName, spec: AdapterSpec) -> Effect {
     moa.generation += 1;
     moa.phase = Phase::Starting;
     moa.account = Some(account);
-    moa.caps = None;
-    moa.thread = None;
-    moa.replaying = None;
+    forget_run(moa);
     Effect::Acp(AcpCmd::Start {
         generation: moa.generation,
         spec,
     })
+}
+
+/// What a run of moa's agent leaves is forgotten: what it offered, its open thread and a
+/// replay under way.
+fn forget_run(moa: &mut Moa) {
+    moa.caps = None;
+    moa.thread = None;
+    moa.replaying = None;
 }
 
 /// What a switch of account hears while moa starts or answers.
@@ -330,8 +336,7 @@ pub fn switch_account(
         let text = format!("moa is on {account} already");
         return reply(Ok(Done { text, data }));
     }
-    let ours = state.config().brain(state.brain()).unwrap_or_default();
-    let value = (ours.moa_account.as_ref() != Some(&account)).then(|| account.to_string());
+    let value = (launch::configured(state).as_ref() != Some(&account)).then(|| account.to_string());
     let key = launch::ACCOUNT_KEY.to_string();
     let mut tx = Tx::new(now);
     if let Err(e) = tx.commit(state, vec![Change::Meta { key, value }]) {
@@ -345,14 +350,14 @@ pub fn switch_account(
     });
     moa.phase = Phase::Off;
     moa.account = None;
-    moa.caps = None;
-    moa.thread = None;
-    moa.replaying = None;
+    forget_run(moa);
     moa.reopen_failed = false;
     moa.new_thread = true;
     let mut fx = post_commit(state, tx);
     fx.extend(stop.map(Effect::Acp));
-    let text = format!("moa switches to {account} with your next prompt, in a new thread");
+    // With reports waiting, a wake-up may start it before you do.
+    let text =
+        format!("moa switches to {account} with your next prompt or wake-up, in a new thread");
     fx.extend(reply(Ok(Done { text, data })));
     fx.extend(said(state));
     fx
@@ -750,10 +755,11 @@ fn thread_row(
 /// brief. The session reports queued now go with it ([`reports::batch`]): a wake-up's text
 /// is theirs, and your text follows them. The same commit deletes them. While writes are
 /// refused the prompt is refused too: nothing is sent, and the reports stay. A wake-up that
-/// finds nothing left to carry saves and sends nothing.
+/// finds nothing left to carry, or `/auto` turned off while moa's agent started, saves and
+/// sends nothing.
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let reports = reports::batch(state, now, state.config().moa.wake_batch);
-    if p.source == Source::Wake && reports.is_empty() {
+    if p.source == Source::Wake && (reports.is_empty() || !channel::auto_on(state)) {
         return Vec::new();
     }
     let n = reports.len();
@@ -864,9 +870,7 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
         None => Restarted::NotStarted,
     };
     moa.phase = phase;
-    moa.caps = None;
-    moa.thread = None;
-    moa.replaying = None;
+    forget_run(moa);
     let pending = moa.pending.take();
     if let Some(p) = &pending {
         failed_wake(moa, p, now);

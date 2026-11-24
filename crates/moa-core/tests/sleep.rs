@@ -21,7 +21,7 @@ use moa_core::model::{
 };
 use moa_core::op::{Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Topic};
-use moa_core::sleep::{SLEEP_KEY, why_not};
+use moa_core::sleep::{SLEEP_AFTER_USAGE, SLEEP_KEY, why_not};
 use moa_core::state::{Deps, EventWhat, LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
@@ -886,7 +886,7 @@ fn sleep_sets_the_threshold() {
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
 
     // A bad value is refused, typed or sent, and changes nothing.
-    let usage = Err(OpError(moa_core::console::SLEEP_AFTER_USAGE.into()));
+    let usage = Err(OpError(SLEEP_AFTER_USAGE.into()));
     for value in ["x", "-1", "nan", "inf", ""] {
         let fx = sleep_after(&mut r, 6, Some(value));
         assert_eq!(replies(&fx), [(ReqId(6), usage.clone())], "{value}");

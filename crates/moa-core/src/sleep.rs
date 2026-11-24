@@ -8,7 +8,6 @@ use serde_json::json;
 use crate::change::Change;
 use crate::cockpit::run::through_queue;
 use crate::config::{SleepAfter, hours_ms};
-use crate::console::SLEEP_AFTER_USAGE;
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, TimerKey, rearm};
 use crate::hooks::asleep;
@@ -27,6 +26,9 @@ use crate::{Now, UtcMs};
 /// The `meta` key `/sleep` sets: the wait in milliseconds, `0` for never. It wins over
 /// moa.toml's `sleep_after_hours` until `/sleep on` removes it.
 pub const SLEEP_KEY: &str = "sleep.after_ms";
+
+/// What a `/sleep` line that isn't one is told, and `console.sleep_after` with a bad value.
+pub const SLEEP_AFTER_USAGE: &str = "/sleep takes on, off or a number of hours";
 
 /// Why session `id` can't go to sleep at `now` after `after_ms` idle, or `None` when it can
 /// (R18). The reasons are fixed words, for tests and logs.

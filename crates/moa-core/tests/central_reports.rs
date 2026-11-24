@@ -937,6 +937,30 @@ fn auto_flips_and_sets() {
     assert_eq!(said(&typed(&mut st, 7, "/auto")), ON);
 }
 
+/// The property's find: `/auto off` while a wake-up's agent starts. The wake gives up at
+/// its commit: no row, no prompt, and the reports wait for your next prompt.
+#[test]
+fn auto_off_stops_a_wake_under_way() {
+    let mut st = moa_brain(1);
+    finished(&mut st, 0, T, "Merged PR #3");
+    let fx = fire(&mut st, T + 45 * SEC);
+    assert!(
+        matches!(acps(&fx)[..], [AcpCmd::Start { .. }]),
+        "the wake starts moa's agent: {fx:?}"
+    );
+    auto_at(&mut st, T + 46 * SEC, 1, Some(false));
+    let fx = play(&mut st, T + 47 * SEC, fx);
+    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+    assert!(
+        common::central::feed_rows(&fx)
+            .iter()
+            .all(|r| r.kind != "you"),
+        "{fx:?}"
+    );
+    assert_eq!(st.reports().count(), 1);
+    assert_eq!(st.central().phase, Phase::Ready);
+}
+
 #[test]
 fn no_wake_while_moa_answers() {
     let mut st = moa_brain(1);
@@ -1417,6 +1441,9 @@ struct Daemon {
     last: Vec<Effect>,
     event: Option<Event>,
     refuse_next: bool,
+    /// What the last input's `/auto` must leave on the disk, `true` for on, once its effects
+    /// are all executed; `None` when it wasn't `/auto`, or its writes were refused.
+    auto_set: Option<bool>,
     /// The last hook's `seq`, token, request and thread.
     seq: u32,
     token: u32,
@@ -1455,6 +1482,7 @@ impl Daemon {
             last,
             event: None,
             refuse_next: false,
+            auto_set: None,
             seq: 0,
             token: 0,
             req: 0,
@@ -1484,9 +1512,12 @@ impl Daemon {
     /// disk was never saved.
     ///
     /// Each `you` row carries each of its tokens once, and each prompt that reaches moa's
-    /// agent holds exactly the tokens of the row saved with it, each once.
+    /// agent holds exactly the tokens of the row saved with it, each once. A wake-up's row is
+    /// saved only while the disk has `/auto` on, and an `/auto` whose effects all ran left
+    /// what it said on the disk.
     fn execute(&mut self, commits: Option<usize>) -> Result<(), TestCaseError> {
         let mut event = self.event.take();
+        let auto_set = self.auto_set.take();
         let mut left = commits;
         let mut row: Option<BTreeMap<String, usize>> = None;
         for e in std::mem::take(&mut self.last) {
@@ -1500,6 +1531,13 @@ impl Daemon {
                     if let Some(e) = event.take() {
                         self.expected.queue(e);
                     }
+                    let wakes = changes
+                        .iter()
+                        .any(|c| matches!(c, Change::Feed(r) if r.kind == "you" && r.automatic));
+                    prop_assert!(
+                        !wakes || self.disk.meta(AUTO_KEY).as_deref() != Some("off"),
+                        "a wake-up was saved with /auto off"
+                    );
                     self.disk.apply(&changes);
                     for c in &changes {
                         if let Change::Feed(r) = c
@@ -1532,6 +1570,10 @@ impl Daemon {
         }
         if let Some(e) = event {
             self.expected.gone.insert(e.token);
+        }
+        if let (Some(on), None) = (auto_set, commits) {
+            let off = self.disk.meta(AUTO_KEY).as_deref() == Some("off");
+            prop_assert_eq!(!off, on, "/auto didn't leave what it said on the disk");
         }
         Ok(())
     }
@@ -1700,7 +1742,8 @@ impl Daemon {
             }
             Step::Answer => self.answer(),
             Step::Auto => {
-                self.next()?;
+                let refused = self.next()?;
+                self.auto_set = (!refused).then(|| !auto_on(&self.st));
                 self.req += 1;
                 self.run(Input::Client {
                     conn: ConnId(1),
