@@ -6,8 +6,10 @@
 //! for the commit. One prompt at a time. What moa says in its turn lands in the feed as it
 //! comes, and the turn's end answers whoever waits ([`turn`]). The session reports ride on
 //! the prompts, or wake moa on their own ([`channel`]). A turn that hangs is cancelled, then
-//! cut short and moa's agent restarted ([`watchdog`]).
+//! cut short and moa's agent restarted ([`watchdog`]). One that fails for its account's sake
+//! says so in a card ([`account`]).
 
+pub mod account;
 pub mod channel;
 pub mod feed;
 pub mod launch;
@@ -29,7 +31,7 @@ use self::watchdog::{Restart, Restarted, Watchdog};
 use self::wire::{AcpCmd, AcpIn, AdapterSpec, Caps, Opened, PermOption, ThreadHow};
 use crate::change::Change;
 use crate::config::AccountName;
-use crate::core::{Tx, post_commit};
+use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
 use crate::model::{FeedEntry, MoaThread, ThreadKind};
 use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
@@ -176,6 +178,9 @@ pub struct Moa {
     /// The restart couldn't reopen today's thread: the next prompt opens a new one, as one
     /// whose reopen failed does ([`Pending::reopen_failed`]).
     pub reopen_failed: bool,
+    /// The account whose card ([`account`]) was said: it isn't said again for that account
+    /// until a turn ends `end_turn` or `/account` switches. Kept in memory.
+    pub account_card: Option<AccountName>,
 }
 
 impl Moa {
@@ -353,6 +358,7 @@ pub fn switch_account(
     forget_run(moa);
     moa.reopen_failed = false;
     moa.new_thread = true;
+    moa.account_card = None;
     let mut fx = post_commit(state, tx);
     fx.extend(stop.map(Effect::Acp));
     // With reports waiting, a wake-up may start it before you do.
@@ -719,6 +725,7 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
             fx.push(Effect::Publish(Publish::Event(CoreEvent::Error {
                 message: line,
             })));
+            fold_in(&mut fx, account::failed(state, now, &why));
             fx
         }
     }
@@ -900,6 +907,10 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     }
     // A restart that ends here opened no thread.
     fx.extend(watchdog::reopened(state, now, ended));
+    // A start that failed may have failed for its account.
+    if let Phase::Failed(why) = state.central.phase.clone() {
+        fold_in(&mut fx, account::failed(state, now, &why));
+    }
     fx
 }
 

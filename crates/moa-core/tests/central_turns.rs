@@ -5,7 +5,7 @@ mod common;
 
 use common::central::{
     acps, caps, ended, feed_rows, first_turn, hear, moa, moa_from, moa_with, opened, phase,
-    prompt_at, published_state, saved, started, text_of, thread,
+    prompt_at, published_state, refuse_writes, saved, started, text_of, thread,
 };
 use common::{changes, replies, send, send_on};
 use moa_core::UtcMs;
@@ -13,7 +13,7 @@ use moa_core::central::Phase;
 use moa_core::central::wire::{
     AcpCmd, AcpIn, Opened, PermKind, PermOption, PlanEntry, StopReason, ThreadHow, Update,
 };
-use moa_core::effect::{Effect, Input, LogLevel, RefuseWrites, handle_checked};
+use moa_core::effect::{Effect, Input, LogLevel, handle_checked};
 use moa_core::model::FeedEntry;
 use moa_core::op::{ConnId, Done, NoParams, Op, OpError, PermAnswer, ReqId};
 use moa_core::state::{Snapshot, State};
@@ -160,23 +160,6 @@ fn done(fx: &[Effect]) -> Done {
         [(ReqId(1), Ok(done))] => done.clone(),
         other => panic!("{other:?}"),
     }
-}
-
-/// From now on, until a minute from now, the store refuses writes; everything saved so far
-/// is kept.
-fn refuse_writes(b: &TypicalBrain, st: &mut State) {
-    let snapshot = saved(b, st);
-    handle_checked(
-        st,
-        Input::Reload {
-            snapshot: Box::new(snapshot),
-            refuse_writes: Some(RefuseWrites {
-                until: UtcMs(b.now().wall.0 + 60_000),
-                reason: "the disk is full".into(),
-            }),
-        },
-        b.now(),
-    );
 }
 
 #[test]

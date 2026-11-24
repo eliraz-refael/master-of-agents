@@ -12,10 +12,10 @@ use super::feed::{
     self, body_text, kind, permission_body, plan_body, text_body, tool_body, tool_input,
 };
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
-use super::{Asking, Moa, Phase, answer, chosen, warn};
+use super::{Asking, Moa, Phase, account, answer, chosen, warn};
 use crate::Now;
 use crate::change::Change;
-use crate::core::{Tx, post_commit};
+use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::model::FeedEntry;
 use crate::op::{Done, OpError, PermAnswer};
@@ -299,6 +299,12 @@ pub(super) fn ended(
         fx.extend(write(state, tx, rows).unwrap_or_default());
     }
     state.central.written.clear();
+    // A turn that failed for its account says so; one that ended well lets it say so again.
+    match &result {
+        Ok(StopReason::EndTurn) => state.central.account_card = None,
+        Ok(_) => {}
+        Err(why) => fold_in(&mut fx, account::failed(state, now, why)),
+    }
     fx.extend(cmds.into_iter().map(Effect::Acp));
     fx.extend(answer(turn.waiter, reply));
     fx
