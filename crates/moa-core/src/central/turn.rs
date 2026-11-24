@@ -162,16 +162,12 @@ pub(super) fn permission(
     record(state, tx, vec![row])
 }
 
-/// Request `id` was answered with the option of `kind`: its row says which.
-pub(super) fn answered(state: &mut State, now: &Now, id: i64, kind: PermKind) -> Vec<Effect> {
-    let Some(row) = asked_row(&state.central, id) else {
-        return Vec::new();
-    };
-    let row = FeedEntry {
+/// Request `id`'s row, answered with the option of `kind`: it says which.
+pub(super) fn answered_row(moa: &Moa, id: i64, kind: PermKind) -> Option<FeedEntry> {
+    asked_row(moa, id).map(|row| FeedEntry {
         state: Some(kind.name().into()),
         ..row.clone()
-    };
-    record(state, Tx::new(now), vec![row])
+    })
 }
 
 /// Nobody will answer the requests that wait any more (`console.cancel`): moa's agent hears
@@ -238,6 +234,7 @@ pub(super) fn ended(
     let mut fx: Vec<Effect> = unsaved(moa).into_iter().collect();
     // What still waits for your answer can't be answered any more.
     let (cards, cmds) = forsaken(moa, turn.exited.is_none());
+    moa.answered.clear();
     if turn.exited.is_some() {
         // Late updates after the exit may have started tool calls the exit didn't see.
         let mut rows = cancelled_tools(&state.central);
@@ -300,6 +297,7 @@ pub(super) fn ended(
 pub(super) fn cut_short(state: &mut State, now: &Now, thread: &str, told: &str) -> Vec<Effect> {
     let mut rows = cancelled_tools(&state.central);
     rows.extend(forsaken(&mut state.central, false).0);
+    state.central.answered.clear();
     let mut tx = Tx::new(now);
     let body = text_body(told);
     rows.push(new_row(
@@ -331,7 +329,8 @@ fn cancelled_tools(moa: &Moa) -> Vec<FeedEntry> {
 
 /// After a reload the rows are the store's. A row the reloaded tail holds is taken from it;
 /// a new row a failed commit lost (its id not yet the store's) is forgotten, so the updates
-/// stepped again after the reload write it once, as is a permission request it held.
+/// stepped again after the reload write it once, as is a permission request it held. An
+/// answer whose commit failed is undone.
 ///
 /// An older row, gone from the tail, is kept as written: the snapshot carries only the
 /// newest [`crate::publish::FEED_SHOWN`] rows, and the core reads nothing else, so the store's
@@ -349,9 +348,16 @@ pub(super) fn reloaded(state: &mut State) {
             None => Some((id, row)),
         })
         .collect();
-    // A request whose row was lost is heard again, stepped after the reload.
+    // A request whose row was lost is heard again, stepped after the reload. One you
+    // answered whose row is still `pending` lost its answer's commit, and the answer with it
+    // (it waits for the commit): it waits for you again.
     let moa = &mut state.central;
     moa.asking.retain(|id, _| moa.written.contains_key(id));
+    for (id, asked) in std::mem::take(&mut moa.answered) {
+        if asked_row(moa, id).is_some_and(|r| r.state.as_deref() == Some("pending")) {
+            moa.asking.insert(id, asked);
+        }
+    }
 }
 
 /// A piece of moa's answer or thinking. With a message id it extends that message's row;

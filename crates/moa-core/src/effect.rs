@@ -221,9 +221,9 @@ pub enum Effect {
         text: String,
         req: Option<(ConnId, ReqId)>,
     },
-    /// A command for moa's agent. A `Prompt` is sent once its `you` row is saved, so it
-    /// waits for the commit and is dropped with a failed one; every other command runs at
-    /// once.
+    /// A command for moa's agent. A `Prompt` is sent once its `you` row is saved, and your
+    /// answer to a permission request once its row says so ([`AcpCmd::held`]): each waits
+    /// for the commit and is dropped with a failed one. Every other command runs at once.
     Acp(AcpCmd),
 }
 
@@ -233,7 +233,8 @@ impl Effect {
     /// and held behind a failed commit it would be lost while the link waits for its answer.
     /// An `open`'s new window is not plumbing: the agent it starts sends events for a
     /// session that must be saved first. Held behind a failed commit it is dropped, and the
-    /// reload answers the open. So is a prompt to moa: it goes once its row is saved.
+    /// reload answers the open. So is a prompt to moa, or your answer to its agent: each goes
+    /// once its row is saved.
     pub fn runs_at_once(&self) -> bool {
         matches!(
             self,
@@ -250,12 +251,12 @@ impl Effect {
                     ),
                     ..
                 }
-        ) || matches!(self, Effect::Acp(c) if !matches!(c, AcpCmd::Prompt { .. }))
+        ) || matches!(self, Effect::Acp(c) if !c.held())
     }
 
     /// Whether this tells the world about saved state, or starts something that will: a
-    /// `Publish`, a `Reply`, a view (an untokened `Tmux`), an `open`'s new window, or a
-    /// prompt to moa (its answer lands in the feed after its row).
+    /// `Publish`, a `Reply`, a view (an untokened `Tmux`), an `open`'s new window, a prompt
+    /// to moa (its answer lands in the feed after its row), or your answer to its agent.
     pub fn is_heard(&self) -> bool {
         matches!(
             self,
@@ -265,8 +266,7 @@ impl Effect {
                     token: None | Some(TmuxToken::Open(_)),
                     ..
                 }
-                | Effect::Acp(AcpCmd::Prompt { .. })
-        )
+        ) || matches!(self, Effect::Acp(c) if c.held())
     }
 }
 

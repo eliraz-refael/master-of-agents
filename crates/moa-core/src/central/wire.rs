@@ -103,6 +103,20 @@ impl AcpCmd {
             | AcpCmd::Stop { generation } => *generation,
         }
     }
+
+    /// Whether it waits for the commit before it goes: a prompt, whose `you` row is saved
+    /// first, and your answer to a permission request, whose row says so first. A cancelled
+    /// request's `None` goes at once: the protocol needs it, and nothing waits on its row.
+    pub fn held(&self) -> bool {
+        matches!(
+            self,
+            AcpCmd::Prompt { .. }
+                | AcpCmd::Permission {
+                    choice: Some(_),
+                    ..
+                }
+        )
+    }
 }
 
 /// What the host tells the core.

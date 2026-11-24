@@ -296,6 +296,58 @@ async fn a_failed_commit_replays_moas_updates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_whose_commit_fails_is_never_sent() {
+    let ask = StubStep::Ask {
+        title: "delete the Harbor".into(),
+        options: vec![
+            ("yes".into(), "allow_once".into()),
+            ("no".into(), "reject_once".into()),
+        ],
+    };
+    let rig = Rig::new(&[ask, say("understood", "m1"), end()]);
+    let up = rig.start().await;
+    let (mut asker, mut answerer) = (up.client(), up.client());
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let pending = || {
+                rig.rows()
+                    .iter()
+                    .any(|(kind, _, state)| {
+                        kind == "permission" && state.as_deref() == Some("pending")
+                    })
+                    .then_some(())
+            };
+            wait_for(WAIT, pending).expect("a pending permission row");
+            // The answer's commit fails: nothing reaches moa's agent, and the card waits.
+            up.core.store_fault(Fault::FailNextCommit);
+            let reply = answerer.call("console.permission", json!({"answer": "once"}));
+            assert!(
+                refusal(&reply).starts_with("moa couldn't save that"),
+                "{reply}"
+            );
+            let reply = answerer.call("console.permission", json!({"answer": "no"}));
+            assert_eq!(answer(&reply), "refused");
+        });
+        let reply = prompt(&mut asker, "tidy up");
+        assert_eq!(answer(&reply), "understood");
+    });
+    let outcomes: Vec<Value> = rig
+        .logged("permission.outcome")
+        .into_iter()
+        .map(|l| l["params"].clone())
+        .collect();
+    assert_eq!(outcomes, [json!({"outcome": "selected", "optionId": "no"})]);
+    let cards: Vec<_> = rig
+        .rows()
+        .into_iter()
+        .filter(|(kind, _, _)| kind == "permission")
+        .map(|(_, _, state)| state)
+        .collect();
+    assert_eq!(cards, [Some("reject_once".to_string())]);
+    up.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_adapter_gets_the_specs_env() {
     let rig = Rig::new(&[end()]);
     let up = rig.start().await;

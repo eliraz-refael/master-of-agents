@@ -520,6 +520,8 @@ impl Op {
             | Op::ConsoleNew(_)
             | Op::BarSet { .. }
             | Op::ConsolePermission { .. }
+            // It saves the requests it cancels as `cancelled`.
+            | Op::ConsoleCancel(_)
             // It may run a write (`/archive`, `/open`), so it is counted as one. A read-only
             // command still answers while writes are refused: the core refuses only at a
             // commit, and a read never commits.
@@ -542,7 +544,6 @@ impl Op {
             | Op::LayoutList(_)
             | Op::LayoutShow { .. }
             | Op::Goto { .. }
-            | Op::ConsoleCancel(_)
             | Op::ConsolePage { .. }
             | Op::DebugPanic => false,
         }

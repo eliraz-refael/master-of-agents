@@ -639,6 +639,69 @@ fn two_requests_queue_oldest_first() {
 }
 
 #[test]
+fn an_answer_waits_while_writes_are_refused() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let id = asked(&hear(&b, &mut st, permission(3, "Read a", three_options()))).id;
+    refuse_writes(&b, &mut st);
+    let fx = answer_with(&b, &mut st, 2, None, PermAnswer::Once);
+    let refused = "moa can't save right now (the disk is full); nothing was changed";
+    assert_eq!(replies(&fx), [(ReqId(2), Err(OpError(refused.into())))]);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(asking(&st), json!([id]));
+    assert_eq!(card_states(&st), [Some("pending".into())]);
+}
+
+#[test]
+fn an_answer_whose_commit_fails_waits_again() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let id = asked(&hear(&b, &mut st, permission(3, "Read a", three_options()))).id;
+    let before = saved(&b, &st);
+    let fx = answer_with(&b, &mut st, 2, None, PermAnswer::Always);
+    // The answer goes once its row is saved: it waits for the commit.
+    let sent: Vec<&Effect> = fx.iter().filter(|e| matches!(e, Effect::Acp(_))).collect();
+    assert!(
+        matches!(sent[..], [e @ Effect::Acp(AcpCmd::Permission { choice: Some(_), .. })] if !e.runs_at_once() && e.is_heard()),
+        "{fx:?}"
+    );
+    assert_eq!(asking(&st), json!([]));
+
+    // Its commit fails: the reload finds the row still pending, and it waits again.
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(before),
+            refuse_writes: None,
+        },
+        b.now(),
+    );
+    assert_eq!(asking(&st), json!([id]));
+    let fx = answer_with(&b, &mut st, 3, None, PermAnswer::No);
+    assert_eq!(
+        acps(&fx),
+        [&AcpCmd::Permission {
+            generation: 1,
+            req: 3,
+            choice: Some("not-now".into())
+        }]
+    );
+    assert_eq!(card_states(&st), [Some("reject_once".into())]);
+
+    // Saved, an answer stays answered through a later reload.
+    let after = saved(&b, &st);
+    handle_checked(
+        &mut st,
+        Input::Reload {
+            snapshot: Box::new(after),
+            refuse_writes: None,
+        },
+        b.now(),
+    );
+    assert_eq!(asking(&st), json!([]));
+}
+
+#[test]
 fn a_request_outside_the_turn_is_cancelled() {
     let b = TypicalBrain::new();
     let mut st = turn(&b, false);

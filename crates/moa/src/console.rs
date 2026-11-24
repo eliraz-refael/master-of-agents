@@ -144,12 +144,12 @@ pub fn render(rows: &[FeedRow], tz: &TimeZone) -> Vec<String> {
                 "tool" => {
                     let title = r.body.get("title").and_then(Value::as_str).unwrap_or("");
                     let state = r.state.as_deref().unwrap_or("pending");
-                    format!("{at} ⚙ {title} · {state}")
+                    format!("{at} ⚙ {} · {state}", first_line(title))
                 }
                 "permission" => {
                     let title = r.body.get("title").and_then(Value::as_str).unwrap_or("");
                     let state = r.state.as_deref().unwrap_or("pending");
-                    format!("{at} permission  {title} · {state}")
+                    format!("{at} permission  {} · {state}", first_line(title))
                 }
                 "plan" => {
                     let n = r.body.get("entries").and_then(Value::as_array);
@@ -239,7 +239,8 @@ mod tests {
                 json!({"title": "Run git push", "options": []}),
                 Some("allow_once"),
             ),
-            row(9, "permission", json!({"title": "Edit a"}), None),
+            row(9, "permission", json!({"title": "Edit a\nand b"}), None),
+            row(10, "tool", json!({"title": "git log\n--oneline"}), None),
         ];
         assert_eq!(
             render(&rows, &tz),
@@ -252,7 +253,8 @@ mod tests {
                 "22:19 ~ hmm …",
                 "22:20 plan, 2 steps",
                 "22:21 permission  Run git push · allow_once",
-                "22:22 permission  Edit a · pending",
+                "22:22 permission  Edit a … · pending",
+                "22:23 ⚙ git log … · pending",
             ]
         );
     }

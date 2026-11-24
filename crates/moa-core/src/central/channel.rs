@@ -73,6 +73,12 @@ fn due(state: &State) -> Option<UtcMs> {
     let mut reports = state.reports().peekable();
     reports.peek()?;
     let moa = &state.central;
+    // A request waits for you only within a live turn, which shuts the gate too; `asking`
+    // shuts it on its own as well.
+    debug_assert!(
+        moa.asking.is_empty() || moa.turn.as_ref().is_some_and(|t| t.exited.is_none()),
+        "a permission request waits outside a live turn"
+    );
     let open = auto_on(state)
         && matches!(moa.phase, Phase::Off | Phase::Ready)
         && moa.pending.is_none()

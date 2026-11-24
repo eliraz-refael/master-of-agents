@@ -588,6 +588,7 @@ const WRITES: &[&str] = &[
     "layout.set",
     "layout.apply",
     "console.prompt",
+    "console.cancel",
     "console.new",
     "console.command",
     "console.permission",

@@ -157,6 +157,10 @@ pub struct Moa {
     pub wake_armed: Option<UtcMs>,
     /// The turn's permission requests that wait for your answer, by row id: oldest first.
     pub asking: BTreeMap<i64, Asking>,
+    /// The turn's requests you answered, by row id, kept until the turn ends: when the commit
+    /// of an answer fails, its answer isn't sent and the reload finds its row still `pending`,
+    /// so it waits for you again.
+    pub answered: BTreeMap<i64, Asking>,
 }
 
 impl Moa {
@@ -327,7 +331,8 @@ pub fn cancel(state: &mut State, now: &Now, conn: ConnId, req: ReqId) -> Vec<Eff
 }
 
 /// `console.permission`: answers request `id` (the oldest waiting when `None`) with the
-/// option of the kind `answer` names, and its row says which.
+/// option of the kind `answer` names. Its row says which in a commit of its own, and the
+/// answer goes once that is saved; while writes are refused it is refused, and still waits.
 pub fn answer_permission(
     state: &mut State,
     now: &Now,
@@ -359,8 +364,24 @@ pub fn answer_permission(
             }];
         }
     };
-    state.central.asking.remove(&id);
-    let mut fx = turn::answered(state, now, id, option.kind);
+    let mut tx = Tx::new(now);
+    let row = turn::answered_row(&state.central, id, option.kind);
+    let changes = row.iter().cloned().map(Change::Feed).collect();
+    if let Err(e) = tx.commit(state, changes) {
+        return vec![Effect::Reply {
+            conn,
+            req,
+            result: Err(e),
+        }];
+    }
+    let moa = &mut state.central;
+    if let Some(row) = row {
+        moa.written.insert(row.id, row);
+    }
+    if let Some(asked) = moa.asking.remove(&id) {
+        moa.answered.insert(id, asked);
+    }
+    let mut fx = post_commit(state, tx);
     fx.push(Effect::Acp(AcpCmd::Permission {
         generation: state.central.generation,
         req: asked,
