@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc fcf3c20c41aaf64b76f0140f98fba460576f98b7e03b781f3230a3eefbebc413 # shrinks to steps = [Auto, Auto, Auto, Auto, Turn(0), Prompt, Answer, Restart { mid_send: true }]
+cc 72114d65c118cba3d6befdfbb0b394156b8cd53d17305d04d27bb8d6dd1925b0 # shrinks to steps = [Turn(0), Prompt, Answer, Restart(Index(6148914691236517206))]

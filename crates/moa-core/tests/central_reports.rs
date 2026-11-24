@@ -1072,9 +1072,10 @@ enum Step {
     Auto,
     /// The next input's writes are refused.
     Refuse,
-    /// The daemon restarts before the last input's commits reach the disk (they are lost),
-    /// or, `mid_send`, after them but before its prompt reaches moa's agent.
-    Restart { mid_send: bool },
+    /// The daemon restarts after the first k of the last input's commits reach the disk, k
+    /// from 0 to all of them (this index picks it): the rest are lost, and nothing it said
+    /// reaches moa's agent.
+    Restart(prop::sample::Index),
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -1086,25 +1087,38 @@ fn step() -> impl Strategy<Value = Step> {
         3 => Just(Step::Answer),
         1 => Just(Step::Auto),
         1 => Just(Step::Refuse),
-        2 => any::<bool>().prop_map(|mid_send| Step::Restart { mid_send }),
+        2 => any::<prop::sample::Index>().prop_map(Step::Restart),
     ]
 }
 
-/// The tokens in `text`.
-fn tokens(text: &str) -> BTreeSet<String> {
-    text.match_indices("tok-")
-        .map(|(i, _)| text[i..i + 8].to_string())
-        .collect()
+/// Each token in `text`, and how many times it is there.
+fn tokens(text: &str) -> BTreeMap<String, usize> {
+    let mut found = BTreeMap::new();
+    for (i, _) in text.match_indices("tok-") {
+        *found.entry(text[i..i + 8].to_string()).or_default() += 1;
+    }
+    found
 }
 
-/// The tokens a `you` row's body carries: in its text, and in what rode on it.
-fn row_tokens(body: &str) -> BTreeSet<String> {
+/// The tokens a `you` row's body carries, in its text and in what rode on it, and how many
+/// times.
+fn row_tokens(body: &str) -> BTreeMap<String, usize> {
     let body: Value = serde_json::from_str(body).unwrap();
-    ["text", "carried"]
-        .iter()
-        .filter_map(|k| body[k].as_str())
-        .flat_map(tokens)
-        .collect()
+    let mut found = BTreeMap::new();
+    for text in ["text", "carried"].iter().filter_map(|k| body[k].as_str()) {
+        for (t, n) in tokens(text) {
+            *found.entry(t).or_default() += n;
+        }
+    }
+    found
+}
+
+/// Each token in `found` is there once.
+fn once(found: &BTreeMap<String, usize>, what: &str) -> Result<(), TestCaseError> {
+    for (t, n) in found {
+        prop_assert_eq!(*n, 1, "{} is {} times in {}", t, n, what);
+    }
+    Ok(())
 }
 
 /// A hook event the expected queue takes once its commit reaches the disk.
@@ -1144,8 +1158,8 @@ impl Expected {
 
     /// A `you` row carrying `tokens` is saved: each was waiting, and each report it takes
     /// goes whole.
-    fn carry(&mut self, tokens: &BTreeSet<String>) -> Result<(), TestCaseError> {
-        for t in tokens {
+    fn carry(&mut self, tokens: &BTreeMap<String, usize>) -> Result<(), TestCaseError> {
+        for t in tokens.keys() {
             prop_assert!(
                 self.queues.values().any(|q| q.contains(t)),
                 "{} is carried, but isn't waiting: carried twice, or never queued",
@@ -1155,13 +1169,13 @@ impl Expected {
         let taken: Vec<(usize, ReportKind)> = self
             .queues
             .iter()
-            .filter(|(_, q)| q.iter().any(|t| tokens.contains(t)))
+            .filter(|(_, q)| q.iter().any(|t| tokens.contains_key(t)))
             .map(|(k, _)| *k)
             .collect();
         for k in taken {
             let q = self.queues.remove(&k).unwrap();
             prop_assert!(
-                q.iter().all(|t| tokens.contains(t)),
+                q.iter().all(|t| tokens.contains_key(t)),
                 "part of a report is carried: {:?} of {:?}",
                 tokens,
                 q
@@ -1236,42 +1250,64 @@ impl Daemon {
             thread: 0,
             expected: Expected::default(),
         };
-        d.flush(true)?;
+        d.flush()?;
         Ok(d)
     }
 
     /// Executes the last input's effects in order: its commits reach the disk (the queue
-    /// takes its event first), the `Wake` timer is set, and its commands reach moa's agent.
-    /// Each prompt that reaches it holds exactly the tokens of the row saved with it. Not
-    /// `whole`, the daemon dies mid-send: once the commit that saves a `you` row is on the
-    /// disk, nothing after it is executed, and no command reaches moa's agent.
-    fn flush(&mut self, whole: bool) -> Result<(), TestCaseError> {
-        if let Some(e) = self.event.take() {
-            self.expected.queue(e);
-        }
-        let mut row: Option<BTreeSet<String>> = None;
+    /// takes its event with the first), the `Wake` timer is set, and its commands reach moa's
+    /// agent.
+    fn flush(&mut self) -> Result<(), TestCaseError> {
+        self.execute(None)
+    }
+
+    /// The last input's commits in `self.last`.
+    fn commits(&self) -> usize {
+        let persist = |e: &&Effect| matches!(e, Effect::Persist(_));
+        self.last.iter().filter(persist).count()
+    }
+
+    /// Executes the last input's effects as [`Daemon::flush`] does, but with `commits`, the
+    /// daemon dies once that many of its commits are on the disk: nothing after them is
+    /// executed, and no command reaches moa's agent. An event whose commit didn't reach the
+    /// disk was never saved.
+    ///
+    /// Each `you` row carries each of its tokens once, and each prompt that reaches moa's
+    /// agent holds exactly the tokens of the row saved with it, each once.
+    fn execute(&mut self, commits: Option<usize>) -> Result<(), TestCaseError> {
+        let mut event = self.event.take();
+        let mut left = commits;
+        let mut row: Option<BTreeMap<String, usize>> = None;
         for e in std::mem::take(&mut self.last) {
             match e {
                 Effect::Persist(changes) => {
+                    match &mut left {
+                        Some(0) => break,
+                        Some(n) => *n -= 1,
+                        None => {}
+                    }
+                    if let Some(e) = event.take() {
+                        self.expected.queue(e);
+                    }
                     self.disk.apply(&changes);
                     for c in &changes {
                         if let Change::Feed(r) = c
                             && r.kind == "you"
                         {
                             let carried = row_tokens(&r.body);
+                            once(&carried, "its row")?;
                             self.expected.carry(&carried)?;
                             row = Some(carried);
                         }
                     }
-                    if row.is_some() && !whole {
-                        break;
-                    }
                 }
-                Effect::Acp(cmd) if whole => {
+                Effect::Acp(cmd) if commits.is_none() => {
                     if let AcpCmd::Prompt { text, .. } = &cmd {
                         let saved = row.take();
                         prop_assert!(saved.is_some(), "a prompt went before its row was saved");
-                        prop_assert_eq!(Some(tokens(text)), saved);
+                        let sent = tokens(text);
+                        once(&sent, "its prompt")?;
+                        prop_assert_eq!(Some(sent), saved);
                     }
                     self.out.push_back(cmd);
                 }
@@ -1283,6 +1319,9 @@ impl Daemon {
                 _ => {}
             }
         }
+        if let Some(e) = event {
+            self.expected.gone.insert(e.token);
+        }
         Ok(())
     }
 
@@ -1290,7 +1329,7 @@ impl Daemon {
     /// executed first, and when the step before said so, writes are refused at this moment
     /// only. Whether they are.
     fn next(&mut self) -> Result<bool, TestCaseError> {
-        self.flush(true)?;
+        self.flush()?;
         self.now += 1;
         let refused = std::mem::take(&mut self.refuse_next);
         if refused {
@@ -1302,7 +1341,7 @@ impl Daemon {
                 }),
             };
             self.last = handle_checked(&mut self.st, reload, at(self.now));
-            self.flush(true)?;
+            self.flush()?;
         }
         Ok(refused)
     }
@@ -1357,7 +1396,7 @@ impl Daemon {
     /// new prompt's turn ends at the next answer: the last input is often the one that sends
     /// a prompt.
     fn answer(&mut self) -> Result<(), TestCaseError> {
-        self.flush(true)?;
+        self.flush()?;
         let mut asked = std::mem::take(&mut self.out);
         loop {
             let Some(cmd) = asked.pop_front() else {
@@ -1365,7 +1404,7 @@ impl Daemon {
                 if !acps(&self.last).into_iter().any(opening) {
                     break;
                 }
-                self.flush(true)?;
+                self.flush()?;
                 let (opens, later) = self.out.drain(..).partition(opening);
                 (asked, self.out) = (opens, later);
                 continue;
@@ -1408,12 +1447,19 @@ impl Daemon {
         let (st, fx) = self.disk.restart(&self.b, at(self.now));
         self.st = st;
         self.last = fx;
-        self.flush(true)
+        self.flush()
+    }
+
+    /// The daemon dies once `k` of the last input's commits are on the disk, and starts
+    /// again.
+    fn restart_after(&mut self, k: usize) -> Result<(), TestCaseError> {
+        self.execute(Some(k))?;
+        self.restart()
     }
 
     /// `/auto` set by hand on the disk, `None` for on, and the daemon restarted to read it.
     fn set_auto(&mut self, value: Option<&str>) -> Result<(), TestCaseError> {
-        self.flush(true)?;
+        self.flush()?;
         self.auto = value.is_none();
         let key = AUTO_KEY.to_string();
         let value = value.map(str::to_string);
@@ -1432,7 +1478,7 @@ impl Daemon {
                 Ok(())
             }
             Step::Advance(s) => {
-                self.flush(true)?;
+                self.flush()?;
                 self.now += s * SEC;
                 if self.wake_at.is_some_and(|w| w <= self.now) {
                     self.next()?;
@@ -1451,16 +1497,9 @@ impl Daemon {
                 self.refuse_next = true;
                 Ok(())
             }
-            Step::Restart { mid_send } => {
-                if mid_send {
-                    self.flush(false)?;
-                } else {
-                    self.last.clear();
-                    if let Some(e) = self.event.take() {
-                        self.expected.gone.insert(e.token);
-                    }
-                }
-                self.restart()
+            Step::Restart(k) => {
+                let k = k.index(self.commits() + 1);
+                self.restart_after(k)
             }
         }
     }
@@ -1475,14 +1514,14 @@ impl Daemon {
             }
             self.step(Step::Advance(60))?;
             for _ in 0..20 {
-                self.flush(true)?;
+                self.flush()?;
                 if self.out.is_empty() {
                     break;
                 }
                 self.answer()?;
             }
         }
-        self.flush(true)
+        self.flush()
     }
 
     /// What the disk holds at the end: no report waits, no token is in two `you` rows, each
@@ -1499,12 +1538,12 @@ impl Daemon {
         );
         let mut rows: BTreeMap<String, usize> = BTreeMap::new();
         for body in self.disk.you_bodies() {
-            for t in row_tokens(&body) {
-                *rows.entry(t).or_default() += 1;
+            for (t, n) in row_tokens(&body) {
+                *rows.entry(t).or_default() += n;
             }
         }
         for (t, n) in &rows {
-            prop_assert_eq!(*n, 1, "{} is in {} rows", t, n);
+            prop_assert_eq!(*n, 1, "{} is {} times in the rows", t, n);
         }
         for t in &self.expected.carried {
             prop_assert!(rows.contains_key(t), "{} is in no row", t);
@@ -1534,4 +1573,36 @@ proptest! {
         d.drain()?;
         d.check()?;
     }
+}
+
+/// The crash the property may or may not draw: right after the commit that saves your
+/// prompt's row, before the prompt reaches moa's agent. The report went with that commit: it
+/// is carried once, and none is left.
+#[test]
+fn a_restart_right_after_the_prompt_commit_loses_nothing() -> Result<(), TestCaseError> {
+    let mut d = Daemon::new()?;
+    for s in [Step::Turn(0), Step::Prompt, Step::Answer] {
+        d.step(s)?;
+    }
+    // The last input, the thread opened, saved the row and sent the prompt.
+    assert_eq!(prompts_sent(&d.last).len(), 1);
+    let saves_you = |e: &Effect| {
+        matches!(e, Effect::Persist(c)
+            if c.iter().any(|c| matches!(c, Change::Feed(r) if r.kind == "you")))
+    };
+    let mut commits = d.last.iter().filter(|e| matches!(e, Effect::Persist(_)));
+    let k = 1 + commits.position(saves_you).expect("the row is saved");
+    d.restart_after(k)?;
+    let rows: Vec<BTreeMap<String, usize>> =
+        d.disk.you_bodies().iter().map(|b| row_tokens(b)).collect();
+    let carrying: Vec<usize> = rows
+        .iter()
+        .filter_map(|r| r.get("tok-0001"))
+        .copied()
+        .collect();
+    assert_eq!(carrying, [1]);
+    assert!(d.disk.snapshot().reports.is_empty());
+    assert_eq!(d.st.reports().count(), 0);
+    d.drain()?;
+    d.check()
 }
