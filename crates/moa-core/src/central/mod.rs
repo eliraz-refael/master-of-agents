@@ -25,7 +25,7 @@ use serde_json::json;
 use self::channel::Source;
 use self::feed::{kind, text_body};
 use self::threads::{How, choose, new_thread};
-use self::watchdog::Watchdog;
+use self::watchdog::{Restart, Restarted, Watchdog};
 use self::wire::{AcpCmd, AcpIn, AdapterSpec, Caps, Opened, PermOption, ThreadHow};
 use crate::change::Change;
 use crate::config::AccountName;
@@ -43,6 +43,9 @@ use crate::{Now, UtcMs};
 pub const PROMPT_MAX: usize = 100_000;
 
 const BUSY: &str = "moa is still answering; wait for it, or cancel it";
+
+/// What a prompt hears while the watchdog restarts moa's agent.
+const RESTARTING: &str = "moa's agent is restarting; try again in a moment";
 
 /// The first line of a new thread opened because today's couldn't be reopened.
 const REOPEN_FAILED: &str = "today's earlier thread couldn't be reopened, so this is a new one";
@@ -166,9 +169,9 @@ pub struct Moa {
     pub answered: BTreeMap<i64, Asking>,
     /// The watchdog of the turn under way.
     pub watchdog: Watchdog,
-    /// The watchdog's card, while the restart it made reopens today's thread: the reopen's
-    /// end finishes its text. A prompt waits for it, and so does a wake-up.
-    pub restarting: Option<FeedEntry>,
+    /// The watchdog's restart, until moa's agent has started again and opened its thread:
+    /// its end finishes the card. Meanwhile a prompt is refused, and no wake-up goes.
+    pub restarting: Option<Restart>,
     /// The restart couldn't reopen today's thread: the next prompt opens a new one, as one
     /// whose reopen failed does ([`Pending::reopen_failed`]).
     pub reopen_failed: bool,
@@ -222,6 +225,7 @@ pub fn send(
         Source::You if text.chars().count() > PROMPT_MAX => {
             Some(format!("a prompt is at most {PROMPT_MAX} characters"))
         }
+        _ if state.central.restarting.is_some() => Some(RESTARTING.to_string()),
         _ if state.central.busy() => Some(BUSY.to_string()),
         _ => None,
     };
@@ -505,7 +509,8 @@ fn started(state: &mut State, now: &Now, caps: Caps) -> Vec<Effect> {
 }
 
 /// Asks for the waiting prompt's thread, or sends the prompt when its thread is open. With
-/// no prompt, after the watchdog's restart, it reopens today's thread, if there is one.
+/// no prompt, after the watchdog's restart, it reopens today's thread, if there is one, or
+/// opens the new thread `console.new` asked for.
 fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     let moa = &state.central;
     let (Some(account), Some(caps)) = (&moa.account, moa.caps) else {
@@ -516,7 +521,8 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
         Some(_) => choose(state, account, now.local_day, caps),
         None if moa.restarting.is_some() => match choose(state, account, now.local_day, caps) {
             how @ (How::Resume(_) | How::Load(_)) => how,
-            How::Use(_) | How::New => return watchdog::reopened(state, now, None),
+            How::New if moa.new_thread => How::New,
+            How::Use(_) | How::New => return watchdog::reopened(state, now, Restarted::NoThread),
         },
         None => return Vec::new(),
     };
@@ -544,6 +550,8 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     if let Some(p) = &mut moa.pending {
         p.reopening = matches!(how, ThreadHow::Resume { .. } | ThreadHow::Load { .. });
         p.brief = brief;
+    } else if let Some(r) = &mut moa.restarting {
+        r.brief = brief;
     }
     fx.push(Effect::Acp(AcpCmd::Open {
         generation: moa.generation,
@@ -558,18 +566,30 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
 fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>) -> Vec<Effect> {
     let moa = &mut state.central;
     moa.replaying = None;
-    if moa.pending.is_none() && moa.restarting.is_some() {
-        let thread = match &result {
-            Ok((id, Opened::Resumed | Opened::Loaded)) => state.thread(id).cloned(),
-            _ => None,
+    if moa.pending.is_none()
+        && let (Some(restart), Some(account)) = (&moa.restarting, moa.account.clone())
+    {
+        let brief = restart.brief.clone();
+        let ended = match result {
+            Ok((id, how)) => {
+                let row = thread_row(state, now, &account, id, how);
+                let open = Open {
+                    row,
+                    brief,
+                    reopen_failed: false,
+                };
+                match how {
+                    Opened::New => Restarted::New(open),
+                    Opened::Resumed | Opened::Loaded => Restarted::Reopened(open),
+                }
+            }
+            Err(_) => Restarted::NoThread,
         };
         let mut fx = Vec::new();
-        if thread.is_none() {
-            fx.push(warn(
-                "moa's thread for today couldn't be reopened after a restart",
-            ));
+        if matches!(ended, Restarted::NoThread) {
+            fx.push(warn("moa's thread couldn't be opened after a restart"));
         }
-        fx.extend(watchdog::reopened(state, now, thread));
+        fx.extend(watchdog::reopened(state, now, ended));
         return fx;
     }
     let (Some(mut p), Some(account)) = (moa.pending.take(), moa.account.clone()) else {
@@ -577,22 +597,7 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
     };
     match result {
         Ok((id, how)) => {
-            let row = match (how, state.thread(&id)) {
-                (Opened::Resumed | Opened::Loaded, Some(row)) => row.clone(),
-                // Only a new thread ends `console.new`: one said while a reopen was under way
-                // still holds for the next prompt.
-                _ => MoaThread {
-                    thread_id: id,
-                    account: account.to_string(),
-                    day: now.local_day,
-                    kind: if std::mem::take(&mut state.central.new_thread) {
-                        ThreadKind::Manual
-                    } else {
-                        ThreadKind::Daily
-                    },
-                    started_at: now.wall,
-                },
-            };
+            let row = thread_row(state, now, &account, id, how);
             let open = Open {
                 row,
                 brief: p.brief.take(),
@@ -624,6 +629,32 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
             })));
             fx
         }
+    }
+}
+
+/// The row of thread `id`, opened as `how`: its saved row when it was reopened, else a new
+/// one on `account`, of kind `Manual` when `console.new` asked for it. Only a new thread ends
+/// `console.new`: one said while a reopen was under way still holds for the next prompt.
+fn thread_row(
+    state: &mut State,
+    now: &Now,
+    account: &AccountName,
+    id: String,
+    how: Opened,
+) -> MoaThread {
+    match (how, state.thread(&id)) {
+        (Opened::Resumed | Opened::Loaded, Some(row)) => row.clone(),
+        _ => MoaThread {
+            thread_id: id,
+            account: account.to_string(),
+            day: now.local_day,
+            kind: if std::mem::take(&mut state.central.new_thread) {
+                ThreadKind::Manual
+            } else {
+                ThreadKind::Daily
+            },
+            started_at: now.wall,
+        },
     }
 }
 
@@ -740,6 +771,11 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
         ),
         Phase::Ready | Phase::Thinking => (Phase::Off, stopped_text(&why), "moa's agent stopped"),
     };
+    // A restart's agent that goes before it has started couldn't start again.
+    let ended = match moa.caps {
+        Some(_) => Restarted::NoThread,
+        None => Restarted::NotStarted,
+    };
     moa.phase = phase;
     moa.caps = None;
     moa.thread = None;
@@ -756,13 +792,23 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
         turn.exited = Some(why);
         waiters.extend(turn.waiter.take());
         let thread = turn.thread.clone();
-        fx.extend(turn::cut_short(state, now, &thread, &told));
+        let mut tx = Tx::new(now);
+        let says = turn::new_row(
+            state,
+            &mut tx,
+            &thread,
+            kind::ERROR,
+            None,
+            text_body(&told),
+            None,
+        );
+        fx.extend(turn::cut_short(state, tx, says));
     }
     for w in waiters {
         fx.extend(answer(Some(w), Err(OpError(told.clone()))));
     }
-    // A restart that ends here reopened nothing.
-    fx.extend(watchdog::reopened(state, now, None));
+    // A restart that ends here opened no thread.
+    fx.extend(watchdog::reopened(state, now, ended));
     fx
 }
 

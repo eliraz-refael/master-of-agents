@@ -14,7 +14,7 @@ use moa_core::central::wire::{
     AcpCmd, AcpIn, Caps, Opened, PermKind, PermOption, StopReason, ThreadHow, Update,
 };
 use moa_core::effect::{Effect, Input, TimerKey, handle_checked};
-use moa_core::model::FeedEntry;
+use moa_core::model::{FeedEntry, ThreadKind};
 use moa_core::op::{ConnId, Op, OpError, PermAnswer, ReqId};
 use moa_core::state::State;
 use moa_core::{Now, UtcMs};
@@ -326,7 +326,102 @@ fn a_restart_that_cant_reopen_says_so() {
     );
 
     // The next prompt opens a new thread, whose first line says why.
-    let fx = prompt_at(&mut st, at(t + 7 * MIN), 2, "go on", false);
+    next_prompt_opens_a_new_thread(&mut st, t + 7 * MIN);
+}
+
+/// The next prompt after a restart that opened no thread: it starts moa's agent when it must,
+/// and opens a new thread, whose first line says today's couldn't be reopened.
+fn next_prompt_opens_a_new_thread(st: &mut State, ms: i64) {
+    let generation = st.central().generation;
+    let fx = prompt_at(st, at(ms), 2, "go on", false);
+    let generation = match &acps(&fx)[..] {
+        [AcpCmd::Start { generation, .. }] => {
+            let fx = hear_at(st, at(ms), started(*generation, caps(true, true, true)));
+            assert!(
+                matches!(
+                    &acps(&fx)[..],
+                    [AcpCmd::Open {
+                        how: ThreadHow::New { .. },
+                        ..
+                    }]
+                ),
+                "{fx:?}"
+            );
+            *generation
+        }
+        [
+            AcpCmd::Open {
+                how: ThreadHow::New { .. },
+                ..
+            },
+        ] => generation,
+        _ => panic!("{fx:?}"),
+    };
+    let fx = hear_at(st, at(ms), opened(generation, "th-2", Opened::New));
+    assert_eq!(prompts_sent(&fx), ["go on"]);
+    assert_eq!(thread_rows(&fx).len(), 1);
+    let first = feed_rows(&fx)[0];
+    assert_eq!(first.kind, "system");
+    assert!(first.body.contains("couldn't be reopened"), "{first:?}");
+}
+
+#[test]
+fn a_restart_whose_agent_cant_start_says_so() {
+    let b = TypicalBrain::new();
+    let (mut st, t) = turn(&b, false);
+    restarted(&mut st, t);
+    // moa's new agent goes before it has started.
+    let exit = AcpIn::Exited {
+        generation: 2,
+        why: "it crashed".into(),
+    };
+    hear_at(&mut st, at(t + 6 * MIN), exit);
+    assert!(matches!(phase(&st), Phase::Failed(_)));
+    assert!(st.central().restarting.is_none());
+    assert_eq!(
+        card_text(&st),
+        format!(
+            "{CANCELLED} It still hadn't stopped 30 s later, so moa stopped moa's agent, and it \
+             couldn't start again; your next prompt starts it with a new thread."
+        )
+    );
+    next_prompt_opens_a_new_thread(&mut st, t + 7 * MIN);
+}
+
+#[test]
+fn a_prompt_while_restarting_is_refused() {
+    let b = TypicalBrain::new();
+    let (mut st, t) = turn(&b, false);
+    restarted(&mut st, t);
+    let refused = Err(OpError(
+        "moa's agent is restarting; try again in a moment".into(),
+    ));
+    let fx = prompt_at(&mut st, at(t + 6 * MIN), 2, "hello?", false);
+    assert_eq!(replies(&fx), [(ReqId(2), refused.clone())]);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    // Started, it is still reopening today's thread.
+    hear_at(&mut st, at(t + 6 * MIN), started(2, caps(true, true, true)));
+    let fx = prompt_at(&mut st, at(t + 6 * MIN), 3, "hello?", false);
+    assert_eq!(replies(&fx), [(ReqId(3), refused)]);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    hear_at(&mut st, at(t + 6 * MIN), opened(2, "th-1", Opened::Resumed));
+    let fx = prompt_at(&mut st, at(t + 6 * MIN), 4, "hello?", false);
+    assert_eq!(prompts_sent(&fx), ["hello?"]);
+}
+
+#[test]
+fn a_restart_after_new_opens_the_new_thread() {
+    let b = TypicalBrain::new();
+    let (mut st, t) = turn(&b, false);
+    let input = Input::Client {
+        conn: ConnId(1),
+        req: ReqId(5),
+        caller: Default::default(),
+        op: Op::ConsoleNew(moa_core::op::NoParams),
+    };
+    handle_checked(&mut st, input, at(t + MIN));
+    restarted(&mut st, t);
+    let fx = hear_at(&mut st, at(t + 6 * MIN), started(2, caps(true, true, true)));
     assert!(
         matches!(
             &acps(&fx)[..],
@@ -337,30 +432,27 @@ fn a_restart_that_cant_reopen_says_so() {
         ),
         "{fx:?}"
     );
-    let fx = hear_at(&mut st, at(t + 7 * MIN), opened(2, "th-2", Opened::New));
+    let fx = hear_at(&mut st, at(t + 6 * MIN), opened(2, "th-2", Opened::New));
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(*phase(&st), Phase::Ready);
+    assert_eq!(
+        card_text(&st),
+        format!("{CANCELLED}{KILLED}, with a new thread as you asked.")
+    );
+    let open = st.central().thread.clone().expect("the new thread is open");
+    assert_eq!(open.row.thread_id, "th-2");
+    assert_eq!(open.row.kind, ThreadKind::Manual);
+    assert!(!open.reopen_failed);
+    assert!(!st.central().new_thread);
+    assert!(!st.central().reopen_failed);
+
+    // Its first prompt goes to it and saves it, with no line about a failed reopen.
+    let fx = prompt_at(&mut st, at(t + 7 * MIN), 2, "go on", false);
     assert_eq!(prompts_sent(&fx), ["go on"]);
     assert_eq!(thread_rows(&fx).len(), 1);
-    let first = feed_rows(&fx)[0];
-    assert_eq!(first.kind, "system");
-    assert!(first.body.contains("couldn't be reopened"), "{first:?}");
-}
-
-#[test]
-fn a_failed_restart_says_so_too() {
-    let b = TypicalBrain::new();
-    let (mut st, t) = turn(&b, false);
-    restarted(&mut st, t);
-    let exit = AcpIn::Exited {
-        generation: 2,
-        why: "it crashed".into(),
-    };
-    hear_at(&mut st, at(t + 6 * MIN), exit);
-    assert!(matches!(phase(&st), Phase::Failed(_)));
-    assert!(st.central().restarting.is_none());
-    assert!(
-        card_text(&st)
-            .ends_with("Today's thread couldn't be reopened; your next prompt starts a new one.")
-    );
+    let rows = feed_rows(&fx);
+    assert!(rows.iter().all(|r| r.thread_id == "th-2"), "{rows:?}");
+    assert!(rows.iter().all(|r| r.kind == "you"), "{rows:?}");
 }
 
 #[test]

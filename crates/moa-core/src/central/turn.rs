@@ -197,7 +197,7 @@ pub(super) fn unanswered(state: &mut State, now: &Now) -> Vec<Effect> {
 
 /// Takes every request that waits: their rows as `cancelled`, and, when moa's agent is
 /// there to hear it (`told`), each answered cancelled.
-pub(super) fn forsaken(moa: &mut Moa, told: bool) -> (Vec<FeedEntry>, Vec<AcpCmd>) {
+fn forsaken(moa: &mut Moa, told: bool) -> (Vec<FeedEntry>, Vec<AcpCmd>) {
     let asking = std::mem::take(&mut moa.asking);
     let rows = asking
         .keys()
@@ -304,31 +304,21 @@ pub(super) fn ended(
     fx
 }
 
-/// moa's agent went away during the turn in `thread`, cutting it short: its running tool
-/// calls and the requests that wait for your answer are cancelled, and an `error` line says
-/// so with `told`, the reason the waiter hears.
-pub(super) fn cut_short(state: &mut State, now: &Now, thread: &str, told: &str) -> Vec<Effect> {
+/// moa's agent went away during the turn, or the watchdog is restarting it, cutting the turn
+/// short: its running tool calls and the requests that wait for your answer are cancelled
+/// (nobody is there to hear it), in one commit `tx` with `says`, the row that says why.
+pub(super) fn cut_short(state: &mut State, tx: Tx, says: FeedEntry) -> Vec<Effect> {
     let mut rows = cancelled_tools(&state.central);
     rows.extend(forsaken(&mut state.central, false).0);
     state.central.answered.clear();
-    let mut tx = Tx::new(now);
-    let body = text_body(told);
-    rows.push(new_row(
-        state,
-        &mut tx,
-        thread,
-        kind::ERROR,
-        None,
-        body,
-        None,
-    ));
+    rows.push(says);
     let mut fx: Vec<Effect> = unsaved(&mut state.central).into_iter().collect();
     fx.extend(write(state, tx, rows).unwrap_or_default());
     fx
 }
 
 /// The turn's tool calls still running, as cancelled: their turn ended without them.
-pub(super) fn cancelled_tools(moa: &Moa) -> Vec<FeedEntry> {
+fn cancelled_tools(moa: &Moa) -> Vec<FeedEntry> {
     let running = moa.written.values().filter(|r| {
         r.kind == kind::TOOL && r.state.as_deref().is_some_and(|s| RUNNING.contains(&s))
     });
@@ -456,7 +446,7 @@ pub(super) fn record(state: &mut State, tx: Tx, rows: Vec<FeedEntry>) -> Vec<Eff
 
 /// Commits `rows` and keeps them as the turn's, saved or not; `None` when the commit was
 /// refused.
-pub(super) fn write(state: &mut State, mut tx: Tx, rows: Vec<FeedEntry>) -> Option<Vec<Effect>> {
+fn write(state: &mut State, mut tx: Tx, rows: Vec<FeedEntry>) -> Option<Vec<Effect>> {
     let written = &mut state.central.written;
     written.extend(rows.iter().map(|r| (r.id, r.clone())));
     let changes = rows.into_iter().map(Change::Feed).collect();
@@ -465,7 +455,7 @@ pub(super) fn write(state: &mut State, mut tx: Tx, rows: Vec<FeedEntry>) -> Opti
 }
 
 /// The count of updates that couldn't be saved, said once and started again.
-pub(super) fn unsaved(moa: &mut Moa) -> Option<Effect> {
+fn unsaved(moa: &mut Moa) -> Option<Effect> {
     let n = std::mem::take(&mut moa.unsaved);
     (n > 0).then(|| warn(format!("{n} of moa's updates couldn't be saved")))
 }

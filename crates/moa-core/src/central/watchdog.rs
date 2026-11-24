@@ -1,6 +1,7 @@
 //! The watchdog (K6): a turn of moa's agent with no news for `watchdog_seconds` is cancelled,
 //! and one still under way `watchdog_kill_seconds` after that is cut short: moa's agent is
-//! restarted, and today's thread reopened with no prompt. A `card` row in the turn's thread
+//! restarted, and today's thread reopened with no prompt (or the new thread `/new` asked for
+//! opened). A `card` row in the turn's thread
 //! says what happened, and is updated in place at each step (K7, K11).
 //!
 //! Until the cancel it watches only while no request of moa's agent waits for you: you may
@@ -16,7 +17,7 @@ use super::wire::AcpCmd;
 use super::{Open, Phase, answer, card, launch, new_run, said, turn, warn};
 use crate::core::{Tx, fold_in};
 use crate::effect::{Effect, TimerKey, rearm};
-use crate::model::{FeedEntry, MoaThread};
+use crate::model::FeedEntry;
 use crate::op::OpError;
 use crate::state::State;
 use crate::time::words;
@@ -27,6 +28,10 @@ pub const WHAT: &str = "watchdog";
 
 /// What whoever waits for a turn the watchdog cut short hears.
 const HUNG: &str = "moa's turn hung, so moa's agent was restarted";
+
+/// How the card and the waiter end when moa's agent couldn't start again.
+const NOT_STARTED: &str = "so moa stopped moa's agent, and it couldn't start again; your next \
+                           prompt starts it with a new thread.";
 
 /// How late a timer may fire and still be on time.
 const LATE_MS: i64 = 60_000;
@@ -40,6 +45,26 @@ pub enum Stage {
     /// It was cancelled, and card `card` says so: if it doesn't stop, moa's agent is
     /// restarted.
     Cancelled { card: i64 },
+}
+
+/// The watchdog's restart under way: its card, finished once the restart ends, and the brief
+/// of the new thread `/new` asked for, which the thread's first prompt carries.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Restart {
+    pub card: FeedEntry,
+    pub brief: Option<String>,
+}
+
+/// How the restart ended.
+pub(super) enum Restarted {
+    /// Today's thread is open again.
+    Reopened(Open),
+    /// The new thread `/new` asked for is open.
+    New(Open),
+    /// moa's agent started again, but no thread could be opened.
+    NoThread,
+    /// moa's agent couldn't start again.
+    NotStarted,
 }
 
 /// The watchdog of moa's turn under way. Kept in memory.
@@ -158,68 +183,64 @@ fn cancel(state: &mut State, now: &Now) -> Vec<Effect> {
 /// stopped first. Once it has started it reopens today's thread ([`reopened`] ends that).
 fn restart(state: &mut State, now: &Now, card_id: i64) -> Vec<Effect> {
     let start = launch::spec(state);
-    let moa = &mut state.central;
-    let Some(turn) = moa.turn.take() else {
+    let Some(turn) = state.central.turn.take() else {
         return Vec::new();
     };
-    let mut fx = vec![warn("moa's turn didn't stop; moa's agent is restarted")];
-    fx.extend(turn::unsaved(moa));
-    let mut rows = turn::cancelled_tools(moa);
-    rows.extend(turn::forsaken(moa, false).0);
-    moa.answered.clear();
+    let ended = start.is_err().then_some(&Restarted::NotStarted);
     let mut tx = Tx::new(now);
-    let killed = card_row(
-        state,
-        &mut tx,
-        &turn.thread,
-        card_id,
-        &killed_text(state, None),
-    );
-    rows.push(killed.clone());
-    fx.extend(turn::write(state, tx, rows).unwrap_or_default());
+    let text = killed_text(state, ended);
+    let killed = card_row(state, &mut tx, &turn.thread, card_id, &text);
+    let mut fx = vec![warn("moa's turn didn't stop; moa's agent is stopped")];
+    fx.extend(turn::cut_short(state, tx, killed.clone()));
     let moa = &mut state.central;
     moa.written.clear();
-    fx.extend(answer(turn.waiter, Err(OpError(HUNG.into()))));
+    let told = match ended {
+        None => HUNG.to_string(),
+        Some(_) => format!("moa's turn hung, {NOT_STARTED}"),
+    };
+    fx.extend(answer(turn.waiter, Err(OpError(told))));
     match start {
         Ok((account, spec)) => {
             fx.push(new_run(moa, account, spec));
-            moa.restarting = Some(killed);
+            moa.restarting = Some(Restart {
+                card: killed,
+                brief: None,
+            });
         }
-        // moa's agent can't be started any more: the stuck one is stopped, and the card
-        // says no thread is open.
+        // moa's agent can't be started any more: the stuck one is stopped, and the next prompt
+        // starts it with a new thread.
         Err(OpError(why)) => {
             fx.push(Effect::Acp(AcpCmd::Stop {
                 generation: moa.generation,
             }));
             moa.phase = Phase::Failed(why);
             moa.thread = None;
-            moa.restarting = Some(killed);
-            fx.extend(reopened(state, now, None));
+            moa.reopen_failed = true;
         }
     }
     fx
 }
 
-/// The restart is over: today's thread is open again (`thread`), or it couldn't be (or moa's
-/// agent couldn't start), and the next prompt opens a new one. The card says which.
-pub(super) fn reopened(state: &mut State, now: &Now, thread: Option<MoaThread>) -> Vec<Effect> {
-    let Some(card) = state.central.restarting.take() else {
+/// The restart is over, as `ended` says: a thread is open, or none is and the next prompt
+/// opens a new one. The card says which.
+pub(super) fn reopened(state: &mut State, now: &Now, ended: Restarted) -> Vec<Effect> {
+    let Some(restart) = state.central.restarting.take() else {
         return Vec::new();
     };
-    let text = killed_text(state, Some(thread.is_some()));
+    let text = killed_text(state, Some(&ended));
     let moa = &mut state.central;
     if moa.phase == Phase::Starting {
         moa.phase = Phase::Ready;
     }
-    moa.reopen_failed = thread.is_none();
-    moa.thread = thread.map(|row| Open {
-        row,
-        brief: None,
-        reopen_failed: false,
-    });
+    let (thread, failed) = match ended {
+        Restarted::Reopened(open) | Restarted::New(open) => (Some(open), false),
+        Restarted::NoThread | Restarted::NotStarted => (None, true),
+    };
+    moa.thread = thread;
+    moa.reopen_failed = failed;
     let row = FeedEntry {
         body: card_body(WHAT, &text),
-        ..card
+        ..restart.card
     };
     let fx = turn::record(state, Tx::new(now), vec![row]);
     state.central.written.clear();
@@ -243,17 +264,21 @@ fn cancelled_text(state: &State) -> String {
     format!("moa's turn had no news for {span}, so moa cancelled it.")
 }
 
-/// K11: the cancel's text, then the restart's: whether today's thread was reopened, once
-/// known.
-fn killed_text(state: &State, reopened: Option<bool>) -> String {
+/// K11: the cancel's text, then the restart's: how it ended, once it has (`ended`).
+fn killed_text(state: &State, ended: Option<&Restarted>) -> String {
     let kill = words(state.config().moa.watchdog_kill_ms);
-    let end = match reopened {
-        None => ".",
-        Some(true) => " and today's thread reopened.",
-        Some(false) => ". Today's thread couldn't be reopened; your next prompt starts a new one.",
+    let end = match ended {
+        None => "so moa's agent was restarted.",
+        Some(Restarted::Reopened(_)) => "so moa's agent was restarted and today's thread reopened.",
+        Some(Restarted::New(_)) => "so moa's agent was restarted, with a new thread as you asked.",
+        Some(Restarted::NoThread) => {
+            "so moa's agent was restarted. Today's thread couldn't be reopened; your next prompt \
+             starts a new one."
+        }
+        Some(Restarted::NotStarted) => NOT_STARTED,
     };
     format!(
-        "{} It still hadn't stopped {kill} later, so moa's agent was restarted{end}",
+        "{} It still hadn't stopped {kill} later, {end}",
         cancelled_text(state)
     )
 }
