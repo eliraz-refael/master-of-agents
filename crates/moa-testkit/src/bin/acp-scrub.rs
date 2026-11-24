@@ -180,7 +180,8 @@ fn args() -> Args {
     }
 }
 
-/// `value` with `f` applied to each of its strings, object keys included.
+/// `value` with `f` applied to each of its string values. Keys stay as they are, so the
+/// message keeps its shape: a key that still names something fails the check after.
 fn map_strings(value: Value, f: &impl Fn(&str) -> String) -> Value {
     match value {
         Value::String(s) => Value::String(f(&s)),
@@ -188,7 +189,7 @@ fn map_strings(value: Value, f: &impl Fn(&str) -> String) -> Value {
         Value::Object(fields) => Value::Object(
             fields
                 .into_iter()
-                .map(|(k, v)| (f(&k), map_strings(v, f)))
+                .map(|(k, v)| (k, map_strings(v, f)))
                 .collect::<Map<_, _>>(),
         ),
         other => other,
@@ -370,8 +371,10 @@ impl Found {
     fn search(texts: &[&str]) -> Found {
         let home = Regex::new(r"/(?:Users|home)/([A-Za-z0-9._-]+)").expect("a pattern");
         let file_host = Regex::new(r#"file://([^/\s"'<>]+)/"#).expect("a pattern");
+        // Not after a `.`: `.env.local` is a file, not a host named `env`.
         let local_host =
-            Regex::new(r"([A-Za-z0-9][A-Za-z0-9-]*)\.local(?:[^A-Za-z0-9.]|$)").expect("a pattern");
+            Regex::new(r"(?:^|[^A-Za-z0-9.-])([A-Za-z0-9][A-Za-z0-9-]*)\.local(?:[^A-Za-z0-9.]|$)")
+                .expect("a pattern");
         let mut found = Found::default();
         for text in texts {
             for m in home.captures_iter(text) {
@@ -406,8 +409,12 @@ impl Found {
         if let Some((short, _)) = machine.split_once('.') {
             found.host(short);
         }
+        // The full name, and each part of it: a first name alone names the user too.
         for name in &full_names {
             found.user(name);
+            for part in name.split_whitespace().filter(|p| p.chars().count() >= 3) {
+                found.user(part);
+            }
         }
         found
     }

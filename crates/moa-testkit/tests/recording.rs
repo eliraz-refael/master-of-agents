@@ -522,7 +522,7 @@ async fn replay_answers_in_order() {
 
 /// The host name and full name `acp-scrub` takes for this machine's in every test.
 const TEST_HOST: &str = "scrub-test-host";
-const TEST_FULL_NAME: &str = "Ada Lantern";
+const TEST_FULL_NAME: &str = "Ines Quillfeather";
 
 /// `acp-scrub <in> <out> args…` with no home, user or login name in its environment, unless
 /// `home` is given, and the test's host and full name, not the machine's.
@@ -584,7 +584,7 @@ fn scrub_replaces_and_denies() {
             ),
             update_with(json!({"text": "mail beacon@harbor.lan about Harbor Labs"})),
             update_with(
-                json!({"text": "/Users/Shared/notes and .claude/settings.local.json, signed Ada Lantern on scrub-test-host"}),
+                json!({"text": "/Users/Shared/notes and .claude/settings.local.json, signed Ines Quillfeather on scrub-test-host; thanks, Ines"}),
             ),
         ],
     );
@@ -617,10 +617,11 @@ fn scrub_replaces_and_denies() {
         "user's projects: /home/user/.claude/projects/-home-user-private-kite on file://host/x"
     );
     assert_eq!(clean[4]["msg"]["params"]["text"], "mail EMAIL about Org");
-    // `/Users/Shared` names no one, and `settings.local.json` is no host.
+    // `/Users/Shared` names no one, `settings.local.json` is no host, and a first name
+    // alone is the user's.
     assert_eq!(
         clean[5]["msg"]["params"]["text"],
-        "/Users/Shared/notes and .claude/settings.local.json, signed user on host"
+        "/Users/Shared/notes and .claude/settings.local.json, signed user on host; thanks, user"
     );
 
     // A deny pattern that still matches (in any case) fails the line; each pattern is named
@@ -696,6 +697,25 @@ fn scrub_redacts_the_account() {
                "org_name": "Org", "Email": "user@example.com",
                "organizationID": id, "email-address": "user@example.com"})
     );
+}
+
+/// Keys aren't rewritten, so a message keeps its shape: a key that names the user fails the
+/// scrub instead of being renamed, or colliding with another.
+#[test]
+fn a_key_that_names_someone_fails() {
+    let dir = folder();
+    let input = tap_file(
+        dir.path(),
+        &[update_with(
+            json!({"text": "ok", "byPath": {"/Users/beacon/x": 1, "/home/beacon/x": 2}}),
+        )],
+    );
+    let out = dir.path().join("out.jsonl");
+    let (code, stderr) = scrub(&input, &out, None, &[]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("line 2:"), "{stderr}");
+    assert!(!stderr.contains("beacon"), "{stderr}");
+    assert!(!out.exists());
 }
 
 #[test]
