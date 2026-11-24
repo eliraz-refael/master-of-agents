@@ -836,7 +836,13 @@ fn a_wake_says_it_reads_reports() {
         ]
     );
     let view = only(vec![wake.clone()], &ctx, 80);
-    assert_eq!(view.lines[1].spans[1].tone, moa_view::line::Tone::Dim);
+    assert!(
+        view.lines[1]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|s| s.tone == moa_view::line::Tone::Dim)
+    );
     // One report reads as one; a wake-up with none says nothing more.
     wake.body["reports"] = json!(1);
     assert_eq!(
@@ -881,21 +887,22 @@ fn your_prompt_says_what_it_carried() {
     }
 }
 
-/// K12 (B3): a session's last line shows under its line only while auto is off (moa doesn't
-/// read the reports on its own); with auto on, moa says what matters. No state row counts as
-/// off.
+/// K12 (B3): a session's last line shows under its line (finished or needing you) only while
+/// auto is off (moa doesn't read the reports on its own); with auto on, moa says what matters.
+/// No state row counts as off, and so does a link that is down (moa's state may be stale).
 #[test]
 fn turn_text_only_when_auto_is_off() {
     let (mut data, ctx) = lantern();
-    let finished = EventRow {
-        seq: 1,
+    let event = |seq: u64, n: u8, what: EventWhat| EventRow {
+        seq,
         at: 1_000,
-        session: session(3),
-        what: EventWhat::Finished,
+        session: session(n),
+        what,
     };
-    data.events.insert(1, finished);
-    let text = |data: &Data| -> Vec<String> {
-        build(data, &ctx, &ConsoleUi::default(), true, 80)
+    data.events.insert(1, event(1, 3, EventWhat::Finished));
+    data.events.insert(2, event(2, 1, EventWhat::NeedsYou));
+    let text = |data: &Data, up: bool| -> Vec<String> {
+        build(data, &ctx, &ConsoleUi::default(), up, 80)
             .lines
             .iter()
             .map(Line::text)
@@ -903,17 +910,23 @@ fn turn_text_only_when_auto_is_off() {
     };
     data.touch();
     let off = [
+        "⚠ Fix login needs you [↩ answer]",
+        "  Bash: cargo test ⚠",
         "● Release notes · 1 turn since 19:00 [↩ open]",
         "  Ship it today?",
     ];
-    assert_eq!(text(&data), off);
+    assert_eq!(text(&data, true), off);
     data.moa = Some(moa("ready", 0, false));
     data.touch();
-    assert_eq!(text(&data), off);
+    assert_eq!(text(&data, true), off);
     data.moa = Some(moa("ready", 0, true));
     data.touch();
     assert_eq!(
-        text(&data),
-        ["● Release notes · 1 turn since 19:00 [↩ open]"]
+        text(&data, true),
+        [
+            "⚠ Fix login needs you [↩ answer]",
+            "● Release notes · 1 turn since 19:00 [↩ open]",
+        ]
     );
+    assert_eq!(text(&data, false), off);
 }

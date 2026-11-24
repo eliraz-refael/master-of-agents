@@ -1321,7 +1321,8 @@ impl<'a> Draw<'a> {
         }
         self.lines.extend(hanging(glyph, spans, self.width));
         let why = row.map(|r| clean(&r.why)).unwrap_or_default();
-        let auto = self.data.moa.as_ref().is_some_and(|m| m.auto);
+        // moa's state unsure (the link down): nothing is hidden.
+        let auto = live(self.data, self.up).is_some_and(|m| m.auto);
         if press.is_some() && !auto && !why.trim().is_empty() {
             let spans = vec![Span::new("  ", Tone::Text), Span::new(why, Tone::Dim)];
             self.lines.push(Line::new(cut_spans(spans, self.width)));
