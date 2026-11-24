@@ -432,6 +432,7 @@ async fn replay_answers_in_order() {
             id: s(id),
             title: None,
             status: Some(s(status)),
+            input: None,
         })
     };
     let usage = || update(Update::Other("usage_update"));

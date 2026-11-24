@@ -8,7 +8,8 @@
 
 use serde_json::{Value, json};
 
-use super::feed::{self, body_text, kind, plan_body, text_body, tool_body};
+use super::feed::{self, TOOL_INPUT_MAX, body_text, kind, plan_body, text_body, tool_body};
+use crate::text::cut;
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
 use super::{Moa, Phase, answer, warn};
 use crate::Now;
@@ -68,13 +69,23 @@ pub(super) fn update(state: &mut State, now: &Now, thread: &str, update: Update)
                 )),
             }
         }
-        Update::ToolUpdate { id, title, status } => {
+        Update::ToolUpdate {
+            id,
+            title,
+            status,
+            input,
+        } => {
             keyed(&state.central, kind::TOOL, &format!("tool:{id}")).map(|row| {
                 let mut row = row.clone();
-                if let Some(title) = title
+                if (title.is_some() || input.is_some())
                     && let Ok(mut body) = serde_json::from_str::<Value>(&row.body)
                 {
-                    body["title"] = json!(title);
+                    if let Some(title) = title {
+                        body["title"] = json!(title);
+                    }
+                    if let Some(input) = input {
+                        body["input"] = json!(cut(&input, TOOL_INPUT_MAX));
+                    }
                     row.body = body.to_string();
                 }
                 if status.is_some() {

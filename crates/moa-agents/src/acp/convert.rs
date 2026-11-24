@@ -121,6 +121,7 @@ fn update(update: SessionUpdate) -> Update {
             id: u.tool_call_id.to_string(),
             title: u.fields.title,
             status: u.fields.status.map(|s| name_of(&s)),
+            input: u.fields.raw_input.map(|v| v.to_string()),
         },
         SessionUpdate::Plan(p) => Update::Plan {
             entries: p
