@@ -43,10 +43,21 @@ pub fn loaded(toml: &str) -> (TypicalBrain, State) {
 
 /// `b` under `toml`, with `deps`, started from `snapshot`; its link not yet up.
 pub fn loaded_with(b: &TypicalBrain, toml: &str, deps: Deps, snapshot: Snapshot) -> State {
+    started_at(b, toml, deps, snapshot, b.now()).0
+}
+
+/// [`loaded_with`], started at `now`; what its start said too.
+pub fn started_at(
+    b: &TypicalBrain,
+    toml: &str,
+    deps: Deps,
+    snapshot: Snapshot,
+    now: Now,
+) -> (State, Vec<Effect>) {
     let config = Config::parse(toml, &b.home).unwrap();
     let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
-    handle_checked(&mut st, Input::Startup(Box::new(snapshot)), b.now());
-    st
+    let fx = handle_checked(&mut st, Input::Startup(Box::new(snapshot)), now);
+    (st, fx)
 }
 
 /// A hook from `agent`'s session `slot`, in conversation `conversation`, at `at`: the

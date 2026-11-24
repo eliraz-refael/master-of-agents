@@ -4,15 +4,16 @@
 
 mod common;
 
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use common::central::{acps, caps, hear_at, opened, prompt_at, prompts_sent, started as up};
+use common::central::{Disk, acps, caps, hear_at, opened, prompt_at, prompts_sent, started as up};
 use jiff::tz::TimeZone;
 use moa_core::central::channel::AUTO_KEY;
 use moa_core::central::reports::{EARLIER_MAX, LAST_MAX, TURNS_KEPT};
-use moa_core::central::wire::{AcpCmd, AcpIn, Opened};
+use moa_core::central::wire::{AcpCmd, AcpIn, Opened, ThreadHow};
 use moa_core::central::{PROMPT_MAX, Phase};
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
@@ -26,6 +27,8 @@ use moa_core::op::{ConnId, Op, ReqId};
 use moa_core::publish::Topic;
 use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::{Now, UtcMs};
+use moa_testkit::brain::TypicalBrain;
+use proptest::prelude::*;
 use serde_json::Value;
 
 const S: &str = "0195f3a2-1111-7000-8000-000000000001";
@@ -1045,4 +1048,490 @@ fn no_timer_with_nothing_queued() {
     all.extend(play(&mut st, T + 2 * SEC, fx));
     all.extend(end_turn(&mut st, T + 3 * SEC));
     assert!(common::timers(&all, TimerKey::Wake).is_empty(), "{all:?}");
+}
+
+// ---------- exactly once, across restarts ----------
+
+/// The world of [`each_report_reaches_moa_exactly_once`]: settle, gap and batch small.
+const SMALL: &str = "[moa]\nwake_settle_seconds = 5\nwake_gap_seconds = 20\nwake_batch = 2\n";
+
+/// One step of the property.
+#[derive(Clone, Debug)]
+enum Step {
+    /// Session `n` finishes a turn, its text a token of its own.
+    Turn(usize),
+    /// Session `n` needs the user, what it asks a token of its own.
+    NeedsYou(usize),
+    /// Your prompt.
+    Prompt,
+    /// Time moves this many seconds, and the `Wake` timer fires if it is due.
+    Advance(i64),
+    /// moa's agent answers what it has been asked.
+    Answer,
+    /// `/auto` is flipped: by hand on the disk, then a restart, until `/auto` is an op.
+    Auto,
+    /// The next input's writes are refused.
+    Refuse,
+    /// The daemon restarts before the last input's commits reach the disk (they are lost),
+    /// or, `mid_send`, after them but before its prompt reaches moa's agent.
+    Restart { mid_send: bool },
+}
+
+fn step() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        6 => (0..4usize).prop_map(Step::Turn),
+        2 => (0..4usize).prop_map(Step::NeedsYou),
+        1 => Just(Step::Prompt),
+        3 => (0..=60i64).prop_map(Step::Advance),
+        3 => Just(Step::Answer),
+        1 => Just(Step::Auto),
+        1 => Just(Step::Refuse),
+        2 => any::<bool>().prop_map(|mid_send| Step::Restart { mid_send }),
+    ]
+}
+
+/// The tokens in `text`.
+fn tokens(text: &str) -> BTreeSet<String> {
+    text.match_indices("tok-")
+        .map(|(i, _)| text[i..i + 8].to_string())
+        .collect()
+}
+
+/// The tokens a `you` row's body carries: in its text, and in what rode on it.
+fn row_tokens(body: &str) -> BTreeSet<String> {
+    let body: Value = serde_json::from_str(body).unwrap();
+    ["text", "carried"]
+        .iter()
+        .filter_map(|k| body[k].as_str())
+        .flat_map(tokens)
+        .collect()
+}
+
+/// A hook event the expected queue takes once its commit reaches the disk.
+struct Event {
+    session: usize,
+    kind: ReportKind,
+    token: String,
+}
+
+/// The queue as K2's rules alone keep it, commit by commit as the disk takes them.
+#[derive(Default)]
+struct Expected {
+    /// Each session's tokens of each kind, waiting.
+    queues: HashMap<(usize, ReportKind), Vec<String>>,
+    /// Carried in a saved `you` row.
+    carried: BTreeSet<String>,
+    /// Pushed out by a 7th turn, replaced by a newer need, or never saved: no row has them.
+    gone: BTreeSet<String>,
+}
+
+impl Expected {
+    fn queue(&mut self, e: Event) {
+        let q = self.queues.entry((e.session, e.kind)).or_default();
+        match e.kind {
+            ReportKind::TurnEnded => {
+                q.push(e.token);
+                if q.len() > TURNS_KEPT {
+                    self.gone.insert(q.remove(0));
+                }
+            }
+            ReportKind::NeedsYou => {
+                self.gone.extend(q.drain(..));
+                q.push(e.token);
+            }
+        }
+    }
+
+    /// A `you` row carrying `tokens` is saved: each was waiting, and each report it takes
+    /// goes whole.
+    fn carry(&mut self, tokens: &BTreeSet<String>) -> Result<(), TestCaseError> {
+        for t in tokens {
+            prop_assert!(
+                self.queues.values().any(|q| q.contains(t)),
+                "{} is carried, but isn't waiting: carried twice, or never queued",
+                t
+            );
+        }
+        let taken: Vec<(usize, ReportKind)> = self
+            .queues
+            .iter()
+            .filter(|(_, q)| q.iter().any(|t| tokens.contains(t)))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in taken {
+            let q = self.queues.remove(&k).unwrap();
+            prop_assert!(
+                q.iter().all(|t| tokens.contains(t)),
+                "part of a report is carried: {:?} of {:?}",
+                tokens,
+                q
+            );
+            self.carried.extend(q);
+        }
+        Ok(())
+    }
+}
+
+/// The daemon of the property: the core, the disk, the clock and the `Wake` timer, and moa's
+/// agent played by hand. An input's effects are executed only when the next step comes, so
+/// a restart can come between an input and its effects.
+struct Daemon {
+    disk: Disk,
+    b: TypicalBrain,
+    st: State,
+    now: i64,
+    /// Four of the typical brain's live sessions: their ids and conversations.
+    sessions: Vec<(SessionId, String)>,
+    /// The `Wake` timer's deadline, as executed.
+    wake_at: Option<i64>,
+    /// What moa's agent has been asked and hasn't answered.
+    out: VecDeque<AcpCmd>,
+    /// The last input's effects, not executed yet, and the event they bring the queue.
+    last: Vec<Effect>,
+    event: Option<Event>,
+    refuse_next: bool,
+    auto: bool,
+    /// The last hook's `seq`, token, request and thread.
+    seq: u32,
+    token: u32,
+    req: u64,
+    thread: u32,
+    expected: Expected,
+}
+
+impl Daemon {
+    fn new() -> Result<Daemon, TestCaseError> {
+        let b = TypicalBrain::new();
+        let disk = Disk::new(&b, SMALL);
+        let now = b.now().wall.0;
+        let (st, last) = disk.restart(&b, at(now));
+        let sessions: Vec<(SessionId, String)> = st
+            .sessions()
+            .filter(|s| s.lifecycle == Lifecycle::Live && s.location == Location::Here)
+            .filter(|s| s.archived_at.is_none())
+            .filter_map(|s| {
+                let c = st
+                    .conversations_of(s.id)
+                    .find(|c| c.agent_kind == AgentKind::Claude)?;
+                Some((s.id, c.conversation_id.clone()))
+            })
+            .take(4)
+            .collect();
+        assert_eq!(sessions.len(), 4, "the typical brain's live sessions");
+        let mut d = Daemon {
+            disk,
+            b,
+            st,
+            now,
+            sessions,
+            wake_at: None,
+            out: VecDeque::new(),
+            last,
+            event: None,
+            refuse_next: false,
+            auto: true,
+            seq: 0,
+            token: 0,
+            req: 0,
+            thread: 0,
+            expected: Expected::default(),
+        };
+        d.flush(true)?;
+        Ok(d)
+    }
+
+    /// Executes the last input's effects in order: its commits reach the disk (the queue
+    /// takes its event first), the `Wake` timer is set, and its commands reach moa's agent.
+    /// Each prompt that reaches it holds exactly the tokens of the row saved with it. Not
+    /// `whole`, the daemon dies mid-send: once the commit that saves a `you` row is on the
+    /// disk, nothing after it is executed, and no command reaches moa's agent.
+    fn flush(&mut self, whole: bool) -> Result<(), TestCaseError> {
+        if let Some(e) = self.event.take() {
+            self.expected.queue(e);
+        }
+        let mut row: Option<BTreeSet<String>> = None;
+        for e in std::mem::take(&mut self.last) {
+            match e {
+                Effect::Persist(changes) => {
+                    self.disk.apply(&changes);
+                    for c in &changes {
+                        if let Change::Feed(r) = c
+                            && r.kind == "you"
+                        {
+                            let carried = row_tokens(&r.body);
+                            self.expected.carry(&carried)?;
+                            row = Some(carried);
+                        }
+                    }
+                    if row.is_some() && !whole {
+                        break;
+                    }
+                }
+                Effect::Acp(cmd) if whole => {
+                    if let AcpCmd::Prompt { text, .. } = &cmd {
+                        let saved = row.take();
+                        prop_assert!(saved.is_some(), "a prompt went before its row was saved");
+                        prop_assert_eq!(Some(tokens(text)), saved);
+                    }
+                    self.out.push_back(cmd);
+                }
+                Effect::SetTimer {
+                    key: TimerKey::Wake,
+                    at,
+                } => self.wake_at = Some(at.0),
+                Effect::CancelTimer(TimerKey::Wake) => self.wake_at = None,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The next input's moment, a millisecond after the last. The last input's effects are
+    /// executed first, and when the step before said so, writes are refused at this moment
+    /// only. Whether they are.
+    fn next(&mut self) -> Result<bool, TestCaseError> {
+        self.flush(true)?;
+        self.now += 1;
+        let refused = std::mem::take(&mut self.refuse_next);
+        if refused {
+            let reload = Input::Reload {
+                snapshot: Box::new(self.disk.snapshot()),
+                refuse_writes: Some(RefuseWrites {
+                    until: UtcMs(self.now + 1),
+                    reason: "the disk is full".into(),
+                }),
+            };
+            self.last = handle_checked(&mut self.st, reload, at(self.now));
+            self.flush(true)?;
+        }
+        Ok(refused)
+    }
+
+    fn run(&mut self, input: Input) {
+        self.last = handle_checked(&mut self.st, input, at(self.now));
+    }
+
+    /// Session `n`'s hook of `kind`, a new token its text. The queue takes it when it is
+    /// saved: unless writes are refused, every one is, by the sessions chosen and the clock.
+    fn hook(&mut self, n: usize, kind: ReportKind) -> Result<(), TestCaseError> {
+        let refused = self.next()?;
+        self.token += 1;
+        self.seq += 1;
+        let token = format!("tok-{:04}", self.token);
+        let hook = match kind {
+            ReportKind::TurnEnded => HookKind::TurnEnded {
+                last_message: token.clone(),
+            },
+            ReportKind::NeedsYou => HookKind::NeedsAnswer {
+                what: token.clone(),
+            },
+        };
+        let (id, conversation) = &self.sessions[n];
+        let at = UtcMs(self.now);
+        let envelope = common::envelope(&id.to_string(), conversation, at, self.seq, hook);
+        self.run(Input::Hook {
+            reply: None,
+            envelope,
+        });
+        let queued = common::changes(&self.last)
+            .iter()
+            .any(|c| matches!(c, Change::Report(r) if r.turns.last() == Some(&token)));
+        prop_assert_eq!(queued, !refused, "{}", token);
+        match refused {
+            true => {
+                self.expected.gone.insert(token);
+            }
+            false => {
+                self.event = Some(Event {
+                    session: n,
+                    kind,
+                    token,
+                })
+            }
+        }
+        Ok(())
+    }
+
+    /// moa's agent answers each thing it has been asked: it starts, opens the thread asked
+    /// for, and ends each prompt's turn. What its answers ask in turn is answered too, but a
+    /// new prompt's turn ends at the next answer: the last input is often the one that sends
+    /// a prompt.
+    fn answer(&mut self) -> Result<(), TestCaseError> {
+        self.flush(true)?;
+        let mut asked = std::mem::take(&mut self.out);
+        loop {
+            let Some(cmd) = asked.pop_front() else {
+                let opening = |c: &AcpCmd| matches!(c, AcpCmd::Start { .. } | AcpCmd::Open { .. });
+                if !acps(&self.last).into_iter().any(opening) {
+                    break;
+                }
+                self.flush(true)?;
+                let (opens, later) = self.out.drain(..).partition(opening);
+                (asked, self.out) = (opens, later);
+                continue;
+            };
+            let heard = match cmd {
+                AcpCmd::Start { generation, .. } => up(generation, caps(true, true, true)),
+                AcpCmd::Open {
+                    generation, how, ..
+                } => {
+                    let result = match how {
+                        ThreadHow::New { .. } => {
+                            self.thread += 1;
+                            (format!("thread-{}", self.thread), Opened::New)
+                        }
+                        ThreadHow::Resume { thread } => (thread, Opened::Resumed),
+                        ThreadHow::Load { thread } => (thread, Opened::Loaded),
+                    };
+                    AcpIn::Opened {
+                        generation,
+                        result: Ok(result),
+                    }
+                }
+                AcpCmd::Prompt {
+                    generation, prompt, ..
+                } => common::central::ended(generation, prompt),
+                _ => continue,
+            };
+            self.next()?;
+            self.run(Input::Acp(heard));
+        }
+        Ok(())
+    }
+
+    /// The daemon starts again from what the disk holds; moa's agent, and whatever it was
+    /// asked, went with the old one.
+    fn restart(&mut self) -> Result<(), TestCaseError> {
+        self.out.clear();
+        self.wake_at = None;
+        self.now += 1;
+        let (st, fx) = self.disk.restart(&self.b, at(self.now));
+        self.st = st;
+        self.last = fx;
+        self.flush(true)
+    }
+
+    /// `/auto` set by hand on the disk, `None` for on, and the daemon restarted to read it.
+    fn set_auto(&mut self, value: Option<&str>) -> Result<(), TestCaseError> {
+        self.flush(true)?;
+        self.auto = value.is_none();
+        let key = AUTO_KEY.to_string();
+        let value = value.map(str::to_string);
+        self.disk.apply(&[Change::Meta { key, value }]);
+        self.restart()
+    }
+
+    fn step(&mut self, step: Step) -> Result<(), TestCaseError> {
+        match step {
+            Step::Turn(n) => self.hook(n, ReportKind::TurnEnded),
+            Step::NeedsYou(n) => self.hook(n, ReportKind::NeedsYou),
+            Step::Prompt => {
+                self.next()?;
+                self.req += 1;
+                self.last = prompt_at(&mut self.st, at(self.now), self.req, "hi", false);
+                Ok(())
+            }
+            Step::Advance(s) => {
+                self.flush(true)?;
+                self.now += s * SEC;
+                if self.wake_at.is_some_and(|w| w <= self.now) {
+                    self.next()?;
+                    // The scheduler forgets a timer that fired.
+                    self.wake_at = None;
+                    self.run(Input::Timer(TimerKey::Wake));
+                }
+                Ok(())
+            }
+            Step::Answer => self.answer(),
+            Step::Auto => match self.auto {
+                true => self.set_auto(Some("off")),
+                false => self.set_auto(None),
+            },
+            Step::Refuse => {
+                self.refuse_next = true;
+                Ok(())
+            }
+            Step::Restart { mid_send } => {
+                if mid_send {
+                    self.flush(false)?;
+                } else {
+                    self.last.clear();
+                    if let Some(e) = self.event.take() {
+                        self.expected.gone.insert(e.token);
+                    }
+                }
+                self.restart()
+            }
+        }
+    }
+
+    /// `/auto` on, then a minute at a time, moa's agent answering all it is asked, until
+    /// nothing waits.
+    fn drain(&mut self) -> Result<(), TestCaseError> {
+        self.set_auto(None)?;
+        for _ in 0..50 {
+            if self.st.reports().next().is_none() {
+                break;
+            }
+            self.step(Step::Advance(60))?;
+            for _ in 0..20 {
+                self.flush(true)?;
+                if self.out.is_empty() {
+                    break;
+                }
+                self.answer()?;
+            }
+        }
+        self.flush(true)
+    }
+
+    /// What the disk holds at the end: no report waits, no token is in two `you` rows, each
+    /// token kept is in one, and each pushed out or never saved is in none.
+    fn check(&self) -> Result<(), TestCaseError> {
+        prop_assert!(
+            self.disk.snapshot().reports.is_empty(),
+            "reports still wait"
+        );
+        prop_assert!(
+            self.expected.queues.values().all(Vec::is_empty),
+            "never carried: {:?}",
+            self.expected.queues
+        );
+        let mut rows: BTreeMap<String, usize> = BTreeMap::new();
+        for body in self.disk.you_bodies() {
+            for t in row_tokens(&body) {
+                *rows.entry(t).or_default() += 1;
+            }
+        }
+        for (t, n) in &rows {
+            prop_assert_eq!(*n, 1, "{} is in {} rows", t, n);
+        }
+        for t in &self.expected.carried {
+            prop_assert!(rows.contains_key(t), "{} is in no row", t);
+        }
+        for t in &self.expected.gone {
+            prop_assert!(
+                !rows.contains_key(t),
+                "{} was pushed out, or never saved",
+                t
+            );
+        }
+        Ok(())
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Whatever the sessions report, whatever you prompt and wherever the daemon restarts,
+    /// each report that isn't pushed out reaches moa's agent in exactly one saved row.
+    #[test]
+    fn each_report_reaches_moa_exactly_once(steps in prop::collection::vec(step(), 1..=60)) {
+        let mut d = Daemon::new()?;
+        for s in steps {
+            d.step(s)?;
+        }
+        d.drain()?;
+        d.check()?;
+    }
 }
