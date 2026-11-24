@@ -29,6 +29,7 @@ moa-agents = { path = "../moa-agents" }
 moa-platform = { path = "../moa-platform" }
 moa-testkit = { path = "../moa-testkit" }
 moa-proto = { path = "../moa-proto" }
+moa-store = { path = "../moa-store" }
 
 [lints]
 workspace = true

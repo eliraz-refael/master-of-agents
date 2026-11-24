@@ -38,6 +38,12 @@ starts**, and no slice's code starts before its detailed plan is approved. The p
   A slice-6 plan written today would guess at slice-2 types, and those guesses would rot.
   This file fixes what has to be fixed now. That covers the names, the crate boundaries, the
   order, and what each slice must deliver.
+- **Build order** (the user's call, 2026-11-24): 6 (6c, 6d), 7, 9, 10, and then 8, after
+  the switch-over. Live update and the switch come before setup, so v1 can be used daily
+  sooner. Partners (7) stay before the switch: the spike has `ask`, `peers`, `reply` and
+  `asks`, and the agents that call them would break without. Slice 8's items 9 and 10 (the
+  project-path canonicalisation and the front-door fixes) move into slice 10's carried
+  bundle, since daily use on the real home meets them.
 
 ## Global Constraints
 
@@ -814,7 +820,8 @@ Spec §6.12; R1 §2.12; lessons 46–53.
 
 ## Slice 8: setup, brains, import
 
-Spec §6.10, §6.12 (retention), §6.9.
+Spec §6.10, §6.12 (retention), §6.9. Built after slice 10, on the real home; its items 9 and
+10 are done in slice 10 (see the build order above).
 
 1. **Account discovery** (`~/.claude`, `~/.claude-*`). State per account: tracked by which
    brain, limits, plugin installed, `cleanupPeriodDays`, last used, unreadable.
@@ -892,7 +899,8 @@ with no lost state, no refused connection, and no lost hook.
 
 ## Slice 10: switch-over kit
 
-Spec §9.
+Spec §9. Also carries slice 8's items 9 (project paths canonicalised once) and 10 (the
+front door's fixes), which daily use on the real home needs before setup arrives.
 
 1. **Spike forwarders PR** (C25, a spike bug-fix-sized change): `track.sh`, the plugin's
    `bin/moactl` and `moa-proto/moactl` forward when `~/.local/state/moa/v1-live` exists.

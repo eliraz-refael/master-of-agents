@@ -118,6 +118,10 @@ impl Store {
             .iter()
             .filter_map(|r| rows::nag(r, n))
             .collect();
+        let reports = rows_of("reports", rows::REPORTS, "id")?
+            .iter()
+            .filter_map(|r| rows::report(r, n))
+            .collect();
         // Open terminals only: a closed one's row is history, and history keeps growing.
         let terminals = src
             .rows(
@@ -181,6 +185,7 @@ impl Store {
             spike_panes,
             threads,
             nags,
+            reports,
             terminals,
             activity_tail,
             feed_tail,
@@ -209,6 +214,7 @@ impl Store {
             activity: next("activity")?,
             feed: next("feed")?,
             terminal: next("terminals")?,
+            report: next("reports")?,
         })
     }
 

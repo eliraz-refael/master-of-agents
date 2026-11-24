@@ -336,6 +336,8 @@ fn changes_name_their_topics() {
     );
     assert_eq!(Change::DeleteGroup("g".into()).topics(), [Topic::Groups]);
     assert_eq!(Change::Terminal(terminal(1, None)).topics(), [Topic::Terms]);
+    assert_eq!(Change::Report(report(1, 1)).topics(), [Topic::Feed]);
+    assert_eq!(Change::DeleteReport(1).topics(), [Topic::Feed]);
     assert_eq!(
         Change::Meta {
             key: "k".into(),
@@ -515,6 +517,43 @@ fn nags_are_keyed_like_their_table() {
     assert_eq!(s.nags.len(), 3);
 }
 
+fn report(id: i64, queued_at: i64) -> Report {
+    Report {
+        id,
+        session_id: sid(1),
+        kind: ReportKind::TurnEnded,
+        queued_at: UtcMs(queued_at),
+        last_at: UtcMs(queued_at),
+        turns: vec!["Done".into()],
+    }
+}
+
+#[test]
+fn reports_apply_delete_and_come_in_line_order() {
+    let mut s = new_state();
+    assert_eq!(s.next_id(Table::Report), 1);
+    for r in [report(4, 30), report(2, 10), report(3, 10)] {
+        s.apply(&Change::Report(r));
+    }
+    let ids = |s: &State| s.reports().map(|r| r.id).collect::<Vec<_>>();
+    assert_eq!(ids(&s), [2, 3, 4]);
+    assert_eq!(s.next_id(Table::Report), 5);
+    s.apply(&Change::DeleteReport(3));
+    assert_eq!(ids(&s), [2, 4]);
+    // The id stays taken until a restart, as a deleted terminal's does.
+    assert_eq!(s.next_id(Table::Report), 5);
+    s.load(Snapshot {
+        reports: vec![report(9, 1)],
+        next_ids: NextIds {
+            report: 10,
+            ..NextIds::default()
+        },
+        ..Snapshot::default()
+    });
+    assert_eq!(ids(&s), [9]);
+    assert_eq!(s.next_id(Table::Report), 10);
+}
+
 #[test]
 fn row_names_the_sql_table_for_every_variant() {
     let id = sid(5);
@@ -638,6 +677,8 @@ fn row_names_the_sql_table_for_every_variant() {
             "nags",
             "#3/2026-11-20/2026-11-16".into(),
         ),
+        (Change::Report(report(4, 1)), "reports", "#4".into()),
+        (Change::DeleteReport(4), "reports", "#4".into()),
         (
             Change::DeletePaneBinding(id),
             "pane_bindings",

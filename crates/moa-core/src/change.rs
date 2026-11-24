@@ -4,7 +4,7 @@
 use crate::layout::CURRENT_KEY;
 use crate::model::{
     ActivityRow, Ask, Conversation, Event, FeedEntry, Group, MoaThread, Nag, Note, PaneBinding,
-    Project, Session, SessionId, SpikePane, Suggestion, Task, Terminal,
+    Project, Report, Session, SessionId, SpikePane, Suggestion, Task, Terminal,
 };
 use crate::publish::{BAR_KEY_PREFIX, Topic};
 
@@ -25,6 +25,7 @@ pub enum Change {
     Thread(MoaThread),
     Feed(FeedEntry),
     Nag(Nag),
+    Report(Report),
     Terminal(Terminal),
     /// `None` deletes the key.
     Meta {
@@ -34,6 +35,8 @@ pub enum Change {
     DeletePaneBinding(SessionId),
     DeleteSpikePane(SessionId),
     DeleteGroup(String),
+    /// A report's id: it was carried to moa's agent.
+    DeleteReport(i64),
 }
 
 /// The key of a `conversations` row: `<agent_kind>/<conversation_id>`. The store names rows it
@@ -69,6 +72,8 @@ impl Change {
             Change::Terminal(_) => &[Topic::Terms],
             // A thread change moves the `state` row's thread.
             Change::Thread(_) | Change::Feed(_) => &[Topic::Feed],
+            // The `state` row counts the reports waiting.
+            Change::Report(_) | Change::DeleteReport(_) => &[Topic::Feed],
             Change::Event(_)
             | Change::Note(_)
             | Change::SpikePane(_)
@@ -106,11 +111,13 @@ impl Change {
             Change::Thread(r) => ("moa_threads", r.thread_id.clone()),
             Change::Feed(r) => ("feed", format!("#{}", r.id)),
             Change::Nag(r) => ("nags", nag_key(r.task_id, r.due, r.day)),
+            Change::Report(r) => ("reports", format!("#{}", r.id)),
             Change::Terminal(r) => ("terminals", format!("#{}", r.id)),
             Change::Meta { .. } => return None,
             Change::DeletePaneBinding(id) => ("pane_bindings", id.to_string()),
             Change::DeleteSpikePane(id) => ("spike_panes", id.to_string()),
             Change::DeleteGroup(path) => ("groups", path.clone()),
+            Change::DeleteReport(id) => ("reports", format!("#{id}")),
         })
     }
 }

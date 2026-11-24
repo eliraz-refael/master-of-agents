@@ -629,9 +629,89 @@ fn a_short_table_is_not_taken_for_ui() {
             format!("moa.toml: [{near}] isn't a table moa knows; did you mean [ui]?"),
         );
     }
+    // A swapped pair is one edit: `[mao]` is `[moa]` misspelt, and `[iu]` still isn't `[ui]`.
+    assert_eq!(
+        err("[mao]\nx = 1\n"),
+        "moa.toml: [mao] isn't a table moa knows; did you mean [moa]?"
+    );
     // The long names still take two edits.
     assert_eq!(
         err("[setp]\nx = 1\n"),
         "moa.toml: [setp] isn't a table moa knows; did you mean [setup]?"
     );
+}
+
+/// 6c: `[moa]` sets how moa's agent is woken and watched.
+#[test]
+fn moa_settings_default() {
+    let want = |c: Config| {
+        let m = c.moa;
+        (
+            m.wake_settle_ms,
+            m.wake_gap_ms,
+            m.wake_batch,
+            m.watchdog_ms,
+            m.watchdog_kill_ms,
+        )
+    };
+    let defaults = (45_000, 180_000, 8, 300_000, 30_000);
+    assert_eq!(want(Config::default()), defaults);
+    assert_eq!(want(Config::parse("", home()).unwrap()), defaults);
+    assert_eq!(want(Config::parse("[moa]\n", home()).unwrap()), defaults);
+}
+
+#[test]
+fn moa_settings_parse() {
+    let text = "[moa]\nwake_settle_seconds = 0\nwake_gap_seconds = 5\nwake_batch = 100\n\
+                watchdog_seconds = 2\nwatchdog_kill_seconds = 1\n";
+    let m = Config::parse(text, home()).unwrap().moa;
+    assert_eq!(
+        (
+            m.wake_settle_ms,
+            m.wake_gap_ms,
+            m.wake_batch,
+            m.watchdog_ms,
+            m.watchdog_kill_ms
+        ),
+        (0, 5_000, 100, 2_000, 1_000)
+    );
+    let one = Config::parse("[moa]\nwake_batch = 1\n", home())
+        .unwrap()
+        .moa;
+    assert_eq!((one.wake_batch, one.wake_gap_ms), (1, 180_000));
+}
+
+#[test]
+fn bad_moa_settings_say_so() {
+    let line = |key: &str, words: &str| format!("moa.toml: {key} in [moa] must be {words}");
+    let batch = "a whole number from 1 to 100";
+    assert_eq!(err("[moa]\nwake_batch = 0\n"), line("wake_batch", batch));
+    assert_eq!(err("[moa]\nwake_batch = 101\n"), line("wake_batch", batch));
+    assert_eq!(err("[moa]\nwake_batch = 1.5\n"), line("wake_batch", batch));
+    assert_eq!(
+        err("[moa]\nwatchdog_seconds = -1\n"),
+        line("watchdog_seconds", "a whole number of seconds, 1 or more")
+    );
+    assert_eq!(
+        err("[moa]\nwatchdog_kill_seconds = 0\n"),
+        line(
+            "watchdog_kill_seconds",
+            "a whole number of seconds, 1 or more"
+        )
+    );
+    assert_eq!(
+        err("[moa]\nwake_settle_seconds = \"45\"\n"),
+        line(
+            "wake_settle_seconds",
+            "a whole number of seconds, 0 or more"
+        )
+    );
+    assert_eq!(
+        err("[moa]\nwake_gap_seconds = -3\n"),
+        line("wake_gap_seconds", "a whole number of seconds, 0 or more")
+    );
+    // A misspelt key is toml's own line, as `folder = []` is.
+    let typo = err("[moa]\nwake_setle_seconds = 45\n");
+    assert!(typo.starts_with("moa.toml line "), "{typo}");
+    assert!(typo.contains("wake_setle_seconds"), "{typo}");
 }

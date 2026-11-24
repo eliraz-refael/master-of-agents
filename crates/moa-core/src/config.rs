@@ -244,12 +244,43 @@ pub enum Form {
     Tab,
 }
 
+/// `[moa]`: how moa's agent is woken and watched, in milliseconds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MoaConfig {
+    /// How long a session report waits for the session to go quiet before moa is woken
+    /// (`wake_settle_seconds`); `0` wakes at once.
+    pub wake_settle_ms: i64,
+    /// The least time between two wake-ups (`wake_gap_seconds`); `0` has no gap.
+    pub wake_gap_ms: i64,
+    /// The most sessions one wake-up carries (`wake_batch`), 1 to 100.
+    pub wake_batch: usize,
+    /// How long a turn of moa's agent can go quiet before it's cancelled
+    /// (`watchdog_seconds`), 1 or more.
+    pub watchdog_ms: i64,
+    /// How long a cancelled turn gets to stop before the agent is killed
+    /// (`watchdog_kill_seconds`), 1 or more.
+    pub watchdog_kill_ms: i64,
+}
+
+impl Default for MoaConfig {
+    fn default() -> MoaConfig {
+        MoaConfig {
+            wake_settle_ms: 45_000,
+            wake_gap_ms: 180_000,
+            wake_batch: 8,
+            watchdog_ms: 300_000,
+            watchdog_kill_ms: 30_000,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Config {
     pub brains: BTreeMap<BrainName, BrainConfig>,
     pub accounts: BTreeMap<AccountName, AccountConfig>,
     pub setup: SetupConfig,
     pub ui: UiConfig,
+    pub moa: MoaConfig,
     /// Top-level tables moa doesn't know, for the caller to log as a warning.
     pub skipped_tables: Vec<String>,
 }
@@ -264,6 +295,19 @@ struct RawConfig {
     setup: RawSetup,
     #[serde(default)]
     ui: RawUi,
+    #[serde(default)]
+    moa: RawMoa,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawMoa {
+    /// Each is checked by hand, so any value gets the one plain line.
+    wake_settle_seconds: Option<toml::Value>,
+    wake_gap_seconds: Option<toml::Value>,
+    wake_batch: Option<toml::Value>,
+    watchdog_seconds: Option<toml::Value>,
+    watchdog_kill_seconds: Option<toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -307,6 +351,17 @@ struct RawAccount {
 struct RawSetup {
     #[serde(default)]
     skipped: Vec<String>,
+}
+
+/// A `[moa]` whole number of seconds, at least `min`, as milliseconds. `None` when unset.
+fn seconds_ms(v: &Option<toml::Value>, key: &str, min: i64) -> Result<Option<i64>, ConfigError> {
+    match v {
+        None => Ok(None),
+        Some(toml::Value::Integer(n)) if *n >= min => Ok(Some(n.saturating_mul(1000))),
+        Some(_) => Err(problem(format_args!(
+            "{key} in [moa] must be a whole number of seconds, {min} or more"
+        ))),
+    }
 }
 
 fn toml_problem(text: &str, e: &toml::de::Error) -> ConfigError {
@@ -362,22 +417,30 @@ fn expand_one(s: &str, what: &str, place: &str, home: &Path) -> Result<PathBuf, 
     expand(s, what, place, home)
 }
 
-const TABLES: [&str; 4] = ["brains", "accounts", "setup", "ui"];
+const TABLES: [&str; 5] = ["brains", "accounts", "setup", "ui", "moa"];
 
-/// Levenshtein distance, for catching a misspelt table name.
+/// Edit distance (insert, delete, change, or swap two neighbours), for catching a misspelt
+/// table name: `mao` is one edit from `moa`.
 fn distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cur = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
-            prev = cur;
+    let mut rows = vec![(0..=b.len()).collect::<Vec<usize>>(); a.len() + 1];
+    for (i, row) in rows.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let same = usize::from(a[i - 1] != b[j - 1]);
+            let mut d = (rows[i - 1][j - 1] + same)
+                .min(rows[i - 1][j] + 1)
+                .min(rows[i][j - 1] + 1);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d = d.min(rows[i - 2][j - 2] + 1);
+            }
+            rows[i][j] = d;
         }
     }
-    row[b.len()]
+    rows[a.len()][b.len()]
 }
 
 /// Whether `key` is a misspelling of the table `known`: two edits for a long name; for a
@@ -536,6 +599,27 @@ impl Config {
             Some(v) => hours_ms(v).ok_or_else(|| {
                 problem("terminal_idle_hours in [ui] must be a number of hours, 0 or more")
             })?,
+        };
+        let moa = &raw.moa;
+        let default = MoaConfig::default();
+        config.moa = MoaConfig {
+            wake_settle_ms: seconds_ms(&moa.wake_settle_seconds, "wake_settle_seconds", 0)?
+                .unwrap_or(default.wake_settle_ms),
+            wake_gap_ms: seconds_ms(&moa.wake_gap_seconds, "wake_gap_seconds", 0)?
+                .unwrap_or(default.wake_gap_ms),
+            wake_batch: match &moa.wake_batch {
+                None => default.wake_batch,
+                Some(toml::Value::Integer(n)) if (1..=100).contains(n) => *n as usize,
+                Some(_) => {
+                    return Err(problem(
+                        "wake_batch in [moa] must be a whole number from 1 to 100",
+                    ));
+                }
+            },
+            watchdog_ms: seconds_ms(&moa.watchdog_seconds, "watchdog_seconds", 1)?
+                .unwrap_or(default.watchdog_ms),
+            watchdog_kill_ms: seconds_ms(&moa.watchdog_kill_seconds, "watchdog_kill_seconds", 1)?
+                .unwrap_or(default.watchdog_kill_ms),
         };
         config.setup.skipped = raw
             .setup

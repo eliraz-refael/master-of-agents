@@ -629,6 +629,38 @@ pub(crate) fn feed(r: &SrcRow) -> FeedEntry {
     }
 }
 
+pub(crate) const REPORTS: &[&str] = &["id", "session_id", "kind", "queued_at", "last_at", "turns"];
+
+/// `None` when the session isn't one or `turns` isn't a list of text: a report that can't be
+/// read is left on disk, and it is no use to moa's agent.
+pub(crate) fn report(r: &SrcRow, notes: &mut Vec<LoadNote>) -> Option<Report> {
+    let mut f = Flags::new(r);
+    let turns = r
+        .text_cow("turns")
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok());
+    let (Some(session_id), Some(turns)) = (f.session(r.text_cow("session_id").as_deref()), turns)
+    else {
+        unusable(notes, "reports", r.int("id").map(|id| format!("#{id}")));
+        return None;
+    };
+    // A kind this build doesn't know can't be told from another row of its session: it is left
+    // on disk, unread.
+    let Some(kind) = r.text_cow("kind").and_then(|k| k.parse().ok()) else {
+        unusable(notes, "reports", r.int("id").map(|id| format!("#{id}")));
+        return None;
+    };
+    let report = Report {
+        id: r.int("id").unwrap_or(0),
+        session_id,
+        kind,
+        queued_at: ms(r, "queued_at"),
+        last_at: ms(r, "last_at"),
+        turns,
+    };
+    f.finish(notes, || Change::Report(report.clone()));
+    Some(report)
+}
+
 pub(crate) const META: &[&str] = &["key", "value"];
 
 const R_META_NULL: &str = "value was missing; loaded as empty";
@@ -940,6 +972,24 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
             tx.prepare_cached(&upsert("nags", NAGS, &["task_id", "due", "day"]))?
                 .execute(params![n.task_id.0, n.due.to_string(), n.day.to_string()])?;
         }
+        Change::Report(r) => {
+            let turns = serde_json::to_string(&r.turns).unwrap_or_else(|_| "[]".into());
+            // A row this build couldn't read stays on disk under another id, and would
+            // clash with this one on (session, kind): the newer row replaces it.
+            tx.prepare_cached(
+                "DELETE FROM reports WHERE session_id = ?1 AND kind = ?2 AND id <> ?3",
+            )?
+            .execute(params![r.session_id.to_string(), r.kind.as_str(), r.id])?;
+            tx.prepare_cached(&upsert("reports", REPORTS, &["id"]))?
+                .execute(params![
+                    r.id,
+                    r.session_id.to_string(),
+                    r.kind.as_str(),
+                    r.queued_at.0,
+                    r.last_at.0,
+                    turns
+                ])?;
+        }
         Change::Terminal(t) => {
             tx.prepare_cached(&upsert("terminals", TERMINALS, &["id"]))?
                 .execute(params![
@@ -979,6 +1029,10 @@ pub(crate) fn write(tx: &Transaction, change: &Change) -> rusqlite::Result<()> {
         Change::DeleteSpikePane(id) => {
             tx.prepare_cached("DELETE FROM spike_panes WHERE session_id = ?1")?
                 .execute([id.to_string()])?;
+        }
+        Change::DeleteReport(id) => {
+            tx.prepare_cached("DELETE FROM reports WHERE id = ?1")?
+                .execute([id])?;
         }
         Change::DeleteGroup(path) => {
             tx.prepare_cached("DELETE FROM groups WHERE path = ?1")?

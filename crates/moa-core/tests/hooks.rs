@@ -27,6 +27,8 @@ use moa_core::{Now, UtcMs};
 use proptest::prelude::*;
 use serde_json::json;
 
+mod common;
+
 const S: &str = "0195f3a2-1111-7000-8000-000000000001";
 const C: &str = "a1b2c3d4-0000-4000-8000-000000000001";
 const T0: i64 = 1_800_000_000_000;
@@ -115,21 +117,7 @@ fn seeded_from(deps: Deps, pane_bindings: Vec<PaneBinding>) -> State {
 }
 
 fn envelope(seq: u32, plus_ms: i64, kind: HookKind) -> HookEnvelope {
-    HookEnvelope {
-        agent: AgentKind::Claude,
-        slot: Some(S.into()),
-        pane: None,
-        brain: Some("default".into()),
-        store_dir: None,
-        conversation_id: C.into(),
-        kind,
-        at: UtcMs(T0 + plus_ms),
-        at_ns: (T0 + plus_ms) * 1_000_000,
-        pid: 100,
-        seq,
-        cwd: None,
-        transcript_path: None,
-    }
+    common::envelope(S, C, UtcMs(T0 + plus_ms), seq, kind)
 }
 
 fn feed(st: &mut State, env: HookEnvelope) -> Vec<Effect> {

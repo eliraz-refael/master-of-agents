@@ -223,6 +223,9 @@ pub struct MoaRow {
     pub phase: String,
     pub thread: Option<String>,
     pub why: Option<String>,
+    /// How many session reports wait for a wake-up. Absent from an older daemon's row: none.
+    #[serde(default)]
+    pub queued: u32,
 }
 
 /// The `meta` keys of the console's button bar start with this: `.moa` holds the list moa set
@@ -481,7 +484,7 @@ impl State {
             let v = keyed(&key, &EventRow::from(e));
             (key, v)
         }));
-        rows.insert("state".into(), keyed("state", &self.central.row()));
+        rows.insert("state".into(), keyed("state", &self.moa_row()));
         rows.insert("bar".into(), keyed("bar", &self.bar()));
         rows
     }
@@ -550,7 +553,7 @@ impl State {
     /// publishes everything: only the `state` row is compared, and the topic is built only
     /// when it moved.
     pub(crate) fn publish_moa_state(&mut self) -> Option<Arc<Model>> {
-        let row = keyed("state", &self.central.row());
+        let row = keyed("state", &self.moa_row());
         let last = self
             .model
             .topics

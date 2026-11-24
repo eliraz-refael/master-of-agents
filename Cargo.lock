@@ -1361,6 +1361,7 @@ dependencies = [
  "moa-agents",
  "moa-platform",
  "moa-proto",
+ "moa-store",
  "moa-testkit",
  "proptest",
  "schemars 1.2.3",

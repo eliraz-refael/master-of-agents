@@ -10,10 +10,11 @@ use moa_core::op::{ConnId, Op, ReqId};
 use moa_core::publish::Topic;
 use moa_core::state::{Deps, Snapshot, State};
 use moa_core::{Now, UtcMs};
+use moa_store::Store;
 use moa_testkit::brain::TypicalBrain;
 use serde_json::Value;
 
-use super::{changes, loaded_with};
+use super::{changes, started_at};
 
 pub const LAUNCHER: &str = "/opt/claude/bin/claude";
 pub const STUB: &str = "/opt/moa/bin/stub-acp";
@@ -49,11 +50,76 @@ pub fn moa_with(b: &TypicalBrain, account: &str, threads: Vec<MoaThread>) -> Sta
 
 /// The typical brain with moa's account `account`, loaded from `snapshot`.
 pub fn moa_from(b: &TypicalBrain, account: &str, snapshot: Snapshot) -> State {
+    moa_at(b, account, "", snapshot, b.now()).0
+}
+
+/// [`moa_from`] with `settings` (TOML, such as a `[moa]` table) after the `moa.toml`,
+/// started at `now`; what its start said too.
+pub fn moa_at(
+    b: &TypicalBrain,
+    account: &str,
+    settings: &str,
+    snapshot: Snapshot,
+    now: Now,
+) -> (State, Vec<Effect>) {
     let deps = Deps {
         home: b.home.clone(),
         ..Deps::default()
     };
-    loaded_with(b, &toml(account), deps, snapshot)
+    started_at(
+        b,
+        &format!("{}{settings}", toml(account)),
+        deps,
+        snapshot,
+        now,
+    )
+}
+
+/// The daemon's disk: the typical brain's own store, which holds only the commits a test
+/// executes. A restart loads what it holds, as the daemon's start does.
+pub struct Disk {
+    store: Store,
+    /// What `moa.toml` says after [`toml`]`("acct-a")`.
+    settings: String,
+}
+
+impl Disk {
+    pub fn new(b: &TypicalBrain, settings: &str) -> Disk {
+        Disk {
+            store: b.store(),
+            settings: settings.into(),
+        }
+    }
+
+    /// One commit reaches the disk.
+    pub fn apply(&mut self, changes: &[Change]) {
+        self.store
+            .apply(changes)
+            .expect("the disk takes the commit");
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.store.load_snapshot().expect("the disk loads")
+    }
+
+    /// The daemon starts again at `now`, with moa's account `acct-a`, from what the disk
+    /// holds; what its start said too.
+    pub fn restart(&self, b: &TypicalBrain, now: Now) -> (State, Vec<Effect>) {
+        moa_at(b, "acct-a", &self.settings, self.snapshot(), now)
+    }
+
+    /// The bodies of every `you` row saved, read with SQL: every one, not a tail.
+    pub fn you_bodies(&self) -> Vec<String> {
+        let mut rows = self
+            .store
+            .conn()
+            .prepare("SELECT body FROM feed WHERE kind = 'you' ORDER BY id")
+            .unwrap();
+        rows.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
 }
 
 pub fn moa(b: &TypicalBrain) -> State {
