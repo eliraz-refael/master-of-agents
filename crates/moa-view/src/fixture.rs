@@ -575,11 +575,12 @@ fn tool(id: i64, at: UtcMs, title: &str, input: Value, state: &str) -> Value {
 }
 
 /// A made-up day of moa's conversation, as the `feed` topic carries it: yesterday's thread with
-/// one exchange; then today's, with moa's own morning brief (an automatic prompt, a thought
-/// and an answer), a plan and a run of five tool calls, a turn you cancelled, one that failed,
-/// and one still running a tool. Then the sessions' events (Migrate DB started, Old spike fell
-/// asleep, Closed thing ended, Rust scaffold finished 3 turns, Fix login needs you), moa
-/// thinking, and the default bar.
+/// one exchange; then today's, with moa's morning wake-up (an automatic prompt carrying 3
+/// session reports, a thought and an answer), a plan and a run of five tool calls, a turn you
+/// cancelled, one that failed, and one still running a tool, whose prompt carried 2 session
+/// reports. Then the sessions' events (Migrate DB started, Old spike fell asleep, Closed thing
+/// ended, Rust scaffold finished 3 turns, Fix login needs you), moa thinking with auto off and
+/// one session report waiting, and the default bar.
 pub fn console_rows(data: &mut Data) {
     let day = date(2026, 11, 13);
     let at = |h: i8, m: i8| local(day, h, m);
@@ -587,7 +588,8 @@ pub fn console_rows(data: &mut Data) {
     let text = |t: &str| json!({ "text": t });
     let today =
         |id: i64, at: UtcMs, kind: &str, body: Value| feed(id, THREAD_TODAY, at, kind, body, None);
-    let mut morning = today(3, at(8, 0), "you", text("Morning brief"));
+    let wake = "(moa · a wake-up, not typed by the user) 3 session reports since your last look:";
+    let mut morning = today(3, at(8, 0), "you", json!({ "text": wake, "reports": 3 }));
     morning["automatic"] = json!(true);
     let rows = vec![
         feed(
@@ -692,7 +694,17 @@ pub fn console_rows(data: &mut Data) {
             "error",
             text("moa's agent stopped answering"),
         ),
-        today(18, at(9, 58), "you", text("Check the deploy")),
+        today(
+            18,
+            at(9, 58),
+            "you",
+            json!({
+                "text": "Check the deploy",
+                "reports": 2,
+                "carried": "(moa · 2 session reports since your last look, sent with the \
+                            user's message)",
+            }),
+        ),
         tool(
             19,
             at(9, 58),
@@ -712,7 +724,10 @@ pub fn console_rows(data: &mut Data) {
         event(7, at(9, 40), 1, "needs_you"),
         event(8, at(9, 45), 2, "finished"),
     ];
-    let state = json!({"key": "state", "phase": "thinking", "thread": THREAD_TODAY, "why": null});
+    let state = json!({
+        "key": "state", "phase": "thinking", "thread": THREAD_TODAY, "why": null,
+        "queued": 1, "auto": false,
+    });
     let bar = json!({"key": "bar", "commands": ["/brief", "/attention", "/ls", "/help"], "by": "default"});
     data.upsert(
         Topic::Feed,

@@ -1,9 +1,10 @@
-//! The console (B6): moa's conversation, the newest at the bottom. Your prompts; moa's turns,
-//! each under a header and behind a gutter (its answers as Markdown, its thoughts, tool calls,
-//! plans and notes, its permission requests as cards you answer, K12, and the cards moa's
-//! core writes, K7); the sessions' events, one line per session (B3); your commands' cards;
-//! errors; and a separator where the thread changes (B2). A row it can't read is one dim line
-//! (B10): nothing here panics, whatever the daemon sends.
+//! The console (B6): moa's conversation, the newest at the bottom. Your prompts, and the
+//! session reports each carried (K12); moa's turns, each under a header and behind a gutter
+//! (what a wake-up carried, its answers as Markdown, its thoughts, tool calls, plans and
+//! notes, its permission requests as cards you answer, K12, and the cards moa's core writes,
+//! K7); the sessions' events, one line per session (B3); your commands' cards; errors; and a
+//! separator where the thread changes (B2). A row it can't read is one dim line (B10):
+//! nothing here panics, whatever the daemon sends.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
@@ -426,11 +427,11 @@ pub fn more(n: usize, width: u16) -> Line {
     Line::plain(cut(&format!("↑ {n} more"), usize::from(width)), Tone::Dim)
 }
 
-/// The head line (B9): moa's thread and state, and `↓ N new` when `new` lines came below a
-/// view scrolled up. While a permission request waits, the state is `⚠ answer y/a/n`, the
-/// keys offered by the request y, a and n answer: the oldest but those `answered` from here
-/// (K12). `up` is whether the panel's connection is. The thread goes first when the width
-/// is short, then the end of the rest.
+/// The head line (B9): moa's thread and state, `◷ N for moa` while session reports wait for
+/// it (K12), and `↓ N new` when `new` lines came below a view scrolled up. While a permission
+/// request waits, the state is `⚠ answer y/a/n`, the keys offered by the request y, a and n
+/// answer: the oldest but those `answered` from here (K12). `up` is whether the panel's
+/// connection is. The thread goes first when the width is short, then the end of the rest.
 pub fn head(
     data: &Data,
     ctx: &Ctx,
@@ -439,7 +440,6 @@ pub fn head(
     new: usize,
     width: u16,
 ) -> Line {
-    let dim = |s: &str| Span::new(s, Tone::Dim);
     let moa = live(data, up);
     let phase = moa.map_or("off", |m| m.phase.as_str());
     let waiting = waiting(data, up, answered);
@@ -475,6 +475,9 @@ pub fn head(
         }
         other => vec![dim(&clean(other))],
     };
+    if let Some(queued) = moa.map(|m| m.queued).filter(|q| *q > 0) {
+        spans.push(dim(&format!(" · ◷ {queued} for moa")));
+    }
     if new > 0 {
         spans.push(dim(" · "));
         spans.push(Span::new(format!("↓ {new} new"), Tone::Work));
@@ -980,6 +983,13 @@ impl<'a> Draw<'a> {
                     let lines = self.row(row, self.width);
                     self.lines.extend(lines);
                     self.last = Last::Row;
+                } else if let Some(n) = carried(row) {
+                    // A wake-up: its text is the reports, and it says so under the header
+                    // as soon as it is sent.
+                    self.header(row.at);
+                    let text = format!("moa is reading {}…", session_reports(n));
+                    let lines = hanging(dim("· "), vec![dim(&text)], self.room());
+                    self.push_row(lines);
                 }
             }
             other => {
@@ -1061,6 +1071,12 @@ impl<'a> Draw<'a> {
         if !matches!(self.last, Last::Row | Last::Separator) {
             self.gap();
         }
+        self.header(row.at);
+    }
+
+    /// The turn's header, `◆ moa  HH:MM` at `at` (`· on its own` when its prompt was moa's),
+    /// unless it is drawn; it opens a turn when none is.
+    fn header(&mut self, at: i64) {
         let turn = self.turn.get_or_insert(Turn {
             automatic: false,
             headed: false,
@@ -1073,7 +1089,7 @@ impl<'a> Draw<'a> {
         if automatic {
             self.gap();
         }
-        let at = local_format(UtcMs(row.at), &self.ctx.tz, "%H:%M");
+        let at = local_format(UtcMs(at), &self.ctx.tz, "%H:%M");
         let mut spans = vec![Span::bold(format!("◆ moa  {at}"), Tone::Brain)];
         if automatic {
             spans.push(Span::new(" · on its own", Tone::Dim));
@@ -1139,7 +1155,12 @@ impl<'a> Draw<'a> {
         let lines = match row.kind.as_str() {
             kind::YOU => text.map(|t| {
                 let you = |s: &str| Span::new(s, Tone::You);
-                hanging(you("› "), vec![you(&clean(t))], room)
+                let mut lines = hanging(you("› "), vec![you(&clean(t))], room);
+                if let Some(n) = carried(row) {
+                    let with = format!("· with {}", session_reports(n));
+                    lines.extend(hanging(Span::new("  ", Tone::Text), vec![dim(&with)], room));
+                }
+                lines
             }),
             kind::MOA => text.map(|t| {
                 let (w, data) = (u16::try_from(room).unwrap_or(u16::MAX), self.data);
@@ -1157,10 +1178,7 @@ impl<'a> Draw<'a> {
             }),
             kind::TOOL => self.tool(row, room).map(|line| vec![line]),
             kind::PLAN => plan(row, room),
-            kind::SYSTEM => text.map(|t| {
-                let dim = |s: &str| Span::new(s, Tone::Dim);
-                hanging(dim("· "), vec![dim(&clean(t))], room)
-            }),
+            kind::SYSTEM => text.map(|t| hanging(dim("· "), vec![dim(&clean(t))], room)),
             kind::ERROR => text.map(|t| hanging(fail("✗ "), vec![fail(&clean(t))], room)),
             kind::PERMISSION => self.permission(row, room),
             kind::CARD => self.core_card(row, room),
@@ -1260,7 +1278,6 @@ impl<'a> Draw<'a> {
             .map(clean)
             .filter(|name| !name.trim().is_empty());
         if let Some(name) = always {
-            let dim = |s: &str| Span::new(s, Tone::Dim);
             card.extend(hanging(dim("always: "), vec![dim(&name)], inner));
         }
         lines.extend(behind(CARD_GUTTER, card));
@@ -1268,7 +1285,8 @@ impl<'a> Draw<'a> {
     }
 
     /// A session's folded line (B3). When it needs you or finished a turn: a button to go to
-    /// it, and its last line under it (under a start or an end that line may be stale).
+    /// it, and while auto is off its last line under it (under a start or an end that line
+    /// may be stale; with auto on, moa reads the session reports and says what matters, K12).
     fn event(&mut self, f: &Folded) {
         let row = self.data.sessions.get(&f.session);
         let name = row.map_or_else(|| f.session.to_string().chars().take(8).collect(), label);
@@ -1303,7 +1321,8 @@ impl<'a> Draw<'a> {
         }
         self.lines.extend(hanging(glyph, spans, self.width));
         let why = row.map(|r| clean(&r.why)).unwrap_or_default();
-        if press.is_some() && !why.trim().is_empty() {
+        let auto = self.data.moa.as_ref().is_some_and(|m| m.auto);
+        if press.is_some() && !auto && !why.trim().is_empty() {
             let spans = vec![Span::new("  ", Tone::Text), Span::new(why, Tone::Dim)];
             self.lines.push(Line::new(cut_spans(spans, self.width)));
         }
@@ -1417,6 +1436,24 @@ fn plan(row: &FeedRow, room: usize) -> Option<Vec<Line>> {
 
 fn fail(text: &str) -> Span {
     Span::new(text, Tone::Fail)
+}
+
+fn dim(text: &str) -> Span {
+    Span::new(text, Tone::Dim)
+}
+
+/// How many session reports a `you` row carried (K12), when it carried any.
+fn carried(row: &FeedRow) -> Option<u64> {
+    row.body
+        .get("reports")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+}
+
+/// `N session reports`, or `1 session report`.
+fn session_reports(n: u64) -> String {
+    let reports = if n == 1 { "report" } else { "reports" };
+    format!("{n} session {reports}")
 }
 
 /// `lead`, then `spans` wrapped to the cells left beside it ([`text::hang`]); the wrapped

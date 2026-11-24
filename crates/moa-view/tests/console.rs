@@ -75,10 +75,11 @@ fn only(rows: Vec<FeedRow>, ctx: &Ctx, w: u16) -> ConsoleView {
     build(&data, ctx, &ConsoleUi::default(), true, w)
 }
 
-/// The day at 40, 80 and 120: yesterday's exchange, the separator, moa's own turn (`· on its
-/// own`) with its thought and answer, a plan, five tool calls folded to the last three, a
-/// cancelled turn, the session lines folded where they fall (Old spike asleep draws none), the
-/// `/ls` card, a failed turn, the error and the tool still running.
+/// The day at 40, 80 and 120: yesterday's exchange, the separator, moa's wake-up (`· on its
+/// own`, reading 3 session reports) with its thought and answer, a plan, five tool calls
+/// folded to the last three, a cancelled turn, the session lines folded where they fall (Old
+/// spike asleep draws none), the `/ls` card, a failed turn, the error, and the prompt that
+/// carried 2 session reports with its tool still running.
 #[test]
 fn the_day_at_three_widths() {
     let (data, ctx) = day();
@@ -745,5 +746,174 @@ fn cards_draw_as_cards() {
     assert_eq!(
         pressed(&view),
         [("/account acct-b", "/account acct-b"), ("/new", "/new")]
+    );
+}
+
+/// moa's state row: `phase`, today's thread, `queued` reports waiting, `auto`.
+fn moa(phase: &str, queued: u32, auto: bool) -> moa_core::publish::MoaRow {
+    moa_core::publish::MoaRow {
+        phase: phase.into(),
+        thread: Some(THREAD_TODAY.into()),
+        why: None,
+        queued,
+        asking: Vec::new(),
+        auto,
+    }
+}
+
+/// K12: while session reports wait for moa, the head line says how many after the state
+/// (Dim): `◷ 3 for moa`; nothing while none do, or while the link is down. At 40 and 80:
+/// ready, thinking, off and waiting for an answer with 3 waiting, ready with 1 under `↓ N
+/// new`, and ready with none.
+#[test]
+fn the_head_counts_reports() {
+    use moa_view::views::console::head;
+    let (mut asked, ctx) = asked();
+    let (mut data, _) = lantern();
+    let none = BTreeSet::new();
+    for w in [40, 80] {
+        let mut lines = Vec::new();
+        for (phase, queued, new) in [
+            ("ready", 3, 0),
+            ("thinking", 3, 0),
+            ("off", 3, 0),
+            ("ready", 1, 4),
+            ("ready", 0, 0),
+        ] {
+            data.moa = Some(moa(phase, queued, false));
+            data.touch();
+            lines.push(head(&data, &ctx, true, &none, new, w));
+        }
+        asked.moa.as_mut().unwrap().queued = 3;
+        asked.touch();
+        lines.push(head(&asked, &ctx, true, &none, 0, w));
+        assert_fits(&lines, w);
+        insta::assert_snapshot!(format!("head-reports@{w}"), debug_lines(&lines));
+    }
+    data.moa = Some(moa("ready", 3, true));
+    data.touch();
+    let line = head(&data, &ctx, true, &none, 0, 80);
+    let count = line.spans.iter().find(|s| s.text.contains("◷ 3 for moa"));
+    assert_eq!(count.map(|s| s.tone), Some(moa_view::line::Tone::Dim));
+    assert!(!head(&data, &ctx, false, &none, 0, 80).text().contains('◷'));
+    data.moa = Some(moa("ready", 0, true));
+    data.touch();
+    assert!(!head(&data, &ctx, true, &none, 0, 80).text().contains('◷'));
+}
+
+/// K12: a wake-up that carried reports says so under its turn's header, behind the gutter,
+/// as soon as it is sent: `· moa is reading 3 session reports…` (Dim); its text, the reports
+/// themselves, is never drawn. moa's answer follows under the same header.
+#[test]
+fn a_wake_says_it_reads_reports() {
+    let (_, ctx) = lantern();
+    let mut wake = row(
+        1,
+        "you",
+        json!({"text": "(moa · a wake-up) 3 session reports:", "reports": 3}),
+        None,
+    );
+    wake.automatic = true;
+    let text = |rows: Vec<FeedRow>| -> Vec<String> {
+        let view = only(rows, &ctx, 80);
+        assert_fits(&view.lines, 80);
+        view.lines.iter().map(Line::text).collect()
+    };
+    assert_eq!(
+        text(vec![wake.clone()]),
+        [
+            "◆ moa  19:00 · on its own",
+            "│ · moa is reading 3 session reports…"
+        ]
+    );
+    let answer = row(2, "moa", json!({"text": "Kite finished."}), None);
+    assert_eq!(
+        text(vec![wake.clone(), answer]),
+        [
+            "◆ moa  19:00 · on its own",
+            "│ · moa is reading 3 session reports…",
+            "│ Kite finished.",
+        ]
+    );
+    let view = only(vec![wake.clone()], &ctx, 80);
+    assert_eq!(view.lines[1].spans[1].tone, moa_view::line::Tone::Dim);
+    // One report reads as one; a wake-up with none says nothing more.
+    wake.body["reports"] = json!(1);
+    assert_eq!(
+        text(vec![wake.clone()])[1],
+        "│ · moa is reading 1 session report…"
+    );
+    wake.body["reports"] = json!(0);
+    assert!(text(vec![wake]).is_empty());
+}
+
+/// K12: your prompt that carried session reports says how many under it (Dim): `· with 2
+/// session reports`. One without says nothing more.
+#[test]
+fn your_prompt_says_what_it_carried() {
+    let (_, ctx) = lantern();
+    let hi = row(
+        1,
+        "you",
+        json!({"text": "hi", "reports": 2, "carried": "(moa · 2 session reports)"}),
+        None,
+    );
+    let view = only(vec![hi.clone()], &ctx, 80);
+    let text: Vec<String> = view.lines.iter().map(Line::text).collect();
+    assert_eq!(text, ["› hi", "  · with 2 session reports"]);
+    assert!(
+        view.lines[1]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|s| s.tone == moa_view::line::Tone::Dim)
+    );
+    let mut one = hi.clone();
+    one.body["reports"] = json!(1);
+    assert_eq!(
+        only(vec![one], &ctx, 80).lines[1].text(),
+        "  · with 1 session report"
+    );
+    let plain = row(1, "you", json!({"text": "hi"}), None);
+    assert_eq!(only(vec![plain], &ctx, 80).lines.len(), 1);
+    for w in 1..=40 {
+        assert_fits(&only(vec![hi.clone()], &ctx, w).lines, w);
+    }
+}
+
+/// K12 (B3): a session's last line shows under its line only while auto is off (moa doesn't
+/// read the reports on its own); with auto on, moa says what matters. No state row counts as
+/// off.
+#[test]
+fn turn_text_only_when_auto_is_off() {
+    let (mut data, ctx) = lantern();
+    let finished = EventRow {
+        seq: 1,
+        at: 1_000,
+        session: session(3),
+        what: EventWhat::Finished,
+    };
+    data.events.insert(1, finished);
+    let text = |data: &Data| -> Vec<String> {
+        build(data, &ctx, &ConsoleUi::default(), true, 80)
+            .lines
+            .iter()
+            .map(Line::text)
+            .collect()
+    };
+    data.touch();
+    let off = [
+        "● Release notes · 1 turn since 19:00 [↩ open]",
+        "  Ship it today?",
+    ];
+    assert_eq!(text(&data), off);
+    data.moa = Some(moa("ready", 0, false));
+    data.touch();
+    assert_eq!(text(&data), off);
+    data.moa = Some(moa("ready", 0, true));
+    data.touch();
+    assert_eq!(
+        text(&data),
+        ["● Release notes · 1 turn since 19:00 [↩ open]"]
     );
 }

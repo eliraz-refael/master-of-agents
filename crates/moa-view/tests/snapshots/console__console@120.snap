@@ -8,6 +8,7 @@ expression: debug_lines(&view.lines)
 
 [dim]── Fri 13 Nov · thread 0193b4f0 ──
 [brain*]◆ moa  08:00[dim] · on its own
+[dim]│ [dim]· [dim]moa is reading 3 session reports…
 [dim]│ [dim]Checking the sessions first. …
 [dim]│ [text]Good morning. Three things:
 [dim]│
@@ -51,5 +52,6 @@ expression: debug_lines(&view.lines)
 [fail]✗ [fail]moa's agent couldn't start
 
 [you]› [you]Check the deploy
+[text]  [dim]· with 2 session reports
 [brain*]◆ moa  09:58
 [dim]│ [dim]⚙ [text]Terminal[dim]: tail -n 50 deploy.log[text] [work]⠸

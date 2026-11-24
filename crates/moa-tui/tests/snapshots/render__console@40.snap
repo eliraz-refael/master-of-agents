@@ -3,14 +3,14 @@ source: crates/moa-tui/tests/render.rs
 expression: screen_text(&buf)
 ---
 ╭─ ◆ moa · default ────────────────────╮
-│ ⠸ thinking… Esc cancels              │
-│ ↑ 39 more                            │
-│                                      │
+│ ⠸ thinking… Esc cancels · ◷ 1 for moa│
+│ ↑ 41 more                            │
 │ › Why did Migrate DB fail?           │
 │ ◆ moa  09:51                         │
 │ │ ✗ moa's agent stopped answering    │
 │                                      │
 │ › Check the deploy                   │
+│   · with 2 session reports           │
 │ ◆ moa  09:58                         │
 │ │ ⚙ Terminal: tail -n 50 deploy.log ⠸│
 │ › ask moa, or / for commands         │
