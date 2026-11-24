@@ -668,6 +668,7 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
         && let (Some(restart), Some(account)) = (&moa.restarting, moa.account.clone())
     {
         let brief = restart.brief.clone();
+        let mut unopened = None;
         let ended = match result {
             Ok((id, how)) => {
                 let row = thread_row(state, now, &account, id, how);
@@ -681,13 +682,20 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
                     Opened::Resumed | Opened::Loaded => Restarted::Reopened(open),
                 }
             }
-            Err(_) => Restarted::NoThread,
+            Err(why) => {
+                unopened = Some(why);
+                Restarted::NoThread
+            }
         };
         let mut fx = Vec::new();
         if matches!(ended, Restarted::NoThread) {
             fx.push(warn("moa's thread couldn't be opened after a restart"));
         }
         fx.extend(watchdog::reopened(state, now, ended));
+        // The thread may have failed for its account.
+        if let Some(why) = unopened {
+            fold_in(&mut fx, account::failed(state, now, &why));
+        }
         return fx;
     }
     let (Some(mut p), Some(account)) = (moa.pending.take(), moa.account.clone()) else {

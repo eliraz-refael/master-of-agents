@@ -8,19 +8,20 @@
 mod common;
 
 use common::central::{
-    acps, caps, ended, feed_rows, first_turn, hear, moa, moa_at, moa_with, opened, phase, prompt,
-    prompts_sent, refuse_writes, started, thread,
+    acps, caps, ended, feed_rows, first_turn, hear, hear_at, moa, moa_at, moa_with, opened, phase,
+    prompt, prompts_sent, refuse_writes, started, thread,
 };
-use common::{changes, replies, started_at};
+use common::{at, changes, replies, started_at};
+use moa_core::UtcMs;
 use moa_core::central::Phase;
 use moa_core::central::account::{ACCOUNT_TROUBLE, trouble};
 use moa_core::central::launch::{self, ACCOUNT_KEY};
-use moa_core::central::wire::{AcpCmd, AcpIn, AdapterSpec, Opened};
+use moa_core::central::wire::{AcpCmd, AcpIn, AdapterSpec, Opened, ThreadHow};
 use moa_core::change::Change;
 use moa_core::config::AccountName;
-use moa_core::effect::{Effect, Input, Publish, handle_checked};
+use moa_core::effect::{Effect, Input, Publish, TimerKey, handle_checked};
 use moa_core::model::FeedEntry;
-use moa_core::op::{ConnId, Op, ReqId};
+use moa_core::op::{ConnId, NoParams, Op, ReqId};
 use moa_core::publish::CoreEvent;
 use moa_core::state::{Deps, State};
 use moa_testkit::brain::TypicalBrain;
@@ -28,10 +29,15 @@ use serde_json::Value;
 
 const AUTH: &str = "Authentication required";
 
+/// Claude Code's own word that a thread is full: not the account's.
+const CONTEXT_FULL: &str = "Context limit reached · /compact or /clear to continue";
+
 /// The card for an auth failure on `acct-a`, with `acct-b` to go on with.
 const AUTH_CARD: &str = "moa's account acct-a failed: Authentication required.\n\n\
                          Nothing was switched. To go on with another account:\n\n\
                          `/account acct-b`";
+
+const MIN: i64 = 60_000;
 
 /// A runnable account more, and one moa can't run on (no launcher): only the first is offered.
 const MORE: &str = "[accounts.acct-c]\nkind = \"claude\"\nstore = \"~/.claude-acct-c\"\n\
@@ -159,10 +165,12 @@ fn the_trouble_is_the_accounts() {
         "Credit balance is too low",
         "Claude AI usage limit reached|1700000000",
         "You've hit your usage limit",
+        "5-hour limit reached ∙ resets 3pm",
+        "Weekly limit reached ∙ resets Mon 9am",
     ] {
         assert!(trouble(why), "{why}");
     }
-    for why in ["connection reset", "internal error", ""] {
+    for why in ["connection reset", "internal error", "", CONTEXT_FULL] {
         assert!(!trouble(why), "{why}");
     }
     assert!(ACCOUNT_TROUBLE.iter().all(|p| *p == p.to_lowercase()));
@@ -235,6 +243,27 @@ fn a_card_that_cant_be_saved_is_an_error() {
     assert!(changes(&fx).is_empty(), "{fx:?}");
     assert_eq!(errors(&fx), [AUTH_CARD]);
     assert!(logs(&fx).iter().all(|l| !l.contains(AUTH)), "{fx:?}");
+}
+
+/// The open thread holds the card. Its why is the first line that isn't blank.
+#[test]
+fn a_blank_first_line_is_skipped() {
+    let b = TypicalBrain::new();
+    let mut st = on_acct_a(&b, "");
+    first_turn(&mut st, &b.now(), "th-1", false);
+    fail(&b, &mut st, "\n   \nAuthentication required\nmore");
+    assert_eq!(cards(&st), [("th-1".into(), AUTH_CARD.into())]);
+}
+
+/// The open thread would hold it, but a full thread is no account's trouble.
+#[test]
+fn a_full_context_is_no_card() {
+    let b = TypicalBrain::new();
+    let mut st = on_acct_a(&b, "");
+    first_turn(&mut st, &b.now(), "th-1", false);
+    let fx = fail(&b, &mut st, CONTEXT_FULL);
+    assert_eq!(cards(&st), []);
+    assert!(errors(&fx).is_empty(), "{fx:?}");
 }
 
 /// The open thread would hold it, but there is no card.
@@ -340,6 +369,54 @@ fn a_new_thread_that_fails_on_auth_offers_too() {
     let card = AUTH_CARD.replace(AUTH, "Invalid API key");
     assert_eq!(cards(&st), [("th-b".into(), card)]);
     assert!(acps(&fx).is_empty(), "{fx:?}");
+}
+
+/// The watchdog's restart, `/new` asked during the hung turn: the new thread couldn't open.
+/// No thread is open (the restart forgot it): the newest saved thread of any account, the
+/// hung turn's, holds the card.
+#[test]
+fn a_restart_whose_new_thread_fails_on_auth_offers_too() {
+    let b = TypicalBrain::new();
+    let mut st = on_acct_a(&b, "");
+    let t = b.now().wall.0;
+    first_turn(&mut st, &b.now(), "th-1", false);
+    let new = Input::Client {
+        conn: ConnId(1),
+        req: ReqId(5),
+        caller: Default::default(),
+        op: Op::ConsoleNew(NoParams),
+    };
+    handle_checked(&mut st, new, at(UtcMs(t + MIN)));
+    let fire =
+        |st: &mut State, ms| handle_checked(st, Input::Timer(TimerKey::Watchdog), at(UtcMs(ms)));
+    fire(&mut st, t + 5 * MIN);
+    let fx = fire(&mut st, t + 5 * MIN + 30_000);
+    assert_eq!(starts(&fx), [&on(&st, "acct-a")]);
+    let later = at(UtcMs(t + 6 * MIN));
+    let fx = hear_at(&mut st, later.clone(), started(2, caps(true, true, true)));
+    assert!(
+        matches!(
+            acps(&fx)[..],
+            [AcpCmd::Open {
+                how: ThreadHow::New { .. },
+                ..
+            }]
+        ),
+        "{fx:?}"
+    );
+    let result = Err(AUTH.into());
+    let fx = hear_at(
+        &mut st,
+        later,
+        AcpIn::Opened {
+            generation: 2,
+            result,
+        },
+    );
+    assert_eq!(cards(&st), [("th-1".into(), AUTH_CARD.into())]);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert!(logs(&fx).iter().all(|l| !l.contains(AUTH)), "{fx:?}");
+    assert_eq!(st.central().account.as_ref().unwrap().as_str(), "acct-a");
 }
 
 /// No thread at all, on a brain that never had one: the text goes out as an error, not a

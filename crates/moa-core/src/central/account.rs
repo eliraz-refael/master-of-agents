@@ -15,7 +15,7 @@ use crate::state::State;
 use crate::text::cut;
 
 /// What says the account is the trouble, in lowercase: its login, its billing, a spent limit.
-pub const ACCOUNT_TROUBLE: [&str; 9] = [
+pub const ACCOUNT_TROUBLE: [&str; 10] = [
     "authentication required",
     "not logged in",
     "/login",
@@ -24,7 +24,8 @@ pub const ACCOUNT_TROUBLE: [&str; 9] = [
     "credit balance",
     "billing",
     "usage limit",
-    "limit reached",
+    "5-hour limit",
+    "weekly limit",
 ];
 
 /// Whether `why` moa's agent failed is its account's.
@@ -94,7 +95,8 @@ fn thread(state: &State) -> Option<String> {
 /// K11: `moa's account <A> failed: <why>.`, then the other accounts moa can run on, each a
 /// `/account B` button, or that there is none.
 fn card_text(state: &State, account: &AccountName, why: &str) -> String {
-    let why = cut(why.lines().next().unwrap_or("").trim(), WHY_MAX);
+    let first = why.lines().map(str::trim).find(|l| !l.is_empty());
+    let why = cut(first.unwrap_or(""), WHY_MAX);
     // A why that ends its sentence isn't ended twice.
     let why = why.trim_end().trim_end_matches('.');
     let others: Vec<String> = launch::runnable(state)
