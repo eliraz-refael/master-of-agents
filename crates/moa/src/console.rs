@@ -83,7 +83,8 @@ fn cancel(brain: &BrainArgs) -> Result<(), String> {
 /// Sends `op` to the brain's running daemon, without starting one: with none, nothing is
 /// under way to act on.
 fn send_now(brain: &BrainArgs, op: Op) -> Result<(), String> {
-    running(brain, false, |_, mut client| async move {
+    let writes = op.writes();
+    running(brain, false, writes, |_, mut client| async move {
         let done = client.call(op).await.map_err(|e| e.to_string())?;
         println!("{}", done.text);
         Ok(())
@@ -91,7 +92,7 @@ fn send_now(brain: &BrainArgs, op: Op) -> Result<(), String> {
 }
 
 fn feed(brain: &BrainArgs, n: usize) -> Result<(), String> {
-    running(brain, false, |_, mut client| async move {
+    running(brain, false, false, |_, mut client| async move {
         let snap = client
             .subscribe(&[Topic::Feed])
             .await
