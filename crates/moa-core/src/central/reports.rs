@@ -58,10 +58,7 @@ pub(crate) fn queued(
     if text.is_empty() || is_moas_own(state, session) {
         return None;
     }
-    let row = match state
-        .reports()
-        .find(|r| r.session_id == session.id && r.kind == kind)
-    {
+    let row = match state.report_of(session.id, kind) {
         Some(old) => {
             let mut turns = old.turns.clone();
             match kind {
@@ -111,9 +108,10 @@ pub fn batch<'a>(state: &'a State, now: &Now, sessions: usize) -> Vec<&'a Report
             None => line.push((r.session_id, vec![r])),
         }
     }
-    let mut chosen: Vec<SessionId> = Vec::new();
+    // A session's reports go together, in its place in line.
+    let mut chosen: Vec<&Report> = Vec::new();
     let mut size = FRAME;
-    for (session, reports) in line.into_iter().take(sessions) {
+    for (_, reports) in line.into_iter().take(sessions) {
         // Each section, and the blank line before it.
         let more: usize = reports
             .iter()
@@ -123,12 +121,9 @@ pub fn batch<'a>(state: &'a State, now: &Now, sessions: usize) -> Vec<&'a Report
             break;
         }
         size += more;
-        chosen.push(session);
+        chosen.extend(reports);
     }
-    state
-        .reports()
-        .filter(|r| chosen.contains(&r.session_id))
-        .collect()
+    chosen
 }
 
 /// A wake-up's prompt: `reports`, and what moa does with them.

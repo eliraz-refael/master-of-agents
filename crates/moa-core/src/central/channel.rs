@@ -45,9 +45,10 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
         // Nothing else ends a refusal from the core's side.
         next = next.map(|at| at.max(until));
     } else if next.is_some_and(|at| at <= now.wall) {
-        next = match launch::spec(state) {
-            Err(_) => None,
-            Ok(_) => {
+        // A running agent needs no start, so only a stopped one's launch can hold a wake.
+        next = match state.central.running() || launch::spec(state).is_ok() {
+            false => None,
+            true => {
                 let more = send(state, now, Source::Wake, String::new(), None);
                 fold_in(fx, more);
                 due(state)

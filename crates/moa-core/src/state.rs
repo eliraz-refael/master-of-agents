@@ -638,6 +638,13 @@ impl State {
         all.into_iter()
     }
 
+    /// Session `id`'s waiting report of `kind`, if any: a session has at most one of each.
+    pub fn report_of(&self, id: SessionId, kind: ReportKind) -> Option<&Report> {
+        self.reports
+            .values()
+            .find(|r| r.session_id == id && r.kind == kind)
+    }
+
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {
         self.tasks.values()
     }
