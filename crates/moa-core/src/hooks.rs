@@ -316,7 +316,8 @@ fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) 
 }
 
 /// The changes an applied event brings besides the session itself, `after`: the project's
-/// day, the activity row, a start's conversation, and the session report it queues.
+/// day, the activity row, a start's conversation, the need it resolved and the session report
+/// it queues.
 fn applied_changes(
     state: &State,
     tx: &mut Tx,
@@ -345,6 +346,7 @@ fn applied_changes(
     if let HookKind::SessionStarted { source } = &env.kind {
         changes.push(Change::Conversation(rotated(state, id, env, *source)));
     }
+    changes.extend(reports::resolved(state, after));
     changes.extend(reports::queued(state, tx, after, env));
     changes
 }

@@ -1,8 +1,8 @@
 //! The session reports queue: what a session tells moa's agent, kept in the database until a
 //! wake-up, or your prompt, carries it. A hook event that is applied (not history only, not a
-//! duplicate) may queue one report row; its rules are here, and the change goes in the hook's
-//! own commit, so a report is never queued for an event that wasn't saved. So are the texts
-//! that carry them (K11).
+//! duplicate) may queue one report row, or delete a need it resolved; its rules are here, and
+//! the change goes in the hook's own commit, so a report is never queued, or deleted, for an
+//! event that wasn't saved. So are the texts that carry them (K11).
 
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use crate::central::PROMPT_MAX;
 use crate::change::Change;
 use crate::core::Tx;
 use crate::hook::{HookEnvelope, HookKind};
-use crate::model::{Report, ReportKind, Session, SessionId};
+use crate::model::{Activity, Report, ReportKind, Session, SessionId};
 use crate::ops::launch::title_of;
 use crate::state::{State, Table};
 use crate::text::{cut, one_line};
@@ -19,9 +19,11 @@ use crate::time::local_format;
 
 /// `text` cut to `n` characters, with a `…` after the cut: the stored text says it was cut.
 fn cut_marked(text: &str, n: usize) -> String {
-    match text.char_indices().nth(n) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_string(),
+    let kept = cut(text, n);
+    if kept.len() < text.len() {
+        format!("{kept}…")
+    } else {
+        kept
     }
 }
 
@@ -88,6 +90,21 @@ pub(crate) fn queued(
         },
     };
     Some(Change::Report(row))
+}
+
+/// The deletion of `session`'s `needs_you` report once the session (as an applied event
+/// leaves it) no longer needs a permission or an answer, or `None` when it still does or has
+/// none: a wake-up mustn't tell moa that a session needs the user once it has moved on. Its
+/// `turn_ended` report stays.
+pub(crate) fn resolved(state: &State, session: &Session) -> Option<Change> {
+    if matches!(
+        session.activity,
+        Activity::NeedsPermission | Activity::NeedsAnswer
+    ) {
+        return None;
+    }
+    let report = state.report_of(session.id, ReportKind::NeedsYou)?;
+    Some(Change::DeleteReport(report.id))
 }
 
 /// The most characters of a session's title, or its project's name, in a report's heading.

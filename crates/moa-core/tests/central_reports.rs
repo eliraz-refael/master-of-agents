@@ -149,6 +149,16 @@ fn feed(st: &mut State, envelope: HookEnvelope) -> Vec<Effect> {
     )
 }
 
+/// The commits `fx` saves.
+fn commits(fx: &[Effect]) -> Vec<&Vec<Change>> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Persist(c) => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The reports `fx` saves.
 fn saved(fx: &[Effect]) -> Vec<Report> {
     common::changes(fx)
@@ -174,13 +184,7 @@ fn a_finished_turn_queues_a_report() {
     let env = turn(1, 1_000, "Merged PR #3");
     let fx = feed(&mut st, env.clone());
     // One commit holds the session and its report.
-    let persists: Vec<_> = fx
-        .iter()
-        .filter_map(|e| match e {
-            Effect::Persist(c) => Some(c),
-            _ => None,
-        })
-        .collect();
+    let persists = commits(&fx);
     assert_eq!(persists.len(), 1);
     assert!(matches!(persists[0][0], Change::Session(_)));
     let reports = saved(&fx);
@@ -240,6 +244,59 @@ fn needs_you_keeps_the_latest() {
     assert_eq!(rows[0].turns, strs(&["Which branch?"]));
     assert_eq!(rows[0].queued_at, UtcMs(T0 + 1_000));
     assert_eq!(rows[0].last_at, UtcMs(T0 + 2_000));
+}
+
+#[test]
+fn a_resolved_need_leaves_the_queue() {
+    let mut st = lantern();
+    let needs = HookKind::NeedsPermission {
+        tool: "Bash".into(),
+    };
+    feed(&mut st, hook(1, 1_000, needs));
+    let id = waiting(&st)[0].id;
+    // The permission is given: the session works again, and the need goes in that commit.
+    let fx = feed(&mut st, hook(2, 2_000, HookKind::NeedsCleared));
+    assert!(waiting(&st).is_empty());
+    let commits = commits(&fx);
+    assert_eq!(commits.len(), 1);
+    assert!(matches!(&commits[0][0], Change::Session(s) if s.activity == Activity::Working));
+    assert!(commits[0].contains(&Change::DeleteReport(id)));
+}
+
+#[test]
+fn a_turn_after_a_question_leaves_only_the_turn() {
+    let mut st = lantern();
+    let needs = HookKind::NeedsAnswer {
+        what: "Which branch?".into(),
+    };
+    feed(&mut st, hook(1, 1_000, needs));
+    feed(&mut st, turn(2, 2_000, "Went with main"));
+    let rows = waiting(&st);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, ReportKind::TurnEnded);
+    assert_eq!(rows[0].turns, strs(&["Went with main"]));
+}
+
+#[test]
+fn a_need_after_a_need_still_waits() {
+    let mut st = lantern();
+    let permission = HookKind::NeedsPermission {
+        tool: "Bash".into(),
+    };
+    let question = HookKind::NeedsAnswer {
+        what: "Which branch?".into(),
+    };
+    feed(&mut st, hook(1, 1_000, permission));
+    let fx = feed(&mut st, hook(2, 2_000, question));
+    assert!(
+        !common::changes(&fx)
+            .iter()
+            .any(|c| matches!(c, Change::DeleteReport(_)))
+    );
+    let rows = waiting(&st);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, ReportKind::NeedsYou);
+    assert_eq!(rows[0].turns, strs(&["Which branch?"]));
 }
 
 #[test]
@@ -1135,7 +1192,8 @@ struct Expected {
     queues: HashMap<(usize, ReportKind), Vec<String>>,
     /// Carried in a saved `you` row.
     carried: BTreeSet<String>,
-    /// Pushed out by a 7th turn, replaced by a newer need, or never saved: no row has them.
+    /// Pushed out by a 7th turn, replaced by a newer need, resolved by a turn, or never
+    /// saved: no row has them.
     gone: BTreeSet<String>,
 }
 
@@ -1147,6 +1205,10 @@ impl Expected {
                 q.push(e.token);
                 if q.len() > TURNS_KEPT {
                     self.gone.insert(q.remove(0));
+                }
+                // The turn ended, so the session needs nothing now: its need is deleted.
+                if let Some(need) = self.queues.remove(&(e.session, ReportKind::NeedsYou)) {
+                    self.gone.extend(need);
                 }
             }
             ReportKind::NeedsYou => {
