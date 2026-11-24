@@ -38,12 +38,15 @@ pub enum TimerKey {
     Terminals,
     /// When moa's agent is next woken with the session reports (`central::channel`).
     Wake,
+    /// When moa's turn under way has gone too long without news, or without stopping once
+    /// cancelled (`central::watchdog`).
+    Watchdog,
 }
 
 /// Timer `key`, armed at `armed`, at its next deadline `next`: set, or cancelled when there
 /// is none, but only when that changed or when this input is the timer firing (`fired`: the
-/// scheduler has forgotten it). `armed` becomes `next`. Sleep's, the terminals' and the
-/// wake-up's timers are kept this way.
+/// scheduler has forgotten it). `armed` becomes `next`. Sleep's, the terminals', the
+/// wake-up's and the watchdog's timers are kept this way.
 pub(crate) fn rearm(
     armed: &mut Option<UtcMs>,
     key: TimerKey,

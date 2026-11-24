@@ -705,3 +705,40 @@ fn a_card_waits_only_while_the_link_is_up() {
     assert!(!lines.iter().any(|l| l.contains("moa asks")), "{lines:#?}");
     assert!(lines.contains(&s("│ ⊘ not answered: cargo publish -p kite")));
 }
+
+/// K7: a card moa's core writes is drawn as a command's card is: its head line (Warn), then
+/// its text as Markdown behind the card's gutter, whose commands are buttons. In a turn it
+/// sits behind the turn's gutter too. An unknown `what` says only `▸ moa`.
+#[test]
+fn cards_draw_as_cards() {
+    let (_, ctx) = lantern();
+    let card =
+        |id, what: &str, text: &str| row(id, "card", json!({"what": what, "text": text}), None);
+    let watchdog = "moa's turn had no news for 5 min, so moa cancelled it. It still hadn't \
+                    stopped 30 s later, so moa's agent was restarted and today's thread reopened.";
+    let account = "moa's account acct-a failed: Not logged in · Please run /login.\n\n\
+                   Nothing was switched. To go on with another account:\n\n`/account acct-b`";
+    let rows = vec![
+        row(1, "you", json!({"text": "Tidy the Harbor folder"}), None),
+        row(2, "moa", json!({"text": "Looking at the folder"}), None),
+        card(3, "watchdog", watchdog),
+        row(4, "you", json!({"text": "Try again"}), None),
+        card(5, "account", account),
+        card(
+            6,
+            "a later kind",
+            "From a newer moa: `/new` starts a new thread.",
+        ),
+    ];
+    for w in [40, 80] {
+        let view = only(rows.clone(), &ctx, w);
+        assert_fits(&view.lines, w);
+        insta::assert_snapshot!(format!("cards@{w}"), debug_lines(&view.lines));
+    }
+    let view = only(rows, &ctx, 80);
+    let lines: Vec<String> = view.lines.iter().map(Line::text).collect();
+    assert!(lines.contains(&s("│ ▸ moa's turn was stuck")), "{lines:#?}");
+    assert!(lines.contains(&s("│ ▸ moa's account failed")), "{lines:#?}");
+    assert!(lines.contains(&s("│ ▸ moa")), "{lines:#?}");
+    assert_eq!(pressed(&view), [("/new", "/new")]);
+}

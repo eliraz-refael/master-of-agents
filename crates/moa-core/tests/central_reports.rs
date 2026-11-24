@@ -884,6 +884,39 @@ fn no_wake_while_moa_answers() {
 }
 
 #[test]
+fn no_wake_while_restarting() {
+    let mut st = moa_brain(1);
+    let fx = prompt_at(&mut st, at(T0), 1, "hello", false);
+    play(&mut st, T0, fx);
+    finished(&mut st, 0, T, "Merged PR #3");
+    // The turn hangs: the watchdog cancels it, then restarts moa's agent.
+    let dog = |st: &mut State, ms| handle_checked(st, Input::Timer(TimerKey::Watchdog), at(ms));
+    dog(&mut st, T0 + 300 * SEC);
+    let restart = T0 + 330 * SEC;
+    let fx = dog(&mut st, restart);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Start { .. }]), "{fx:?}");
+    assert!(st.central().restarting.is_some());
+    // Due, but the restart is reopening today's thread: no wake races it.
+    let generation = st.central().generation;
+    let fx = hear_at(&mut st, at(restart), up(generation, caps(true, true, true)));
+    assert!(
+        matches!(acps(&fx)[..], [AcpCmd::Open { .. }]),
+        "only the reopen: {fx:?}"
+    );
+    assert_eq!(wake_timer(&fx), None);
+    assert_eq!(st.reports().count(), 1);
+    // Reopened, the wake goes.
+    let thread = st.threads().next().unwrap().thread_id.clone();
+    let fx = hear_at(
+        &mut st,
+        at(restart),
+        opened(generation, &thread, Opened::Resumed),
+    );
+    assert!(sent(&fx).starts_with(WAKE));
+    assert_eq!(st.reports().count(), 0);
+}
+
+#[test]
 fn no_wake_while_a_permission_waits() {
     let mut st = moa_brain(1);
     let fx = prompt_at(&mut st, at(T0), 1, "hello", false);

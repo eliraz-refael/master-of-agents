@@ -139,6 +139,15 @@ pub fn span(ms: i64) -> String {
     }
 }
 
+/// How long a setting's `ms` is, in words a card says it in: `{n} min` when it is whole
+/// minutes, else `{n} s`.
+pub fn words(ms: i64) -> String {
+    match ms {
+        ms if ms >= MINUTE && ms % MINUTE == 0 => format!("{} min", ms / MINUTE),
+        ms => format!("{} s", ms / 1_000),
+    }
+}
+
 /// Age of `from` at `now` as the spike printed it: `?`, `{m}m`, `{h}h` or `{d}d`; under a
 /// minute, and the future, is `0m`.
 pub fn age(from: Option<UtcMs>, now: UtcMs) -> String {

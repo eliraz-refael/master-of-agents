@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use crate::central::channel::{self, Source};
+use crate::central::watchdog;
 use crate::central::{self, Waiter};
 use crate::change::Change;
 use crate::cockpit;
@@ -41,6 +42,7 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     let sleep_fired = matches!(input, Input::Timer(TimerKey::Sleep));
     let terminals_fired = matches!(input, Input::Timer(TimerKey::Terminals));
     let wake_fired = matches!(input, Input::Timer(TimerKey::Wake));
+    let watchdog_fired = matches!(input, Input::Timer(TimerKey::Watchdog));
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
@@ -51,6 +53,9 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     sleep::run(state, &now, sleep_fired, &mut fx);
     // So does a terminal's kill or timeout, once moa may act on its tab (T8).
     terminals::run(state, &now, terminals_fired, &mut fx);
+    // moa's turn that hangs is cancelled, then cut short (K6); before the wake's check, which
+    // a restart shuts.
+    watchdog::run(state, &now, watchdog_fired, &mut fx);
     // And moa's agent is woken with the session reports once they settle (K4).
     channel::run(state, &now, wake_fired, &mut fx);
     // The terminals are the topology's: a listing's, a terminal's own tag, a session's tag
@@ -130,6 +135,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.sleep_at = None;
             state.terminals_at = None;
             state.central.wake_armed = None;
+            state.central.watchdog.armed = None;
             // The closes under way may have been half-changed: they are forgotten.
             state.closing.clear();
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
@@ -415,7 +421,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx
         }
         // The checks at the end of every input do the work.
-        Input::Timer(TimerKey::Sleep | TimerKey::Terminals | TimerKey::Wake) => Vec::new(),
+        Input::Timer(
+            TimerKey::Sleep | TimerKey::Terminals | TimerKey::Wake | TimerKey::Watchdog,
+        ) => Vec::new(),
         // Its waiters are dropped; a launch it asked for goes on, as does moa's turn, and a
         // terminal's tab still gets its tags (R26). A panel on it goes, and `panels` says so;
         // a popup's going may nudge tmux to reap it.

@@ -197,7 +197,7 @@ pub(super) fn unanswered(state: &mut State, now: &Now) -> Vec<Effect> {
 
 /// Takes every request that waits: their rows as `cancelled`, and, when moa's agent is
 /// there to hear it (`told`), each answered cancelled.
-fn forsaken(moa: &mut Moa, told: bool) -> (Vec<FeedEntry>, Vec<AcpCmd>) {
+pub(super) fn forsaken(moa: &mut Moa, told: bool) -> (Vec<FeedEntry>, Vec<AcpCmd>) {
     let asking = std::mem::take(&mut moa.asking);
     let rows = asking
         .keys()
@@ -328,7 +328,7 @@ pub(super) fn cut_short(state: &mut State, now: &Now, thread: &str, told: &str) 
 }
 
 /// The turn's tool calls still running, as cancelled: their turn ended without them.
-fn cancelled_tools(moa: &Moa) -> Vec<FeedEntry> {
+pub(super) fn cancelled_tools(moa: &Moa) -> Vec<FeedEntry> {
     let running = moa.written.values().filter(|r| {
         r.kind == kind::TOOL && r.state.as_deref().is_some_and(|s| RUNNING.contains(&s))
     });
@@ -428,7 +428,7 @@ fn in_turn(moa: &Moa, thread: &str) -> bool {
 
 /// A new row of `thread`. A row a refused commit left unsaved keeps its id for the turn, so
 /// a new one never takes it.
-fn new_row(
+pub(super) fn new_row(
     state: &State,
     tx: &mut Tx,
     thread: &str,
@@ -447,7 +447,7 @@ fn new_row(
 
 /// Writes what moa said: when the commit is refused the turn goes on, and the update is
 /// counted as unsaved.
-fn record(state: &mut State, tx: Tx, rows: Vec<FeedEntry>) -> Vec<Effect> {
+pub(super) fn record(state: &mut State, tx: Tx, rows: Vec<FeedEntry>) -> Vec<Effect> {
     write(state, tx, rows).unwrap_or_else(|| {
         state.central.unsaved += 1;
         Vec::new()
@@ -456,7 +456,7 @@ fn record(state: &mut State, tx: Tx, rows: Vec<FeedEntry>) -> Vec<Effect> {
 
 /// Commits `rows` and keeps them as the turn's, saved or not; `None` when the commit was
 /// refused.
-fn write(state: &mut State, mut tx: Tx, rows: Vec<FeedEntry>) -> Option<Vec<Effect>> {
+pub(super) fn write(state: &mut State, mut tx: Tx, rows: Vec<FeedEntry>) -> Option<Vec<Effect>> {
     let written = &mut state.central.written;
     written.extend(rows.iter().map(|r| (r.id, r.clone())));
     let changes = rows.into_iter().map(Change::Feed).collect();
@@ -465,7 +465,7 @@ fn write(state: &mut State, mut tx: Tx, rows: Vec<FeedEntry>) -> Option<Vec<Effe
 }
 
 /// The count of updates that couldn't be saved, said once and started again.
-fn unsaved(moa: &mut Moa) -> Option<Effect> {
+pub(super) fn unsaved(moa: &mut Moa) -> Option<Effect> {
     let n = std::mem::take(&mut moa.unsaved);
     (n > 0).then(|| warn(format!("{n} of moa's updates couldn't be saved")))
 }

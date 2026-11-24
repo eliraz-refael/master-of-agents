@@ -1,9 +1,9 @@
 //! The console (B6): moa's conversation, the newest at the bottom. Your prompts; moa's turns,
 //! each under a header and behind a gutter (its answers as Markdown, its thoughts, tool calls,
-//! plans and notes, and its permission requests as cards you answer, K12); the sessions'
-//! events, one line per session (B3); your commands' cards; errors; and a separator where the
-//! thread changes (B2). A row it can't read is one dim line (B10): nothing here panics,
-//! whatever the daemon sends.
+//! plans and notes, its permission requests as cards you answer, K12, and the cards moa's
+//! core writes, K7); the sessions' events, one line per session (B3); your commands' cards;
+//! errors; and a separator where the thread changes (B2). A row it can't read is one dim line
+//! (B10): nothing here panics, whatever the daemon sends.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
@@ -1163,6 +1163,7 @@ impl<'a> Draw<'a> {
             }),
             kind::ERROR => text.map(|t| hanging(fail("✗ "), vec![fail(&clean(t))], room)),
             kind::PERMISSION => self.permission(row, room),
+            kind::CARD => self.core_card(row, room),
             _ => None,
         };
         lines.unwrap_or_else(|| {
@@ -1310,16 +1311,36 @@ impl<'a> Draw<'a> {
 
     /// `▸ <command>`, then its reply as Markdown behind the card's gutter.
     fn card(&mut self, card: &Card) {
-        let dim = |s: &str| Span::new(s, Tone::Dim);
-        let lines = hanging(dim("▸ "), vec![dim(&clean(&card.line))], self.width);
+        let head = Span::new(clean(&card.line), Tone::Dim);
+        let lines = self.carded(head, &card.text, self.width);
         self.lines.extend(lines);
-        if self.width <= width(CARD_GUTTER) {
-            return;
+    }
+
+    /// A card moa's core wrote (K7), drawn as a command's card is: `▸ moa's turn was stuck`,
+    /// `▸ moa's account failed`, or `▸ moa` for a card this build doesn't know (Warn), then
+    /// its text. `None` without a text.
+    fn core_card(&mut self, row: &FeedRow, room: usize) -> Option<Vec<Line>> {
+        let text = row.body.get("text")?.as_str()?;
+        let head = match row.body.get("what").and_then(Value::as_str) {
+            Some("watchdog") => "moa's turn was stuck",
+            Some("account") => "moa's account failed",
+            _ => "moa",
+        };
+        Some(self.carded(Span::new(head, Tone::Warn), text, room))
+    }
+
+    /// `▸ ` and `head`, then `text` as Markdown behind the card's gutter, `w` cells wide in
+    /// all.
+    fn carded(&mut self, head: Span, text: &str, w: usize) -> Vec<Line> {
+        let mut lines = hanging(Span::new("▸ ", head.tone), vec![head], w);
+        if w <= width(CARD_GUTTER) {
+            return lines;
         }
-        let w = u16::try_from(self.width - width(CARD_GUTTER)).unwrap_or(u16::MAX);
+        let inner = u16::try_from(w - width(CARD_GUTTER)).unwrap_or(u16::MAX);
         let data = self.data;
-        let reply = markdown::render(&card.text, w, &mut self.buttons, &|c| find(data, c));
-        self.lines.extend(behind(CARD_GUTTER, reply));
+        let body = markdown::render(text, inner, &mut self.buttons, &|c| find(data, c));
+        lines.extend(behind(CARD_GUTTER, body));
+        lines
     }
 
     /// The bar (B5): `data.bar`'s commands as buttons, wrapped to the width on at most
