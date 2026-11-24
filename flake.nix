@@ -62,7 +62,7 @@
 
       # The recording of moa's agent the replay test plays (change it with the test's
       # `recording()`); its first line says which adapter version made it.
-      recording = ./crates/moa-testkit/recordings/synthetic.jsonl;
+      recording = ./crates/moa-testkit/recordings/claude-agent-acp.jsonl;
     in
     {
       packages = forAllSystems (system:

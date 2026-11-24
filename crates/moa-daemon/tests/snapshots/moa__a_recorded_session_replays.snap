@@ -11,9 +11,25 @@ expression: rows
     "state": null
   },
   {
+    "kind": "tool",
+    "body": {
+      "title": "moactl ls --all; echo ---; moactl task ls; echo ---; moactl suggestion ls",
+      "kind": "execute",
+      "input": "{\"command\":\"moactl ls --all; echo ---; moactl task ls; echo ---; moactl suggestion ls\",\"description\":\"List sessions, open tasks, and suggestions\"}"
+    },
+    "state": "failed"
+  },
+  {
+    "kind": "system",
+    "body": {
+      "text": "moa wanted to moactl ls --all; echo ---; moactl task ls; echo ---; moactl suggestion ls, and was refused: moa can't ask you yet"
+    },
+    "state": null
+  },
+  {
     "kind": "moa",
     "body": {
-      "text": "Hello! I'm moa. Ask me about your sessions, or tell me what to start."
+      "text": "Morning. The brain is empty so far: no projects, tasks or live sessions, and nothing waiting on you.\n\nI tried to check sessions and tasks with `moactl`, but that call was declined, so all I have is the startup brief.\n\nTo get started, tell me what you're working on this week, or point me at a folder:\n- `moactl project NAME --add PATH --summary TEXT` tracks a project\n- `moactl ls --all` shows any agent tabs I can bring in"
     },
     "state": null
   }

@@ -60,7 +60,7 @@ fn child_pid(agent: &Path) -> u32 {
 
 /// The recording the replay test plays: the one line to change when it is another file.
 fn recording() -> PathBuf {
-    moa_testkit::recording::synthetic()
+    moa_testkit::recording::recorded()
 }
 
 /// A recorded session, replayed by `stub-acp` through the real daemon: the feed it makes

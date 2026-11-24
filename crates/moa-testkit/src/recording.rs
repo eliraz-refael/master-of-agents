@@ -86,6 +86,12 @@ pub fn synthetic() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("recordings/synthetic.jsonl")
 }
 
+/// The recording of a real session with the packaged adapter, scrubbed by `acp-scrub`: the
+/// account's command list emptied and its plan and limits made generic before scrubbing.
+pub fn recorded() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("recordings/claude-agent-acp.jsonl")
+}
+
 /// What a JSON-RPC message is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind<'a> {
