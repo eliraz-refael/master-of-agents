@@ -1194,6 +1194,64 @@ fn a_quick_second_y_answers_the_next() {
     assert_eq!(op, line(3), "refused, so it is answered again");
 }
 
+/// The head line names the keys of the request y, a and n will answer: after y on 9, and
+/// before moa's state drops 9, that is 10, which offers only y and n.
+#[test]
+fn the_head_follows_the_keys() {
+    let rows = vec![
+        asking(9, "Write RELEASE.md", &ALL),
+        asking(10, "cargo publish", &["allow_once", "reject_once"]),
+    ];
+    let mut c = C::new(rows, SIZE);
+    c.asking(&[9, 10]);
+    assert!(c.head().contains("⚠ answer y/a/n"), "{}", c.head());
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 9 once".into()
+        }
+    );
+    let head = c.head();
+    assert!(
+        head.contains("⚠ answer y/n") && !head.contains("y/a/n"),
+        "{head}"
+    );
+    // As the head says, `a` isn't offered.
+    assert!(c.key(Key::Char('a')).is_empty());
+    assert_eq!(c.footer(), NOT_OFFERED);
+}
+
+/// While the link is down, moa's state may be stale: no card has buttons, and y is text, as
+/// while nothing waits. Once it is up again, y answers.
+#[test]
+fn nothing_waits_while_the_link_is_down() {
+    let mut c = C::new(vec![asking(2, "Write note.txt", &ALL)], SIZE);
+    c.asking(&[2]);
+    c.panel.set_link_up(false);
+    let body = c.body();
+    assert!(!body.iter().any(|l| l.contains("[y once]")), "{body:#?}");
+    assert!(
+        c.screen()
+            .body
+            .iter()
+            .all(|(l, _)| l.spans.iter().all(|s| s.button.is_none()))
+    );
+    assert!(c.typed("y").is_empty());
+    assert_eq!(c.input(), "› y");
+    c.key(Key::Backspace);
+    c.panel.set_link_up(true);
+    let outs = c.key(Key::Char('y'));
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/permission 2 once".into()
+        }
+    );
+}
+
 /// A `y` typed into a draft that isn't empty is text, as is one while nothing waits; `Y` is
 /// always text.
 #[test]

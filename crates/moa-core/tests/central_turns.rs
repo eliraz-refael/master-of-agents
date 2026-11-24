@@ -727,6 +727,40 @@ fn a_request_outside_the_turn_is_cancelled() {
     assert_eq!(asking(&st), json!([]));
 }
 
+/// A request that offers nothing y, a or n could pick can never be answered: it is cancelled
+/// at once, and its card says it wasn't answered.
+#[test]
+fn a_request_nothing_can_answer_is_cancelled() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let odd = vec![option("x", PermKind::Other), option("y", PermKind::Other)];
+    let fx = hear(&b, &mut st, permission(5, "Do a thing", odd));
+    assert_eq!(
+        acps(&fx),
+        [&AcpCmd::Permission {
+            generation: 1,
+            req: 5,
+            choice: None,
+        }]
+    );
+    assert_eq!(asked(&fx).state.as_deref(), Some("cancelled"));
+    assert_eq!(card_states(&st), [Some("cancelled".into())]);
+    assert_eq!(asking(&st), json!([]));
+    assert_eq!(*phase(&st), Phase::Thinking);
+}
+
+/// A request's title is cut as a tool's input is.
+#[test]
+fn a_huge_permission_title_is_cut() {
+    let b = TypicalBrain::new();
+    let mut st = turn(&b, false);
+    let title = "é".repeat(5_000);
+    let fx = hear(&b, &mut st, permission(6, &title, three_options()));
+    let cut = body(&asked(&fx))["title"].as_str().unwrap().to_string();
+    assert_eq!(cut.chars().count(), 2_000);
+    assert!(title.starts_with(&cut));
+}
+
 #[test]
 fn a_cancel_clears_the_cards() {
     let b = TypicalBrain::new();

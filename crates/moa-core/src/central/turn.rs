@@ -12,13 +12,13 @@ use super::feed::{
     self, body_text, kind, permission_body, plan_body, text_body, tool_body, tool_input,
 };
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
-use super::{Asking, Moa, Phase, answer, warn};
+use super::{Asking, Moa, Phase, answer, chosen, warn};
 use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::model::FeedEntry;
-use crate::op::{Done, OpError};
+use crate::op::{Done, OpError, PermAnswer};
 use crate::state::{State, Table};
 use crate::tmux::link::log;
 
@@ -119,7 +119,8 @@ pub(super) fn update(state: &mut State, now: &Now, thread: &str, update: Update)
 
 /// moa's agent asks before it goes on. In the turn under way the request waits for your
 /// answer: a `permission` row, `pending`, and an entry in [`Moa::asking`]; nothing is sent
-/// until you answer. Any other request (another thread, no turn, or a run that has exited)
+/// until you answer. One that offers nothing y, a or n could pick is cancelled at once, its
+/// row `cancelled`. Any other request (another thread, no turn, or a run that has exited)
 /// is cancelled at once, with no row.
 pub(super) fn permission(
     state: &mut State,
@@ -134,20 +135,27 @@ pub(super) fn permission(
         .turn
         .as_ref()
         .is_some_and(|t| t.thread == thread && t.exited.is_none());
+    let cancelled = Effect::Acp(AcpCmd::Permission {
+        generation: moa.generation,
+        req,
+        choice: None,
+    });
     if !live {
-        return vec![Effect::Acp(AcpCmd::Permission {
-            generation: moa.generation,
-            req,
-            choice: None,
-        })];
+        return vec![cancelled];
     }
     let title = match title.trim() {
         "" => "a tool call",
         _ => title,
     };
+    let answerable = PermAnswer::ALL
+        .into_iter()
+        .any(|a| chosen(options, a).is_some());
     let mut tx = Tx::new(now);
     let body = permission_body(title, options);
-    let pending = Some("pending".to_string());
+    let row_state = match answerable {
+        true => "pending",
+        false => "cancelled",
+    };
     let row = new_row(
         state,
         &mut tx,
@@ -155,8 +163,13 @@ pub(super) fn permission(
         kind::PERMISSION,
         None,
         body,
-        pending,
+        Some(row_state.to_string()),
     );
+    if !answerable {
+        let mut fx = record(state, tx, vec![row]);
+        fx.push(cancelled);
+        return fx;
+    }
     let options = options.to_vec();
     state.central.asking.insert(row.id, Asking { req, options });
     record(state, tx, vec![row])

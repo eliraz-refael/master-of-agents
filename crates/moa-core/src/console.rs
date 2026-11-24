@@ -90,6 +90,15 @@ const LATER: &[&str] = &["auto", "sleep", "setup"];
 /// What a `/permission` line that isn't one is told.
 pub const PERMISSION_USAGE: &str = "/permission takes a request's id, then once, always or no";
 
+/// The request and the answer the words after `/permission` give: a request's id, then
+/// `once`, `always` or `no`, and nothing more.
+pub fn permission_args<S: AsRef<str>>(args: &[S]) -> Option<(i64, PermAnswer)> {
+    let [id, answer] = args else {
+        return None;
+    };
+    Some((id.as_ref().parse().ok()?, answer.as_ref().parse().ok()?))
+}
+
 /// What a command that isn't one is told.
 pub fn unknown(name: &str) -> String {
     format!("there's no /{name} command; /help lists them")
@@ -138,15 +147,12 @@ fn parse_with(line: &str, cwd: Option<&Path>, deps: &Deps, button: bool) -> Resu
             user: true,
         })),
         // A permission card's buttons send it.
-        "permission" => match &args[..] {
-            [id, answer] => match (id.parse(), answer.parse::<PermAnswer>()) {
-                (Ok(id), Ok(answer)) => Ok(Parsed::Run(Op::ConsolePermission {
-                    id: Some(id),
-                    answer,
-                })),
-                _ => Err(PERMISSION_USAGE.into()),
-            },
-            _ => Err(PERMISSION_USAGE.into()),
+        "permission" => match permission_args(&args) {
+            Some((id, answer)) => Ok(Parsed::Run(Op::ConsolePermission {
+                id: Some(id),
+                answer,
+            })),
+            None => Err(PERMISSION_USAGE.into()),
         },
         // The console closes its own panel; a `/quit` sent here has nothing to close.
         "quit" => Err("/quit is the console's own: it closes the console's panel".into()),

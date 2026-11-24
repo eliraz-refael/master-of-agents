@@ -58,14 +58,15 @@ pub fn plan_body(entries: &[PlanEntry]) -> String {
     json!({ "entries": entries }).to_string()
 }
 
-/// The body of a `permission` row: `{"title", "options": [{"kind", "name"}]}`. The options'
-/// ids stay in the core.
+/// The body of a `permission` row: `{"title", "options": [{"kind", "name"}]}`, its title
+/// (the tool call it asks about) cut as a tool's input is ([`tool_input`]). The options' ids
+/// stay in the core.
 pub fn permission_body(title: &str, options: &[PermOption]) -> String {
     let options: Vec<Value> = options
         .iter()
         .map(|o| json!({ "kind": o.kind.name(), "name": o.name }))
         .collect();
-    json!({ "title": title, "options": options }).to_string()
+    json!({ "title": tool_input(title), "options": options }).to_string()
 }
 
 /// A new row of `thread`, with the next id of the table (counting this transaction's). The

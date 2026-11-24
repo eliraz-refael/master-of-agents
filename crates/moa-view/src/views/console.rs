@@ -11,10 +11,10 @@ use std::ops::Range;
 use moa_core::UtcMs;
 use moa_core::central::feed::kind;
 use moa_core::central::wire::PermKind;
-use moa_core::console::COMMANDS;
+use moa_core::console::{COMMANDS, permission_args};
 use moa_core::model::SessionId;
 use moa_core::op::PermAnswer;
-use moa_core::publish::{EventRow, FeedRow};
+use moa_core::publish::{EventRow, FeedRow, MoaRow};
 use moa_core::state::EventWhat;
 use moa_core::time::local_format;
 use serde_json::Value;
@@ -428,13 +428,21 @@ pub fn more(n: usize, width: u16) -> Line {
 
 /// The head line (B9): moa's thread and state, and `↓ N new` when `new` lines came below a
 /// view scrolled up. While a permission request waits, the state is `⚠ answer y/a/n`, the
-/// keys the oldest offers (K12). `up` is whether the panel's connection is. The thread goes
-/// first when the width is short, then the end of the rest.
-pub fn head(data: &Data, ctx: &Ctx, up: bool, new: usize, width: u16) -> Line {
+/// keys offered by the request y, a and n answer: the oldest but those `answered` from here
+/// (K12). `up` is whether the panel's connection is. The thread goes first when the width
+/// is short, then the end of the rest.
+pub fn head(
+    data: &Data,
+    ctx: &Ctx,
+    up: bool,
+    answered: &BTreeSet<i64>,
+    new: usize,
+    width: u16,
+) -> Line {
     let dim = |s: &str| Span::new(s, Tone::Dim);
-    let moa = data.moa.as_ref().filter(|_| up);
+    let moa = live(data, up);
     let phase = moa.map_or("off", |m| m.phase.as_str());
-    let waiting = moa.and_then(|_| waiting(data, &BTreeSet::new()));
+    let waiting = waiting(data, up, answered);
     let mut spans = match phase {
         _ if !up => vec![dim("connecting…")],
         _ if let Some(waiting) = &waiting => {
@@ -506,11 +514,10 @@ pub fn answer_line(id: i64, answer: PermAnswer) -> String {
 /// The request `line` answers, when it is an [`answer_line`].
 pub fn answer_id(line: &str) -> Option<i64> {
     let words: Vec<&str> = line.split_whitespace().collect();
-    let ["/permission", id, answer] = words[..] else {
+    let ["/permission", args @ ..] = &words[..] else {
         return None;
     };
-    answer.parse::<PermAnswer>().ok()?;
-    id.parse().ok()
+    permission_args(args).map(|(id, _)| id)
 }
 
 /// The options of a `permission` row's body.
@@ -542,11 +549,22 @@ pub struct Waiting {
     pub offered: Vec<PermAnswer>,
 }
 
-/// The request y, a and n answer (K12): the oldest in moa's `asking` but those in `skip`, if
+/// moa's state while the panel's connection is `up`; with it down, what it last said may be
+/// stale.
+fn live(data: &Data, up: bool) -> Option<&MoaRow> {
+    data.moa.as_ref().filter(|_| up)
+}
+
+/// The requests waiting for your answer, oldest first: moa's `asking`, and none while the
+/// panel's connection is down (K12). Their cards have buttons, and y, a and n answer them.
+pub fn asking(data: &Data, up: bool) -> &[i64] {
+    live(data, up).map_or(&[], |m| m.asking.as_slice())
+}
+
+/// The request y, a and n answer (K12): the oldest in [`asking`] but those in `skip`, if
 /// any.
-pub fn waiting(data: &Data, skip: &BTreeSet<i64>) -> Option<Waiting> {
-    let asking = &data.moa.as_ref()?.asking;
-    let id = *asking.iter().find(|id| !skip.contains(id))?;
+pub fn waiting(data: &Data, up: bool, skip: &BTreeSet<i64>) -> Option<Waiting> {
+    let id = *asking(data, up).iter().find(|id| !skip.contains(id))?;
     let offered = data
         .feed
         .get(&id)
@@ -776,11 +794,13 @@ fn session_name(row: &SessionRow) -> String {
     }
 }
 
-/// The console's lines, none wider than `width` cells.
-pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, width: u16) -> ConsoleView {
+/// The console's lines, none wider than `width` cells. `up` is whether the panel's
+/// connection is: while it is down no permission card waits.
+pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, up: bool, width: u16) -> ConsoleView {
     let mut draw = Draw {
         data,
         ctx,
+        up,
         width: usize::from(width),
         lines: Vec::new(),
         buttons: Vec::new(),
@@ -931,6 +951,8 @@ enum Last {
 struct Draw<'a> {
     data: &'a Data,
     ctx: &'a Ctx,
+    /// The panel's connection is up.
+    up: bool,
     width: usize,
     lines: Vec<Line>,
     buttons: Vec<Button>,
@@ -1196,12 +1218,8 @@ impl<'a> Draw<'a> {
     /// restart lost it). `None` without a title.
     fn permission(&mut self, row: &FeedRow, room: usize) -> Option<Vec<Line>> {
         let title = clean(row.body.get("title")?.as_str()?);
-        let waits = row.state.as_deref() == Some("pending")
-            && self
-                .data
-                .moa
-                .as_ref()
-                .is_some_and(|m| m.asking.contains(&row.id));
+        let waits =
+            row.state.as_deref() == Some("pending") && asking(self.data, self.up).contains(&row.id);
         if !waits {
             let (glyph, done, tone) = match row.state.as_deref() {
                 Some("allow_once") => ("✓ ", "allowed once", Tone::Ok),

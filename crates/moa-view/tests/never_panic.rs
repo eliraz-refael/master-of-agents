@@ -821,7 +821,7 @@ proptest! {
         ctx in ctx(),
         w in 10u16..=200,
     ) {
-        let view = console::build(&data, &ctx, &ui, w);
+        let view = console::build(&data, &ctx, &ui, true, w);
         for line in &view.lines {
             check_line(line, usize::from(w), "a console line")?;
             let cells: usize = line.spans.iter().map(|s| width(&s.text)).sum();
@@ -843,10 +843,10 @@ proptest! {
         // The head line (F23), up or not, with or without new lines below; the input line,
         // its cursor within it.
         for (up, new) in [(true, 0), (false, 0), (true, 3), (true, usize::MAX)] {
-            let head = console::head(&data, &ctx, up, new, w);
+            let head = console::head(&data, &ctx, up, &ui.answered, new, w);
             check_line(&head, usize::from(w), "the head line")?;
             // While a request waits, the state is `⚠ answer`, which doesn't spin.
-            let spins = data.moa.as_ref().is_some_and(|m| m.phase == "thinking" && m.asking.is_empty());
+            let spins = data.moa.as_ref().is_some_and(|m| m.phase == "thinking" && m.asking.iter().all(|id| ui.answered.contains(id)));
             prop_assert_eq!(head.animated, up && spins);
         }
         let (input, at) = console::input(&ui, w);

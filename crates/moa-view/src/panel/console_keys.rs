@@ -68,7 +68,7 @@ impl Panel {
                 }
             }
         }
-        let mut built = console::build(data, ctx, ui, build_width(&g));
+        let mut built = console::build(data, ctx, ui, !self.link_down, build_width(&g));
         let rows = u16::try_from(built.bar.len()).unwrap_or(u16::MAX);
         let g = g.with_bar_rows(rows);
         self.palette = console::palette(data, ui);
@@ -129,14 +129,14 @@ impl Panel {
         if self.palette_key(k) {
             return Vec::new();
         }
-        let asking = data.moa.as_ref().is_some_and(|m| !m.asking.is_empty());
+        let up = !self.link_down;
         if let Key::Char(c) = k
-            && asking
+            && !console::asking(data, up).is_empty()
             && self.console.draft.text.is_empty()
             && let Some(answer) = console::answer_of(c)
         {
             // Every waiting request answered from here already: their answers are on the way.
-            return match console::waiting(data, &self.console.answered) {
+            return match console::waiting(data, up, &self.console.answered) {
                 Some(waiting) => self.answer(&waiting, answer, ctx.now),
                 None => Vec::new(),
             };
@@ -447,10 +447,10 @@ impl Panel {
         }
         let shown = self.built.lines.get(w.top..w.end).unwrap_or_default();
         body.extend(shown.iter().map(|l| (l.clone(), Mark::Plain)));
-        let head = g
-            .head
-            .filter(|r| r.h > 0)
-            .map(|_| console::head(data, ctx, !self.link_down, w.new, width));
+        let head = g.head.filter(|r| r.h > 0).map(|_| {
+            let answered = &self.console.answered;
+            console::head(data, ctx, !self.link_down, answered, w.new, width)
+        });
         let palette = self
             .palette
             .as_ref()
