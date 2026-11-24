@@ -9,7 +9,7 @@ use std::process::Output;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use moa_testkit::{FakeStep, TempBrain, Terminal, fake_claude, wait_for, write_script};
+use moa_testkit::{FakeStep, TempBrain, Terminal, fake_claude, stub_log, wait_for, write_script};
 use serde_json::{Map, Value};
 
 pub mod screen;
@@ -1089,4 +1089,12 @@ pub fn activity(tb: &TempBrain) -> String {
     );
     assert!(o.status.success(), "{}{}", out(&o), err(&o));
     out(&o)
+}
+
+/// The lines `stub-acp`, as moa's agent, logged for `method`.
+pub fn stub_logged(tb: &TempBrain, method: &str) -> Vec<Value> {
+    stub_log(&tb.paths().agent_dir(B))
+        .into_iter()
+        .filter(|l| l["method"] == method)
+        .collect()
 }
