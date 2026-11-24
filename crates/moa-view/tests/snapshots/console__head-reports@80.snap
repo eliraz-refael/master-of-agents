@@ -1,0 +1,10 @@
+---
+source: crates/moa-view/tests/console.rs
+expression: debug_lines(&lines)
+---
+[dim]thread 0193b4f0 · [ok]● ready[dim] · ◷ 3 for moa
+[dim]thread 0193b4f0 · [work]⠸ thinking…[dim] Esc cancels[dim] · ◷ 3 for moa
+[dim]thread 0193b4f0 · [dim]○ off · type to start moa[dim] · ◷ 3 for moa
+[dim]thread 0193b4f0 · [ok]● ready[dim] · ◷ 1 for moa[dim] · [work]↓ 4 new
+[dim]thread 0193b4f0 · [ok]● ready
+[dim]thread 0193b4f0 · [warn]⚠ answer y/a/n[dim] Esc cancels[dim] · ◷ 3 for moa

@@ -34,6 +34,8 @@ pub(crate) fn run(
         Op::GroupRm { path } => groups::rm(state, tx, &path),
         Op::GroupFold { path, collapsed } => groups::fold(state, tx, &path, collapsed),
         Op::BarSet { commands, user } => bar::set(state, tx, commands, user),
+        Op::ConsoleAuto { on } => crate::central::channel::set_auto(state, tx, on),
+        Op::ConsoleSleepAfter { value } => crate::sleep::set_after(state, tx, value.as_deref()),
         Op::SessionLs { all } => sessions::ls(state, now, all),
         Op::SessionSet { q, title, group } => {
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())
@@ -95,7 +97,8 @@ pub(crate) fn run(
         | Op::ConsolePage { .. }
         | Op::ConsoleNew(_)
         | Op::ConsoleCommand { .. }
-        | Op::ConsolePermission { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::ConsolePermission { .. }
+        | Op::ConsoleAccount { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

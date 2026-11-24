@@ -91,16 +91,12 @@ async fn later_commands_say_so() {
     let (_rig, up) = typical().await;
     let mut c = up.client();
 
-    for name in ["auto", "sleep", "setup"] {
+    for line in ["/setup", "/setup acct-b"] {
         assert_eq!(
-            refusal(&command(&mut c, &format!("/{name}"))),
-            format!("/{name} comes in a later version of moa")
+            refusal(&command(&mut c, line)),
+            "/setup comes in a later version of moa"
         );
     }
-    assert_eq!(
-        refusal(&command(&mut c, "/auto off")),
-        "/auto comes in a later version of moa"
-    );
     up.stop().await;
 }
 

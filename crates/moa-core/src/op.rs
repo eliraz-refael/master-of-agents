@@ -281,6 +281,27 @@ pub enum Op {
         id: Option<i64>,
         answer: PermAnswer,
     },
+    /// `/auto`: whether moa reads the session reports on its own, with wake-ups. `None` flips
+    /// it.
+    #[serde(rename = "console.auto")]
+    ConsoleAuto {
+        #[serde(default)]
+        on: Option<bool>,
+    },
+    /// `/sleep`: how long an idle session waits before it goes to sleep: `on` (moa.toml's),
+    /// `off` (never) or a number of hours. `None` says the wait.
+    #[serde(rename = "console.sleep_after")]
+    ConsoleSleepAfter {
+        #[serde(default)]
+        value: Option<String>,
+    },
+    /// `/account`: switches moa's agent to account `name` with the next prompt; only you can.
+    /// `None` says which account moa is on, and the others it can run on.
+    #[serde(rename = "console.account")]
+    ConsoleAccount {
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from
     /// `moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.
     #[serde(rename = "bar.set")]
@@ -505,6 +526,9 @@ impl Op {
         "console.new",
         "console.command",
         "console.permission",
+        "console.auto",
+        "console.sleep_after",
+        "console.account",
         "bar.set",
     ];
 
@@ -541,6 +565,9 @@ impl Op {
             | Op::ConsoleNew(_)
             | Op::BarSet { .. }
             | Op::ConsolePermission { .. }
+            | Op::ConsoleAuto { .. }
+            | Op::ConsoleSleepAfter { .. }
+            | Op::ConsoleAccount { .. }
             // It saves the requests it cancels as `cancelled`.
             | Op::ConsoleCancel(_)
             // It may run a write (`/archive`, `/open`), so it is counted as one. A read-only
@@ -623,6 +650,9 @@ impl Op {
             Op::BarSet { .. } => "bar.set",
             Op::ConsoleCommand { .. } => "console.command",
             Op::ConsolePermission { .. } => "console.permission",
+            Op::ConsoleAuto { .. } => "console.auto",
+            Op::ConsoleSleepAfter { .. } => "console.sleep_after",
+            Op::ConsoleAccount { .. } => "console.account",
             Op::DebugPanic => "debug.panic",
         }
     }

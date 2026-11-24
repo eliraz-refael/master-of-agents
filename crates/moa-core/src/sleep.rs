@@ -3,21 +3,32 @@
 //! every input, since what kept a due session awake (being on screen, say) can end with any
 //! of them.
 
+use serde_json::json;
+
 use crate::change::Change;
 use crate::cockpit::run::through_queue;
-use crate::config::SleepAfter;
+use crate::config::{SleepAfter, hours_ms};
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, TimerKey, rearm};
 use crate::hooks::asleep;
-use crate::live::{DisplayState, display_state};
+use crate::live::{DisplayState, display_state, is_asleep};
 use crate::model::{ActivityWho, AskStatus, AskTarget, Lifecycle, Location, Session, SessionId};
+use crate::op::{Done, OpError};
 use crate::ops::launch::title_of;
 use crate::state::State;
+use crate::time::words;
 use crate::tmux::cmd::Cmd;
 use crate::tmux::focus::bound_pane;
 use crate::tmux::ids::PaneId;
 use crate::tmux::link::{Link, log};
 use crate::{Now, UtcMs};
+
+/// The `meta` key `/sleep` sets: the wait in milliseconds, `0` for never. It wins over
+/// moa.toml's `sleep_after_hours` until `/sleep on` removes it.
+pub const SLEEP_KEY: &str = "sleep.after_ms";
+
+/// What a `/sleep` line that isn't one is told, and `console.sleep_after` with a bad value.
+pub const SLEEP_AFTER_USAGE: &str = "/sleep takes on, off or a number of hours";
 
 /// Why session `id` can't go to sleep at `now` after `after_ms` idle, or `None` when it can
 /// (R18). The reasons are fixed words, for tests and logs.
@@ -107,6 +118,8 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
         state.sleep_at = None;
     }
     let Some(after) = threshold(state) else {
+        // `/sleep off` cancels the deadline it leaves; a fired one is forgotten already.
+        fx.extend(rearm(&mut state.sleep_at, TimerKey::Sleep, None, false));
         return;
     };
     if !state.writes_refused(now.wall) {
@@ -211,14 +224,69 @@ pub(crate) fn kill_tab(state: &mut State, tx: &mut Tx, id: SessionId, pane: Pane
     }
 }
 
-/// This brain's wait before an idle session sleeps, or `None` for never.
+/// This brain's wait before an idle session sleeps, or `None` for never: `/sleep`'s, else
+/// moa.toml's.
 fn threshold(state: &State) -> Option<i64> {
-    state
-        .config()
-        .brains
-        .get(state.brain())
-        .map_or_else(SleepAfter::default, |b| b.sleep_after)
+    let chosen = state
+        .meta(SLEEP_KEY)
+        .and_then(|v| v.parse().ok())
+        .filter(|ms| *ms >= 0)
+        .map(SleepAfter);
+    chosen
+        .unwrap_or_else(|| {
+            state
+                .config()
+                .brains
+                .get(state.brain())
+                .map_or_else(SleepAfter::default, |b| b.sleep_after)
+        })
         .ms()
+}
+
+/// What `/sleep WORD` stores under [`SLEEP_KEY`]: nothing for `on` (moa.toml's wait), `0` for
+/// `off`, or a number of hours, 0 or more, in milliseconds ([`hours_ms`]). Anything else is
+/// refused.
+pub fn stored(word: &str) -> Result<Option<String>, String> {
+    match word {
+        "on" => Ok(None),
+        "off" => Ok(Some("0".into())),
+        hours => hours
+            .parse()
+            .ok()
+            .and_then(|h| hours_ms(&toml::Value::Float(h)))
+            .map(|ms| Some(ms.to_string()))
+            .ok_or_else(|| SLEEP_AFTER_USAGE.to_string()),
+    }
+}
+
+/// `console.sleep_after` (`/sleep`): the wait set as `value` says ([`stored`]), or only said
+/// when there is none. It takes effect at once: [`run`] moves the deadline at the end of
+/// this input.
+pub(crate) fn set_after(
+    state: &mut State,
+    tx: &mut Tx,
+    value: Option<&str>,
+) -> Result<Done, OpError> {
+    if let Some(word) = value {
+        let value = stored(word).map_err(OpError)?;
+        if state.meta(SLEEP_KEY) != value.as_deref() {
+            let key = SLEEP_KEY.to_string();
+            tx.commit(state, vec![Change::Meta { key, value }])?;
+        }
+    }
+    let after = threshold(state);
+    let asleep = state.sessions().filter(|s| is_asleep(s)).count();
+    let text = match after {
+        Some(ms) => format!(
+            "idle sessions go to sleep after {} · {asleep} asleep now",
+            words(ms)
+        ),
+        None => "idle sessions stay up (/sleep on)".into(),
+    };
+    Ok(Done {
+        text,
+        data: json!({ "after_ms": after, "asleep": asleep }),
+    })
 }
 
 /// When session `s` has been idle `after_ms`.

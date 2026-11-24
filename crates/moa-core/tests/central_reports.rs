@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::central::{Disk, acps, caps, hear_at, opened, prompt_at, prompts_sent, started as up};
 use jiff::tz::TimeZone;
-use moa_core::central::channel::AUTO_KEY;
+use moa_core::central::channel::{AUTO_KEY, auto_on};
 use moa_core::central::reports::{EARLIER_MAX, LAST_MAX, TURNS_KEPT};
 use moa_core::central::wire::{AcpCmd, AcpIn, Opened, PermKind, PermOption, ThreadHow};
 use moa_core::central::{PROMPT_MAX, Phase};
@@ -867,6 +867,100 @@ fn auto_off_never_wakes_but_prompts_still_carry() {
     assert_eq!(st.reports().count(), 0);
 }
 
+/// `/auto` (`console.auto`) at `ms`, as request `req`: `on`, else a flip.
+fn auto_at(st: &mut State, ms: i64, req: u64, on: Option<bool>) -> Vec<Effect> {
+    let input = Input::Client {
+        conn: ConnId(1),
+        req: ReqId(req),
+        caller: Default::default(),
+        op: Op::ConsoleAuto { on },
+    };
+    handle_checked(st, input, at(ms))
+}
+
+/// `/auto` flips the wake-ups, or sets them, at once: the `Wake` timer and the console's
+/// `state` row follow. Set as it is, nothing is saved.
+#[test]
+fn auto_flips_and_sets() {
+    const ON: &str = "moa reads session reports on its own";
+    const OFF: &str =
+        "moa won't read session reports on its own; they ride on your next prompt (/auto on)";
+    let mut st = moa_brain(1);
+    let fx = finished(&mut st, 0, T, "Merged PR #3");
+    let due = Some(Some(UtcMs(T + 45 * SEC)));
+    assert_eq!(wake_timer(&fx), due);
+    let said = |fx: &[Effect]| match &common::replies(fx)[..] {
+        [(_, Ok(done))] => done.text.clone(),
+        other => panic!("one answer: {other:?}"),
+    };
+    let meta = |value: Option<&str>| Change::Meta {
+        key: AUTO_KEY.into(),
+        value: value.map(str::to_string),
+    };
+    let auto = |fx: &[Effect]| common::central::published_state(fx).map(|s| s["auto"].clone());
+
+    let fx = auto_at(&mut st, T + SEC, 1, None);
+    assert_eq!(said(&fx), OFF);
+    assert_eq!(common::changes(&fx), [&meta(Some("off"))]);
+    assert_eq!(wake_timer(&fx), Some(None));
+    assert_eq!(auto(&fx), Some(Value::Bool(false)));
+
+    let fx = auto_at(&mut st, T + 2 * SEC, 2, Some(false));
+    assert_eq!(said(&fx), OFF);
+    assert!(common::changes(&fx).is_empty(), "{fx:?}");
+
+    let fx = auto_at(&mut st, T + 3 * SEC, 3, None);
+    assert_eq!(said(&fx), ON);
+    assert_eq!(common::changes(&fx), [&meta(None)]);
+    assert_eq!(wake_timer(&fx), due);
+    assert_eq!(auto(&fx), Some(Value::Bool(true)));
+
+    let fx = auto_at(&mut st, T + 4 * SEC, 4, Some(false));
+    assert_eq!(said(&fx), OFF);
+    assert_eq!(common::changes(&fx), [&meta(Some("off"))]);
+    let fx = auto_at(&mut st, T + 5 * SEC, 5, Some(true));
+    assert_eq!(said(&fx), ON);
+    assert_eq!(common::changes(&fx), [&meta(None)]);
+    assert_eq!(auto(&fx), Some(Value::Bool(true)));
+
+    // Typed in the console, too.
+    let typed = |st: &mut State, req: u64, line: &str| {
+        let input = Input::Client {
+            conn: ConnId(1),
+            req: ReqId(req),
+            caller: Default::default(),
+            op: Op::ConsoleCommand { line: line.into() },
+        };
+        handle_checked(st, input, at(T + 6 * SEC))
+    };
+    assert_eq!(said(&typed(&mut st, 6, "/auto off")), OFF);
+    assert_eq!(said(&typed(&mut st, 7, "/auto")), ON);
+}
+
+/// The property's find: `/auto off` while a wake-up's agent starts. The wake gives up at
+/// its commit: no row, no prompt, and the reports wait for your next prompt.
+#[test]
+fn auto_off_stops_a_wake_under_way() {
+    let mut st = moa_brain(1);
+    finished(&mut st, 0, T, "Merged PR #3");
+    let fx = fire(&mut st, T + 45 * SEC);
+    assert!(
+        matches!(acps(&fx)[..], [AcpCmd::Start { .. }]),
+        "the wake starts moa's agent: {fx:?}"
+    );
+    auto_at(&mut st, T + 46 * SEC, 1, Some(false));
+    let fx = play(&mut st, T + 47 * SEC, fx);
+    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+    assert!(
+        common::central::feed_rows(&fx)
+            .iter()
+            .all(|r| r.kind != "you"),
+        "{fx:?}"
+    );
+    assert_eq!(st.reports().count(), 1);
+    assert_eq!(st.central().phase, Phase::Ready);
+}
+
 #[test]
 fn no_wake_while_moa_answers() {
     let mut st = moa_brain(1);
@@ -879,6 +973,39 @@ fn no_wake_while_moa_answers() {
     assert!(acps(&fx).is_empty(), "{fx:?}");
     // Due since T + 45 s: it goes with the turn's end.
     let fx = end_turn(&mut st, T + 60 * SEC);
+    assert!(sent(&fx).starts_with(WAKE));
+    assert_eq!(st.reports().count(), 0);
+}
+
+#[test]
+fn no_wake_while_restarting() {
+    let mut st = moa_brain(1);
+    let fx = prompt_at(&mut st, at(T0), 1, "hello", false);
+    play(&mut st, T0, fx);
+    finished(&mut st, 0, T, "Merged PR #3");
+    // The turn hangs: the watchdog cancels it, then restarts moa's agent.
+    let dog = |st: &mut State, ms| handle_checked(st, Input::Timer(TimerKey::Watchdog), at(ms));
+    dog(&mut st, T0 + 300 * SEC);
+    let restart = T0 + 330 * SEC;
+    let fx = dog(&mut st, restart);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Start { .. }]), "{fx:?}");
+    assert!(st.central().restarting.is_some());
+    // Due, but the restart is reopening today's thread: no wake races it.
+    let generation = st.central().generation;
+    let fx = hear_at(&mut st, at(restart), up(generation, caps(true, true, true)));
+    assert!(
+        matches!(acps(&fx)[..], [AcpCmd::Open { .. }]),
+        "only the reopen: {fx:?}"
+    );
+    assert_eq!(wake_timer(&fx), None);
+    assert_eq!(st.reports().count(), 1);
+    // Reopened, the wake goes.
+    let thread = st.threads().next().unwrap().thread_id.clone();
+    let fx = hear_at(
+        &mut st,
+        at(restart),
+        opened(generation, &thread, Opened::Resumed),
+    );
     assert!(sent(&fx).starts_with(WAKE));
     assert_eq!(st.reports().count(), 0);
 }
@@ -1170,8 +1297,10 @@ enum Step {
     Advance(i64),
     /// moa's agent answers what it has been asked.
     Answer,
-    /// `/auto` is flipped: by hand on the disk, then a restart, until `/auto` is an op.
+    /// `/auto` is flipped, as `console.auto`: at once, mid-turn or not.
     Auto,
+    /// `/auto` is flipped by hand on the disk, then the daemon restarts to read it.
+    AutoOnDisk,
     /// The next input's writes are refused.
     Refuse,
     /// The daemon restarts after the first k of the last input's commits reach the disk, k
@@ -1188,6 +1317,7 @@ fn step() -> impl Strategy<Value = Step> {
         3 => (0..=60i64).prop_map(Step::Advance),
         3 => Just(Step::Answer),
         1 => Just(Step::Auto),
+        1 => Just(Step::AutoOnDisk),
         1 => Just(Step::Refuse),
         2 => any::<prop::sample::Index>().prop_map(Step::Restart),
     ]
@@ -1311,7 +1441,9 @@ struct Daemon {
     last: Vec<Effect>,
     event: Option<Event>,
     refuse_next: bool,
-    auto: bool,
+    /// What the last input's `/auto` must leave on the disk, `true` for on, once its effects
+    /// are all executed; `None` when it wasn't `/auto`, or its writes were refused.
+    auto_set: Option<bool>,
     /// The last hook's `seq`, token, request and thread.
     seq: u32,
     token: u32,
@@ -1350,7 +1482,7 @@ impl Daemon {
             last,
             event: None,
             refuse_next: false,
-            auto: true,
+            auto_set: None,
             seq: 0,
             token: 0,
             req: 0,
@@ -1380,9 +1512,12 @@ impl Daemon {
     /// disk was never saved.
     ///
     /// Each `you` row carries each of its tokens once, and each prompt that reaches moa's
-    /// agent holds exactly the tokens of the row saved with it, each once.
+    /// agent holds exactly the tokens of the row saved with it, each once. A wake-up's row is
+    /// saved only while the disk has `/auto` on, and an `/auto` whose effects all ran left
+    /// what it said on the disk.
     fn execute(&mut self, commits: Option<usize>) -> Result<(), TestCaseError> {
         let mut event = self.event.take();
+        let auto_set = self.auto_set.take();
         let mut left = commits;
         let mut row: Option<BTreeMap<String, usize>> = None;
         for e in std::mem::take(&mut self.last) {
@@ -1396,6 +1531,13 @@ impl Daemon {
                     if let Some(e) = event.take() {
                         self.expected.queue(e);
                     }
+                    let wakes = changes
+                        .iter()
+                        .any(|c| matches!(c, Change::Feed(r) if r.kind == "you" && r.automatic));
+                    prop_assert!(
+                        !wakes || self.disk.meta(AUTO_KEY).as_deref() != Some("off"),
+                        "a wake-up was saved with /auto off"
+                    );
                     self.disk.apply(&changes);
                     for c in &changes {
                         if let Change::Feed(r) = c
@@ -1428,6 +1570,10 @@ impl Daemon {
         }
         if let Some(e) = event {
             self.expected.gone.insert(e.token);
+        }
+        if let (Some(on), None) = (auto_set, commits) {
+            let off = self.disk.meta(AUTO_KEY).as_deref() == Some("off");
+            prop_assert_eq!(!off, on, "/auto didn't leave what it said on the disk");
         }
         Ok(())
     }
@@ -1567,7 +1713,6 @@ impl Daemon {
     /// `/auto` set by hand on the disk, `None` for on, and the daemon restarted to read it.
     fn set_auto(&mut self, value: Option<&str>) -> Result<(), TestCaseError> {
         self.flush()?;
-        self.auto = value.is_none();
         let key = AUTO_KEY.to_string();
         let value = value.map(str::to_string);
         self.disk.apply(&[Change::Meta { key, value }]);
@@ -1596,10 +1741,22 @@ impl Daemon {
                 Ok(())
             }
             Step::Answer => self.answer(),
-            Step::Auto => match self.auto {
-                true => self.set_auto(Some("off")),
-                false => self.set_auto(None),
-            },
+            Step::Auto => {
+                let refused = self.next()?;
+                self.auto_set = (!refused).then(|| !auto_on(&self.st));
+                self.req += 1;
+                self.run(Input::Client {
+                    conn: ConnId(1),
+                    req: ReqId(self.req),
+                    caller: Default::default(),
+                    op: Op::ConsoleAuto { on: None },
+                });
+                Ok(())
+            }
+            Step::AutoOnDisk => {
+                self.flush()?;
+                self.set_auto(auto_on(&self.st).then_some("off"))
+            }
             Step::Refuse => {
                 self.refuse_next = true;
                 Ok(())

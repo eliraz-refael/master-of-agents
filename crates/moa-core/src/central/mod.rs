@@ -5,8 +5,11 @@
 //! open ([`threads`]), saves the prompt's `you` row, and only then sends it: the prompt waits
 //! for the commit. One prompt at a time. What moa says in its turn lands in the feed as it
 //! comes, and the turn's end answers whoever waits ([`turn`]). The session reports ride on
-//! the prompts, or wake moa on their own ([`channel`]).
+//! the prompts, or wake moa on their own ([`channel`]). A turn that hangs is cancelled, then
+//! cut short and moa's agent restarted ([`watchdog`]). One that fails for its account's sake
+//! says so in a card ([`account`]).
 
+pub mod account;
 pub mod channel;
 pub mod feed;
 pub mod launch;
@@ -14,6 +17,7 @@ pub mod prompt;
 pub mod reports;
 pub mod threads;
 mod turn;
+pub mod watchdog;
 pub mod wire;
 
 use std::collections::BTreeMap;
@@ -23,16 +27,17 @@ use serde_json::json;
 use self::channel::Source;
 use self::feed::{kind, text_body};
 use self::threads::{How, choose, new_thread};
-use self::wire::{AcpCmd, AcpIn, Caps, Opened, PermOption, ThreadHow};
+use self::watchdog::{Restart, Restarted, Watchdog};
+use self::wire::{AcpCmd, AcpIn, AdapterSpec, Caps, Opened, PermOption, ThreadHow};
 use crate::change::Change;
 use crate::config::AccountName;
-use crate::core::{Tx, post_commit};
+use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
 use crate::model::{FeedEntry, MoaThread, ThreadKind};
 use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
 use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
-use crate::state::State;
+use crate::state::{Caller, State};
 use crate::tmux::link::log;
 use crate::{Now, UtcMs};
 
@@ -40,6 +45,9 @@ use crate::{Now, UtcMs};
 pub const PROMPT_MAX: usize = 100_000;
 
 const BUSY: &str = "moa is still answering; wait for it, or cancel it";
+
+/// What a prompt hears while the watchdog restarts moa's agent.
+const RESTARTING: &str = "moa's agent is restarting; try again in a moment";
 
 /// The first line of a new thread opened because today's couldn't be reopened.
 const REOPEN_FAILED: &str = "today's earlier thread couldn't be reopened, so this is a new one";
@@ -147,8 +155,9 @@ pub struct Moa {
     /// moa's updates that couldn't be saved since the count was last logged, at a turn's
     /// end.
     pub unsaved: u64,
-    /// `console.new` was said: the next prompt opens a new thread of kind `Manual`, even the
-    /// same day. Kept in memory; it ends once that thread is open.
+    /// `console.new` was said, or `console.account` switched: the next prompt opens a new
+    /// thread of kind `Manual`, even the same day. Kept in memory; it ends once that thread
+    /// is open.
     pub new_thread: bool,
     /// When the last wake-up was saved, or failed to reach moa's agent: the next waits a
     /// gap after it. Kept in memory.
@@ -161,11 +170,23 @@ pub struct Moa {
     /// of an answer fails, its answer isn't sent and the reload finds its row still `pending`,
     /// so it waits for you again.
     pub answered: BTreeMap<i64, Asking>,
+    /// The watchdog of the turn under way.
+    pub watchdog: Watchdog,
+    /// The watchdog's restart, until moa's agent has started again and opened its thread:
+    /// its end finishes the card. Meanwhile a prompt is refused, and no wake-up goes.
+    pub restarting: Option<Restart>,
+    /// The restart couldn't reopen today's thread: the next prompt opens a new one, as one
+    /// whose reopen failed does ([`Pending::reopen_failed`]).
+    pub reopen_failed: bool,
+    /// The account whose card ([`account`]) was said: it isn't said again for that account
+    /// until a turn ends `end_turn` or `/account` switches. Kept in memory.
+    pub account_card: Option<AccountName>,
 }
 
 impl Moa {
-    /// The `state` row of the `feed` topic.
-    pub fn row(&self, queued: u32) -> MoaRow {
+    /// The `state` row of the `feed` topic: `queued` reports wait, and `auto` says whether
+    /// wake-ups read them.
+    pub fn row(&self, queued: u32, auto: bool) -> MoaRow {
         let (phase, why) = match &self.phase {
             Phase::Off => ("off", None),
             Phase::Starting => ("starting", None),
@@ -179,6 +200,7 @@ impl Moa {
             why,
             queued,
             asking: self.asking.keys().copied().collect(),
+            auto,
         }
     }
 
@@ -211,6 +233,7 @@ pub fn send(
         Source::You if text.chars().count() > PROMPT_MAX => {
             Some(format!("a prompt is at most {PROMPT_MAX} characters"))
         }
+        _ if state.central.restarting.is_some() => Some(RESTARTING.to_string()),
         _ if state.central.busy() => Some(BUSY.to_string()),
         _ => None,
     };
@@ -235,7 +258,7 @@ pub fn send(
         source,
         waiter,
         reopening: false,
-        reopen_failed: false,
+        reopen_failed: std::mem::take(&mut moa.reopen_failed),
         brief: None,
     });
     let mut fx = match start {
@@ -250,22 +273,124 @@ pub fn send(
             if let Some((w, why)) = left {
                 fx.extend(answer(Some(w), Err(OpError(stopped_text(&why)))));
             }
-            moa.generation += 1;
-            moa.phase = Phase::Starting;
-            moa.account = Some(account);
-            moa.caps = None;
-            moa.thread = None;
-            moa.replaying = None;
-            fx.push(Effect::Acp(AcpCmd::Start {
-                generation: moa.generation,
-                spec,
-            }));
+            fx.push(new_run(moa, account, spec));
             fx
         }
         None => open(state, now),
     };
     fx.extend(said(state));
     fx
+}
+
+/// A new run of moa's agent on `account`: nothing of the last one carries over. The command
+/// that starts it; the host stops the last run first.
+fn new_run(moa: &mut Moa, account: AccountName, spec: AdapterSpec) -> Effect {
+    moa.generation += 1;
+    moa.phase = Phase::Starting;
+    moa.account = Some(account);
+    forget_run(moa);
+    Effect::Acp(AcpCmd::Start {
+        generation: moa.generation,
+        spec,
+    })
+}
+
+/// What a run of moa's agent leaves is forgotten: what it offered, its open thread and a
+/// replay under way.
+fn forget_run(moa: &mut Moa) {
+    moa.caps = None;
+    moa.thread = None;
+    moa.replaying = None;
+}
+
+/// What a switch of account hears while moa starts or answers.
+const ANSWERING: &str = "moa is answering; cancel it first, then switch";
+
+/// `console.account` (`/account`): with `name`, moa's agent runs on that account from your
+/// next prompt, in a new thread. The choice is saved over moa.toml's `moa_account` (removed
+/// when it is that one), and a running agent is stopped once it is. Only you switch it: moa's
+/// own call is refused, as is a switch while moa starts or answers. With no name, which
+/// account moa is on, and the others it can run on.
+pub fn switch_account(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    caller: &Caller,
+    name: Option<String>,
+) -> Vec<Effect> {
+    let reply = |result| vec![Effect::Reply { conn, req, result }];
+    let Some(name) = name else {
+        return reply(accounts(state));
+    };
+    let refused = |why: String| reply(Err(OpError(why)));
+    if *caller == Caller::Moa {
+        return refused("only you can switch moa's account".into());
+    }
+    if state.central.busy() || state.central.restarting.is_some() {
+        return refused(ANSWERING.into());
+    }
+    let runnable = AccountName::parse(&name)
+        .ok()
+        .filter(|a| launch::spec_on(state, a).is_ok());
+    let Some(account) = runnable else {
+        return refused(format!("there's no account {name} moa can run on"));
+    };
+    let data = json!({ "account": account.as_str() });
+    if launch::account(state).as_ref() == Some(&account) {
+        let text = format!("moa is on {account} already");
+        return reply(Ok(Done { text, data }));
+    }
+    let value = (launch::configured(state).as_ref() != Some(&account)).then(|| account.to_string());
+    let key = launch::ACCOUNT_KEY.to_string();
+    let mut tx = Tx::new(now);
+    if let Err(e) = tx.commit(state, vec![Change::Meta { key, value }]) {
+        return reply(Err(e));
+    }
+    // Nothing of the last account's run carries over, nor its failed reopen. The next prompt
+    // opens a new thread, as `console.new` has it, even when the account has one today.
+    let moa = &mut state.central;
+    let stop = (moa.phase == Phase::Ready).then_some(AcpCmd::Stop {
+        generation: moa.generation,
+    });
+    moa.phase = Phase::Off;
+    moa.account = None;
+    forget_run(moa);
+    moa.reopen_failed = false;
+    moa.new_thread = true;
+    moa.account_card = None;
+    let mut fx = post_commit(state, tx);
+    fx.extend(stop.map(Effect::Acp));
+    // With reports waiting, a wake-up may start it before you do.
+    let text =
+        format!("moa switches to {account} with your next prompt or wake-up, in a new thread");
+    fx.extend(reply(Ok(Done { text, data })));
+    fx.extend(said(state));
+    fx
+}
+
+/// A bare `/account`: the account moa is on, and the others moa.toml has that it can run on.
+fn accounts(state: &State) -> Result<Done, OpError> {
+    let on = launch::account(state).ok_or_else(|| launch::no_account(state))?;
+    let others: Vec<String> = launch::others(state, &on)
+        .into_iter()
+        .map(|a| a.to_string())
+        .collect();
+    let text = match others.is_empty() {
+        true => format!("moa is on {on}; no other account is set up"),
+        false => format!("moa is on {on}; others: {}", others.join(", ")),
+    };
+    Ok(Done {
+        text,
+        data: json!({ "account": on.as_str(), "others": others }),
+    })
+}
+
+/// A `card` row of `thread` (K7): what moa's core tells you, `what` naming which card and
+/// `text` its Markdown. The caller commits it.
+pub(crate) fn card(state: &State, tx: &mut Tx, thread: &str, what: &str, text: &str) -> FeedEntry {
+    let body = feed::card_body(what, text);
+    turn::new_row(state, tx, thread, kind::CARD, None, body, None)
 }
 
 /// `console.new`: the next prompt starts a new thread.
@@ -288,6 +413,8 @@ pub fn heard(state: &mut State, now: &Now, input: AcpIn) -> Vec<Effect> {
     if input.generation() != state.central.generation {
         return Vec::new();
     }
+    // Whatever the run says is news of its turn.
+    state.central.watchdog.news(now.wall);
     let mut fx = match input {
         AcpIn::Started { caps, .. } => started(state, now, caps),
         AcpIn::Opened { result, .. } => opened(state, now, result),
@@ -464,26 +591,37 @@ fn saved(state: &State, thread: &str, message_id: &str) -> bool {
             .any(|e| e.thread_id == thread && e.message_id.as_deref() == Some(message_id))
 }
 
-/// moa's agent has started: the waiting prompt's thread is opened.
+/// moa's agent has started: the waiting prompt's thread is opened. After the watchdog's
+/// restart today's thread is, and moa stays starting until it is open.
 fn started(state: &mut State, now: &Now, caps: Caps) -> Vec<Effect> {
     let moa = &mut state.central;
     if moa.phase != Phase::Starting {
         return Vec::new();
     }
     moa.caps = Some(caps);
-    moa.phase = Phase::Ready;
+    if moa.restarting.is_none() {
+        moa.phase = Phase::Ready;
+    }
     open(state, now)
 }
 
-/// Asks for the waiting prompt's thread, or sends the prompt when its thread is open.
+/// Asks for the waiting prompt's thread, or sends the prompt when its thread is open. With
+/// no prompt, after the watchdog's restart, it reopens today's thread, or opens a new one:
+/// the one `console.new` asked for, or today's first when there is none yet (the stuck turn
+/// began before midnight).
 fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     let moa = &state.central;
-    let (Some(account), Some(caps), Some(pending)) = (&moa.account, moa.caps, &moa.pending) else {
+    let (Some(account), Some(caps)) = (&moa.account, moa.caps) else {
         return Vec::new();
     };
-    let how = match pending.reopen_failed {
-        true => How::New,
-        false => choose(state, account, now.local_day, caps),
+    let how = match &moa.pending {
+        Some(p) if p.reopen_failed => How::New,
+        Some(_) => choose(state, account, now.local_day, caps),
+        None if moa.restarting.is_some() => match choose(state, account, now.local_day, caps) {
+            How::Use(_) => return watchdog::reopened(state, now, Restarted::NoThread),
+            how => how,
+        },
+        None => return Vec::new(),
     };
     let (how, brief, mut fx) = match how {
         How::Use(_) => {
@@ -509,6 +647,8 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
     if let Some(p) = &mut moa.pending {
         p.reopening = matches!(how, ThreadHow::Resume { .. } | ThreadHow::Load { .. });
         p.brief = brief;
+    } else if let Some(r) = &mut moa.restarting {
+        r.brief = brief;
     }
     fx.push(Effect::Acp(AcpCmd::Open {
         generation: moa.generation,
@@ -523,27 +663,48 @@ fn open(state: &mut State, now: &Now) -> Vec<Effect> {
 fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>) -> Vec<Effect> {
     let moa = &mut state.central;
     moa.replaying = None;
+    if moa.pending.is_none()
+        && let (Some(restart), Some(account)) = (&moa.restarting, moa.account.clone())
+    {
+        let brief = restart.brief.clone();
+        let asked = moa.new_thread;
+        let mut unopened = None;
+        let ended = match result {
+            Ok((id, how)) => {
+                let row = thread_row(state, now, &account, id, how);
+                let open = Open {
+                    row,
+                    brief,
+                    reopen_failed: false,
+                };
+                match how {
+                    Opened::New if asked => Restarted::New(open),
+                    Opened::New => Restarted::NewToday(open),
+                    Opened::Resumed | Opened::Loaded => Restarted::Reopened(open),
+                }
+            }
+            Err(why) => {
+                unopened = Some(why);
+                Restarted::NoThread
+            }
+        };
+        let mut fx = Vec::new();
+        if matches!(ended, Restarted::NoThread) {
+            fx.push(warn("moa's thread couldn't be opened after a restart"));
+        }
+        fx.extend(watchdog::reopened(state, now, ended));
+        // The thread may have failed for its account.
+        if let Some(why) = unopened {
+            fold_in(&mut fx, account::failed(state, now, &why));
+        }
+        return fx;
+    }
     let (Some(mut p), Some(account)) = (moa.pending.take(), moa.account.clone()) else {
         return Vec::new();
     };
     match result {
         Ok((id, how)) => {
-            let row = match (how, state.thread(&id)) {
-                (Opened::Resumed | Opened::Loaded, Some(row)) => row.clone(),
-                // Only a new thread ends `console.new`: one said while a reopen was under way
-                // still holds for the next prompt.
-                _ => MoaThread {
-                    thread_id: id,
-                    account: account.to_string(),
-                    day: now.local_day,
-                    kind: if std::mem::take(&mut state.central.new_thread) {
-                        ThreadKind::Manual
-                    } else {
-                        ThreadKind::Daily
-                    },
-                    started_at: now.wall,
-                },
-            };
+            let row = thread_row(state, now, &account, id, how);
             let open = Open {
                 row,
                 brief: p.brief.take(),
@@ -573,8 +734,35 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
             fx.push(Effect::Publish(Publish::Event(CoreEvent::Error {
                 message: line,
             })));
+            fold_in(&mut fx, account::failed(state, now, &why));
             fx
         }
+    }
+}
+
+/// The row of thread `id`, opened as `how`: its saved row when it was reopened, else a new
+/// one on `account`, of kind `Manual` when `console.new` asked for it. Only a new thread ends
+/// `console.new`: one said while a reopen was under way still holds for the next prompt.
+fn thread_row(
+    state: &mut State,
+    now: &Now,
+    account: &AccountName,
+    id: String,
+    how: Opened,
+) -> MoaThread {
+    match (how, state.thread(&id)) {
+        (Opened::Resumed | Opened::Loaded, Some(row)) => row.clone(),
+        _ => MoaThread {
+            thread_id: id,
+            account: account.to_string(),
+            day: now.local_day,
+            kind: if std::mem::take(&mut state.central.new_thread) {
+                ThreadKind::Manual
+            } else {
+                ThreadKind::Daily
+            },
+            started_at: now.wall,
+        },
     }
 }
 
@@ -583,10 +771,11 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
 /// brief. The session reports queued now go with it ([`reports::batch`]): a wake-up's text
 /// is theirs, and your text follows them. The same commit deletes them. While writes are
 /// refused the prompt is refused too: nothing is sent, and the reports stay. A wake-up that
-/// finds nothing left to carry saves and sends nothing.
+/// finds nothing left to carry, or `/auto` turned off while moa's agent started, saves and
+/// sends nothing.
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let reports = reports::batch(state, now, state.config().moa.wake_batch);
-    if p.source == Source::Wake && reports.is_empty() {
+    if p.source == Source::Wake && (reports.is_empty() || !channel::auto_on(state)) {
         return Vec::new();
     }
     let n = reports.len();
@@ -647,6 +836,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     }
     moa.phase = Phase::Thinking;
     moa.written.clear();
+    moa.watchdog.watch(now.wall);
     moa.turn = Some(Turn {
         prompt: p.prompt,
         message_id: p.message_id.clone(),
@@ -691,9 +881,7 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
         Phase::Ready | Phase::Thinking => (Phase::Off, stopped_text(&why), "moa's agent stopped"),
     };
     moa.phase = phase;
-    moa.caps = None;
-    moa.thread = None;
-    moa.replaying = None;
+    forget_run(moa);
     let pending = moa.pending.take();
     if let Some(p) = &pending {
         failed_wake(moa, p, now);
@@ -706,10 +894,27 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
         turn.exited = Some(why);
         waiters.extend(turn.waiter.take());
         let thread = turn.thread.clone();
-        fx.extend(turn::cut_short(state, now, &thread, &told));
+        let mut tx = Tx::new(now);
+        let says = turn::new_row(
+            state,
+            &mut tx,
+            &thread,
+            kind::ERROR,
+            None,
+            text_body(&told),
+            None,
+        );
+        fx.extend(turn::cut_short(state, tx, says));
     }
     for w in waiters {
         fx.extend(answer(Some(w), Err(OpError(told.clone()))));
+    }
+    // A restart's agent that goes before its thread is open couldn't start again: moa is
+    // `Failed`, as the card says.
+    fx.extend(watchdog::reopened(state, now, Restarted::NotStarted));
+    // A start that failed may have failed for its account.
+    if let Phase::Failed(why) = state.central.phase.clone() {
+        fold_in(&mut fx, account::failed(state, now, &why));
     }
     fx
 }

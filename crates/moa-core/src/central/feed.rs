@@ -19,6 +19,7 @@ pub mod kind {
     pub const SYSTEM: &str = "system";
     pub const ERROR: &str = "error";
     pub const PERMISSION: &str = "permission";
+    pub const CARD: &str = "card";
 }
 
 /// The most of a tool's input a `tool` row keeps, in characters.
@@ -67,6 +68,12 @@ pub fn permission_body(title: &str, options: &[PermOption]) -> String {
         .map(|o| json!({ "kind": o.kind.name(), "name": o.name }))
         .collect();
     json!({ "title": tool_input(title), "options": options }).to_string()
+}
+
+/// The body of a `card` row (K7): `{"what", "text"}`, `what` naming the card and `text` its
+/// Markdown.
+pub fn card_body(what: &str, text: &str) -> String {
+    json!({ "what": what, "text": text }).to_string()
 }
 
 /// A new row of `thread`, with the next id of the table (counting this transaction's). The

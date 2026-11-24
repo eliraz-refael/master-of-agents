@@ -4,7 +4,7 @@ use jiff::civil::Date;
 use moa_core::central::Phase;
 use moa_core::central::wire::{AcpCmd, AcpIn, Caps, Opened, StopReason};
 use moa_core::change::Change;
-use moa_core::effect::{Effect, Input, Publish, handle_checked};
+use moa_core::effect::{Effect, Input, Publish, RefuseWrites, handle_checked};
 use moa_core::model::{FeedEntry, MoaThread, ThreadKind};
 use moa_core::op::{ConnId, Op, ReqId};
 use moa_core::publish::Topic;
@@ -106,6 +106,14 @@ impl Disk {
     /// holds; what its start said too.
     pub fn restart(&self, b: &TypicalBrain, now: Now) -> (State, Vec<Effect>) {
         moa_at(b, "acct-a", &self.settings, self.snapshot(), now)
+    }
+
+    /// The `meta` value of `key` on the disk now.
+    pub fn meta(&self, key: &str) -> Option<String> {
+        self.store
+            .conn()
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
     }
 
     /// The bodies of every `you` row saved, read with SQL: every one, not a tail.
@@ -281,4 +289,21 @@ pub fn saved(b: &TypicalBrain, st: &State) -> Snapshot {
         snapshot.next_ids.feed = last.id + 1;
     }
     snapshot
+}
+
+/// From now on, until a minute from now, the store refuses writes; everything saved so far
+/// is kept.
+pub fn refuse_writes(b: &TypicalBrain, st: &mut State) {
+    let snapshot = saved(b, st);
+    handle_checked(
+        st,
+        Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes: Some(RefuseWrites {
+                until: UtcMs(b.now().wall.0 + 60_000),
+                reason: "the disk is full".into(),
+            }),
+        },
+        b.now(),
+    );
 }

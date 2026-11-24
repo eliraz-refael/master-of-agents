@@ -4,11 +4,15 @@
 //! is chosen at its commit ([`super::reports::batch`]), and that commit deletes it: each
 //! report reaches moa once.
 
+use serde_json::json;
+
 use super::{Phase, launch, send};
 use crate::Now;
 use crate::UtcMs;
-use crate::core::fold_in;
+use crate::change::Change;
+use crate::core::{Tx, fold_in};
 use crate::effect::{Effect, TimerKey, rearm};
+use crate::op::{Done, OpError};
 use crate::state::State;
 
 /// The `meta` key `/auto` sets: `off` stops the wake-ups, and reports ride on your prompts.
@@ -26,6 +30,28 @@ pub enum Source {
 /// Whether moa reads session reports on its own: `meta` `moa.auto` isn't `off`.
 pub fn auto_on(state: &State) -> bool {
     state.meta(AUTO_KEY) != Some("off")
+}
+
+/// `console.auto` (`/auto`): the wake-ups on or off, as `on` says, else flipped. It takes
+/// effect at once: [`run`] arms or cancels the `Wake` timer at the end of this input. Set as
+/// it is, nothing is saved.
+pub(crate) fn set_auto(state: &mut State, tx: &mut Tx, on: Option<bool>) -> Result<Done, OpError> {
+    let on = on.unwrap_or(!auto_on(state));
+    if on != auto_on(state) {
+        let value = (!on).then(|| "off".to_string());
+        let key = AUTO_KEY.to_string();
+        tx.commit(state, vec![Change::Meta { key, value }])?;
+    }
+    let text = match on {
+        true => "moa reads session reports on its own",
+        false => {
+            "moa won't read session reports on its own; they ride on your next prompt (/auto on)"
+        }
+    };
+    Ok(Done {
+        text: text.into(),
+        data: json!({ "auto": on }),
+    })
 }
 
 /// The wake-up's check at the end of every input: a wake that is due goes, and the `Wake`
@@ -67,8 +93,9 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
 /// newest), or once the oldest has waited `wake_gap`, whichever comes first, and never
 /// sooner than `wake_gap` after the last wake. `None` while nothing is queued, or while a
 /// wake can't go: `/auto` is off, or moa's agent failed to start, is starting, has a prompt
-/// under way, waits for your answer or is replaying a thread. A turn whose agent exited is
-/// over for this: the wake's start takes it, as any prompt's does.
+/// under way, waits for your answer, is replaying a thread or is reopening one after the
+/// watchdog restarted it. A turn whose agent exited is over for this: the wake's start takes
+/// it, as any prompt's does.
 fn due(state: &State) -> Option<UtcMs> {
     let mut reports = state.reports().peekable();
     reports.peek()?;
@@ -84,7 +111,8 @@ fn due(state: &State) -> Option<UtcMs> {
         && moa.pending.is_none()
         && moa.turn.as_ref().is_none_or(|t| t.exited.is_some())
         && moa.asking.is_empty()
-        && moa.replaying.is_none();
+        && moa.replaying.is_none()
+        && moa.restarting.is_none();
     if !open {
         return None;
     }

@@ -1,10 +1,12 @@
 //! A console command parsed with the real grammar and the real folder checks: `/open` and
-//! `/term` name a folder that is there, spelled as the system spells it.
+//! `/term` name a folder that is there, spelled as the system spells it. `/auto`, `/sleep`
+//! and `/account` are moa's own ops.
 
 use std::path::{Path, PathBuf};
 
-use moa_core::console::{Parsed, parse};
+use moa_core::console::{ACCOUNT_USAGE, AUTO_USAGE, Parsed, parse};
 use moa_core::op::Op;
+use moa_core::sleep::SLEEP_AFTER_USAGE;
 use moa_core::state::Deps;
 
 fn deps(home: &Path) -> Deps {
@@ -59,4 +61,57 @@ fn open_and_term_name_a_folder_that_is_there_spelled_canonically() {
         );
     }
     assert!(!missing.exists(), "the core never makes a folder");
+}
+
+/// `/auto`, `/sleep` and `/account` are ops of their own; only `/setup` is still to come.
+#[test]
+fn auto_sleep_and_account_are_ops() {
+    let root = tempfile::tempdir_in("/tmp").expect("a temp dir");
+    let deps = deps(root.path());
+    let run = |line: &str| match parse(line, None, &deps) {
+        Ok(Parsed::Run(op)) => Ok(op),
+        Ok(other) => panic!("{line}: {other:?}"),
+        Err(why) => Err(why),
+    };
+    let auto = |on| Ok(Op::ConsoleAuto { on });
+    assert_eq!(run("/auto"), auto(None));
+    assert_eq!(run("/auto on"), auto(Some(true)));
+    assert_eq!(run("/auto off"), auto(Some(false)));
+    for line in ["/auto maybe", "/auto on off"] {
+        assert_eq!(run(line), Err(AUTO_USAGE.to_string()), "{line}");
+    }
+
+    let sleep = |value: Option<&str>| {
+        Ok(Op::ConsoleSleepAfter {
+            value: value.map(str::to_string),
+        })
+    };
+    assert_eq!(run("/sleep"), sleep(None));
+    for value in ["on", "off", "2", "1.5", "0"] {
+        assert_eq!(
+            run(&format!("/sleep {value}")),
+            sleep(Some(value)),
+            "{value}"
+        );
+    }
+    for line in ["/sleep x", "/sleep -1", "/sleep inf", "/sleep 2 3"] {
+        assert_eq!(run(line), Err(SLEEP_AFTER_USAGE.to_string()), "{line}");
+    }
+
+    let account = |name: Option<&str>| {
+        Ok(Op::ConsoleAccount {
+            name: name.map(str::to_string),
+        })
+    };
+    assert_eq!(run("/account"), account(None));
+    assert_eq!(run("/account acct-b"), account(Some("acct-b")));
+    assert_eq!(
+        run("/account acct-a acct-b"),
+        Err(ACCOUNT_USAGE.to_string())
+    );
+
+    assert_eq!(
+        run("/setup"),
+        Err("/setup comes in a later version of moa".to_string())
+    );
 }

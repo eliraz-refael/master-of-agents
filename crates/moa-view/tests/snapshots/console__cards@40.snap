@@ -1,0 +1,27 @@
+---
+source: crates/moa-view/tests/console.rs
+expression: debug_lines(&view.lines)
+---
+[you]› [you]Tidy the Harbor folder
+[brain*]◆ moa  19:00
+[dim]│ [text]Looking at the folder
+[dim]│ [warn]▸ [warn]moa's turn was stuck
+[dim]│ [dim]┊ [text]moa's turn had no news for 5 min, so
+[dim]│ [dim]┊ [text]moa cancelled it. It still hadn't  ‹more›
+[dim]│ [dim]┊ [text]stopped 30 s later, so moa's agent  ‹more›
+[dim]│ [dim]┊ [text]was restarted and today's thread  ‹more›
+[dim]│ [dim]┊ [text]reopened.  ‹more›
+
+[you]› [you]Try again
+[brain*]◆ moa  19:00
+[dim]│ [warn]▸ [warn]moa's account failed
+[dim]│ [dim]┊ [text]moa's account acct-a failed: Not
+[dim]│ [dim]┊ [text]logged in · Please run /login.  ‹more›
+[dim]│ [dim]┊
+[dim]│ [dim]┊ [text]Nothing was switched. To go on with
+[dim]│ [dim]┊ [text]another account:  ‹more›
+[dim]│ [dim]┊
+[dim]│ [dim]┊ [work#0][/account acct-b]
+[dim]│ [warn]▸ [warn]moa
+[dim]│ [dim]┊ [text]From a newer moa: [work#1][/new][text] starts a
+[dim]│ [dim]┊ [text]new thread.  ‹more›

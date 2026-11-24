@@ -12,10 +12,10 @@ use super::feed::{
     self, body_text, kind, permission_body, plan_body, text_body, tool_body, tool_input,
 };
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
-use super::{Asking, Moa, Phase, answer, chosen, warn};
+use super::{Asking, Moa, Phase, account, answer, chosen, warn};
 use crate::Now;
 use crate::change::Change;
-use crate::core::{Tx, post_commit};
+use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel};
 use crate::model::FeedEntry;
 use crate::op::{Done, OpError, PermAnswer};
@@ -299,29 +299,25 @@ pub(super) fn ended(
         fx.extend(write(state, tx, rows).unwrap_or_default());
     }
     state.central.written.clear();
+    // A turn that failed for its account says so; one that ended well lets it say so again.
+    match &result {
+        Ok(StopReason::EndTurn) => state.central.account_card = None,
+        Ok(_) => {}
+        Err(why) => fold_in(&mut fx, account::failed(state, now, why)),
+    }
     fx.extend(cmds.into_iter().map(Effect::Acp));
     fx.extend(answer(turn.waiter, reply));
     fx
 }
 
-/// moa's agent went away during the turn in `thread`, cutting it short: its running tool
-/// calls and the requests that wait for your answer are cancelled, and an `error` line says
-/// so with `told`, the reason the waiter hears.
-pub(super) fn cut_short(state: &mut State, now: &Now, thread: &str, told: &str) -> Vec<Effect> {
+/// moa's agent went away during the turn, or the watchdog is restarting it, cutting the turn
+/// short: its running tool calls and the requests that wait for your answer are cancelled
+/// (nobody is there to hear it), in one commit `tx` with `says`, the row that says why.
+pub(super) fn cut_short(state: &mut State, tx: Tx, says: FeedEntry) -> Vec<Effect> {
     let mut rows = cancelled_tools(&state.central);
     rows.extend(forsaken(&mut state.central, false).0);
     state.central.answered.clear();
-    let mut tx = Tx::new(now);
-    let body = text_body(told);
-    rows.push(new_row(
-        state,
-        &mut tx,
-        thread,
-        kind::ERROR,
-        None,
-        body,
-        None,
-    ));
+    rows.push(says);
     let mut fx: Vec<Effect> = unsaved(&mut state.central).into_iter().collect();
     fx.extend(write(state, tx, rows).unwrap_or_default());
     fx
@@ -428,7 +424,7 @@ fn in_turn(moa: &Moa, thread: &str) -> bool {
 
 /// A new row of `thread`. A row a refused commit left unsaved keeps its id for the turn, so
 /// a new one never takes it.
-fn new_row(
+pub(super) fn new_row(
     state: &State,
     tx: &mut Tx,
     thread: &str,
@@ -447,7 +443,7 @@ fn new_row(
 
 /// Writes what moa said: when the commit is refused the turn goes on, and the update is
 /// counted as unsaved.
-fn record(state: &mut State, tx: Tx, rows: Vec<FeedEntry>) -> Vec<Effect> {
+pub(super) fn record(state: &mut State, tx: Tx, rows: Vec<FeedEntry>) -> Vec<Effect> {
     write(state, tx, rows).unwrap_or_else(|| {
         state.central.unsaved += 1;
         Vec::new()

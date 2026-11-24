@@ -1,18 +1,24 @@
-//! How moa's agent is started (`central::launch`) and what it's told (`central::prompt`).
+//! How moa's agent is started (`central::launch`), on which account (`/account`), and what
+//! it's told (`central::prompt`).
 
 mod common;
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use common::loaded_with;
-use moa_core::central::launch::{settings, spec};
+use common::{central, loaded_with};
+use moa_core::Now;
+use moa_core::central::Phase;
+use moa_core::central::launch::{ACCOUNT_KEY, settings, spec};
 use moa_core::central::prompt::{CONSTITUTION, system_text};
-use moa_core::effect::{LogLevel, LogLine};
+use moa_core::central::wire::{AcpCmd, ThreadHow};
+use moa_core::change::Change;
+use moa_core::effect::{Effect, Input, LogLevel, LogLine, handle_checked};
 use moa_core::model::NoteKind;
-use moa_core::op::{NoParams, Op};
-use moa_core::state::{Deps, PanelLaunch, State};
+use moa_core::op::{ConnId, NoParams, Op, ReqId};
+use moa_core::state::{CallerInfo, Deps, PanelLaunch, Snapshot, State};
 use moa_testkit::brain::{TypicalBrain, run};
+use serde_json::json;
 
 const ADAPTER: &str = "/opt/moa/bin/claude-agent-acp";
 const LAUNCHER: &str = "/opt/claude/bin/claude";
@@ -350,4 +356,251 @@ fn the_constitution_names_the_note_kinds() {
     ] {
         assert!(CONSTITUTION.contains(&format!("`{kind}`")), "{kind}");
     }
+}
+
+// ---------- /account ----------
+
+/// Two accounts more, neither of which moa can run on: `acct-c` has no launcher, and
+/// `acct-d` no `acp` (and this build has no adapter of its own).
+const UNRUNNABLE: &str = "[accounts.acct-c]\nkind = \"claude\"\nstore = \"~/.claude-acct-c\"\n\
+                          [accounts.acct-d]\nkind = \"claude\"\nstore = \"~/.claude-acct-d\"\n\
+                          launcher = \"/opt/claude/bin/claude\"\n";
+
+/// moa on `acct-a`, with `acct-b` to switch to and the two of [`UNRUNNABLE`].
+fn on_acct_a(b: &TypicalBrain) -> State {
+    central::moa_at(b, "acct-a", UNRUNNABLE, b.snapshot(), b.now()).0
+}
+
+/// `/account` (`console.account`) with `name`, as request `req`, from `caller`.
+fn account_by(
+    st: &mut State,
+    now: &Now,
+    req: u64,
+    name: Option<&str>,
+    caller: CallerInfo,
+) -> Vec<Effect> {
+    let op = Op::ConsoleAccount {
+        name: name.map(str::to_string),
+    };
+    let input = Input::Client {
+        conn: ConnId(1),
+        req: ReqId(req),
+        caller,
+        op,
+    };
+    handle_checked(st, input, now.clone())
+}
+
+/// `/account` from you.
+fn account(st: &mut State, now: &Now, req: u64, name: Option<&str>) -> Vec<Effect> {
+    account_by(st, now, req, name, CallerInfo::default())
+}
+
+/// The one answer in `fx`.
+fn answered(fx: &[Effect]) -> Result<String, String> {
+    match &common::replies(fx)[..] {
+        [(_, result)] => result.clone().map(|d| d.text).map_err(|e| e.0),
+        other => panic!("one answer: {other:?}"),
+    }
+}
+
+fn account_meta(value: Option<&str>) -> Change {
+    Change::Meta {
+        key: ACCOUNT_KEY.into(),
+        value: value.map(str::to_string),
+    }
+}
+
+/// K9: the switch is saved, the running agent stopped, and the next prompt starts moa's
+/// agent on the new account, in a new thread: today's is the other account's.
+#[test]
+fn account_switches_with_the_next_prompt() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let mut st = on_acct_a(&b);
+    central::first_turn(&mut st, &now, "thread-a", false);
+    let generation = st.central().generation;
+    central::hear(&b, &mut st, central::ended(generation, 1));
+    assert_eq!(*central::phase(&st), Phase::Ready);
+
+    let fx = account(&mut st, &now, 2, Some("acct-b"));
+    assert_eq!(
+        answered(&fx),
+        Ok("moa switches to acct-b with your next prompt or wake-up, in a new thread".into())
+    );
+    assert_eq!(common::changes(&fx), [&account_meta(Some("acct-b"))]);
+    assert_eq!(central::acps(&fx), [&AcpCmd::Stop { generation }]);
+    assert_eq!(*central::phase(&st), Phase::Off);
+    assert_eq!(st.central().thread, None);
+    let row = central::published_state(&fx).expect("the state row");
+    assert_eq!(
+        (&row["phase"], &row["thread"]),
+        (&json!("off"), &json!(null))
+    );
+
+    let (name, expected) = spec(&st).unwrap();
+    assert_eq!(name.as_str(), "acct-b");
+    let store = b.home.join(".claude-acct-b").display().to_string();
+    assert!(
+        expected.env.contains(&("CLAUDE_CONFIG_DIR".into(), store)),
+        "{:?}",
+        expected.env
+    );
+    let fx = central::prompt(&b, &mut st, 3, "and now?");
+    assert_eq!(
+        central::acps(&fx),
+        [&AcpCmd::Start {
+            generation: generation + 1,
+            spec: expected
+        }]
+    );
+    let fx = central::hear(
+        &b,
+        &mut st,
+        central::started(generation + 1, central::caps(true, true, true)),
+    );
+    assert!(
+        matches!(
+            central::acps(&fx)[..],
+            [AcpCmd::Open {
+                how: ThreadHow::New { .. },
+                ..
+            }]
+        ),
+        "{fx:?}"
+    );
+    assert_eq!(
+        st.central().account.as_ref().map(|a| a.as_str()),
+        Some("acct-b")
+    );
+}
+
+/// Back to moa.toml's account, the choice is removed: moa.toml decides again. Switching to the
+/// account moa is on changes nothing.
+#[test]
+fn account_back_to_moa_toml_clears_meta() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let mut st = on_acct_a(&b);
+    let fx = account(&mut st, &now, 1, Some("acct-b"));
+    assert_eq!(common::changes(&fx), [&account_meta(Some("acct-b"))]);
+    // Nothing runs: nothing is stopped.
+    assert!(central::acps(&fx).is_empty(), "{fx:?}");
+
+    let fx = account(&mut st, &now, 2, Some("acct-a"));
+    assert_eq!(
+        answered(&fx),
+        Ok("moa switches to acct-a with your next prompt or wake-up, in a new thread".into())
+    );
+    assert_eq!(common::changes(&fx), [&account_meta(None)]);
+    assert_eq!(spec(&st).unwrap().0.as_str(), "acct-a");
+
+    let fx = account(&mut st, &now, 3, Some("acct-a"));
+    assert_eq!(answered(&fx), Ok("moa is on acct-a already".into()));
+    assert!(common::changes(&fx).is_empty(), "{fx:?}");
+}
+
+/// The choice outlives a restart, but only while moa.toml still has that account.
+#[test]
+fn the_spec_takes_the_chosen_account_first() {
+    let b = TypicalBrain::new();
+    let with = |name: &str| Snapshot {
+        meta: vec![(ACCOUNT_KEY.into(), name.into())],
+        ..b.snapshot()
+    };
+    let st = central::moa_from(&b, "acct-a", with("acct-b"));
+    assert_eq!(spec(&st).unwrap().0.as_str(), "acct-b");
+    let st = central::moa_from(&b, "acct-a", with("acct-z"));
+    assert_eq!(spec(&st).unwrap().0.as_str(), "acct-a");
+}
+
+/// Only you switch moa's account (the design's "must never happen"): moa's own call is
+/// refused, sent or typed.
+#[test]
+fn account_refused_from_moa() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let mut st = on_acct_a(&b);
+    let moa = || CallerInfo {
+        moa_session: Some("moa".into()),
+        ..CallerInfo::default()
+    };
+    let refused = Err("only you can switch moa's account".to_string());
+    let fx = account_by(&mut st, &now, 1, Some("acct-b"), moa());
+    assert_eq!(answered(&fx), refused);
+    assert!(common::changes(&fx).is_empty(), "{fx:?}");
+    let typed = Input::Client {
+        conn: ConnId(1),
+        req: ReqId(2),
+        caller: moa(),
+        op: Op::ConsoleCommand {
+            line: "/account acct-b".into(),
+        },
+    };
+    let fx = handle_checked(&mut st, typed, now.clone());
+    assert_eq!(answered(&fx), refused);
+    assert!(common::changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(spec(&st).unwrap().0.as_str(), "acct-a");
+}
+
+/// While moa starts or answers, the switch waits for you to cancel.
+#[test]
+fn account_refused_while_thinking() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let refused = Err("moa is answering; cancel it first, then switch".to_string());
+
+    let mut st = on_acct_a(&b);
+    central::prompt(&b, &mut st, 1, "hello");
+    assert_eq!(*central::phase(&st), Phase::Starting);
+    let fx = account(&mut st, &now, 2, Some("acct-b"));
+    assert_eq!(answered(&fx), refused);
+
+    let mut st = on_acct_a(&b);
+    central::first_turn(&mut st, &now, "thread-a", false);
+    let fx = account(&mut st, &now, 2, Some("acct-b"));
+    assert_eq!(answered(&fx), refused);
+    assert!(common::changes(&fx).is_empty(), "{fx:?}");
+    assert!(central::acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(*central::phase(&st), Phase::Thinking);
+}
+
+/// An account moa.toml doesn't have, or one moa's agent can't run on, is no account to switch
+/// to.
+#[test]
+fn account_unknown_refused() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let mut st = on_acct_a(&b);
+    for name in ["acct-z", "acct-c", "acct-d", "not a name"] {
+        let fx = account(&mut st, &now, 1, Some(name));
+        assert_eq!(
+            answered(&fx),
+            Err(format!("there's no account {name} moa can run on")),
+            "{name}"
+        );
+        assert!(common::changes(&fx).is_empty(), "{fx:?}");
+    }
+}
+
+/// A bare `/account` says which account moa is on, and the others it can run on.
+#[test]
+fn bare_account_lists() {
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let mut st = on_acct_a(&b);
+    let fx = account(&mut st, &now, 1, None);
+    assert_eq!(answered(&fx), Ok("moa is on acct-a; others: acct-b".into()));
+    assert!(common::changes(&fx).is_empty(), "{fx:?}");
+    account(&mut st, &now, 2, Some("acct-b"));
+    let fx = account(&mut st, &now, 3, None);
+    assert_eq!(answered(&fx), Ok("moa is on acct-b; others: acct-a".into()));
+
+    // moa.toml with acct-a alone.
+    let mut st = state(&b, &toml("~/.claude-acct-a", ""), deps(&b));
+    let fx = account(&mut st, &now, 1, None);
+    assert_eq!(
+        answered(&fx),
+        Ok("moa is on acct-a; no other account is set up".into())
+    );
 }

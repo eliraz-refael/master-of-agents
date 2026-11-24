@@ -102,7 +102,7 @@ async fn a_bad_bar_is_refused() {
     );
     for (entry, why) in [
         ("/quit", "the console's own"),
-        ("/auto", "later version"),
+        ("/setup", "later version"),
         ("/bar /ls", "can't set the bar"),
     ] {
         assert!(

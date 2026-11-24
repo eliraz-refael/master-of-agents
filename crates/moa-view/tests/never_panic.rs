@@ -616,7 +616,7 @@ fn json_value() -> impl Strategy<Value = Value> {
     ];
     let keys = vec![
         "text", "title", "input", "command", "entries", "content", "status", "options", "kind",
-        "name",
+        "name", "reports",
     ];
     leaf.prop_recursive(3, 24, 4, move |inner| {
         prop_oneof![
@@ -647,12 +647,14 @@ fn permission_body() -> impl Strategy<Value = Value> {
 }
 
 /// A `feed` row's body: any JSON, or one shaped as a text, tool, plan or permission row with
-/// odd text.
+/// odd text, or a prompt that carried any count of session reports.
 fn feed_body() -> impl Strategy<Value = Value> {
     prop_oneof![
         2 => json_value(),
         2 => permission_body(),
         2 => text().prop_map(|t| json!({ "text": t })),
+        2 => (text(), prop_oneof![0u64..5, any::<u64>()])
+            .prop_map(|(t, n)| json!({ "text": t, "reports": n })),
         2 => (text(), text(), any::<bool>()).prop_map(|(title, command, raw)| {
             let input = json!({ "command": command });
             let input = if raw { input } else { Value::from(input.to_string()) };
@@ -732,7 +734,8 @@ fn event_row() -> impl Strategy<Value = EventRow> {
     })
 }
 
-/// moa's state row: every phase, an odd one, odd threads and reasons, and requests waiting.
+/// moa's state row: every phase, an odd one, odd threads and reasons, requests waiting, any
+/// count of session reports waiting, and auto on or off.
 fn moa_row() -> impl Strategy<Value = MoaRow> {
     (
         prop_oneof![
@@ -741,16 +744,18 @@ fn moa_row() -> impl Strategy<Value = MoaRow> {
         ],
         option::of(text()),
         option::of(text()),
-        0u32..5,
+        prop_oneof![0u32..5, any::<u32>()],
         // Rows' ids are 1 to 40: some it waits on are drawn, some not.
         vec(-1i64..45, 0..4),
+        any::<bool>(),
     )
-        .prop_map(|(phase, thread, why, queued, asking)| MoaRow {
+        .prop_map(|(phase, thread, why, queued, asking, auto)| MoaRow {
             phase,
             thread,
             why,
             queued,
             asking,
+            auto,
         })
 }
 

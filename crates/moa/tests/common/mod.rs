@@ -704,7 +704,11 @@ pub fn start_hook() -> FakeStep {
 }
 
 /// `moactl open --bg <root>/work/<name> --title <title>` (and `--group` when given), with
-/// fake-claude starting and hanging there.
+/// fake-claude starting and hanging there; once moa has its start hook.
+///
+/// A hook moves the session's last-seen time, and so its place in the tree, which lists the
+/// newest first. In by now, it lands while the session is the newest anyway, so the tree's
+/// order never changes under a test that then moves through it ([`select_row`]).
 #[track_caller]
 pub fn open_session(
     tb: &TempBrain,
@@ -713,14 +717,32 @@ pub fn open_session(
     title: &str,
     group: Option<&str>,
 ) -> Opened {
-    open_session_with(
+    let opened = open_session_with(
         tb,
         term,
         name,
         title,
         group,
         &[start_hook(), FakeStep::Hang],
-    )
+    );
+    let started = wait_for(SHOWS, || {
+        (events(tb, &opened.id, "session.started") > 0).then_some(())
+    });
+    assert!(
+        started.is_some(),
+        "{title}'s start hook never came\n{}",
+        what_happened(tb, term)
+    );
+    opened
+}
+
+/// How many `events` rows of `kind` session `id` has, read as `moa sql` reads them.
+pub fn events(tb: &TempBrain, id: &str, kind: &str) -> usize {
+    let query =
+        format!("select count(*) from events where session_id = '{id}' and kind = '{kind}'");
+    let o = run(tb, &["sql", &query], &[]);
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    out(&o).lines().nth(1).unwrap().parse().unwrap()
 }
 
 /// [`open_session`], with fake-claude playing `steps`.

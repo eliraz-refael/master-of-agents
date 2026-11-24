@@ -169,19 +169,14 @@ impl Rig {
         );
     }
 
-    /// How many `events` rows of `kind` session `id` has, read as `moa sql` reads them.
-    fn events(&self, id: &str, kind: &str) -> usize {
-        let query =
-            format!("select count(*) from events where session_id = '{id}' and kind = '{kind}'");
-        let o = run(&self.tb, &["sql", &query], &[]);
-        assert!(o.status.success(), "{}{}", out(&o), err(&o));
-        out(&o).lines().nth(1).unwrap().parse().unwrap()
-    }
-
     /// Waits until session `id` has `n` events of `kind`.
     fn has_events(&self, id: &str, kind: &str, n: usize) {
-        let seen = wait_for(LIMIT, || (self.events(id, kind) == n).then_some(()));
-        assert!(seen.is_some(), "{} {kind} events", self.events(id, kind));
+        let seen = wait_for(LIMIT, || (events(&self.tb, id, kind) == n).then_some(()));
+        assert!(
+            seen.is_some(),
+            "{} {kind} events",
+            events(&self.tb, id, kind)
+        );
     }
 
     /// `moa hook claude` as session `s`'s pane runs it: the root's environment (`MOA_ROOT`
@@ -382,7 +377,7 @@ fn a_dying_agent_sleeps() {
     let r = rig();
     let s = r.open("b", &[hook("SessionStart", json!({})), FakeStep::Die]);
     r.shows(&s.id, "asleep");
-    assert_eq!(r.events(&s.id, "session.ended"), 0);
+    assert_eq!(events(&r.tb, &s.id, "session.ended"), 0);
 }
 
 #[test]
@@ -410,8 +405,8 @@ fn hooks_while_down_are_spooled_and_drained() {
     let o = run_exe(&r.tb, &moactl(&r.tb), &["ls"], &[]);
     assert!(o.status.success(), "{}{}", out(&o), err(&o));
     r.shows(&s.id, "done");
-    assert_eq!(r.events(&s.id, "turn.ended"), 3);
-    assert_eq!(r.events(&s.id, "turn.started"), 2);
+    assert_eq!(events(&r.tb, &s.id, "turn.ended"), 3);
+    assert_eq!(events(&r.tb, &s.id, "turn.started"), 2);
     let left = fs::read_to_string(&spool).unwrap_or_default();
     assert!(left.is_empty(), "{left}");
     assert!(!spool::draining(&spool).exists());

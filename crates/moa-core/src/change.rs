@@ -6,7 +6,7 @@ use crate::model::{
     ActivityRow, Ask, Conversation, Event, FeedEntry, Group, MoaThread, Nag, Note, PaneBinding,
     Project, Report, Session, SessionId, SpikePane, Suggestion, Task, Terminal,
 };
-use crate::publish::{BAR_KEY_PREFIX, Topic};
+use crate::publish::{BAR_KEY_PREFIX, MOA_KEY_PREFIX, Topic};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Change {
@@ -81,8 +81,13 @@ impl Change {
             | Change::DeleteSpikePane(_) => &[],
             // The views read two meta values: the current layout, and the folds.
             Change::Meta { key, .. } if key == CURRENT_KEY => &[Topic::Layouts],
-            // The console's bar is a row of the feed topic.
-            Change::Meta { key, .. } if key.starts_with(BAR_KEY_PREFIX) => &[Topic::Feed],
+            // The console's bar is a row of the feed topic, and moa's own keys (`/auto`'s,
+            // `/account`'s) go with its `state` row.
+            Change::Meta { key, .. }
+                if key.starts_with(BAR_KEY_PREFIX) || key.starts_with(MOA_KEY_PREFIX) =>
+            {
+                &[Topic::Feed]
+            }
             Change::Meta { .. } => &[Topic::Brain],
         }
     }
