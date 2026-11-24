@@ -94,7 +94,8 @@ pub(crate) fn run(
         | Op::ConsoleCancel(_)
         | Op::ConsolePage { .. }
         | Op::ConsoleNew(_)
-        | Op::ConsoleCommand { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::ConsoleCommand { .. }
+        | Op::ConsolePermission { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

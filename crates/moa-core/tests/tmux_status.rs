@@ -1,6 +1,8 @@
 //! The status line: counts, per-window state and the minute clock, every input through
 //! `handle_checked`.
 
+mod common;
+
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -618,6 +620,74 @@ fn the_clock_follows_a_zone_change() {
         vec!["set-option -g @moa_clock 09:05"]
     );
     assert!(timers(&fx).contains(&(TimerKey::Clock, ts("2026-11-15T17:06:00Z"))));
+}
+
+/// What the status line starts with while moa's agent waits for your answer.
+const NEEDS_YOU: &str = "#[fg=#ebcb8b,bold]⚠ moa needs you#[nobold]";
+
+#[test]
+fn moa_needs_you_without_a_console() {
+    use common::central::{first_turn, moa};
+    use moa_core::central::wire::{AcpIn, PermKind, PermOption};
+    use moa_core::op::PermAnswer;
+    use moa_core::panel::View;
+    use moa_testkit::brain::TypicalBrain;
+
+    let ask = |req| AcpIn::Permission {
+        generation: 1,
+        req,
+        thread: "th-1".into(),
+        title: "Run git push".into(),
+        options: vec![PermOption {
+            id: "no".into(),
+            kind: PermKind::RejectOnce,
+            name: "No".into(),
+        }],
+    };
+    let answer = |st: &mut State, b: &TypicalBrain, req| {
+        handle_checked(
+            st,
+            Input::Client {
+                conn: ConnId(1),
+                req: ReqId(req),
+                caller: CallerInfo::default(),
+                op: Op::ConsolePermission {
+                    id: None,
+                    answer: PermAnswer::No,
+                },
+            },
+            b.now(),
+        )
+    };
+    let b = TypicalBrain::new();
+    let mut st = moa(&b);
+    common::link_up(&b, &mut st);
+    first_turn(&mut st, &b.now(), "th-1", false);
+    let counts = counts_text(&st);
+    assert!(!counts.is_empty());
+
+    let fx = handle_checked(&mut st, Input::Acp(ask(3)), b.now());
+    assert_eq!(
+        writes_of(&fx, "@moa_status"),
+        [format!("set-option -g @moa_status '{NEEDS_YOU}  {counts}'")]
+    );
+    let fx = answer(&mut st, &b, 10);
+    assert_eq!(
+        writes_of(&fx, "@moa_status"),
+        [format!("set-option -g @moa_status '{counts}'")]
+    );
+
+    // With a console open, the console shows it instead.
+    let panel = Op::UiPanel {
+        pane: None,
+        view: Some(View::Console),
+        placed: false,
+        once: false,
+    };
+    common::send_on(&b, &mut st, 2, 11, panel);
+    let fx = handle_checked(&mut st, Input::Acp(ask(4)), b.now());
+    assert!(writes_of(&fx, "@moa_status").is_empty(), "{fx:?}");
+    assert_eq!(counts_text(&st), counts);
 }
 
 #[test]

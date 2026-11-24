@@ -81,8 +81,25 @@ async fn a_recorded_session_replays() {
     )
     .unwrap();
     let up = rig.start().await;
-    let reply = prompt(&mut up.client(), text);
-    assert!(reply["result"].is_object(), "{reply}");
+    let (mut asker, mut answerer) = (up.client(), up.client());
+    std::thread::scope(|s| {
+        // The recorded request waits for an answer: a second client says no.
+        s.spawn(|| {
+            wait_for(WAIT, || {
+                rig.rows()
+                    .iter()
+                    .any(|(kind, _, state)| {
+                        kind == "permission" && state.as_deref() == Some("pending")
+                    })
+                    .then_some(())
+            })
+            .expect("a pending permission row");
+            let reply = answerer.call("console.permission", json!({"answer": "no"}));
+            assert_eq!(answer(&reply), "refused");
+        });
+        let reply = prompt(&mut asker, text);
+        assert!(reply["result"].is_object(), "{reply}");
+    });
     up.stop().await;
 
     let rows: Vec<Value> = rig

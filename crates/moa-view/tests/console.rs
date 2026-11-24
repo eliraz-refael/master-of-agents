@@ -583,6 +583,7 @@ fn the_head_line_at_each_phase() {
                 thread: thread.clone(),
                 why: why.map(str::to_string),
                 queued: 0,
+                asking: Vec::new(),
             });
             let line = head(&data, &ctx, up, new, w);
             assert_eq!(line.animated, up && phase == "thinking", "{phase}");

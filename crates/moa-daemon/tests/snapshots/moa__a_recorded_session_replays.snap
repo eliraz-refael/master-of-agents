@@ -20,11 +20,25 @@ expression: rows
     "state": "failed"
   },
   {
-    "kind": "system",
+    "kind": "permission",
     "body": {
-      "text": "moa wanted to moactl ls --all; echo ---; moactl task ls; echo ---; moactl suggestion ls, and was refused: moa can't ask you yet"
+      "title": "moactl ls --all; echo ---; moactl task ls; echo ---; moactl suggestion ls",
+      "options": [
+        {
+          "kind": "allow_once",
+          "name": "Yes"
+        },
+        {
+          "kind": "allow_always",
+          "name": "Yes, and don't ask again for moactl ls *, moactl task *, and moactl suggestion * commands"
+        },
+        {
+          "kind": "reject_once",
+          "name": "No"
+        }
+      ]
     },
-    "state": null
+    "state": "reject_once"
   },
   {
     "kind": "moa",

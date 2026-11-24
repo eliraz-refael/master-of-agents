@@ -1489,6 +1489,39 @@ expression: all
             ]
           },
           {
+            "description": "Answers moa's agent's permission request `id` (its `feed` row; the oldest waiting when\n`None`) with its option of the kind `answer` names.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.permission"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "default": null
+                  },
+                  "answer": {
+                    "$ref": "#/$defs/PermAnswer"
+                  }
+                },
+                "required": [
+                  "answer"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
             "description": "Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from\n`moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.",
             "type": "object",
             "properties": {
@@ -1708,6 +1741,26 @@ expression: all
           "status",
           "picture",
           "agent"
+        ]
+      },
+      "PermAnswer": {
+        "description": "How a permission request of moa's agent is answered: by the kind of option it offers,\nnever its place.",
+        "oneOf": [
+          {
+            "description": "Its `allow_once` option.",
+            "type": "string",
+            "const": "once"
+          },
+          {
+            "description": "Its `allow_always` option.",
+            "type": "string",
+            "const": "always"
+          },
+          {
+            "description": "Its `reject_once` option, else its `reject_always`.",
+            "type": "string",
+            "const": "no"
+          }
         ]
       }
     }

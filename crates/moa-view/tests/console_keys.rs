@@ -69,6 +69,7 @@ impl C {
             thread: Some(THREAD.into()),
             why: None,
             queued: 0,
+            asking: Vec::new(),
         });
         data.touch();
         let mut c = C {

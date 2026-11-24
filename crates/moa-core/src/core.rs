@@ -635,13 +635,19 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             req,
             op: Op::ConsoleCancel(_),
             ..
-        } => central::cancel(state, conn, req),
+        } => central::cancel(state, now, conn, req),
         Input::Client {
             conn,
             req,
             op: Op::ConsoleNew(_),
             ..
         } => central::start_new(state, conn, req),
+        Input::Client {
+            conn,
+            req,
+            op: Op::ConsolePermission { id, answer },
+            ..
+        } => central::answer_permission(state, now, conn, req, id, answer),
         // A `/command` is answered as the op it names, as if that op had been sent.
         Input::Client {
             conn,

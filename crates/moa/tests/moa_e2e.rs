@@ -79,7 +79,7 @@ fn moa_answers_from_the_command_line() {
 }
 
 #[test]
-fn a_permission_is_refused_and_said() {
+fn a_permission_is_answered_from_the_command_line() {
     let tb = rig(&[
         StubStep::Ask {
             title: "delete the Harbor".into(),
@@ -92,19 +92,34 @@ fn a_permission_is_refused_and_said() {
         end(),
     ]);
 
-    ok(&tb, &["console", "prompt", "tidy up"]);
+    let said = std::thread::scope(|s| {
+        let asker = s.spawn(|| ok(&tb, &["console", "prompt", "tidy up"]));
+        // Refused until the request waits (or the daemon is up at all).
+        let answered = wait_for(SHOWS, || {
+            let o = run(&tb, &["console", "answer", "no"], BRAIN);
+            o.status.success().then(|| out(&o))
+        });
+        assert_eq!(
+            answered.as_deref(),
+            Some("refused\n"),
+            "{}",
+            tb.log_tail(B, 40)
+        );
+        asker.join().unwrap()
+    });
+    assert_eq!(said, "understood\n");
 
     let outcome = logged(&tb, "permission.outcome");
     assert_eq!(outcome.len(), 1, "{outcome:?}");
     assert_eq!(outcome[0]["params"]["optionId"], "no", "{outcome:?}");
     let feed = ok(&tb, &["console", "feed"]);
     assert!(
-        feed.contains("moa wanted to delete the Harbor, and was refused: moa can't ask you yet"),
+        feed.contains(" permission  delete the Harbor · reject_once\n"),
         "{feed}"
     );
     assert_eq!(
         sql(&tb, "SELECT kind FROM feed ORDER BY id"),
-        ["you", "system", "moa"]
+        ["you", "permission", "moa"]
     );
 }
 

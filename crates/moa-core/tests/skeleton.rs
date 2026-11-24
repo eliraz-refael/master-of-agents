@@ -531,6 +531,10 @@ fn op_methods_match_the_variants() {
         },
         Op::ConsoleNew(NoParams),
         Op::ConsoleCommand { line: "/ls".into() },
+        Op::ConsolePermission {
+            id: Some(4),
+            answer: moa_core::op::PermAnswer::Always,
+        },
         Op::BarSet {
             commands: vec!["/ls".into()],
             user: true,
@@ -586,6 +590,7 @@ const WRITES: &[&str] = &[
     "console.prompt",
     "console.new",
     "console.command",
+    "console.permission",
     "bar.set",
 ];
 

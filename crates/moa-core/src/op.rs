@@ -272,6 +272,14 @@ pub enum Op {
     /// (`moa_core::console`). The reply is that op's reply.
     #[serde(rename = "console.command")]
     ConsoleCommand { line: String },
+    /// Answers moa's agent's permission request `id` (its `feed` row; the oldest waiting when
+    /// `None`) with its option of the kind `answer` names.
+    #[serde(rename = "console.permission")]
+    ConsolePermission {
+        #[serde(default)]
+        id: Option<i64>,
+        answer: PermAnswer,
+    },
     /// Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from
     /// `moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.
     #[serde(rename = "bar.set")]
@@ -304,6 +312,33 @@ pub enum Answer {
     Yes,
     No,
     Later,
+}
+
+/// How a permission request of moa's agent is answered: by the kind of option it offers,
+/// never its place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum PermAnswer {
+    /// Its `allow_once` option.
+    Once,
+    /// Its `allow_always` option.
+    Always,
+    /// Its `reject_once` option, else its `reject_always`.
+    No,
+}
+
+impl std::str::FromStr for PermAnswer {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "once" => Ok(PermAnswer::Once),
+            "always" => Ok(PermAnswer::Always),
+            "no" => Ok(PermAnswer::No),
+            _ => Err("an answer is once, always or no".into()),
+        }
+    }
 }
 
 /// The params of an op that takes none. Missing, `null` and `{}` all decode (a unit variant
@@ -448,6 +483,7 @@ impl Op {
         "console.page",
         "console.new",
         "console.command",
+        "console.permission",
         "bar.set",
     ];
 
@@ -483,6 +519,7 @@ impl Op {
             | Op::ConsolePrompt { .. }
             | Op::ConsoleNew(_)
             | Op::BarSet { .. }
+            | Op::ConsolePermission { .. }
             // It may run a write (`/archive`, `/open`), so it is counted as one. A read-only
             // command still answers while writes are refused: the core refuses only at a
             // commit, and a read never commits.
@@ -563,6 +600,7 @@ impl Op {
             Op::ConsoleNew(_) => "console.new",
             Op::BarSet { .. } => "bar.set",
             Op::ConsoleCommand { .. } => "console.command",
+            Op::ConsolePermission { .. } => "console.permission",
             Op::DebugPanic => "debug.panic",
         }
     }

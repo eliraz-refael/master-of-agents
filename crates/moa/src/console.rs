@@ -1,11 +1,12 @@
 //! `moa console`: talk to moa's own agent from the command line. `prompt` says something and
-//! prints the answer, `cancel` stops a turn under way, `feed` prints the conversation so far.
+//! prints the answer, `cancel` stops a turn under way, `answer` answers what moa's agent asks
+//! permission for, `feed` prints the conversation so far.
 
 use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
 use jiff::tz::TimeZone;
-use moa_core::op::Op;
+use moa_core::op::{Op, PermAnswer};
 use moa_core::publish::{FeedRow, MoaRow, Topic};
 use moa_core::time::{UtcMs, local_format};
 use serde_json::Value;
@@ -33,6 +34,14 @@ pub(crate) enum Verb {
         #[command(flatten)]
         brain: BrainArgs,
     },
+    /// Answer moa's agent's oldest permission request.
+    Answer {
+        #[command(flatten)]
+        brain: BrainArgs,
+        /// Allow it once, allow it always, or refuse it.
+        #[arg(value_name = "once|always|no")]
+        answer: PermAnswer,
+    },
     /// Print the last lines of the conversation, and whether moa is answering.
     Feed {
         #[command(flatten)]
@@ -47,6 +56,13 @@ pub fn console(args: &ConsoleArgs) -> ExitCode {
     finish(match &args.verb {
         Verb::Prompt { brain, text } => prompt(brain, text.join(" ")),
         Verb::Cancel { brain } => cancel(brain),
+        Verb::Answer { brain, answer } => send_now(
+            brain,
+            Op::ConsolePermission {
+                id: None,
+                answer: *answer,
+            },
+        ),
         Verb::Feed { brain, lines } => feed(brain, *lines),
     })
 }
@@ -61,11 +77,14 @@ fn prompt(brain: &BrainArgs, text: String) -> Result<(), String> {
 }
 
 fn cancel(brain: &BrainArgs) -> Result<(), String> {
+    send_now(brain, Op::ConsoleCancel(Default::default()))
+}
+
+/// Sends `op` to the brain's running daemon, without starting one: with none, nothing is
+/// under way to act on.
+fn send_now(brain: &BrainArgs, op: Op) -> Result<(), String> {
     running(brain, false, |_, mut client| async move {
-        let done = client
-            .call(Op::ConsoleCancel(Default::default()))
-            .await
-            .map_err(|e| e.to_string())?;
+        let done = client.call(op).await.map_err(|e| e.to_string())?;
         println!("{}", done.text);
         Ok(())
     })
@@ -126,6 +145,11 @@ pub fn render(rows: &[FeedRow], tz: &TimeZone) -> Vec<String> {
                     let title = r.body.get("title").and_then(Value::as_str).unwrap_or("");
                     let state = r.state.as_deref().unwrap_or("pending");
                     format!("{at} ⚙ {title} · {state}")
+                }
+                "permission" => {
+                    let title = r.body.get("title").and_then(Value::as_str).unwrap_or("");
+                    let state = r.state.as_deref().unwrap_or("pending");
+                    format!("{at} permission  {title} · {state}")
                 }
                 "plan" => {
                     let n = r.body.get("entries").and_then(Value::as_array);
@@ -209,6 +233,13 @@ mod tests {
             row(5, "error", json!({"text": "it broke"}), None),
             row(6, "thought", json!({"text": "hmm\nmore"}), None),
             row(7, "plan", json!({"entries": [{}, {}]}), None),
+            row(
+                8,
+                "permission",
+                json!({"title": "Run git push", "options": []}),
+                Some("allow_once"),
+            ),
+            row(9, "permission", json!({"title": "Edit a"}), None),
         ];
         assert_eq!(
             render(&rows, &tz),
@@ -220,6 +251,8 @@ mod tests {
                 "22:18 ✗ it broke",
                 "22:19 ~ hmm …",
                 "22:20 plan, 2 steps",
+                "22:21 permission  Run git push · allow_once",
+                "22:22 permission  Edit a · pending",
             ]
         );
     }

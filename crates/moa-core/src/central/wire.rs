@@ -199,11 +199,13 @@ pub struct PlanEntry {
     pub priority: String,
 }
 
-/// One answer a permission request offers.
+/// One answer a permission request offers: answered by its `id`, chosen by its `kind`, and
+/// shown by its `name`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PermOption {
     pub id: String,
     pub kind: PermKind,
+    pub name: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -214,6 +216,20 @@ pub enum PermKind {
     RejectAlways,
     /// A kind this build doesn't know.
     Other,
+}
+
+impl PermKind {
+    /// The protocol's name for it (`allow_once`, ...); `other` for a kind this build doesn't
+    /// know.
+    pub fn name(self) -> &'static str {
+        match self {
+            PermKind::AllowOnce => "allow_once",
+            PermKind::AllowAlways => "allow_always",
+            PermKind::RejectOnce => "reject_once",
+            PermKind::RejectAlways => "reject_always",
+            PermKind::Other => "other",
+        }
+    }
 }
 
 /// Why a turn ended.

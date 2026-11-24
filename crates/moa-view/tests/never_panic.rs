@@ -715,6 +715,7 @@ fn moa_row() -> impl Strategy<Value = MoaRow> {
             thread,
             why,
             queued,
+            asking: Vec::new(),
         })
 }
 
