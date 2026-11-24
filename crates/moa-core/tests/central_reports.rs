@@ -24,7 +24,7 @@ use moa_core::model::{
 };
 use moa_core::op::{ConnId, Op, ReqId};
 use moa_core::publish::Topic;
-use moa_core::state::{Deps, Snapshot, State};
+use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::{Now, UtcMs};
 use serde_json::Value;
 
@@ -442,15 +442,9 @@ fn kite_project() -> Project {
     }
 }
 
-/// moa's agent on `acct-a`, with `[moa]` at its defaults, `meta`, and one session per title
-/// (session `n` titled `titles[n]`), idle since `T0`; the second is in project Kite. Started at
-/// `T0`; what the start said too.
-fn moa_brain_with(titles: &[&str], meta: Vec<(String, String)>) -> (State, Vec<Effect>) {
-    let config = Config::parse(&common::central::toml("acct-a"), Path::new(HOME)).unwrap();
-    let deps = Deps {
-        home: PathBuf::from(HOME),
-        ..Deps::default()
-    };
+/// One session per title (session `n` titled `titles[n]`), idle since `T0`, the second in
+/// project Kite; and `meta`.
+fn moa_snapshot(titles: &[&str], meta: Vec<(String, String)>) -> Snapshot {
     let (mut sessions, mut conversations) = (Vec::new(), Vec::new());
     for (n, title) in titles.iter().enumerate() {
         let (mut s, c) = session(n, Some(title), "/work/project");
@@ -460,14 +454,30 @@ fn moa_brain_with(titles: &[&str], meta: Vec<(String, String)>) -> (State, Vec<E
         sessions.push(s);
         conversations.push(c);
     }
-    let snapshot = Snapshot {
+    Snapshot {
         sessions,
         conversations,
         projects: vec![kite_project()],
         meta,
         ..Snapshot::default()
+    }
+}
+
+/// moa's agent on `acct-a`, with `settings` (TOML, `""` for `[moa]` at its defaults), started
+/// at `T0` from `snapshot`; what the start said too.
+fn moa_load(snapshot: Snapshot, settings: &str) -> (State, Vec<Effect>) {
+    let toml = format!("{}{settings}", common::central::toml("acct-a"));
+    let config = Config::parse(&toml, Path::new(HOME)).unwrap();
+    let deps = Deps {
+        home: PathBuf::from(HOME),
+        ..Deps::default()
     };
     load(config, deps, snapshot, at(T0))
+}
+
+/// [`moa_load`] of [`moa_snapshot`], at the default settings.
+fn moa_brain_with(titles: &[&str], meta: Vec<(String, String)>) -> (State, Vec<Effect>) {
+    moa_load(moa_snapshot(titles, meta), "")
 }
 
 /// [`moa_brain_with`] the first `n` of [`TITLES`].
@@ -666,7 +676,8 @@ fn a_wake_takes_8_sessions() {
         text.starts_with(&format!("{WAKE}8 session report(s)")),
         "{text}"
     );
-    assert_eq!(text.matches("### ").count(), 8);
+    let headings = text.lines().filter(|l| l.starts_with("### ")).count();
+    assert_eq!(headings, 8);
     for title in &TITLES[..8] {
         assert!(text.contains(&format!("### {title} · ")), "{title}");
     }
@@ -707,8 +718,8 @@ fn the_wake_text() {
     let w = T + 165 * SEC;
     let fx = fire(&mut st, w);
     let text = sent(&play(&mut st, w, fx));
-    // Each earlier turn is its first 500 characters, then `…`.
-    let earlier = format!("(earlier) {}…", &long("first")[..500]);
+    // Each earlier turn is its first 500 characters, then `…`; each turn is quoted.
+    let earlier = format!("> (earlier) {}…", &long("first")[..500]);
     assert!(text.contains(&format!("{earlier}\n\n")), "{text}");
     insta::assert_snapshot!(text);
 }
@@ -915,6 +926,8 @@ fn odd_sessions_still_report() {
     let mut st = moa_brain_with(&titles, vec![]).0;
     let odd = "\x1b[31mred\x1b[0m and \u{202e}שלום עולם\u{202c}";
     finished(&mut st, 0, T, odd);
+    // A heading of the session's own is quoted, not taken for another report.
+    finished(&mut st, 0, T + SEC, "Done.\n\n### Next steps\n- ship it");
     finished(&mut st, 1, T + SEC, "Kite is done");
     // Kite is archived before the wake.
     let qs = vec![st.handle_of(sid_of(1))];
@@ -941,7 +954,82 @@ fn odd_sessions_still_report() {
         "{headings:?}"
     );
     assert!(text.contains(odd));
+    assert!(
+        text.contains("> Done.\n>\n> ### Next steps\n> - ship it"),
+        "{text}"
+    );
     assert_eq!(st.reports().count(), 0);
+}
+
+#[test]
+fn a_wake_follows_a_turn_whose_agent_exited() {
+    let mut st = moa_brain(1);
+    let fx = prompt_at(&mut st, at(T0), 1, "hello", false);
+    play(&mut st, T0, fx);
+    let generation = st.central().generation;
+    let why = "killed".to_string();
+    hear_at(&mut st, at(T0), AcpIn::Exited { generation, why });
+    // Its end never comes.
+    assert!(st.central().turn.is_some());
+    let fx = finished(&mut st, 0, T, "Merged PR #3");
+    assert_eq!(wake_timer(&fx), Some(Some(UtcMs(T + 45 * SEC))));
+    let fx = fire(&mut st, T + 45 * SEC);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Start { .. }]), "{fx:?}");
+    let text = sent(&play(&mut st, T + 45 * SEC, fx));
+    assert!(text.starts_with(WAKE), "{text}");
+    assert_eq!(st.reports().count(), 0);
+}
+
+#[test]
+fn a_wake_whose_commit_fails_waits_the_gap() {
+    // The queued report's row has a value this build doesn't know: no commit can delete it.
+    let report = Report {
+        id: 1,
+        session_id: sid_of(0),
+        kind: ReportKind::TurnEnded,
+        queued_at: UtcMs(T),
+        last_at: UtcMs(T),
+        turns: vec!["Merged PR #3".into()],
+    };
+    let unknown = LoadNote {
+        table: "reports",
+        key: "#1".into(),
+        reason: "kind isn't a known one",
+    };
+    let snapshot = Snapshot {
+        reports: vec![report],
+        unknown: vec![unknown],
+        ..moa_snapshot(&TITLES[..1], vec![])
+    };
+    let (mut st, _) = moa_load(snapshot, "");
+    let w = T + 45 * SEC;
+    let fx = fire(&mut st, w);
+    let fx = play(&mut st, w, fx);
+    assert!(prompts_sent(&fx).is_empty());
+    // Not tried again at once: the next wake is a gap later.
+    assert_eq!(wake_timer(&fx), Some(Some(UtcMs(w + 180 * SEC))), "{fx:?}");
+    assert_eq!(st.reports().count(), 1);
+}
+
+#[test]
+fn a_wake_stays_within_the_longest_prompt() {
+    let titles: Vec<String> = (0..100).map(|n| format!("{} {n}", TITLES[n % 4])).collect();
+    let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+    let (mut st, _) = moa_load(moa_snapshot(&titles, vec![]), "[moa]\nwake_batch = 100\n");
+    let long = "word ".repeat(1_000);
+    for n in 0..100 {
+        finished(&mut st, n, T + n as i64 * 100, &long);
+    }
+    let w = T + 300 * SEC;
+    let fx = fire(&mut st, w);
+    let text = sent(&play(&mut st, w, fx));
+    let n = text.chars().count();
+    assert!(n <= PROMPT_MAX, "{n} characters");
+    // The oldest went; the rest wait for the next wake.
+    let carried = text.lines().filter(|l| l.starts_with("### ")).count();
+    assert!(carried > 1 && carried < 100, "{carried}");
+    assert!(text.contains(&format!("### {} · ", titles[0])));
+    assert_eq!(st.reports().count(), 100 - carried);
 }
 
 #[test]

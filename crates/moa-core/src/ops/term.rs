@@ -17,8 +17,9 @@ use crate::sleep::kill_pane;
 use crate::state::{State, Table};
 use crate::terminals::{self, Closing, STOP_WAIT_MS, TIMEOUT_FORM, TIMEOUT_MS};
 use crate::text::cut;
+use crate::text::one_line;
 use crate::time::{span, until};
-use crate::tmux::cmd::{Cmd, literal_format, one_line};
+use crate::tmux::cmd::{Cmd, literal_format};
 use crate::tmux::focus::bound_session;
 use crate::tmux::ids::{ClientName, PaneId};
 use crate::tmux::link::{

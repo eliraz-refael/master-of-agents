@@ -481,7 +481,7 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
 /// refused the prompt is refused too: nothing is sent, and the reports stay. A wake-up that
 /// finds nothing left to carry saves and sends nothing.
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
-    let reports = reports::batch(state, state.config().moa.wake_batch);
+    let reports = reports::batch(state, now, state.config().moa.wake_batch);
     if p.source == Source::Wake && reports.is_empty() {
         return Vec::new();
     }
@@ -527,6 +527,11 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     changes.push(Change::Feed(you));
     changes.extend(ids.into_iter().map(Change::DeleteReport));
     if let Err(e) = tx.commit(state, changes) {
+        // Refused writes hold the next wake until they end; any other refusal would come
+        // again at once.
+        if !state.writes_refused(now.wall) {
+            failed_wake(&mut state.central, &p, now);
+        }
         return answer(p.waiter, Err(e));
     }
     let brief = open.brief.filter(|b| first && !b.is_empty());
@@ -607,7 +612,7 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
 }
 
 /// Pending prompt `p` never reached moa's agent. A wake-up's attempt counts as a wake: the
-/// next waits a gap, rather than starting moa's agent or a thread again at once.
+/// next waits a gap, rather than starting moa's agent, a thread or a commit again at once.
 fn failed_wake(moa: &mut Moa, p: &Pending, now: &Now) {
     if p.source == Source::Wake {
         moa.last_wake = Some(now.wall);

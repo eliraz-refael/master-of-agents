@@ -7,15 +7,15 @@
 use std::path::Path;
 
 use crate::Now;
+use crate::central::PROMPT_MAX;
 use crate::change::Change;
 use crate::core::Tx;
 use crate::hook::{HookEnvelope, HookKind};
 use crate::model::{Report, ReportKind, Session, SessionId};
 use crate::ops::launch::title_of;
 use crate::state::{State, Table};
-use crate::text::cut;
+use crate::text::{cut, one_line};
 use crate::time::local_format;
-use crate::tmux::cmd::one_line;
 
 /// `text` cut to `n` characters, with a `…` after the cut: the stored text says it was cut.
 fn cut_marked(text: &str, n: usize) -> String {
@@ -96,22 +96,38 @@ pub(crate) fn queued(
 /// The most characters of a session's title, or its project's name, in a report's heading.
 const HEADING_FIELD_MAX: usize = 80;
 
+/// Room in a prompt for the first and last lines of [`wake_text`] or [`prefix_text`].
+const FRAME: usize = 200;
+
 /// What one prompt carries: the queued reports in line, until `sessions` sessions, each
-/// with every report of its own.
-pub fn batch(state: &State, sessions: usize) -> Vec<&Report> {
+/// with every report of its own, and while their text stays within [`PROMPT_MAX`]. The first
+/// session always goes; the rest wait for the next prompt.
+pub fn batch<'a>(state: &'a State, now: &Now, sessions: usize) -> Vec<&'a Report> {
+    // The sessions in line, each with its reports.
+    let mut line: Vec<(SessionId, Vec<&Report>)> = Vec::new();
+    for r in state.reports() {
+        match line.iter_mut().find(|(s, _)| *s == r.session_id) {
+            Some((_, rs)) => rs.push(r),
+            None => line.push((r.session_id, vec![r])),
+        }
+    }
     let mut chosen: Vec<SessionId> = Vec::new();
+    let mut size = FRAME;
+    for (session, reports) in line.into_iter().take(sessions) {
+        // Each section, and the blank line before it.
+        let more: usize = reports
+            .iter()
+            .map(|r| section(state, now, r).chars().count() + 2)
+            .sum();
+        if !chosen.is_empty() && size + more > PROMPT_MAX {
+            break;
+        }
+        size += more;
+        chosen.push(session);
+    }
     state
         .reports()
-        .filter(|r| {
-            if chosen.contains(&r.session_id) {
-                return true;
-            }
-            let room = chosen.len() < sessions;
-            if room {
-                chosen.push(r.session_id);
-            }
-            room
-        })
+        .filter(|r| chosen.contains(&r.session_id))
         .collect()
 }
 
@@ -140,7 +156,8 @@ fn sections(state: &State, now: &Now, reports: &[&Report]) -> String {
 }
 
 /// One report: a heading line, then its turns, the earlier ones marked, as the queue keeps
-/// them (already cut).
+/// them (already cut). Each turn is a blockquote, so a heading a session wrote can't be read
+/// as the start of another report.
 fn section(state: &State, now: &Now, r: &Report) -> String {
     let session = state.session(r.session_id);
     let title = match session {
@@ -167,13 +184,25 @@ fn section(state: &State, now: &Now, r: &Report) -> String {
     if let Some((last, earlier)) = r.turns.split_last() {
         let turns: Vec<String> = earlier
             .iter()
-            .map(|t| format!("(earlier) {t}"))
-            .chain([last.clone()])
+            .map(|t| quoted(&format!("(earlier) {t}")))
+            .chain([quoted(last)])
             .collect();
         text += "\n";
         text += &turns.join("\n\n");
     }
     text
+}
+
+/// `text` as a Markdown blockquote: `> ` before each line, `>` alone for an empty one.
+fn quoted(text: &str) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| match l {
+            "" => ">".to_string(),
+            l => format!("> {l}"),
+        })
+        .collect();
+    lines.join("\n")
 }
 
 /// A name in a heading: one line, and at most [`HEADING_FIELD_MAX`] characters.
