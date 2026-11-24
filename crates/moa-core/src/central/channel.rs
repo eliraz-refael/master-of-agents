@@ -4,11 +4,15 @@
 //! is chosen at its commit ([`super::reports::batch`]), and that commit deletes it: each
 //! report reaches moa once.
 
+use serde_json::json;
+
 use super::{Phase, launch, send};
 use crate::Now;
 use crate::UtcMs;
-use crate::core::fold_in;
+use crate::change::Change;
+use crate::core::{Tx, fold_in};
 use crate::effect::{Effect, TimerKey, rearm};
+use crate::op::{Done, OpError};
 use crate::state::State;
 
 /// The `meta` key `/auto` sets: `off` stops the wake-ups, and reports ride on your prompts.
@@ -26,6 +30,28 @@ pub enum Source {
 /// Whether moa reads session reports on its own: `meta` `moa.auto` isn't `off`.
 pub fn auto_on(state: &State) -> bool {
     state.meta(AUTO_KEY) != Some("off")
+}
+
+/// `console.auto` (`/auto`): the wake-ups on or off, as `on` says, else flipped. It takes
+/// effect at once: [`run`] arms or cancels the `Wake` timer at the end of this input. Set as
+/// it is, nothing is saved.
+pub(crate) fn set_auto(state: &mut State, tx: &mut Tx, on: Option<bool>) -> Result<Done, OpError> {
+    let on = on.unwrap_or(!auto_on(state));
+    if on != auto_on(state) {
+        let value = (!on).then(|| "off".to_string());
+        let key = AUTO_KEY.to_string();
+        tx.commit(state, vec![Change::Meta { key, value }])?;
+    }
+    let text = match on {
+        true => "moa reads session reports on its own",
+        false => {
+            "moa won't read session reports on its own; they ride on your next prompt (/auto on)"
+        }
+    };
+    Ok(Done {
+        text: text.into(),
+        data: json!({ "auto": on }),
+    })
 }
 
 /// The wake-up's check at the end of every input: a wake that is due goes, and the `Wake`

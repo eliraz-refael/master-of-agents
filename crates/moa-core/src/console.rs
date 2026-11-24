@@ -10,6 +10,7 @@ use serde_json::json;
 use crate::model::SuggestionAction;
 use crate::op::{Done, NoParams, Op, PermAnswer};
 use crate::ops::suggestions::split;
+use crate::sleep;
 use crate::state::Deps;
 
 /// One console command.
@@ -51,8 +52,12 @@ pub const COMMANDS: &[Command] = &[
         "[COMMAND…]: set the button bar; none puts moa's back",
     ),
     shown("new", "the next prompt starts a new thread"),
-    shown("auto", "moa reads reports on its own (later)"),
-    shown("sleep", "idle sessions go to sleep (later)"),
+    shown("auto", "[on|off]: moa reads session reports on its own"),
+    shown(
+        "sleep",
+        "[on|off|HOURS]: idle sessions go to sleep after HOURS",
+    ),
+    shown("account", "[NAME]: switch moa to another of your accounts"),
     shown("suggestions", "moa's open suggestions"),
     shown("setup", "track your accounts' sessions (later)"),
     shown("help", "these commands"),
@@ -85,10 +90,19 @@ pub const VERBS: &[&str] = &[
 ];
 
 /// Commands that come in a later version of moa.
-const LATER: &[&str] = &["auto", "sleep", "setup"];
+const LATER: &[&str] = &["setup"];
 
 /// What a `/permission` line that isn't one is told.
 pub const PERMISSION_USAGE: &str = "/permission takes a request's id, then once, always or no";
+
+/// What an `/auto` line that isn't one is told.
+pub const AUTO_USAGE: &str = "/auto takes on or off";
+
+/// What a `/sleep` line that isn't one is told, and `console.sleep_after` with a bad value.
+pub const SLEEP_AFTER_USAGE: &str = "/sleep takes on, off or a number of hours";
+
+/// What an `/account` line that isn't one is told.
+pub const ACCOUNT_USAGE: &str = "/account takes one account's name";
 
 /// The request and the answer the words after `/permission` give: a request's id, then
 /// `once`, `always` or `no`, and nothing more.
@@ -154,6 +168,32 @@ fn parse_with(line: &str, cwd: Option<&Path>, deps: &Deps, button: bool) -> Resu
             })),
             None => Err(PERMISSION_USAGE.into()),
         },
+        "auto" => {
+            let on = match args.as_slice() {
+                [] => None,
+                [w] if w == "on" => Some(true),
+                [w] if w == "off" => Some(false),
+                _ => return Err(AUTO_USAGE.into()),
+            };
+            Ok(Parsed::Run(Op::ConsoleAuto { on }))
+        }
+        "sleep" => {
+            let value = match args.as_slice() {
+                [] => None,
+                // Checked here as the op checks it, so a button that can't run isn't set.
+                [word] => sleep::stored(word).map(|_| Some(word.clone()))?,
+                _ => return Err(SLEEP_AFTER_USAGE.into()),
+            };
+            Ok(Parsed::Run(Op::ConsoleSleepAfter { value }))
+        }
+        "account" => {
+            let name = match args.as_slice() {
+                [] => None,
+                [name] => Some(name.clone()),
+                _ => return Err(ACCOUNT_USAGE.into()),
+            };
+            Ok(Parsed::Run(Op::ConsoleAccount { name }))
+        }
         // The console closes its own panel; a `/quit` sent here has nothing to close.
         "quit" => Err("/quit is the console's own: it closes the console's panel".into()),
         n if LATER.contains(&n) => Err(format!("/{n} comes in a later version of moa")),
@@ -234,7 +274,7 @@ mod tests {
         assert_eq!(no("ls"), "a command starts with /");
         assert_eq!(no("  "), "a command starts with /");
         assert_eq!(no("/nope"), "there's no /nope command; /help lists them");
-        assert_eq!(no("/auto on"), "/auto comes in a later version of moa");
+        assert_eq!(no("/setup"), "/setup comes in a later version of moa");
         assert_eq!(no("/new now"), "/new takes nothing after it");
         assert_eq!(
             no("/ ls"),

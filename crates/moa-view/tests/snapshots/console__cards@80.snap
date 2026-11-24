@@ -1,6 +1,5 @@
 ---
 source: crates/moa-view/tests/console.rs
-assertion_line: 731
 expression: debug_lines(&view.lines)
 ---
 [you]› [you]Tidy the Harbor folder
@@ -18,6 +17,6 @@ expression: debug_lines(&view.lines)
 [dim]│ [dim]┊
 [dim]│ [dim]┊ [text]Nothing was switched. To go on with another account:
 [dim]│ [dim]┊
-[dim]│ [dim]┊ [work]/account acct-b
+[dim]│ [dim]┊ [work#0][/account acct-b]
 [dim]│ [warn]▸ [warn]moa
-[dim]│ [dim]┊ [text]From a newer moa: [work#0][/new][text] starts a new thread.
+[dim]│ [dim]┊ [text]From a newer moa: [work#1][/new][text] starts a new thread.

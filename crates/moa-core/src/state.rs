@@ -625,9 +625,11 @@ impl State {
         self.sessions.get(&id)
     }
 
-    /// The `state` row of the `feed` topic: moa's agent, and how many reports wait.
+    /// The `state` row of the `feed` topic: moa's agent, how many reports wait, and whether
+    /// wake-ups read them.
     pub(crate) fn moa_row(&self) -> MoaRow {
-        self.central.row(self.reports.len() as u32)
+        let auto = crate::central::channel::auto_on(self);
+        self.central.row(self.reports.len() as u32, auto)
     }
 
     /// The session reports waiting, in line: oldest `queued_at` first, then by id. Spooled

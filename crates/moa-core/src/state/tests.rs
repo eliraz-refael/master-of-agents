@@ -346,6 +346,19 @@ fn changes_name_their_topics() {
         .topics(),
         [Topic::Brain]
     );
+    // moa's own keys go with the console's `state` row; `/sleep`'s is the brain's.
+    for (key, topic) in [
+        ("moa.auto", Topic::Feed),
+        ("moa.account", Topic::Feed),
+        ("console.bar.you", Topic::Feed),
+        ("sleep.after_ms", Topic::Brain),
+    ] {
+        let meta = Change::Meta {
+            key: key.into(),
+            value: None,
+        };
+        assert_eq!(meta.topics(), [topic], "{key}");
+    }
 }
 
 #[test]

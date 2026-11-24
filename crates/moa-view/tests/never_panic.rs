@@ -744,13 +744,15 @@ fn moa_row() -> impl Strategy<Value = MoaRow> {
         0u32..5,
         // Rows' ids are 1 to 40: some it waits on are drawn, some not.
         vec(-1i64..45, 0..4),
+        any::<bool>(),
     )
-        .prop_map(|(phase, thread, why, queued, asking)| MoaRow {
+        .prop_map(|(phase, thread, why, queued, asking, auto)| MoaRow {
             phase,
             thread,
             why,
             queued,
             asking,
+            auto,
         })
 }
 

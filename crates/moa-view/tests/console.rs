@@ -589,6 +589,7 @@ fn the_head_line_at_each_phase() {
                 why: why.map(str::to_string),
                 queued: 0,
                 asking: Vec::new(),
+                auto: true,
             });
             let line = head(&data, &ctx, up, &BTreeSet::new(), new, w);
             assert_eq!(line.animated, up && phase == "thinking", "{phase}");
@@ -740,5 +741,9 @@ fn cards_draw_as_cards() {
     assert!(lines.contains(&s("│ ▸ moa's turn was stuck")), "{lines:#?}");
     assert!(lines.contains(&s("│ ▸ moa's account failed")), "{lines:#?}");
     assert!(lines.contains(&s("│ ▸ moa")), "{lines:#?}");
-    assert_eq!(pressed(&view), [("/new", "/new")]);
+    // The account card's `/account B` is a button, as the card offers it.
+    assert_eq!(
+        pressed(&view),
+        [("/account acct-b", "/account acct-b"), ("/new", "/new")]
+    );
 }

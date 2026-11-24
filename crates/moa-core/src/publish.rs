@@ -230,11 +230,18 @@ pub struct MoaRow {
     /// first. Absent from an older daemon's row: none.
     #[serde(default)]
     pub asking: Vec<i64>,
+    /// Whether moa reads the session reports on its own (`/auto`). Absent from an older
+    /// daemon's row: off, so the console hides nothing of the sessions.
+    #[serde(default)]
+    pub auto: bool,
 }
 
 /// The `meta` keys of the console's button bar start with this: `.moa` holds the list moa set
 /// and `.you` the one you did, each as JSON.
 pub const BAR_KEY_PREFIX: &str = "console.bar.";
+
+/// The `meta` keys of moa's agent start with this: `/auto`'s and `/account`'s.
+pub const MOA_KEY_PREFIX: &str = "moa.";
 
 /// The bar a brain has until moa or you set one.
 pub const DEFAULT_BAR: &[&str] = &["/brief", "/attention", "/ls", "/help"];

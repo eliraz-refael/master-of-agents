@@ -71,6 +71,7 @@ impl C {
             why: None,
             queued: 0,
             asking: Vec::new(),
+            auto: true,
         });
         data.touch();
         let mut c = C {

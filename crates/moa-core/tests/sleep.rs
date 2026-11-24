@@ -21,7 +21,7 @@ use moa_core::model::{
 };
 use moa_core::op::{Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Topic};
-use moa_core::sleep::why_not;
+use moa_core::sleep::{SLEEP_KEY, why_not};
 use moa_core::state::{Deps, EventWhat, LoadNote, Snapshot, State};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
@@ -805,6 +805,98 @@ fn zero_means_never() {
     assert!(kills(&fx).is_empty(), "{fx:?}");
     assert!(timers(&fx, TimerKey::Sleep).is_empty(), "{fx:?}");
     assert_eq!(r.s().lifecycle, Lifecycle::Live);
+}
+
+/// `/sleep` (`console.sleep_after`) with `value`, as request `req`.
+fn sleep_after(r: &mut Rig, req: u64, value: Option<&str>) -> Vec<Effect> {
+    let op = Op::ConsoleSleepAfter {
+        value: value.map(str::to_string),
+    };
+    send(&r.b, &mut r.st, req, op)
+}
+
+/// `/sleep` changes the wait live (§6.13): the deadline moves with it. `off` is never, `on`
+/// is moa.toml's again, and a bare `/sleep` says the wait and saves nothing.
+#[test]
+fn sleep_sets_the_threshold() {
+    let mut r = World::new().up();
+    let idle = r.s().activity_at.unwrap().0;
+    let asleep = r.st.sessions().filter(|s| is_asleep(s)).count();
+    let after = |h: &str| format!("idle sessions go to sleep after {h} h · {asleep} asleep now");
+    let saved = |value: Option<String>| {
+        vec![Change::Meta {
+            key: SLEEP_KEY.into(),
+            value,
+        }]
+    };
+    let set = |at: i64| {
+        vec![Effect::SetTimer {
+            key: TimerKey::Sleep,
+            at: UtcMs(at),
+        }]
+    };
+
+    let fx = sleep_after(&mut r, 1, Some("2"));
+    assert_eq!(reply_text(&fx), after("2"));
+    assert_eq!(
+        changes(&fx),
+        saved(Some((2 * HOUR).to_string()))
+            .iter()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        timers(&fx, TimerKey::Sleep),
+        set(idle + 2 * HOUR).iter().collect::<Vec<_>>()
+    );
+
+    // Said, not changed.
+    let fx = sleep_after(&mut r, 2, None);
+    assert_eq!(reply_text(&fx), after("2"));
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert!(timers(&fx, TimerKey::Sleep).is_empty(), "{fx:?}");
+
+    let fx = sleep_after(&mut r, 3, Some("1.5"));
+    assert_eq!(reply_text(&fx), after("1.5"));
+    assert_eq!(
+        timers(&fx, TimerKey::Sleep),
+        set(idle + 3 * HOUR / 2).iter().collect::<Vec<_>>()
+    );
+
+    let fx = sleep_after(&mut r, 4, Some("off"));
+    assert_eq!(reply_text(&fx), "idle sessions stay up (/sleep on)");
+    assert_eq!(
+        changes(&fx),
+        saved(Some("0".into())).iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        timers(&fx, TimerKey::Sleep),
+        [&Effect::CancelTimer(TimerKey::Sleep)]
+    );
+    // Never, even long after.
+    let fx = r.input(UtcMs(r.due.0 + 100 * HOUR), Input::Timer(TimerKey::Sleep));
+    assert!(slept(&fx).is_empty(), "{fx:?}");
+
+    let fx = sleep_after(&mut r, 5, Some("on"));
+    assert_eq!(reply_text(&fx), after("6"));
+    assert_eq!(changes(&fx), saved(None).iter().collect::<Vec<_>>());
+    assert_eq!(
+        timers(&fx, TimerKey::Sleep),
+        set(r.due.0).iter().collect::<Vec<_>>()
+    );
+    assert_eq!(r.s().lifecycle, Lifecycle::Live);
+
+    // A bad value is refused, typed or sent, and changes nothing.
+    let usage = Err(OpError(moa_core::console::SLEEP_AFTER_USAGE.into()));
+    for value in ["x", "-1", "nan", "inf", ""] {
+        let fx = sleep_after(&mut r, 6, Some(value));
+        assert_eq!(replies(&fx), [(ReqId(6), usage.clone())], "{value}");
+        assert!(changes(&fx).is_empty(), "{fx:?}");
+    }
+    let line = Op::ConsoleCommand {
+        line: "/sleep x".into(),
+    };
+    let fx = send(&r.b, &mut r.st, 7, line);
+    assert_eq!(replies(&fx), [(ReqId(7), usage)]);
 }
 
 /// R15: a sleep the store can't save kills nothing.

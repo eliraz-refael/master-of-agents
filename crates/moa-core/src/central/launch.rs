@@ -32,19 +32,53 @@ const UNSET: [&str; 5] = [
     "MOA_GROUP",
 ];
 
-/// How to start moa's agent for this brain, and the account it runs on.
+/// The `meta` key `/account` sets: the account moa's agent runs on, over moa.toml's
+/// `moa_account`. moa.toml stays yours.
+pub const ACCOUNT_KEY: &str = "moa.account";
+
+/// The account moa's agent runs on: the one `/account` chose while moa.toml still has it,
+/// else moa.toml's `moa_account`.
+pub fn account(state: &State) -> Option<AccountName> {
+    let config = state.config();
+    let chosen = state
+        .meta(ACCOUNT_KEY)
+        .and_then(|n| AccountName::parse(n).ok())
+        .filter(|n| config.accounts.contains_key(n));
+    chosen.or_else(|| config.brain(state.brain()).unwrap_or_default().moa_account)
+}
+
+/// The accounts moa.toml has that moa's agent can run on ([`spec_on`]), by name.
+pub fn runnable(state: &State) -> Vec<AccountName> {
+    let names = state.config().accounts.keys();
+    names
+        .filter(|n| spec_on(state, n).is_ok())
+        .cloned()
+        .collect()
+}
+
+/// What moa says when it has no account to run on.
+pub(crate) fn no_account(state: &State) -> OpError {
+    OpError(format!(
+        "moa has no account yet: set moa_account for the {} brain in moa.toml",
+        state.brain()
+    ))
+}
+
+/// How to start moa's agent for this brain, and the account it runs on ([`account`]).
 pub fn spec(state: &State) -> Result<(AccountName, AdapterSpec), OpError> {
+    let name = account(state).ok_or_else(|| no_account(state))?;
+    let spec = spec_on(state, &name)?;
+    Ok((name, spec))
+}
+
+/// How to start moa's agent on account `name`: refused when moa.toml doesn't have it, or it
+/// has no launcher or program for moa's agent.
+pub fn spec_on(state: &State, name: &AccountName) -> Result<AdapterSpec, OpError> {
     let brain = state.brain();
     let config = state.config();
     let deps = state.deps();
-    let no_account = || {
-        OpError(format!(
-            "moa has no account yet: set moa_account for the {brain} brain in moa.toml"
-        ))
-    };
     let ours = config.brain(brain).unwrap_or_default();
-    let name = ours.moa_account.clone().ok_or_else(no_account)?;
-    let acct = config.accounts.get(&name).ok_or_else(no_account)?;
+    let acct = config.accounts.get(name).ok_or_else(|| no_account(state))?;
     let launcher = launcher_of(name.as_str(), acct)?;
     let program = acct
         .acp
@@ -87,7 +121,7 @@ pub fn spec(state: &State) -> Result<(AccountName, AdapterSpec), OpError> {
         settings: settings(&ours.folders),
         moactl: deps.panel.exe.clone(),
     };
-    Ok((name, spec))
+    Ok(spec)
 }
 
 /// The text of the agent's `.claude/settings.json`: [`ALLOWED`], and reading anything under

@@ -656,6 +656,16 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::ConsolePermission { id, answer },
             ..
         } => central::answer_permission(state, now, conn, req, id, answer),
+        // Only you switch moa's account: who asks is checked.
+        Input::Client {
+            conn,
+            req,
+            caller,
+            op: Op::ConsoleAccount { name },
+        } => {
+            let caller = state.caller(&caller);
+            central::switch_account(state, now, conn, req, &caller, name)
+        }
         // A `/command` is answered as the op it names, as if that op had been sent.
         Input::Client {
             conn,

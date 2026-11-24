@@ -1522,6 +1522,84 @@ expression: all
             ]
           },
           {
+            "description": "`/auto`: whether moa reads the session reports on its own, with wake-ups. `None` flips\nit.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.auto"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "on": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "`/sleep`: how long an idle session waits before it goes to sleep: `on` (moa.toml's),\n`off` (never) or a number of hours. `None` says the wait.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.sleep_after"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "`/account`: switches moa's agent to account `name` with the next prompt; only you can.\n`None` says which account moa is on, and the others it can run on.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "console.account"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                }
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
             "description": "Sets the console's button bar: `/command` lines, as moa's list (`user: false`, from\n`moactl bar`) or yours (`user: true`, from `/bar`), which wins. No commands clears it.",
             "type": "object",
             "properties": {

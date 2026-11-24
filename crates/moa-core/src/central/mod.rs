@@ -35,7 +35,7 @@ use crate::model::{FeedEntry, MoaThread, ThreadKind};
 use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
 use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
-use crate::state::State;
+use crate::state::{Caller, State};
 use crate::tmux::link::log;
 use crate::{Now, UtcMs};
 
@@ -153,8 +153,9 @@ pub struct Moa {
     /// moa's updates that couldn't be saved since the count was last logged, at a turn's
     /// end.
     pub unsaved: u64,
-    /// `console.new` was said: the next prompt opens a new thread of kind `Manual`, even the
-    /// same day. Kept in memory; it ends once that thread is open.
+    /// `console.new` was said, or `console.account` switched: the next prompt opens a new
+    /// thread of kind `Manual`, even the same day. Kept in memory; it ends once that thread
+    /// is open.
     pub new_thread: bool,
     /// When the last wake-up was saved, or failed to reach moa's agent: the next waits a
     /// gap after it. Kept in memory.
@@ -178,8 +179,9 @@ pub struct Moa {
 }
 
 impl Moa {
-    /// The `state` row of the `feed` topic.
-    pub fn row(&self, queued: u32) -> MoaRow {
+    /// The `state` row of the `feed` topic: `queued` reports wait, and `auto` says whether
+    /// wake-ups read them.
+    pub fn row(&self, queued: u32, auto: bool) -> MoaRow {
         let (phase, why) = match &self.phase {
             Phase::Off => ("off", None),
             Phase::Starting => ("starting", None),
@@ -193,6 +195,7 @@ impl Moa {
             why,
             queued,
             asking: self.asking.keys().copied().collect(),
+            auto,
         }
     }
 
@@ -286,6 +289,90 @@ fn new_run(moa: &mut Moa, account: AccountName, spec: AdapterSpec) -> Effect {
     Effect::Acp(AcpCmd::Start {
         generation: moa.generation,
         spec,
+    })
+}
+
+/// What a switch of account hears while moa starts or answers.
+const ANSWERING: &str = "moa is answering; cancel it first, then switch";
+
+/// `console.account` (`/account`): with `name`, moa's agent runs on that account from your
+/// next prompt, in a new thread. The choice is saved over moa.toml's `moa_account` (removed
+/// when it is that one), and a running agent is stopped once it is. Only you switch it: moa's
+/// own call is refused, as is a switch while moa starts or answers. With no name, which
+/// account moa is on, and the others it can run on.
+pub fn switch_account(
+    state: &mut State,
+    now: &Now,
+    conn: ConnId,
+    req: ReqId,
+    caller: &Caller,
+    name: Option<String>,
+) -> Vec<Effect> {
+    let reply = |result| vec![Effect::Reply { conn, req, result }];
+    let Some(name) = name else {
+        return reply(accounts(state));
+    };
+    let refused = |why: String| reply(Err(OpError(why)));
+    if *caller == Caller::Moa {
+        return refused("only you can switch moa's account".into());
+    }
+    if state.central.busy() || state.central.restarting.is_some() {
+        return refused(ANSWERING.into());
+    }
+    let runnable = AccountName::parse(&name)
+        .ok()
+        .filter(|a| launch::spec_on(state, a).is_ok());
+    let Some(account) = runnable else {
+        return refused(format!("there's no account {name} moa can run on"));
+    };
+    let data = json!({ "account": account.as_str() });
+    if launch::account(state).as_ref() == Some(&account) {
+        let text = format!("moa is on {account} already");
+        return reply(Ok(Done { text, data }));
+    }
+    let ours = state.config().brain(state.brain()).unwrap_or_default();
+    let value = (ours.moa_account.as_ref() != Some(&account)).then(|| account.to_string());
+    let key = launch::ACCOUNT_KEY.to_string();
+    let mut tx = Tx::new(now);
+    if let Err(e) = tx.commit(state, vec![Change::Meta { key, value }]) {
+        return reply(Err(e));
+    }
+    // Nothing of the last account's run carries over, nor its failed reopen. The next prompt
+    // opens a new thread, as `console.new` has it, even when the account has one today.
+    let moa = &mut state.central;
+    let stop = (moa.phase == Phase::Ready).then_some(AcpCmd::Stop {
+        generation: moa.generation,
+    });
+    moa.phase = Phase::Off;
+    moa.account = None;
+    moa.caps = None;
+    moa.thread = None;
+    moa.replaying = None;
+    moa.reopen_failed = false;
+    moa.new_thread = true;
+    let mut fx = post_commit(state, tx);
+    fx.extend(stop.map(Effect::Acp));
+    let text = format!("moa switches to {account} with your next prompt, in a new thread");
+    fx.extend(reply(Ok(Done { text, data })));
+    fx.extend(said(state));
+    fx
+}
+
+/// A bare `/account`: the account moa is on, and the others moa.toml has that it can run on.
+fn accounts(state: &State) -> Result<Done, OpError> {
+    let on = launch::account(state).ok_or_else(|| launch::no_account(state))?;
+    let others: Vec<String> = launch::runnable(state)
+        .into_iter()
+        .filter(|a| *a != on)
+        .map(|a| a.to_string())
+        .collect();
+    let text = match others.is_empty() {
+        true => format!("moa is on {on}; no other account is set up"),
+        false => format!("moa is on {on}; others: {}", others.join(", ")),
+    };
+    Ok(Done {
+        text,
+        data: json!({ "account": on.as_str(), "others": others }),
     })
 }
 

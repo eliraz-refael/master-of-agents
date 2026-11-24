@@ -535,6 +535,13 @@ fn op_methods_match_the_variants() {
             id: Some(4),
             answer: moa_core::op::PermAnswer::Always,
         },
+        Op::ConsoleAuto { on: Some(false) },
+        Op::ConsoleSleepAfter {
+            value: Some("2".into()),
+        },
+        Op::ConsoleAccount {
+            name: Some("acct-b".into()),
+        },
         Op::BarSet {
             commands: vec!["/ls".into()],
             user: true,
@@ -592,6 +599,9 @@ const WRITES: &[&str] = &[
     "console.new",
     "console.command",
     "console.permission",
+    "console.auto",
+    "console.sleep_after",
+    "console.account",
     "bar.set",
 ];
 
