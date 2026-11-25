@@ -667,6 +667,18 @@ impl State {
         self.suggestions.values()
     }
 
+    /// The yeses waiting for moa (D5): accepted suggestions with no actions whose result is
+    /// [`YES_WAITING`], by id. A row with a value this build doesn't know is left out: no
+    /// commit could mark it told, so it would hold back every prompt.
+    pub fn yeses(&self) -> impl Iterator<Item = &Suggestion> {
+        self.suggestions.values().filter(|s| {
+            s.status == SuggestionStatus::Accepted
+                && s.actions.is_empty()
+                && s.result.as_deref() == Some(YES_WAITING)
+                && !self.is_unknown("suggestions", &format!("#{}", s.id))
+        })
+    }
+
     pub fn conversations_of(&self, id: SessionId) -> impl Iterator<Item = &Conversation> {
         self.conversations
             .values()

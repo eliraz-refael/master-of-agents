@@ -240,7 +240,8 @@ impl Panel {
     /// Sends `line`, `typed` in the input or pressed: a `/command` as `console.command`, else
     /// a prompt; `/quit` is the console's own (F10). An answer to a permission request is
     /// remembered until moa's state drops the request, and its reply makes no card: the
-    /// request's own card says it. The feed goes back to its bottom, where
+    /// request's own card says it. Neither does the reply to a suggestion card's button
+    /// (D7); one typed by hand is a command like any other. The feed goes back to its bottom, where
     /// the answer comes. A typed line waits for its reply before another goes; the draft is
     /// cleared only once it is accepted (B7).
     fn send_line(&mut self, line: String, typed: bool, now: UtcMs) -> Vec<Out> {
@@ -265,7 +266,15 @@ impl Panel {
         let (asked, op) = if let Some(id) = console::answer_id(&line) {
             ui.answered.insert(id);
             let asked = Asked::Answer {
-                id,
+                id: Some(id),
+                line: line.clone(),
+                at: now,
+                typed,
+            };
+            (asked, Op::ConsoleCommand { line })
+        } else if !typed && console::is_suggestion_answer(&line) {
+            let asked = Asked::Answer {
+                id: None,
                 line: line.clone(),
                 at: now,
                 typed,
@@ -363,7 +372,7 @@ impl Panel {
         let done = match result {
             Ok(done) => done,
             Err(why) => {
-                if let Asked::Answer { id, .. } = asked {
+                if let Asked::Answer { id: Some(id), .. } = asked {
                     self.console.answered.remove(&id);
                 }
                 self.show(Err(why));

@@ -135,6 +135,8 @@ Don't only report: propose what to do, as suggestions answered with one click.
   question that says what yes does and why, in the user's terms ("Kite has 3 overdue tasks
   blocked on the domain; move them to Friday?"), never a label. Without `--do` it's a plain
   yes or no that you act on.
+- When the user says yes to a suggestion without --do, a prompt tells you so: do what it
+  proposed.
 - At most 2 per wake-up. Check `moactl suggestion ls` first; never repeat an open or a
   rejected one.
 - What to suggest: a new date for overdue tasks, or dropping them; what to drop among

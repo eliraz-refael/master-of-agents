@@ -351,6 +351,14 @@ pub struct Note {
     pub created_at: UtcMs,
 }
 
+/// An accepted suggestion's `result` when its actions all ran.
+pub const YES_DONE: &str = "done";
+/// An accepted suggestion's `result` while its yes, with no actions to run, waits for moa
+/// (D5).
+pub const YES_WAITING: &str = "waiting for moa";
+/// An accepted suggestion's `result` once a prompt carried its yes to moa (D1).
+pub const YES_TOLD: &str = "told moa";
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Suggestion {
     pub id: SuggestionId,

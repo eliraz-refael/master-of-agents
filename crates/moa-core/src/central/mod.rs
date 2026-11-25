@@ -4,12 +4,13 @@
 //! A prompt starts moa's agent when it isn't running, opens today's thread when it isn't
 //! open ([`threads`]), saves the prompt's `you` row, and only then sends it: the prompt waits
 //! for the commit. One prompt at a time. What moa says in its turn lands in the feed as it
-//! comes, and the turn's end answers whoever waits ([`turn`]). The session reports ride on
-//! the prompts, or wake moa on their own ([`channel`]). A turn that hangs is cancelled, then
-//! cut short and moa's agent restarted ([`watchdog`]). One that fails for its account's sake
-//! says so in a card ([`account`]).
+//! comes, and the turn's end answers whoever waits ([`turn`]). The session reports and your
+//! yeses ride on the prompts ([`carry`]), or reach moa on their own ([`channel`]). A turn
+//! that hangs is cancelled, then cut short and moa's agent restarted ([`watchdog`]). One that
+//! fails for its account's sake says so in a card ([`account`]).
 
 pub mod account;
+pub mod carry;
 pub mod channel;
 pub mod feed;
 pub mod launch;
@@ -33,7 +34,7 @@ use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
-use crate::model::{FeedEntry, MoaThread, SuggestionId, ThreadKind};
+use crate::model::{FeedEntry, MoaThread, Suggestion, SuggestionId, ThreadKind};
 use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
 use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
@@ -51,6 +52,9 @@ const RESTARTING: &str = "moa's agent is restarting; try again in a moment";
 
 /// The first line of a new thread opened because today's couldn't be reopened.
 const REOPEN_FAILED: &str = "today's earlier thread couldn't be reopened, so this is a new one";
+
+/// What goes between the parts of a prompt: the brief, what it carries, your text (D1).
+const PART_GAP: &str = "\n\n---\n\n";
 
 /// Said to whoever waits for a prompt whose row a failed commit lost.
 const UNSAVED: &str = "moa couldn't save your prompt; nothing was sent";
@@ -95,7 +99,7 @@ pub struct Pending {
     pub prompt: u64,
     /// Its `you` row's `message_id`.
     pub message_id: String,
-    /// Your text; a wake-up's is made at its commit.
+    /// Your text; an automatic prompt's is made at its commit.
     pub text: String,
     pub source: Source,
     pub waiter: Option<Waiter>,
@@ -159,9 +163,12 @@ pub struct Moa {
     /// thread of kind `Manual`, even the same day. Kept in memory; it ends once that thread
     /// is open.
     pub new_thread: bool,
-    /// When the last wake-up was saved, or failed to reach moa's agent: the next waits a
-    /// gap after it. Kept in memory.
+    /// When the last prompt that carried session reports on its own was saved, or a wake-up
+    /// failed to reach moa's agent: the next wake waits a gap after it. Kept in memory.
     pub last_wake: Option<UtcMs>,
+    /// When the last prompt sent for a yes failed to reach moa's agent: the next tries a gap
+    /// after it, rather than at once. A prompt that carries yeses ends it. Kept in memory.
+    pub yes_failed: Option<UtcMs>,
     /// The deadline the `Wake` timer is armed at, if any, as `State::sleep_at` is.
     pub wake_armed: Option<UtcMs>,
     /// The turn's permission requests that wait for your answer, by row id: oldest first.
@@ -217,9 +224,9 @@ impl Moa {
 }
 
 /// The one way a prompt reaches moa: `console.prompt`, and moa's own automatic prompts from
-/// `source`, which are told apart by the `message_id` it records. A wake-up's text is made at
-/// its commit, so it is sent with none. `waiter` hears `moa has it` once the prompt's row is
-/// saved, or, with `wait`, moa's answer when the turn ends.
+/// `source`, which are told apart by the `message_id` it records. An automatic prompt's text
+/// is made at its commit, so it is sent with none. `waiter` hears `moa has it` once the
+/// prompt's row is saved, or, with `wait`, moa's answer when the turn ends.
 pub fn send(
     state: &mut State,
     now: &Now,
@@ -796,31 +803,51 @@ fn thread_row(
 
 /// Saves prompt `p`'s `you` row in the open thread, then sends it. The thread's first prompt
 /// (the one that saves its row) also saves the line a failed reopen leaves, and carries the
-/// brief. The session reports queued now go with it ([`reports::batch`]): a wake-up's text
-/// is theirs, and your text follows them. The same commit deletes them. While writes are
-/// refused the prompt is refused too: nothing is sent, and the reports stay. A wake-up that
-/// finds nothing left to carry, or `/auto` turned off while moa's agent started, saves and
-/// sends nothing.
+/// brief. What waits goes with it (D1): your yeses ([`State::yeses`], [`carry::yes_text`]),
+/// then the session reports queued now ([`reports::batch`]), and your text after them; an
+/// automatic prompt's text is those blocks, and it reads the reports only while `/auto` is
+/// on. The same commit marks each delivered: a report deleted, a yes told. While writes are
+/// refused the prompt is refused too: nothing is sent, and all of it stays. An automatic
+/// prompt that finds nothing left to carry saves and sends nothing.
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
-    let reports = reports::batch(state, now, state.config().moa.wake_batch);
-    if p.source == Source::Wake && (reports.is_empty() || !channel::auto_on(state)) {
+    let automatic = p.source != Source::You;
+    let reports = match automatic && !channel::auto_on(state) {
+        true => Vec::new(),
+        false => reports::batch(state, now, state.config().moa.wake_batch),
+    };
+    let yeses: Vec<&Suggestion> = state.yeses().collect();
+    if automatic && reports.is_empty() && yeses.is_empty() {
         return Vec::new();
     }
     let n = reports.len();
     let ids: Vec<i64> = reports.iter().map(|r| r.id).collect();
-    let (carried, text, body) = match (p.source, n) {
-        (_, 0) => (None, p.text.clone(), text_body(&p.text)),
-        (Source::Wake, _) => {
-            let text = reports::wake_text(state, now, &reports);
-            let body = json!({ "text": text, "reports": n }).to_string();
-            (None, text, body)
-        }
-        (Source::You, _) => {
-            let carried = reports::prefix_text(state, now, &reports);
-            let body = json!({ "text": p.text, "reports": n, "carried": carried }).to_string();
-            (Some(carried), p.text.clone(), body)
-        }
-    };
+    let yes_ids: Vec<i64> = yeses.iter().map(|s| s.id.0).collect();
+    let told = carry::told(&yeses);
+    // The blocks before your text, in D1's order; an automatic prompt is only them.
+    let mut blocks = Vec::new();
+    if !yeses.is_empty() {
+        blocks.push(carry::yes_text(&yeses));
+    }
+    if n > 0 {
+        blocks.push(match automatic {
+            true => reports::wake_text(state, now, &reports),
+            false => reports::prefix_text(state, now, &reports),
+        });
+    }
+    let carried = blocks.join(PART_GAP);
+    let mut body = serde_json::Map::new();
+    let row_text = if automatic { &carried } else { &p.text };
+    body.insert("text".into(), row_text.as_str().into());
+    if n > 0 {
+        body.insert("reports".into(), n.into());
+    }
+    if !automatic && !blocks.is_empty() {
+        body.insert("carried".into(), carried.as_str().into());
+    }
+    if !yes_ids.is_empty() {
+        body.insert("yeses".into(), yes_ids.clone().into());
+    }
+    let body = serde_json::Value::Object(body).to_string();
     let thread = open.row.thread_id.clone();
     let first = state.thread(&thread).is_none();
     let mut tx = Tx::new(now);
@@ -844,9 +871,10 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     }
     let id = Some(p.message_id.clone());
     let mut you = feed::row(state, &mut tx, now.wall, &thread, kind::YOU, id, body, None);
-    you.automatic = p.source != Source::You;
+    you.automatic = automatic;
     changes.push(Change::Feed(you));
     changes.extend(ids.into_iter().map(Change::DeleteReport));
+    changes.extend(told);
     if let Err(e) = tx.commit(state, changes) {
         // Refused writes hold the next wake until they end; any other refusal would come
         // again at once.
@@ -856,11 +884,15 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         return answer(p.waiter, Err(e));
     }
     let brief = open.brief.filter(|b| first && !b.is_empty());
-    let parts: Vec<String> = brief.into_iter().chain(carried).chain([text]).collect();
-    let text = parts.join("\n\n---\n\n");
+    let yours = (!automatic).then(|| p.text.clone());
+    let parts: Vec<String> = brief.into_iter().chain(blocks).chain(yours).collect();
+    let text = parts.join(PART_GAP);
     let moa = &mut state.central;
-    if p.source == Source::Wake {
+    if automatic && n > 0 {
         moa.last_wake = Some(now.wall);
+    }
+    if !yes_ids.is_empty() {
+        moa.yes_failed = None;
     }
     moa.phase = Phase::Thinking;
     moa.written.clear();
@@ -947,11 +979,14 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     fx
 }
 
-/// Pending prompt `p` never reached moa's agent. A wake-up's attempt counts as a wake: the
-/// next waits a gap, rather than starting moa's agent, a thread or a commit again at once.
+/// Pending prompt `p` never reached moa's agent. An automatic prompt's attempt counts: a
+/// wake-up's as a wake, a yes's as a failed try. The next waits a gap, rather than starting
+/// moa's agent, a thread or a commit again at once.
 fn failed_wake(moa: &mut Moa, p: &Pending, now: &Now) {
-    if p.source == Source::Wake {
-        moa.last_wake = Some(now.wall);
+    match p.source {
+        Source::Wake => moa.last_wake = Some(now.wall),
+        Source::Yes => moa.yes_failed = Some(now.wall),
+        Source::You => {}
     }
 }
 

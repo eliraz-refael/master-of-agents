@@ -1356,11 +1356,39 @@ fn the_card_buttons_answer() {
     c.key(Key::Tab);
     assert_eq!(c.focused(), Some(("[later]".to_string(), false)));
     let outs = c.key(Key::Enter);
-    let (_, op) = c.send(outs);
+    let (tag, op) = c.send(outs);
     assert_eq!(
         op,
         Op::ConsoleCommand {
             line: "/suggestion later 12".into()
         }
+    );
+    // Its reply makes no card, as a permission answer's doesn't: the card says it.
+    c.reply(tag, Ok(done("later")));
+    let no_reply_card = |c: &mut C| {
+        let body = c.body();
+        assert!(
+            !body.iter().any(|l| l.contains("▸ /suggestion")),
+            "{body:#?}"
+        );
+    };
+    no_reply_card(&mut c);
+    // A refused one says why in the footer.
+    c.key(Key::Tab);
+    c.key(Key::Tab);
+    let outs = c.key(Key::Enter);
+    let (tag, _) = c.send(outs);
+    c.reply(tag, Err("suggestion #12 is already accepted".into()));
+    assert_eq!(c.footer(), "suggestion #12 is already accepted");
+    no_reply_card(&mut c);
+    // Typed by hand, its reply is a card as any command's is.
+    c.typed("/suggestion yes 12");
+    let outs = c.key(Key::Enter);
+    let (tag, _) = c.send(outs);
+    c.reply(tag, Ok(done("yes; moa acts on it when it's free")));
+    let body = c.body();
+    assert!(
+        body.contains(&"▸ /suggestion yes 12".to_string()),
+        "{body:#?}"
     );
 }

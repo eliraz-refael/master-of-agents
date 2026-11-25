@@ -1,7 +1,8 @@
 //! `suggest`, and `suggestion yes|no|later|ls`. A suggestion is moa's proposal with buttons;
 //! `yes` runs its actions in-process, through the same `ops::run` and the same transaction as
-//! a typed command, so the whole answer is one `Persist`. A `term close` is checked here
-//! instead, and its terminal starts closing once that `Persist` is made.
+//! a typed command, so the whole answer is one `Persist`. A `yes` with no actions waits for
+//! moa instead ([`YES_WAITING`]): the channel carries it to moa's agent (D5). A `term close`
+//! is checked here instead, and its terminal starts closing once that `Persist` is made.
 
 use std::path::Path;
 
@@ -14,11 +15,15 @@ use crate::central;
 use crate::change::Change;
 use crate::core::{Tx, unknown_message};
 use crate::effect::Effect;
-use crate::model::{Suggestion, SuggestionAction, SuggestionId, SuggestionStatus};
+use crate::model::{
+    Suggestion, SuggestionAction, SuggestionId, SuggestionStatus, YES_DONE, YES_WAITING,
+};
 use crate::op::{Answer, Done, Op, OpError};
 use crate::state::{Caller, State, Table};
 
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
+/// What a yes with no actions to run hears: moa's agent hears of it (D5).
+const PLAIN_YES: &str = "yes; moa acts on it when it's free";
 /// Why an open suggestion can't be run, as `Startup` records it.
 pub(crate) const INVALID: &str = "an action doesn't parse as moactl";
 
@@ -195,8 +200,11 @@ pub(crate) fn answer(
             }
         }
     }
+    // A yes with nothing to run is a signal for moa: it waits for the channel (D5).
+    let plain = answer == Answer::Yes && s.actions.is_empty();
     let (status, word) = match answer {
-        Answer::Yes => (SuggestionStatus::Accepted, "done"),
+        Answer::Yes if plain => (SuggestionStatus::Accepted, PLAIN_YES),
+        Answer::Yes => (SuggestionStatus::Accepted, YES_DONE),
         Answer::No => (SuggestionStatus::Rejected, "rejected"),
         Answer::Later => (SuggestionStatus::Later, "later"),
     };
@@ -205,10 +213,10 @@ pub(crate) fn answer(
     row.status = status;
     row.resolved_at = Some(now.wall);
     if answer == Answer::Yes {
-        row.result = Some(if failed.is_empty() {
-            "done".to_string()
-        } else {
-            failures.clone()
+        row.result = Some(match (plain, failed.is_empty()) {
+            (true, _) => YES_WAITING.to_string(),
+            (false, true) => YES_DONE.to_string(),
+            (false, false) => failures.clone(),
         });
     }
     let mut ui = format!("{status} suggestion #{}: {}", s.id, s.text);
