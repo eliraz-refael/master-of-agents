@@ -64,6 +64,7 @@ const LINK: &str = "link-window needs -s and a tab id, then -t and a session id 
 const UNLINK: &str = "unlink-window needs -t and a session id with a window id";
 const SEND_KEYS: &str = "send-keys sends only Ctrl-c or Enter to one pane";
 const SET_BUFFER: &str = "set-buffer needs -b moa-ask-N, then -- and the text";
+const ASK_TEXT: &str = "an ask's text can't be empty or hold a control character";
 const PASTE_BUFFER: &str = "paste-buffer needs -p -d, -b moa-ask-N and a tab id";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
@@ -360,8 +361,12 @@ impl Cmd {
             },
             // An ask's buffer, by its name; the text after `--` is never a flag.
             "set-buffer" => match self.args.as_slice() {
-                [b, name, dashes, _] if b == "-b" && is_ask_buffer(name) && dashes == "--" => {
-                    Ok(())
+                [b, name, dashes, text] if b == "-b" && is_ask_buffer(name) && dashes == "--" => {
+                    if is_clean_text(text) {
+                        Ok(())
+                    } else {
+                        Err(Refused(ASK_TEXT))
+                    }
                 }
                 _ => Err(Refused(SET_BUFFER)),
             },
@@ -549,14 +554,23 @@ fn is_pane_id(s: &str) -> bool {
 
 /// An id as tmux prints it: `prefix` and digits.
 fn is_id(s: &str, prefix: char) -> bool {
-    s.strip_prefix(prefix)
-        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    s.strip_prefix(prefix).is_some_and(is_digits)
 }
 
 /// An ask's buffer name: `moa-ask-` and digits.
 fn is_ask_buffer(s: &str) -> bool {
-    s.strip_prefix("moa-ask-")
-        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    s.strip_prefix("moa-ask-").is_some_and(is_digits)
+}
+
+/// One or more ASCII digits, and nothing else.
+fn is_digits(d: &str) -> bool {
+    !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An ask's text as cleaning leaves it (A2): not empty, and no control character but `\n`
+/// and `\t`. A backstop: an `ESC[201~` would end the bracketed paste early.
+fn is_clean_text(t: &str) -> bool {
+    !t.is_empty() && !t.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
 /// A window in a session, by both ids: `$N:@N`.
@@ -778,7 +792,25 @@ mod tests {
         let enter = Cmd::enter(PaneId(7));
         assert_eq!(enter.line(), "send-keys -t %7 Enter");
         assert_eq!(enter.check(), Ok(()));
-        assert_eq!(Cmd::set_buffer("moa-ask-1", "").check(), Ok(()));
+        assert_eq!(Cmd::set_buffer("moa-ask-1", "\t\n").check(), Ok(()));
+        // A backstop behind the ask's cleaning: an empty text, or one with a control
+        // character other than `\n` and `\t`, is refused.
+        let unclean = "an ask's text can't be empty or hold a control character";
+        for text in [
+            "",
+            "\x1b[201~",
+            "a\rb",
+            "a\0b",
+            "\x07",
+            "\x7f",
+            "\u{9b}201~",
+        ] {
+            assert_eq!(
+                Cmd::set_buffer("moa-ask-1", text).check(),
+                Err(Refused(unclean)),
+                "{text:?}"
+            );
+        }
 
         let set_text = "set-buffer needs -b moa-ask-N, then -- and the text";
         let set = |args: &[&str]| Cmd::new("set-buffer").args(args.iter().copied()).check();

@@ -31,7 +31,9 @@ pub(crate) fn cut_marked(text: &str, n: usize) -> String {
 /// How many turns a session's `turn_ended` row keeps: the newest.
 pub const TURNS_KEPT: usize = 6;
 
-/// The most characters of the newest message a report keeps; a longer one ends in `…`.
+/// The most characters of what a session needs that a report keeps; a longer one ends in
+/// `…`. A turn's message is first cut to its head and tail (`cut_middle`, at most 2405
+/// characters), so this cap never cuts one; it is only a bound.
 pub const LAST_MAX: usize = 2600;
 
 /// The most characters a report keeps of a turn once a newer one follows it; a longer one
