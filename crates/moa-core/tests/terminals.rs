@@ -2672,9 +2672,8 @@ fn split_of_s(id: i64, pane: &str, name: &str) -> Terminal {
 
 /// S, titled Lantern, with its splits kite (#4, `%8`) and logs (#7, `%9`), and Harbor (#2,
 /// `%5`) no session's, its own tab, and `%6` a shell; a thread saved, so a suggestion is
-/// carded. With `agent`
-/// S's agent runs in `%7`; without, it left: `%7` is gone and the splits stay. Listed and
-/// reconciled.
+/// carded. With `agent` S's agent runs in `%7`; without, it left: `%7` is gone and the
+/// splits stay. Listed and reconciled.
 fn lantern(agent: bool) -> Rig {
     let open = vec![
         record(2, "%5", "Harbor"),
@@ -2853,16 +2852,29 @@ fn archiving_several_offers_once() {
     assert_eq!(commits(&fx), 1, "one commit: {fx:?}");
 }
 
-/// A close that kills the agent's tab takes its splits with it: nothing to offer.
+/// A close of a running session kills only its agent's pane (`%7`): its splits outlive it,
+/// and the close offers to close them, in its own commit, before the kill goes out.
 #[test]
-fn a_close_that_kills_the_tab_offers_nothing() {
+fn a_close_that_kills_the_agent_offers_its_splits() {
     let mut r = lantern(true);
-    let before = r.st.suggestions().count();
     let fx = close_session(&mut r, 1);
     assert_eq!(the_reply(&fx).0, "closed");
     assert!(sent(&fx).contains(&kill("%7")), "{fx:?}");
-    assert!(offered(&fx).is_empty(), "{fx:?}");
-    assert_eq!(r.st.suggestions().count(), before);
+    assert!(!sent(&fx).contains(&kill("%8")) && !sent(&fx).contains(&kill("%9")));
+    let saved = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
+    let killed = fx.iter().position(|e| matches!(e, Effect::Tmux { .. }));
+    assert!(saved < killed, "{fx:?}");
+    let text = format!("{LANTERN} is closed. Close its 2 terminals too (kite, logs)?");
+    assert_eq!(
+        offered(&fx),
+        [(
+            text.clone(),
+            vec!["term close 4".to_string(), "term close 7".to_string()]
+        )]
+    );
+    assert_eq!(offer_cards(&fx), [("th-1".to_string(), text)]);
+    assert_eq!(commits(&fx), 1, "one commit: {fx:?}");
+    assert_eq!(r.st.session(s_id()).unwrap().lifecycle, Lifecycle::Ended);
 }
 
 /// The agent already left: the close kills no tab, and its splits are still open, so the

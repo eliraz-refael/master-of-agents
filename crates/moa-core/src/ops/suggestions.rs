@@ -15,13 +15,14 @@ use crate::activity;
 use crate::central;
 use crate::change::Change;
 use crate::core::{Tx, unknown_message};
-use crate::effect::Effect;
+use crate::effect::{Effect, LogLevel};
 use crate::model::{
     SessionId, Suggestion, SuggestionAction, SuggestionId, SuggestionStatus, YES_DONE, YES_WAITING,
 };
 use crate::op::{Answer, Done, Op, OpError};
 use crate::state::{Caller, State, Table};
 use crate::terminals;
+use crate::tmux::link::log;
 
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
 /// What a yes with no actions to run hears: moa's agent hears of it (D5).
@@ -165,13 +166,15 @@ fn made(
 /// moa's offer to close the open terminals of sessions `ids`, just `done` (`closed` or
 /// `archived`) (D9): one suggestion made as [`suggest`] makes it, with a `term close` per
 /// terminal, for the caller to commit with what it did. Nothing when they have none open, or
-/// the same offer still waits. moa closes none unasked.
+/// an open suggestion has the same text; an action that doesn't check is a warning in
+/// `logs`. moa closes none unasked.
 pub(crate) fn close_offer(
     state: &State,
     tx: &mut Tx,
     now: &Now,
     ids: &[SessionId],
     done: &str,
+    logs: &mut Vec<Effect>,
 ) -> Vec<Change> {
     let open = terminals::of_sessions(state, ids);
     if open.is_empty() {
@@ -181,8 +184,20 @@ pub(crate) fn close_offer(
         .iter()
         .map(|t| format!("term close {}", t.id.0))
         .collect();
-    let Ok(parsed) = checked(state, &actions) else {
-        return Vec::new();
+    let parsed = match checked(state, &actions) {
+        Ok(parsed) => parsed,
+        Err(why) => {
+            let ids: Vec<String> = ids.iter().map(SessionId::to_string).collect();
+            logs.push(log(
+                LogLevel::Warn,
+                format!(
+                    "no offer to close the terminals of sessions {}: {}",
+                    ids.join(", "),
+                    why.0
+                ),
+            ));
+            return Vec::new();
+        }
     };
     let names: Vec<&str> = open.iter().map(|t| t.name.as_str()).collect();
     let mut owners: Vec<SessionId> = open.iter().filter_map(|t| t.session_id).collect();

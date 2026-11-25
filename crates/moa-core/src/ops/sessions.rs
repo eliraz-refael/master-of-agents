@@ -331,6 +331,7 @@ pub(crate) fn archive(
     tx: &mut Tx,
     now: &Now,
     qs: &[String],
+    logs: &mut Vec<Effect>,
 ) -> Result<Done, OpError> {
     if qs.is_empty() {
         return Err(OpError("archive needs a session".into()));
@@ -367,7 +368,7 @@ pub(crate) fn archive(
         archived.push(id);
     }
     // Their terminals stay open; moa offers to close them (D9).
-    changes.extend(close_offer(state, tx, now, &archived, "archived"));
+    changes.extend(close_offer(state, tx, now, &archived, "archived", logs));
     // One commit: a refusal leaves every session as it was, and offers nothing.
     tx.ui_each(state, changes, said)?;
     Ok(Done {
@@ -424,11 +425,9 @@ pub(crate) fn close(
     if state.binding(id).is_some() {
         changes.push(Change::DeletePaneBinding(id));
     }
-    // A killed tab takes its splits with it; one left open keeps them, and moa offers to
-    // close them (D9), in the close's own commit.
-    if pane.is_none() {
-        changes.extend(close_offer(state, tx, now, &[id], "closed"));
-    }
+    // Only the agent's pane is killed: its splits outlive it, and moa offers to close them
+    // (D9), in the close's own commit.
+    changes.extend(close_offer(state, tx, now, &[id], "closed", logs));
     tx.ui(state, changes, text)?;
     if let Some(pane) = pane {
         kill_tab(state, tx, id, pane);

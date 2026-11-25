@@ -101,7 +101,8 @@ The most important come first.
    lines and the due list before your text, and no separate brief turn goes.
 5. **Offers to close a session's terminals come from the daemon, not a turn of moa's (D9).**
    - They cover only terminals recorded as that session's: splits of its tab.
-   - A close that kills the tab offers nothing, since those terminals go with it.
+   - A close kills only the agent's pane, so its splits outlive it: every close offers for
+     them, as an archive does.
 6. **Suggestion cards use buttons only (D7).** Tab, Enter and click press them; `y/a/n` stay
    permission keys.
 7. **The due list (D4):**
@@ -145,7 +146,7 @@ p1 also carries this plan.
 | D6 | **Idle terminals:** `central::idle::idle_terms(state: &State, now: &Now, since: Option<UtcMs>) -> Vec<&Terminal>`: open records that are idle (`terminals::is_idle(touched_at or opened_at, row.active, terminal_idle_ms, now)`), and, with `since`, only those whose idle start (`touched_at or opened_at` + `terminal_idle_ms`) is after `since`. The brief passes `None`; a wake passes `Moa.last_wake`. Oldest first, at most `IDLE_MAX = 10`. None when `terminal_idle_ms` is 0. | Spec 6d: "idle terminals ride on the brief and on wake-ups. moa sees the idle list". Not re-telling the same list on every wake keeps wakes short. |
 | D7 | **Suggestion cards:** every new suggestion (any caller; not a duplicate) also writes a feed row of kind `suggestion` (`feed::kind::SUGGESTION`), body `{"id": N, "text": <text>}`, in the same commit, in `central::card_thread(state)` (the open thread when it is saved, else the newest saved; `account::thread` moves here and the account card uses it). No thread: no row (the today view still shows it). The console draws it (D10's texts) from `data.suggestions[id]`, the body's text standing in when the row isn't there. Buttons: `[yes]` `[later]` `[no]` with commands `/suggestion yes N`, `/suggestion later N`, `/suggestion no N`, pressed by Tab/Enter/click; `yes` is left out when `actions_invalid` is set. | §6.11's "suggestion ✦ moa suggests" card; §6.12: "cards update everywhere when answered anywhere". |
 | D8 | **`term close` in a suggestion:** `ACTION_VERBS` gains `term`; `parse_action` refuses a `term` action that isn't `Op::TermClose` with `a suggestion can run term only as term close`. `run_action` runs `Op::TermClose { target }` by finding the record (`terminals::find`) and starting the gentle close (`terminals::close`) with `Tell::Quiet`, a new variant: nobody is told; its activity line `closed terminal NAME` is written as for `Tell::Reply`; a failure logs `terminal #N wasn't closed for a suggestion: <why>`. The close's query goes out after the answer's commit; a refused commit starts none. | Spec 6d: "`term close` joins the suggestion action whitelist". `term PATH` would open terminals on a yes, which nobody asked for. |
-| D9 | **Offers:** after `sessions::close` (only when it didn't kill the tab) and `sessions::archive`, the open terminal records whose `session_id` is one of those sessions become one suggestion, through `suggest` (so it is deduplicated and carded), with one `--do "term close <id>"` per terminal. **`opened_by = moa`:** `Asked::Term` carries `opened_by: OpenedBy`; `term` from `Caller::Moa` sets `Moa`, any other caller `You`; `record_opened` writes it. | Spec 6d's terminal bullets; the design's call: "through suggestions, not as a timed sweep". |
+| D9 | **Offers:** after `sessions::close` (whose kill takes only the agent's pane, so the session's splits outlive it) and `sessions::archive`, the open terminal records whose `session_id` is one of those sessions become one suggestion, through `suggest` (so it is deduplicated and carded), with one `--do "term close <id>"` per terminal. **`opened_by = moa`:** `Asked::Term` carries `opened_by: OpenedBy`; `term` from `Caller::Moa` sets `Moa`, any other caller `You`; `record_opened` writes it. | Spec 6d's terminal bullets; the design's call: "through suggestions, not as a timed sweep". |
 | D10 | **Texts.** See the block below. | The spike's wording; "the user", never a name. |
 
 **D10, the texts:**
@@ -393,7 +394,7 @@ or `sessions.rs`.
     too (kite, logs)?` with actions `term close 4`, `term close 7`, and its card.
   - `archiving_several_offers_once`: two sessions, three terminals → D10's several-sessions
     text.
-  - `a_close_that_kills_the_tab_offers_nothing`.
+  - `a_close_that_kills_the_agent_offers_its_splits`.
   - `a_close_that_leaves_the_tab_offers`: the agent already left; its split is still open.
   - `no_terminals_no_offer`; `archiving_again_offers_nothing_new` (the duplicate check).
 - [ ] **Step 2: Run them.** Expected: FAIL.

@@ -52,7 +52,7 @@ the one you want. moa needs a better way to open a terminal, find it, and end it
 - **Idle terminals** come to moa with the day's opening and wake-ups; it may suggest closing
   one that looks forgotten, and never closes one unasked.
 - **Closing or archiving a session offers to close its terminals:** one suggestion, with a
-  `term close` per terminal, when its tab wasn't killed with it.
+  `term close` per terminal. A close kills only the agent's pane; its splits outlive it.
 
 **Still open, and where it goes:**
 - **Pruning closed records:** with the retention decision (Q1).
