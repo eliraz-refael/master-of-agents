@@ -481,6 +481,77 @@ async fn a_restart_the_same_morning_doesnt_brief_again() {
     up.stop().await;
 }
 
+/// D2: a terminal turning active is the user being here too. After midnight, a
+/// `client-active` line from the user's terminal opens the day.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_turning_active_after_midnight_opens_the_day() {
+    let rig = Rig::new(&[say("good morning", "m1"), end()]);
+    let up = rig.start().await;
+    rig.time.advance(minutes(12 * 60 + 1));
+    up.mailbox("moa:hook client-active /dev/ttys1");
+    rig.wait_saved("moa", "good morning");
+    let sent = prompts_sent(&rig);
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert!(sent[0].starts_with(OPENING), "{}", sent[0]);
+    wait_briefed(&rig, today().tomorrow().unwrap());
+    up.stop().await;
+}
+
+/// D2 (code review): moa's own control client attaching to the terminal server isn't the
+/// user. Its `client-attached` line opens nothing, though moa's agent is free to be sent
+/// the opening; a user's terminal attaching then opens the day.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn moas_own_client_attaching_isnt_the_user() {
+    let rig = Rig::new(&[end(), say("good morning", "m2"), end()]);
+    rig.seed_sessions(1);
+    // No day opened yet.
+    rig.write(&[Change::Meta {
+        key: BRIEFED_KEY.into(),
+        value: None,
+    }]);
+    let up = rig.start().await;
+    // A wake-up, which isn't the user, starts moa's agent: it is then free, with a thread,
+    // so an opening due would go in the same commit as the line that made it due.
+    up.hook(&session_stop(1, ago(0), "the Kite build is green"));
+    up.wait_queued(1);
+    rig.time.advance(Duration::from_secs(45));
+    let sent = wait_prompts(&rig, 1);
+    assert!(!sent[0].starts_with(OPENING), "{}", sent[0]);
+    up.wait_state("phase", json!("ready"));
+
+    create_server(&rig.tb, &rig.paths);
+    let mut c = up.client();
+    let linked = c.call("tmux.ensure", json!({}));
+    assert_eq!(
+        linked["result"]["data"],
+        json!({"running": true}),
+        "{linked}"
+    );
+    // The link's control client names itself in `@moa_ctl`.
+    let ctl = wait_for(WAIT, || {
+        let name = rig
+            .tb
+            .tmux("default", &["show-options", "-gqv", "@moa_ctl"])
+            .ok()?;
+        let name = name.trim().to_string();
+        (!name.is_empty()).then_some(name)
+    })
+    .expect("the link's control client is named");
+
+    up.mailbox(&format!("moa:hook client-attached {ctl}"));
+    up.core.barrier().await;
+    assert_eq!(rig.meta(BRIEFED_KEY), None);
+    assert_eq!(prompts_sent(&rig).len(), 1);
+
+    up.mailbox(ATTACH);
+    rig.wait_saved("moa", "good morning");
+    let sent = prompts_sent(&rig);
+    assert_eq!(sent.len(), 2, "{sent:#?}");
+    assert!(sent[1].starts_with(OPENING), "{}", sent[1]);
+    wait_briefed(&rig, today());
+    up.stop().await;
+}
+
 /// D4: a task due today rides on the day's first wake-up only, and a restart doesn't tell it
 /// again: the commit that sent it saved that it was told.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -709,9 +780,15 @@ async fn archiving_offers_to_close_terminals() {
     let closing =
         format!("SELECT count(*) > 0 FROM activity WHERE text = 'closed terminal {name}'");
     wait_for(WAIT, || saved(&closing).then_some(())).expect("the close is saved as the user's");
-    rig.time.advance(Duration::from_secs(3));
-    wait_for(WAIT, || (!panes().contains(&split)).then_some(()))
-        .unwrap_or_else(|| panic!("the split is still open: {:?}", panes()));
+    // Time moves a second at a time until the split goes, whenever its kill is armed.
+    wait_for(WAIT, || {
+        let open = panes().contains(&split);
+        if open {
+            rig.time.advance(Duration::from_secs(1));
+        }
+        (!open).then_some(())
+    })
+    .unwrap_or_else(|| panic!("the split is still open: {:?}", panes()));
     let closed = format!("SELECT closed_at IS NOT NULL FROM terminals WHERE id = {term_id}");
     wait_for(WAIT, || saved(&closed).then_some(())).expect("the terminal's record is closed");
     assert!(panes().contains(&agent), "the agent's tab closed too");

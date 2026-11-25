@@ -166,8 +166,13 @@ impl Rig {
         let store = self.store();
         store
             .conn()
-            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
-            .ok()
+            // Always one row: NULL when the key isn't saved. An error is the test's to see.
+            .query_row(
+                "SELECT (SELECT value FROM meta WHERE key = ?1)",
+                [key],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("meta {key}: {e}"))
     }
 
     /// The `moa_threads` rows' ids.
