@@ -206,11 +206,11 @@ fn tab_label(name: &str) -> String {
 /// tmux answered a terminal's new window, named `name`: it is recorded as opened by
 /// `opened_by`, with that name whole. Its tab is tagged as a terminal with its label
 /// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen; the
-/// topology has the terminal at once, so the `terms` topic does. The commands go out after the record's commit, and
-/// still do when it wasn't saved (the next listing records the terminal then), before the
-/// reply or notice. A caller that went has nobody to tell, and the tab is still tagged.
-/// `replied` is whether tmux answered: otherwise the link went before it did, and the
-/// answer says so as a launch's does.
+/// topology has the terminal at once, so the `terms` topic does. The commands go out after
+/// the record's commit, and still do when it wasn't saved (the next listing records the
+/// terminal then), before the reply or notice. A caller that went has nobody to tell, and
+/// the tab is still tagged. `replied` is whether tmux answered: otherwise the link went
+/// before it did, and the answer says so as a launch's does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn term_opened(
     state: &mut State,
@@ -271,8 +271,8 @@ pub(crate) fn term_opened(
 /// The record of terminal `pane` (process `pid`) that moa just opened in folder `path`,
 /// named `name`, for `opened_by` (moa, when its own agent asked): its shell is the
 /// process's name (when that can't be read, the next listing's program), and nothing else
-/// runs yet. A commit that wasn't saved saves nothing;
-/// the next listing records the terminal.
+/// runs yet. A commit that wasn't saved saves nothing; the next listing records the
+/// terminal.
 fn record_opened(
     state: &mut State,
     now: &Now,
@@ -451,8 +451,7 @@ pub(crate) fn name(
         return Err(OpError(NAME_LENGTH.into()));
     }
     // `find` reads such a target as a number or a tab: the name could never be used.
-    let number = name.strip_prefix('#').unwrap_or(name);
-    if name.starts_with('%') || number.parse::<i64>().is_ok() {
+    if name.starts_with('%') || terminals::numbered(name).is_some() {
         return Err(OpError(NAME_FORM.into()));
     }
     ready(state)?;
@@ -550,14 +549,9 @@ pub(crate) fn close(state: &mut State, conn: ConnId, req: ReqId, target: &str) -
 /// named by its number that isn't open any more has closed since moa suggested it: gone.
 pub(crate) fn close_on_yes(state: &State, tx: &mut Tx, target: &str) -> Result<(), OpError> {
     ready(state)?;
-    let t = terminals::find(state, target).map_err(|why| {
-        let number = target.trim();
-        let number = number.strip_prefix('#').unwrap_or(number);
-        if number.parse::<i64>().is_ok() {
-            OpError(TERM_GONE.into())
-        } else {
-            why
-        }
+    let t = terminals::find(state, target).map_err(|why| match terminals::numbered(target) {
+        Some(_) => OpError(TERM_GONE.into()),
+        None => why,
     })?;
     if state.closing.contains_key(&t.id) {
         return Ok(());

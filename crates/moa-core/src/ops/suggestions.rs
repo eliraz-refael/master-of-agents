@@ -1,6 +1,7 @@
 //! `suggest`, and `suggestion yes|no|later|ls`. A suggestion is moa's proposal with buttons;
 //! `yes` runs its actions in-process, through the same `ops::run` and the same transaction as
-//! a typed command, so the whole answer is one `Persist`.
+//! a typed command, so the whole answer is one `Persist`. A `term close` is checked here
+//! instead, and its terminal starts closing once that `Persist` is made.
 
 use std::path::Path;
 

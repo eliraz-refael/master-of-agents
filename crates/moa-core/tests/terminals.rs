@@ -2620,12 +2620,12 @@ fn a_yes_closes_terminals_gently() {
     );
 }
 
-/// With writes refused, the yes is refused and no close starts: nothing asks tmux, and the
-/// suggestion still waits. (The tabs aren't reconciled again while writes are refused, so
-/// the close couldn't have started either: the core's `tx_closes_follow_the_commit` pins
-/// a refused commit with the link ready.)
+/// After a reload with writes refused, the yes is refused and no close starts: nothing asks
+/// tmux, and the suggestion still waits. The tabs aren't reconciled again while writes are
+/// refused, so this yes fails before its commit; the core's `tx_closes_follow_the_commit`
+/// pins the commit's gate itself, with the link ready.
 #[test]
-fn a_refused_yes_closes_nothing() {
+fn a_yes_after_a_refusing_reload_closes_nothing() {
     let t = t0().0;
     let mut r = closable();
     let id = suggested(&mut r, 1, "Close Kite", &["term close 1"]);
