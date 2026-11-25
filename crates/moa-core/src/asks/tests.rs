@@ -168,7 +168,15 @@ fn an_ended_ask_says_why() {
     );
     assert_eq!(
         said(ended(AskStatus::Dropped, "Harbor ended")),
-        "ask #12 was dropped: Harbor ended"
+        "Harbor ended; ask #12 was dropped"
+    );
+    let short = Ask {
+        answered_at: Some(UtcMs(T - 30_000)),
+        ..ended(AskStatus::Dropped, STAYED_BUSY)
+    };
+    assert_eq!(
+        said(short),
+        "3f2a91c4 stayed busy for 30s; ask #12 was dropped"
     );
     assert!(answer_of(&st, &sent(12)).is_none());
 }
@@ -177,4 +185,42 @@ fn an_ended_ask_says_why() {
 fn cleaning_keeps_lines_and_tabs() {
     assert_eq!(clean(" \u{1b}a\u{7f}\u{85}\r\nb\tc\u{0} "), "a\nb\tc");
     assert_eq!(clean("\u{1b}\r\n"), "");
+}
+
+/// The brief's step: `reply 12` waits on a sent ask, and `end(…, answered, "yes")` answers
+/// it `yes`.
+#[test]
+fn end_answers_a_waiting_reply() {
+    let mut st = state_with(vec![sent(12)]);
+    let fx = reply(&mut st, &now(T), ConnId(4), ReqId(2), 12, 30);
+    assert!(fx.is_empty(), "{fx:?}");
+    let mut tx = Tx::new(&now(T + 1_000));
+    let fx = end(
+        &mut st,
+        &mut tx,
+        AskId(12),
+        AskStatus::Answered,
+        "yes".into(),
+    );
+    match &replies(&fx)[..] {
+        [(ConnId(4), ReqId(2), Ok(done))] => assert_eq!(done.text, "yes"),
+        other => panic!("{other:?}"),
+    }
+    assert!(st.asks_mem.parked.is_empty());
+}
+
+#[test]
+fn moas_state_in_peers() {
+    use crate::central::Phase;
+    let mut st = state_with(Vec::new());
+    for (phase, word) in [
+        (Phase::Off, "off"),
+        (Phase::Failed("x".into()), "off"),
+        (Phase::Ready, "ready"),
+        (Phase::Starting, "busy"),
+        (Phase::Thinking, "busy"),
+    ] {
+        st.central.phase = phase;
+        assert_eq!(moa_state(&st), word);
+    }
 }

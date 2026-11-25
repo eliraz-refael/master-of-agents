@@ -12,7 +12,7 @@ use jiff::tz::TimeZone;
 use moa_core::asks::{ASK_TEXT_MAX, ASK_WAIT_DEFAULT_MS};
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, TimerKey, handle_checked};
+use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, handle_checked};
 use moa_core::model::{
     Activity, AgentKind, Ask, AskId, AskStatus, AskTarget, Conversation, ConversationReason,
     Lifecycle, Location, PaneBinding, Session, SessionId,
@@ -217,12 +217,20 @@ impl Rig {
 
     /// The core reloads at `ms` with the rows it has, these asks put in by hand.
     fn reload(&mut self, ms: i64, asks: Vec<Ask>) -> Vec<Effect> {
+        self.reload_refusing(ms, asks, None)
+    }
+
+    /// [`Rig::reload`], the store refusing writes until `until` when given.
+    fn reload_refusing(&mut self, ms: i64, asks: Vec<Ask>, until: Option<i64>) -> Vec<Effect> {
         let mut snap = snapshot();
         snap.asks = asks;
         snap.next_ids.ask = snap.asks.iter().map(|a| a.id.0 + 1).max().unwrap_or(1);
         let input = Input::Reload {
             snapshot: Box::new(snap),
-            refuse_writes: None,
+            refuse_writes: until.map(|until| RefuseWrites {
+                until: UtcMs(until),
+                reason: "the disk is full".into(),
+            }),
         };
         handle_checked(&mut self.st, input, now(ms))
     }
@@ -345,16 +353,16 @@ fn a_session_asks_moa() {
 
 #[test]
 fn an_ask_refuses() {
-    let mut deadlock = snapshot();
-    deadlock.asks = vec![ask_row(
-        9,
-        to(HARBOR),
-        "Harbor",
-        to(KITE),
-        "Which branch?",
-        T0 - MIN,
-    )];
-    deadlock.next_ids.ask = 10;
+    // Harbor's ask to Kite, open in each of its open statuses.
+    let deadlock = |status: AskStatus| {
+        let mut snap = snapshot();
+        let mut theirs = ask_row(9, to(HARBOR), "Harbor", to(KITE), "Which branch?", T0 - MIN);
+        theirs.status = status;
+        snap.asks = vec![theirs];
+        snap.next_ids.ask = 10;
+        snap
+    };
+    let waiting = || "Harbor is waiting on your answer to ask #9; answer that first".to_string();
     let at_most = format!("an ask is at most {ASK_TEXT_MAX} characters; point to a file instead");
     let long = "x".repeat(ASK_TEXT_MAX + 1);
     let cases: Vec<(Snapshot, CallerInfo, &str, &str, i64, String)> = vec![
@@ -391,12 +399,28 @@ fn an_ask_refuses() {
             "Lantern isn't running; `moactl resume 5d8e2f10` starts it, then ask again".into(),
         ),
         (
-            deadlock,
+            deadlock(AskStatus::Pending),
             from(KITE),
             "Harbor",
             "hi",
             540,
-            "Harbor is waiting on your answer to ask #9; answer that first".into(),
+            waiting(),
+        ),
+        (
+            deadlock(AskStatus::Sent),
+            from(KITE),
+            "Harbor",
+            "hi",
+            540,
+            waiting(),
+        ),
+        (
+            deadlock(AskStatus::Received),
+            from(KITE),
+            "Harbor",
+            "hi",
+            540,
+            waiting(),
         ),
         (snapshot(), from(KITE), "Harbor", &long, 540, at_most),
         (
@@ -504,6 +528,47 @@ fn live_and_free() {
     assert!(!r.st.is_free(sid(HARBOR)));
     assert!(!r.st.is_free(sid(BEACON)));
     assert!(!r.st.is_free(sid(LANTERN)));
+}
+
+/// [`snapshot`], Beacon changed by `change`.
+fn with_beacon(change: impl Fn(&mut Session)) -> Snapshot {
+    let mut snap = snapshot();
+    change(
+        snap.sessions
+            .iter_mut()
+            .find(|s| s.id == sid(BEACON))
+            .unwrap(),
+    );
+    snap
+}
+
+/// Each of A3's conditions alone makes Beacon not live.
+#[test]
+fn each_condition_makes_a_session_not_live() {
+    assert!(Rig::new(snapshot()).st.is_live(sid(BEACON)));
+    let cases: Vec<(&str, Snapshot)> = vec![
+        (
+            "archived",
+            with_beacon(|s| s.archived_at = Some(UtcMs(T0 - MIN))),
+        ),
+        (
+            "elsewhere",
+            with_beacon(|s| s.location = Location::Elsewhere),
+        ),
+        ("ended", with_beacon(|s| s.lifecycle = Lifecycle::Ended)),
+        (
+            "asleep",
+            with_beacon(|s| s.asleep_at = Some(UtcMs(T0 - MIN))),
+        ),
+        ("unbound", {
+            let mut snap = snapshot();
+            snap.pane_bindings.retain(|b| b.session_id != sid(BEACON));
+            snap
+        }),
+    ];
+    for (why, snap) in cases {
+        assert!(!Rig::new(snap).st.is_live(sid(BEACON)), "{why}");
+    }
 }
 
 #[test]
@@ -753,4 +818,86 @@ fn asks_lists_mine() {
         other => panic!("{other:?}"),
     };
     insta::assert_snapshot!("asks_lists_every_ask", done.text);
+}
+
+/// Only the ask's own wait drops a pending ask (M2): a `reply` that runs out on it says no
+/// reply yet, and the ask stays pending for its own wait.
+#[test]
+fn a_reply_wait_leaves_a_pending_ask() {
+    let mut r = Rig::new(snapshot());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    let fx = r.op(
+        2,
+        from(BEACON),
+        Op::Reply {
+            id: 1,
+            timeout_s: 1,
+        },
+        T0,
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 + SEC)));
+    let fx = r.fire(T0 + SEC);
+    assert!(!persisted(&fx), "{fx:?}");
+    match &replies(&fx)[..] {
+        [(ConnId(2), _, Ok(done))] => assert_eq!(
+            done.text,
+            "no reply yet from Harbor; `moactl reply 1` waits again"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(r.row(1).status, AskStatus::Pending);
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 + 540 * SEC)));
+    // Kite's own wait still drops it.
+    let fx = r.fire(T0 + 540 * SEC);
+    assert_eq!(saved_asks(&fx)[0].status, AskStatus::Dropped);
+    assert_eq!(replies(&fx).len(), 1, "{fx:?}");
+}
+
+/// A wait under a minute is said in seconds (M1).
+#[test]
+fn a_short_wait_is_said_in_seconds() {
+    let mut r = Rig::new(snapshot());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 30);
+    let fx = r.fire(T0 + 30 * SEC);
+    assert_eq!(
+        the_error(&fx),
+        "Harbor stayed busy for 30s; ask #1 was dropped"
+    );
+}
+
+/// While the store refuses writes, an ask is refused: nothing is saved and nothing waits.
+#[test]
+fn an_ask_is_refused_while_writes_are() {
+    let mut r = Rig::new(snapshot());
+    r.reload_refusing(T0 - SEC, Vec::new(), Some(T0 + 600 * SEC));
+    let fx = r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    assert_eq!(
+        the_error(&fx),
+        "moa can't save right now (the disk is full); nothing was changed"
+    );
+    assert!(!persisted(&fx), "{fx:?}");
+    assert_eq!(set_at(&fx), None);
+    // Nothing waits: a fire at its wait replies nothing.
+    let fx = r.fire(T0 + 540 * SEC);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+}
+
+/// A drop the store refuses leaves the ask pending, and its wait hears no reply yet.
+#[test]
+fn a_refused_drop_says_no_reply_yet() {
+    let mut r = Rig::new(snapshot());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    let row = r.row(1);
+    r.reload_refusing(T0 + SEC, vec![row], Some(T0 + 600 * SEC));
+    let fx = r.fire(T0 + 540 * SEC);
+    assert!(!persisted(&fx), "{fx:?}");
+    match &replies(&fx)[..] {
+        [(ConnId(1), _, Ok(done))] => assert_eq!(
+            done.text,
+            "no reply yet from Harbor; `moactl reply 1` waits again"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(r.row(1).status, AskStatus::Pending);
 }

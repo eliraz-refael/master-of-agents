@@ -24,7 +24,7 @@ use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::ops::term::with_tilde;
 use crate::state::{Caller, State, Table};
 use crate::text::{cut, is_unpastable, one_line};
-use crate::time::span;
+use crate::time::{MINUTE, span};
 use crate::tmux::link::log;
 use crate::{Now, UtcMs};
 
@@ -128,11 +128,7 @@ fn save(
     text: &str,
     timeout_s: i64,
 ) -> Result<AskId, OpError> {
-    let from = match caller {
-        Caller::Moa => AskTarget::Moa,
-        Caller::Session(id, _) => AskTarget::Session(*id),
-        Caller::Unknown { .. } => return Err(OpError(NOT_A_PEER.into())),
-    };
+    let from = target_of(caller).ok_or_else(|| OpError(NOT_A_PEER.into()))?;
     let text = clean(text);
     if text.is_empty() {
         return Err(OpError(EMPTY.into()));
@@ -276,15 +272,15 @@ pub(crate) fn end(
             format!("ask #{id} wasn't saved as {status}; it stays open"),
         )];
     }
-    answer_waiting(state, |a| a == id)
+    answer_waiting(state, |p| p.ask == id)
 }
 
-/// The requests waiting on the asks `which` picks, each answered with what its ask's row
-/// says (an ask that is gone: `no ask #N`), and forgotten.
-fn answer_waiting(state: &mut State, which: impl Fn(AskId) -> bool) -> Vec<Effect> {
+/// The waiting requests `which` picks, each answered with what its ask's row says (an open
+/// ask: "no reply yet"; one that is gone: `no ask #N`), and forgotten.
+fn answer_waiting(state: &mut State, which: impl Fn(&Parked) -> bool) -> Vec<Effect> {
     let (done, waiting): (Vec<Parked>, Vec<Parked>) = std::mem::take(&mut state.asks_mem.parked)
         .into_iter()
-        .partition(|p| which(p.ask));
+        .partition(|p| which(p));
     state.asks_mem.parked = waiting;
     done.into_iter()
         .map(|p| {
@@ -322,12 +318,22 @@ fn answer_of(state: &State, a: &Ask) -> Option<Result<Done, OpError>> {
             Err(OpError(format!(
                 "{} stayed busy for {}; ask #{} was dropped",
                 to_label(state, a),
-                span(ended.0 - a.at.0),
+                wait_text(ended.0 - a.at.0),
                 a.id
             )))
         }
-        AskStatus::Dropped => Err(OpError(format!("ask #{} was dropped: {reason}", a.id))),
+        AskStatus::Dropped => Err(OpError(format!("{reason}; ask #{} was dropped", a.id))),
     })
+}
+
+/// How long an ask waited, as its texts say it: `{n}s` under a minute (a wait can be as
+/// short as 1 s), else [`span`]'s `{m}m`, `{h}h` or `{d}d`.
+fn wait_text(ms: i64) -> String {
+    if ms < MINUTE {
+        format!("{}s", ms.max(0) / 1_000)
+    } else {
+        span(ms)
+    }
 }
 
 /// What a wait that runs out on an open ask hears: it exits 0, and `reply` waits again.
@@ -358,11 +364,15 @@ fn to_label(state: &State, a: &Ask) -> String {
 // ---------- every input ----------
 
 /// At the end of every input: a request waiting on an ask that has ended is answered (its
-/// row changed by a reload, say). A wait that has run out (A4 b) drops a `pending` ask
-/// (`stayed busy`), which answers every request on it; on an ask still open it hears "no
-/// reply yet", which exits 0, and the ask stays open. Then the `Asks` timer is armed at the
-/// next deadline ([`deadline`]), or cancelled, when that changed or when this input is the
-/// timer firing (`fired`).
+/// row changed by a reload, say). When the ask's own wait (its [`Waits::Ask`] request) runs
+/// out on a `pending` ask, the ask is dropped (`stayed busy`, A4 b), which answers every
+/// request on it. Any other wait that runs out, a `reply`'s, or one on an ask already sent,
+/// hears "no reply yet", which exits 0, and the ask stays as it is. Then the `Asks` timer is
+/// armed at the next deadline ([`deadline`]), or cancelled, when that changed or when this
+/// input is the timer firing (`fired`).
+///
+/// A `pending` ask whose asker went away ([`client_gone`]) has no wait left to drop it: it
+/// stays `pending`, is delivered when its peer is free, and its answer is saved for `reply`.
 pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect>) {
     if fired {
         state.asks_mem.armed = None;
@@ -375,17 +385,19 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
         .filter(|id| state.ask(*id).is_none_or(|a| !is_open(a.status)))
         .collect();
     if !ended.is_empty() {
-        let more = answer_waiting(state, |id| ended.contains(&id));
+        let more = answer_waiting(state, |p| ended.contains(&p.ask));
         fold_in(fx, more);
     }
-    let ran_out: BTreeSet<AskId> = state
+    let ran_out = |p: &Parked| p.until <= now.wall;
+    // Only the ask's own wait drops it: a `reply` that runs out says no more than that.
+    let to_drop: BTreeSet<AskId> = state
         .asks_mem
         .parked
         .iter()
-        .filter(|p| p.until <= now.wall)
+        .filter(|p| ran_out(p) && p.kind == Waits::Ask)
         .map(|p| p.ask)
         .collect();
-    for id in ran_out {
+    for id in to_drop {
         if state
             .ask(id)
             .is_some_and(|a| a.status == AskStatus::Pending)
@@ -395,11 +407,11 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
             fold_in(fx, post_commit(state, tx));
             fold_in(fx, replies);
         }
-        // Still open (sent, received, or a drop that wasn't saved): only the waits that ran
-        // out hear of it.
-        let more = answer_waiting_until(state, id, now.wall);
-        fold_in(fx, more);
     }
+    // The rest ran out on an ask still open (sent, received, pending under a `reply`'s
+    // wait, or a drop that wasn't saved).
+    let more = answer_waiting(state, ran_out);
+    fold_in(fx, more);
     let next = deadline(state);
     fx.extend(rearm(
         &mut state.asks_mem.armed,
@@ -407,25 +419,6 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
         next,
         fired,
     ));
-}
-
-/// [`answer_waiting`] for the requests on ask `id` whose wait ran out by `now`.
-fn answer_waiting_until(state: &mut State, id: AskId, now: UtcMs) -> Vec<Effect> {
-    let (done, waiting): (Vec<Parked>, Vec<Parked>) = std::mem::take(&mut state.asks_mem.parked)
-        .into_iter()
-        .partition(|p| p.ask == id && p.until <= now);
-    state.asks_mem.parked = waiting;
-    let Some(a) = state.ask(id) else {
-        return Vec::new();
-    };
-    let result = answer_of(state, a).unwrap_or_else(|| Ok(no_reply_yet(state, a)));
-    done.into_iter()
-        .map(|p| Effect::Reply {
-            conn: p.conn,
-            req: p.req,
-            result: result.clone(),
-        })
-        .collect()
 }
 
 /// The asks' next deadline: the earliest wait to run out. One place, so each new deadline
