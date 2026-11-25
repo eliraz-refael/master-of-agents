@@ -185,14 +185,37 @@ fn a_stop_without_its_message_reads_the_transcript_tail() {
     );
 }
 
+/// An ask's answer is the peer's full final message, and its marker may be anywhere in a
+/// prompt (A6): the core gets both uncut, and cuts only what it stores.
 #[test]
-fn a_long_reply_keeps_its_head_and_tail() {
-    let mut payload = fixture("stop");
-    payload["last_assistant_message"] = json!("é".repeat(3000));
+fn full_texts_reach_the_core() {
+    let long = format!("{}\nthe end", "é".repeat(10_000));
+    let mut stop = fixture("stop");
+    stop["last_assistant_message"] = json!(long);
     assert_eq!(
-        kind_of(payload),
+        kind_of(stop),
         Some(HookKind::TurnEnded {
-            last_message: format!("{}\n[…]\n{}", "é".repeat(600), "é".repeat(1800))
+            last_message: long.clone()
+        })
+    );
+    let mut prompt = fixture("user_prompt_submit");
+    prompt["prompt"] = json!(long);
+    assert_eq!(
+        kind_of(prompt),
+        Some(HookKind::TurnStarted {
+            prompt: long.clone()
+        })
+    );
+    // A message read from the transcript's tail is whole too.
+    let mut stop = fixture("stop");
+    stop.as_object_mut()
+        .unwrap()
+        .remove("last_assistant_message");
+    let tail = |_: &Path| Some(long.clone());
+    assert_eq!(
+        normalize(&line(stop), &tail).map(|e| e.kind),
+        Some(HookKind::TurnEnded {
+            last_message: long.clone()
         })
     );
 }

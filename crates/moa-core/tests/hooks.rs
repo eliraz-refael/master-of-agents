@@ -12,7 +12,7 @@ use moa_core::effect::{
     reply_of,
 };
 use moa_core::hook::{HookEnvelope, HookKind, StartSource};
-use moa_core::live::{DisplayState, display_state};
+use moa_core::live::{DisplayState, cut_middle, display_state};
 use moa_core::model::{
     Activity, ActivityWho, AgentKind, Conversation, ConversationReason, FeedEntry, Lifecycle,
     Location, PaneBinding, Project, ProjectId, ProjectStatus, Session, SessionId,
@@ -219,6 +219,44 @@ fn a_long_prompt_is_one_line_of_ninety_characters_in_the_feed() {
     let text = &activity_texts(&fx)[0];
     let want: String = long.replace('\n', " ").chars().take(90).collect();
     assert_eq!(text, &format!("Lantern › {want}"));
+}
+
+/// The Claude normalizer hands the core whole texts (an ask's answer is the full message).
+/// Everything the core keeps of them is cut as it was when they came cut: the history row,
+/// the last prompt, the line beside the state, the feed and the report.
+#[test]
+fn whole_texts_are_cut_where_they_are_kept() {
+    let mut st = seeded();
+    let long = format!("start {}\nthe end", "é".repeat(10_000));
+    let cut = cut_middle(&long);
+    assert!(cut.chars().count() < 2_500);
+    let event_texts = |fx: &[Effect]| -> Vec<String> {
+        changes(fx)
+            .into_iter()
+            .filter_map(|c| match c {
+                Change::Event(e) => e.text.clone(),
+                _ => None,
+            })
+            .collect()
+    };
+    let fx = feed(&mut st, envelope(1, 1000, prompt(&long)));
+    assert_eq!(event_texts(&fx), std::slice::from_ref(&cut));
+    assert_eq!(session(&st).last_prompt.as_deref(), Some(cut.as_str()));
+    assert_eq!(session(&st).activity_why.as_deref(), Some(cut.as_str()));
+    let line: String = long.chars().take(90).collect();
+    assert_eq!(activity_texts(&fx), [format!("Lantern › {line}")]);
+
+    let fx = feed(&mut st, envelope(2, 2000, ended(&long)));
+    assert_eq!(event_texts(&fx), std::slice::from_ref(&cut));
+    assert_eq!(session(&st).activity_why.as_deref(), Some(cut.as_str()));
+    let turns: Vec<Vec<String>> = changes(&fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Report(r) => Some(r.turns.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns, [vec![cut]]);
 }
 
 #[test]

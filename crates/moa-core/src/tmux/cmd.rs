@@ -31,6 +31,8 @@ pub const ALLOWED: &[&str] = &[
     "link-window",
     "unlink-window",
     "send-keys",
+    "set-buffer",
+    "paste-buffer",
 ];
 
 /// A command that must not be sent, with the reason.
@@ -60,7 +62,9 @@ const WINDOW_SIZE: &str = "window-size is only unset, on a tab id's window";
 const REAP: &str = "run-shell only runs true";
 const LINK: &str = "link-window needs -s and a tab id, then -t and a session id with a colon";
 const UNLINK: &str = "unlink-window needs -t and a session id with a window id";
-const SEND_KEYS: &str = "send-keys sends only Ctrl-c to one pane";
+const SEND_KEYS: &str = "send-keys sends only Ctrl-c or Enter to one pane";
+const SET_BUFFER: &str = "set-buffer needs -b moa-ask-N, then -- and the text";
+const PASTE_BUFFER: &str = "paste-buffer needs -p -d, -b moa-ask-N and a tab id";
 const EMPTY_CHAIN: &str = "a chain needs at least one command";
 
 /// What a chain is called where a name is asked for (a log line). It is no tmux command.
@@ -123,10 +127,36 @@ impl Cmd {
             ))
     }
 
-    /// The one `send-keys` moa sends (T7): Ctrl-c to `pane`, which closing a terminal gently
-    /// needs. Nothing else is ever typed into a pane.
+    /// Ctrl-c to `pane` (T7), which closing a terminal gently needs. Beside it, only an ask
+    /// is ever typed into a pane: [`Cmd::set_buffer`], [`Cmd::paste_buffer`], then
+    /// [`Cmd::enter`].
     pub fn interrupt(pane: PaneId) -> Cmd {
         Cmd::new("send-keys").args(["-t".to_string(), pane.to_string(), "C-c".to_string()])
+    }
+
+    /// An ask's text into the buffer `name` (`moa-ask-<id>`), to paste. `--` keeps a text
+    /// that starts with `-` from being read as flags, and [`quote`] keeps tmux's command
+    /// parser from reading any of it; tmux expands no format in a buffer's text.
+    pub fn set_buffer(name: &str, text: &str) -> Cmd {
+        Cmd::new("set-buffer").args(["-b", name, "--", text])
+    }
+
+    /// The buffer `name` pasted into `pane` and deleted (`-d`). `-p` brackets the paste when
+    /// the pane's program asked for that, so the text arrives as one paste, never as keys.
+    pub fn paste_buffer(name: &str, pane: PaneId) -> Cmd {
+        Cmd::new("paste-buffer").args([
+            "-p".to_string(),
+            "-d".to_string(),
+            "-b".to_string(),
+            name.to_string(),
+            "-t".to_string(),
+            pane.to_string(),
+        ])
+    }
+
+    /// Enter to `pane`, which sends a pasted ask.
+    pub fn enter(pane: PaneId) -> Cmd {
+        Cmd::new("send-keys").args(["-t".to_string(), pane.to_string(), "Enter".to_string()])
     }
 
     /// A chain's commands; a plain command is its own one part.
@@ -318,10 +348,36 @@ impl Cmd {
                 [t] if t == "true" => Ok(()),
                 _ => Err(Refused(REAP)),
             },
-            // Only Ctrl-c, to one pane by its id: no other key, no `-l` (literal text).
+            // Only Ctrl-c or Enter, to one pane by its id: no other key, no `-l` (literal
+            // text). An ask's text goes through a buffer, pasted.
             "send-keys" => match self.args.as_slice() {
-                [t, pane, key] if t == "-t" && is_pane_id(pane) && key == "C-c" => Ok(()),
+                [t, pane, key]
+                    if t == "-t" && is_pane_id(pane) && (key == "C-c" || key == "Enter") =>
+                {
+                    Ok(())
+                }
                 _ => Err(Refused(SEND_KEYS)),
+            },
+            // An ask's buffer, by its name; the text after `--` is never a flag.
+            "set-buffer" => match self.args.as_slice() {
+                [b, name, dashes, _] if b == "-b" && is_ask_buffer(name) && dashes == "--" => {
+                    Ok(())
+                }
+                _ => Err(Refused(SET_BUFFER)),
+            },
+            // Bracketed (`-p`) and deleted once pasted (`-d`), into one pane by its id.
+            "paste-buffer" => match self.args.as_slice() {
+                [p, d, b, name, t, pane]
+                    if p == "-p"
+                        && d == "-d"
+                        && b == "-b"
+                        && is_ask_buffer(name)
+                        && t == "-t"
+                        && is_pane_id(pane) =>
+                {
+                    Ok(())
+                }
+                _ => Err(Refused(PASTE_BUFFER)),
             },
             _ => Ok(()),
         }
@@ -494,6 +550,12 @@ fn is_pane_id(s: &str) -> bool {
 /// An id as tmux prints it: `prefix` and digits.
 fn is_id(s: &str, prefix: char) -> bool {
     s.strip_prefix(prefix)
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// An ask's buffer name: `moa-ask-` and digits.
+fn is_ask_buffer(s: &str) -> bool {
+    s.strip_prefix("moa-ask-")
         .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
@@ -675,11 +737,14 @@ mod tests {
 
     #[test]
     fn send_keys_refuses_any_other_shape() {
-        let text = "send-keys sends only Ctrl-c to one pane";
+        let text = "send-keys sends only Ctrl-c or Enter to one pane";
         let send = |args: &[&str]| Cmd::new("send-keys").args(args.iter().copied()).check();
         for args in [
             &["-t", "%7", "C-d"][..],
-            &["-t", "%7", "Enter"],
+            &["-t", "%7", "ls", "Enter"],
+            &["-t", "%7", "Enter", "Enter"],
+            &["-t", "%7", "-l", "Enter"],
+            &["-t", "=moa:", "Enter"],
             &["-t", "%7", "-l", "C-c"],
             &["-l", "-t", "%7", "C-c"],
             &["-t", "%7", "%8", "C-c"],
@@ -693,6 +758,60 @@ mod tests {
             &[],
         ] {
             assert_eq!(send(args), Err(Refused(text)), "{args:?}");
+        }
+    }
+
+    /// Typing an ask (A5): the text into a buffer named for the ask, pasted bracketed into
+    /// one pane by its id and deleted, then Enter. Nothing else of the kind passes.
+    #[test]
+    fn typing_commands_check() {
+        let set = Cmd::set_buffer("moa-ask-12", "-a; #{pane_id} $(x)\n");
+        assert_eq!(set.name(), "set-buffer");
+        assert_eq!(
+            set.argv(),
+            ["-b", "moa-ask-12", "--", "-a; #{pane_id} $(x)\n"]
+        );
+        assert_eq!(set.check(), Ok(()));
+        let paste = Cmd::paste_buffer("moa-ask-12", PaneId(7));
+        assert_eq!(paste.line(), "paste-buffer -p -d -b moa-ask-12 -t %7");
+        assert_eq!(paste.check(), Ok(()));
+        let enter = Cmd::enter(PaneId(7));
+        assert_eq!(enter.line(), "send-keys -t %7 Enter");
+        assert_eq!(enter.check(), Ok(()));
+        assert_eq!(Cmd::set_buffer("moa-ask-1", "").check(), Ok(()));
+
+        let set_text = "set-buffer needs -b moa-ask-N, then -- and the text";
+        let set = |args: &[&str]| Cmd::new("set-buffer").args(args.iter().copied()).check();
+        for args in [
+            &["-b", "other", "x"][..],
+            &["-b", "other", "--", "x"],
+            &["-b", "moa-ask-", "--", "x"],
+            &["-b", "moa-ask-1x", "--", "x"],
+            &["-b", "moa-ask-12", "x"],
+            &["-a", "-b", "moa-ask-12", "--", "x"],
+            &["-w", "-b", "moa-ask-12", "--", "x"],
+            &["-b", "moa-ask-12", "--", "x", "y"],
+            &["-b", "moa-ask-12", "--"],
+            &["--", "x"],
+            &["x"],
+            &[],
+        ] {
+            assert_eq!(set(args), Err(Refused(set_text)), "{args:?}");
+        }
+        let paste_text = "paste-buffer needs -p -d, -b moa-ask-N and a tab id";
+        let paste = |args: &[&str]| Cmd::new("paste-buffer").args(args.iter().copied()).check();
+        for args in [
+            &["-d", "-b", "moa-ask-12", "-t", "%7"][..],
+            &["-p", "-b", "moa-ask-12", "-t", "%7"],
+            &["-p", "-d", "-b", "other", "-t", "%7"],
+            &["-p", "-d", "-b", "moa-ask-12", "-t", "=moa:"],
+            &["-p", "-d", "-b", "moa-ask-12"],
+            &["-p", "-d", "-r", "-b", "moa-ask-12", "-t", "%7"],
+            &["-p", "-d", "-s", "x", "-b", "moa-ask-12", "-t", "%7"],
+            &["-p", "-d", "-b", "moa-ask-12", "-t", "%7", "-t", "%8"],
+            &[],
+        ] {
+            assert_eq!(paste(args), Err(Refused(paste_text)), "{args:?}");
         }
     }
 }

@@ -96,6 +96,14 @@ impl Sandbox {
     /// Run a tmux command against the sandbox server; stdout with trailing newlines
     /// trimmed, or `Err` carrying stderr on a non-zero exit.
     pub fn tmux(&self, args: &[&str]) -> io::Result<String> {
+        let out = self.tmux_bytes(args)?;
+        Ok(String::from_utf8_lossy(&out)
+            .trim_end_matches('\n')
+            .to_string())
+    }
+
+    /// [`Sandbox::tmux`]'s stdout as it came, byte for byte (a buffer's exact text).
+    pub fn tmux_bytes(&self, args: &[&str]) -> io::Result<Vec<u8>> {
         let out = Command::new(sandbox_tmux()?)
             .args(["-u", "-L", &self.name])
             .args(args)
@@ -107,9 +115,7 @@ impl Sandbox {
                 String::from_utf8_lossy(&out.stderr).into_owned(),
             ));
         }
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches('\n')
-            .to_string())
+        Ok(out.stdout)
     }
 
     /// The tmux arguments that name this server's socket: `["-L", name]`. `env()` already

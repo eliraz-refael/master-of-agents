@@ -25,6 +25,7 @@ use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind};
+use moa_core::live::cut_middle;
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Project, ProjectId,
     ProjectStatus, Report, ReportKind, Session, SessionId, Suggestion, SuggestionAction,
@@ -323,17 +324,19 @@ fn a_turn_and_a_question_queue_apart() {
 }
 
 #[test]
-fn a_long_turn_is_cut_to_2600() {
+fn a_long_turn_keeps_its_head_and_tail() {
     let mut st = lantern();
     assert_eq!((LAST_MAX, EARLIER_MAX), (2600, 500));
-    // Exactly the limit is kept whole; one more is cut, and says so.
-    feed(&mut st, turn(1, 1_000, &"é".repeat(2_600)));
-    assert_eq!(waiting(&st)[0].turns, vec!["é".repeat(2_600)]);
+    // A hook's message comes whole: the newest turn keeps its head and tail, as its history
+    // row does, which is always within the limit.
+    feed(&mut st, turn(1, 1_000, &"é".repeat(2_400)));
+    assert_eq!(waiting(&st)[0].turns, vec!["é".repeat(2_400)]);
     feed(&mut st, turn(2, 2_000, &"é".repeat(5_000)));
     let turns = waiting(&st)[0].turns.clone();
-    // The first is an earlier turn now: cut to 500.
+    // The first is an earlier turn now: cut to 500, and says so.
     assert_eq!(turns[0], format!("{}…", "é".repeat(500)));
-    assert_eq!(turns[1], format!("{}…", "é".repeat(2_600)));
+    assert_eq!(turns[1], cut_middle(&"é".repeat(5_000)));
+    assert!(turns[1].chars().count() <= LAST_MAX);
     // An earlier turn of exactly 500 is kept whole.
     let mut st = lantern();
     feed(&mut st, turn(1, 1_000, &"a".repeat(500)));

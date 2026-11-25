@@ -11,6 +11,7 @@ use crate::central::PROMPT_MAX;
 use crate::change::Change;
 use crate::core::Tx;
 use crate::hook::{HookEnvelope, HookKind};
+use crate::live::cut_middle;
 use crate::model::{Activity, Report, ReportKind, Session, SessionId};
 use crate::ops::launch::title_of;
 use crate::state::{State, Table};
@@ -51,7 +52,8 @@ pub(crate) fn queued(
     env: &HookEnvelope,
 ) -> Option<Change> {
     let (kind, text) = match &env.kind {
-        HookKind::TurnEnded { last_message } => (ReportKind::TurnEnded, last_message.clone()),
+        // Whole from the hook: its head and tail, as the history row keeps it.
+        HookKind::TurnEnded { last_message } => (ReportKind::TurnEnded, cut_middle(last_message)),
         HookKind::NeedsPermission { tool } => (ReportKind::NeedsYou, format!("permission: {tool}")),
         HookKind::NeedsAnswer { what } => (ReportKind::NeedsYou, what.clone()),
         _ => return None,
