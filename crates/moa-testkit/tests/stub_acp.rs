@@ -274,6 +274,35 @@ async fn a_permission_outcome_is_logged() {
 }
 
 #[tokio::test]
+async fn a_run_waits_for_its_command_and_logs_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = StubStep::Run {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "pwd -P; echo oops >&2; exit 3".into(),
+        ],
+    };
+    write_stub_script(dir.path(), &[run, say("after", None), end(None)]);
+    let mut child = spawn_stub(dir.path());
+    let events = run_client(&mut child, async |cx, mut events| {
+        initialize(&cx).await?;
+        let session = new_session(&cx, dir.path()).await?;
+        prompt(&cx, &session, "go")?.await.expect("answered")?;
+        Ok(drain(&mut events))
+    })
+    .await
+    .unwrap();
+    assert_eq!(events, ["say  after"]);
+    let runs = logged(dir.path(), "run.done");
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    assert_eq!(runs[0]["stdout"], format!("{}\n", cwd.display()));
+    assert_eq!(runs[0]["stderr"], "oops\n");
+    assert_eq!(runs[0]["code"], 3);
+}
+
+#[tokio::test]
 async fn fail_answers_the_prompt_with_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let fail = StubStep::Fail {
