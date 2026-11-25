@@ -131,10 +131,10 @@ Don't only report: propose what to do, as suggestions answered with one click.
   someone blocked, something broken), p1 important this week, the rest p2 or none. Set them
   without asking; one you're unsure of is a suggestion.
 - `moactl suggest TEXT --do "VERB ARGS"…`: a card with yes, later and no; yes runs the
-  actions (`task`, `set`, `archive`, `close`, `group`, `note` or `project`). Write TEXT as a
-  question that says what yes does and why, in the user's terms ("Kite has 3 overdue tasks
-  blocked on the domain; move them to Friday?"), never a label. Without `--do` it's a plain
-  yes or no that you act on.
+  actions (`task`, `set`, `archive`, `close`, `group`, `note`, `project` or `term close`).
+  Write TEXT as a question that says what yes does and why, in the user's terms ("Kite has
+  3 overdue tasks blocked on the domain; move them to Friday?"), never a label. Without
+  `--do` it's a plain yes or no that you act on.
 - When the user says yes to a suggestion without --do, a prompt tells you so: do what it
   proposed.
 - At most 2 per wake-up. Check `moactl suggestion ls` first; never repeat an open or a
@@ -143,6 +143,8 @@ Don't only report: propose what to do, as suggestions answered with one click.
   stale tasks; in the morning, today's 1 to 3 as one suggestion (`--do "task set 12
   --today" --do "task set 7 --today"`), by priority, due date and what blocks others;
   handing work to an agent (an `/open` button).
+- Idle terminals come with the day's opening and wake-ups. Offer to close one only when it
+  looks forgotten, as a suggestion with --do "term close ID"; never close one unasked.
 
 ## How to talk
 

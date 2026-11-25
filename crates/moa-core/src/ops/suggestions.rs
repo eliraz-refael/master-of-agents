@@ -8,6 +8,7 @@ use std::path::Path;
 
 use serde_json::json;
 
+use super::launch::title_of;
 use super::{brain_row, run, term};
 use crate::Now;
 use crate::activity;
@@ -16,10 +17,11 @@ use crate::change::Change;
 use crate::core::{Tx, unknown_message};
 use crate::effect::Effect;
 use crate::model::{
-    Suggestion, SuggestionAction, SuggestionId, SuggestionStatus, YES_DONE, YES_WAITING,
+    SessionId, Suggestion, SuggestionAction, SuggestionId, SuggestionStatus, YES_DONE, YES_WAITING,
 };
 use crate::op::{Answer, Done, Op, OpError};
 use crate::state::{Caller, State, Table};
+use crate::terminals;
 
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
 /// What a yes with no actions to run hears: moa's agent hears of it (D5).
@@ -81,35 +83,69 @@ pub(crate) fn suggest(
     text: &str,
     actions: &[String],
 ) -> Result<Done, OpError> {
-    let mut parsed = Vec::new();
-    if !actions.is_empty() {
-        let deps = state.deps();
-        let Some(parse) = deps.parse_action else {
-            return Err(OpError("suggestions need the moactl grammar".into()));
-        };
-        // Checked now, so a bad action fails for moa, not later for the user.
-        for act in actions {
-            let a = split(act)
-                .and_then(|a| parse(&a, &deps.home).map(|_| a))
-                .map_err(|why| OpError(format!("--do '{act}': {why}")))?;
-            parsed.push(a);
+    let parsed = checked(state, actions)?;
+    let (row, changes) = match made(state, tx, now, text, parsed) {
+        Ok(made) => made,
+        Err(dup) => {
+            return Ok(Done {
+                text: format!("already suggested (#{dup})"),
+                data: json!({ "id": dup, "duplicate": true }),
+            });
         }
+    };
+    let data = serde_json::to_value(&row).unwrap_or_default();
+    tx.commit(state, changes)?;
+    Ok(Done {
+        text: format!(
+            "suggestion #{}: the user sees it with yes / later / no buttons",
+            row.id
+        ),
+        data,
+    })
+}
+
+/// `actions` checked against the moactl grammar now, so a bad one fails for moa, not later
+/// for the user.
+fn checked(state: &State, actions: &[String]) -> Result<Vec<SuggestionAction>, OpError> {
+    if actions.is_empty() {
+        return Ok(Vec::new());
     }
+    let deps = state.deps();
+    let Some(parse) = deps.parse_action else {
+        return Err(OpError("suggestions need the moactl grammar".into()));
+    };
+    actions
+        .iter()
+        .map(|act| {
+            split(act)
+                .and_then(|a| parse(&a, &deps.home).map(|_| a))
+                .map_err(|why| OpError(format!("--do '{act}': {why}")))
+        })
+        .collect()
+}
+
+/// A new open suggestion `text` and what saves it: its row, moa's activity line and its card
+/// in the console (D7), for the caller to commit. `Err` is the open suggestion with the same
+/// text, which a new one would only repeat.
+fn made(
+    state: &State,
+    tx: &mut Tx,
+    now: &Now,
+    text: &str,
+    actions: Vec<SuggestionAction>,
+) -> Result<(Suggestion, Vec<Change>), SuggestionId> {
     if let Some(dup) = state
         .suggestions()
         .find(|s| s.status == SuggestionStatus::Open && s.text == text)
     {
-        return Ok(Done {
-            text: format!("already suggested (#{})", dup.id),
-            data: json!({ "id": dup.id, "duplicate": true }),
-        });
+        return Err(dup.id);
     }
     let id = SuggestionId(tx.next_id(state, Table::Suggestion));
     let row = Suggestion {
         id,
         text: text.to_string(),
         status: SuggestionStatus::Open,
-        actions: parsed,
+        actions,
         actions_raw: None,
         actions_invalid: None,
         result: None,
@@ -117,18 +153,75 @@ pub(crate) fn suggest(
         resolved_at: None,
     };
     let activity = brain_row(state, tx, now, activity::suggests(id.0, text));
-    let data = serde_json::to_value(&row).unwrap_or_default();
-    let mut changes = vec![Change::Suggestion(row), activity];
-    // Its card in the console (D7); with no thread, the today view shows it all the same.
+    let mut changes = vec![Change::Suggestion(row.clone()), activity];
+    // With no thread, the today view shows it all the same.
     if let Some(thread) = central::card_thread(state) {
         let card = central::suggestion_card(state, tx, &thread, id, text);
         changes.push(Change::Feed(card));
     }
-    tx.commit(state, changes)?;
-    Ok(Done {
-        text: format!("suggestion #{id}: the user sees it with yes / later / no buttons"),
-        data,
-    })
+    Ok((row, changes))
+}
+
+/// moa's offer to close the open terminals of sessions `ids`, just `done` (`closed` or
+/// `archived`) (D9): one suggestion made as [`suggest`] makes it, with a `term close` per
+/// terminal, for the caller to commit with what it did. Nothing when they have none open, or
+/// the same offer still waits. moa closes none unasked.
+pub(crate) fn close_offer(
+    state: &State,
+    tx: &mut Tx,
+    now: &Now,
+    ids: &[SessionId],
+    done: &str,
+) -> Vec<Change> {
+    let open = terminals::of_sessions(state, ids);
+    if open.is_empty() {
+        return Vec::new();
+    }
+    let actions: Vec<String> = open
+        .iter()
+        .map(|t| format!("term close {}", t.id.0))
+        .collect();
+    let Ok(parsed) = checked(state, &actions) else {
+        return Vec::new();
+    };
+    let names: Vec<&str> = open.iter().map(|t| t.name.as_str()).collect();
+    let mut owners: Vec<SessionId> = open.iter().filter_map(|t| t.session_id).collect();
+    owners.sort();
+    owners.dedup();
+    let text = match owners[..] {
+        [one] => {
+            let title = state
+                .session(one)
+                .map(|s| title_of(state, s))
+                .unwrap_or_else(|| state.handle_of(one));
+            match names[..] {
+                [name] => format!("{title} is {done}. Close its terminal {name} too?"),
+                _ => format!(
+                    "{title} is {done}. Close its {} terminals too ({})?",
+                    names.len(),
+                    listed(&names)
+                ),
+            }
+        }
+        _ => format!(
+            "You {done} {} sessions with open terminals. Close their {} terminals too ({})?",
+            owners.len(),
+            names.len(),
+            listed(&names)
+        ),
+    };
+    made(state, tx, now, &text, parsed)
+        .map(|(_, changes)| changes)
+        .unwrap_or_default()
+}
+
+/// An offer's terminal names: the first three, then `…` when there are more.
+fn listed(names: &[&str]) -> String {
+    let mut list = names.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    if names.len() > 3 {
+        list.push('…');
+    }
+    list
 }
 
 pub(crate) fn ls(state: &State) -> Result<Done, OpError> {

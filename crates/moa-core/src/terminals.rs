@@ -117,6 +117,13 @@ pub(crate) fn open_records(state: &State) -> impl Iterator<Item = &Terminal> {
         .filter(move |t| generation.is_some_and(|g| on(t, g)))
 }
 
+/// The open records of sessions `ids` ([`open_records`]), by id.
+pub(crate) fn of_sessions<'a>(state: &'a State, ids: &[SessionId]) -> Vec<&'a Terminal> {
+    open_records(state)
+        .filter(|t| t.session_id.is_some_and(|id| ids.contains(&id)))
+        .collect()
+}
+
 /// Whether record `t` names a pane of server `generation`.
 fn on(t: &Terminal, generation: Generation) -> bool {
     t.server_pid == generation.pid && t.server_start == generation.start

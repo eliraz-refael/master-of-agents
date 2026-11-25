@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::adopt::brains_folder;
 use super::launch::title_of;
+use super::suggestions::close_offer;
 use crate::Now;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
@@ -365,7 +366,9 @@ pub(crate) fn archive(
         changes.push(Change::Session(s));
         archived.push(id);
     }
-    // One commit: a refusal leaves every session as it was.
+    // Their terminals stay open; moa offers to close them (D9).
+    changes.extend(close_offer(state, tx, now, &archived, "archived"));
+    // One commit: a refusal leaves every session as it was, and offers nothing.
     tx.ui_each(state, changes, said)?;
     Ok(Done {
         text: format!("archived {}", archived.len()),
@@ -420,6 +423,11 @@ pub(crate) fn close(
     let mut changes = vec![Change::Session(ended)];
     if state.binding(id).is_some() {
         changes.push(Change::DeletePaneBinding(id));
+    }
+    // A killed tab takes its splits with it; one left open keeps them, and moa offers to
+    // close them (D9), in the close's own commit.
+    if pane.is_none() {
+        changes.extend(close_offer(state, tx, now, &[id], "closed"));
     }
     tx.ui(state, changes, text)?;
     if let Some(pane) = pane {
