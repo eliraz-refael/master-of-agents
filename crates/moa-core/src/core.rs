@@ -511,19 +511,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 },
             ..
         } => panel::register(state, conn, req, pane.as_deref(), view, placed, once),
-        // A panel says its folder on every connect, by itself: only a move is the user (R7).
         Input::Client {
             conn,
             req,
-            caller,
-            op: Op::UiHere { folder },
-        } => {
-            let (fx, moved) = panel::here(state, conn, req, folder);
-            if moved && state.caller(&caller) != Caller::Moa {
-                opening::present(state, now);
-            }
-            fx
-        }
+            op: Op::UiHere { folder, .. },
+            ..
+        } => panel::here(state, conn, req, folder),
         // A sheet's close runs in the cockpit's queue (S9, L17); it is answered at once.
         Input::Client {
             conn,
@@ -754,16 +747,17 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
     }
 }
 
-/// Whether `op` from the user says the user is here (D2): the console's prompts, commands and
-/// paging, and a panel's view chosen. No panel sends these by itself; `ui.here`, which every
-/// panel sends on connect, counts only when it moves ([`panel::here`]).
+/// Whether `op` says the user is here (D2): the console's prompts, commands and paging, each
+/// sent only on the user's keys, and a panel's folder moved by a key or click (`by_user`,
+/// R9). A panel's folder sent on connect, or moved by data, isn't the user; nor is
+/// `ui.select_view`, which nothing of moa's sends on a key.
 fn present_op(op: &Op) -> bool {
     matches!(
         op,
         Op::ConsolePrompt { .. }
             | Op::ConsoleCommand { .. }
             | Op::ConsolePage { .. }
-            | Op::UiSelectView { .. }
+            | Op::UiHere { by_user: true, .. }
     )
 }
 

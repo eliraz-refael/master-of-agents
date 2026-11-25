@@ -1221,6 +1221,11 @@ expression: all
                       "null"
                     ],
                     "default": null
+                  },
+                  "by_user": {
+                    "description": "A key or click in the panel moved its selection there: the user is here. Never\nset for the folder a connect restores, or one that data moved the selection to.",
+                    "type": "boolean",
+                    "default": false
                   }
                 }
               }

@@ -37,6 +37,9 @@ const GAP: &str = "\n\n---\n\n";
 
 const ATTACH: &str = "moa:hook client-attached /dev/ttys1";
 
+/// How many kinds of presence [`presence`] makes.
+const KINDS: usize = 8;
+
 /// A world moa last opened the day before the brain's day.
 fn unopened(
     tasks: impl FnOnce(Date) -> Vec<Task>,
@@ -55,14 +58,14 @@ fn moa_caller() -> CallerInfo {
     }
 }
 
-/// Presence of D2's kind `kind` (0 to 8, then again), as an input: a client attached, a
+/// Presence of D2's kind `kind` (0 to 7, then again), as an input: a client attached, a
 /// client active, a key, a prompt's answer, and the client ops `console.prompt`,
-/// `console.command`, `console.page`, `ui.here` (a move, on connection 1 once [`panel_up`])
-/// and `ui.select_view` from `caller`.
+/// `console.command`, `console.page`, and `ui.here` moved by a key or click (R9), from
+/// `caller`.
 fn presence(kind: usize, caller: CallerInfo) -> Input {
     let message =
         |text: &str| Input::Tmux(TmuxIn::Notification(Notification::Message(text.into())));
-    let op = match kind % 9 {
+    let op = match kind % KINDS {
         0 => return message(ATTACH),
         1 => return message("moa:hook client-active /dev/ttys1"),
         2 => return message("moa:key help - $0 /dev/ttys1"),
@@ -75,13 +78,10 @@ fn presence(kind: usize, caller: CallerInfo) -> Input {
             line: "/help".into(),
         },
         6 => Op::ConsolePage { before: 10, n: 5 },
-        // A panel's folder moved: [`panel_up`] said `~/private/lantern` first.
-        7 => Op::UiHere {
+        // A key moved the panel's selection: [`panel_up`] said `~/private/lantern` first.
+        _ => Op::UiHere {
             folder: Some("~/private/kite".into()),
-        },
-        _ => Op::UiSelectView {
-            pane: "%3".into(),
-            view: View::Console,
+            by_user: true,
         },
     };
     Input::Client {
@@ -144,7 +144,7 @@ fn brief_due(st: &State) -> bool {
 }
 
 /// Connection `conn` says it is a panel, then its folder `here`, as every panel's connect
-/// does (`first_ops`).
+/// does (`first_ops`): none of it is the user.
 fn panel_up(w: &mut World, ms: i64, conn: u64, here: &str) {
     for op in [
         Op::UiPanel {
@@ -155,6 +155,7 @@ fn panel_up(w: &mut World, ms: i64, conn: u64, here: &str) {
         },
         Op::UiHere {
             folder: Some(here.into()),
+            by_user: false,
         },
     ] {
         let fx = input(w, ms, client(conn, op));
@@ -248,7 +249,7 @@ fn presence_bursts_brief_once() {
     let mut all = end_turn(&mut w.st, ms);
     for i in 0..20 {
         let kind = i as usize;
-        if kind % 9 == 4 {
+        if kind % KINDS == 4 {
             continue;
         }
         let fx = input(&mut w, ms + i * SEC, presence(kind, CallerInfo::default()));
@@ -261,7 +262,7 @@ fn presence_bursts_brief_once() {
 /// Each of D2's kinds is presence on its own.
 #[test]
 fn every_kind_of_presence_counts() {
-    for kind in 0..9 {
+    for kind in 0..KINDS {
         let mut w = unopened(|_| vec![], |_| vec![], "");
         let ms = w.t(MIN);
         panel_up(&mut w, ms, 1, "~/private/lantern");
@@ -455,7 +456,7 @@ fn moas_own_ops_arent_presence() {
     let mut w = unopened(five_due, |_| vec![], "");
     let ms = w.t(MIN);
     panel_up(&mut w, ms, 1, "~/private/lantern");
-    for kind in [5, 6, 7, 8] {
+    for kind in [5, 6, 7] {
         let fx = input(&mut w, ms, presence(kind, moa_caller()));
         assert!(!brief_due(&w.st), "kind {kind}");
         assert!(acps(&fx).is_empty(), "kind {kind}: {fx:?}");
@@ -509,36 +510,41 @@ fn the_brief_carries_reports_and_yeses() {
     assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
 }
 
-/// R7: a panel says its folder on every connect, by itself: a daemon restart in the night,
-/// its panels connecting again, opens nothing. Only the folder moving is the user.
+/// R9: a panel says its folder by itself: on every connect (a daemon restart in the night
+/// brings each panel back), and whenever data moves its selection (its first snapshot picks a
+/// row, a row it had vanishes). None of it is the user; a key or click moving it is.
 #[test]
-fn a_reconnecting_panel_isnt_the_user() {
+fn only_a_key_or_click_in_a_panel_is_the_user() {
     let mut w = unopened(five_due, |_| vec![], "");
     let ms = w.t(MIN);
-    panel_up(&mut w, ms, 1, "~/private/lantern");
-    assert!(!brief_due(&w.st));
-    // Said again, the same folder.
-    let here = |f: &str| Op::UiHere {
-        folder: Some(f.into()),
+    let here = |f: Option<&str>, by_user: bool| Op::UiHere {
+        folder: f.map(String::from),
+        by_user,
     };
-    input(&mut w, ms, client(1, here("~/private/lantern")));
-    assert!(!brief_due(&w.st));
-    // The panel connects again, on a new connection, its folder another: its first word.
+    // A panel connects with no row picked yet; its first snapshot picks one; a row vanishes
+    // and the selection shifts to the next.
+    panel_up(&mut w, ms, 1, "~/private/lantern");
+    for folder in [None, Some("~/private/lantern"), Some("~/private/harbor")] {
+        let fx = input(&mut w, ms, client(1, here(folder, false)));
+        assert!(!brief_due(&w.st), "{folder:?}");
+        assert!(acps(&fx).is_empty(), "{fx:?}");
+    }
+    // It connects again on a new connection.
     input(&mut w, ms, Input::ClientGone(ConnId(1)));
-    panel_up(&mut w, ms, 2, "~/private/harbor");
+    panel_up(&mut w, ms, 2, "~/private/beacon");
     assert!(!brief_due(&w.st));
-    let fx = input(&mut w, ms, client(2, Op::UiHere { folder: None }));
-    assert!(brief_due(&w.st), "a move to no folder is a move");
+    // A view picked for a panel isn't the user either: nothing of moa's sends it on a key.
+    let view = Op::UiSelectView {
+        pane: "%3".into(),
+        view: View::Console,
+    };
+    input(&mut w, ms, client(2, view));
+    assert!(!brief_due(&w.st));
+    // A key moves the selection.
+    let fx = input(&mut w, ms, client(2, here(Some("~/private/kite"), true)));
+    assert!(brief_due(&w.st));
     let fx = play(&mut w.st, ms, fx);
     assert_eq!(briefs(&fx), 1);
-    // A move on a connection that isn't a panel's is refused, and nobody is here.
-    let mut w = unopened(five_due, |_| vec![], "");
-    input(&mut w, ms, client(3, here("~/private/kite")));
-    assert!(!brief_due(&w.st));
-    // A move is the user.
-    panel_up(&mut w, ms, 3, "~/private/lantern");
-    input(&mut w, ms, client(3, here("~/private/kite")));
-    assert!(brief_due(&w.st));
 }
 
 /// R8: presence at 22:00 while writes are refused until 03:00 opens nothing at 03:00: the

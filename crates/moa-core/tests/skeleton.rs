@@ -500,6 +500,7 @@ fn op_methods_match_the_variants() {
         },
         Op::UiHere {
             folder: Some("/x".into()),
+            by_user: false,
         },
         Op::UiClose(NoParams),
         Op::LayoutList(NoParams),

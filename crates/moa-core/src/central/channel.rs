@@ -126,10 +126,10 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
 }
 
 /// The next automatic prompt, and when it is due: the day's opening (while due today) and a
-/// waiting yes at once, the opening first, a wake-up when [`wake_due`] says, and none sooner than a gap
-/// after an automatic prompt failed ([`super::Moa::failed_at`]). The sooner goes; whichever
-/// it is carries what the others would. `None` while none waits, or moa's agent isn't
-/// [`free`].
+/// waiting yes at once, the opening first, a wake-up when [`wake_due`] says, and none sooner
+/// than a gap after an automatic prompt failed ([`super::Moa::failed_at`]). The sooner goes;
+/// whichever it is carries what the others would. `None` while none waits, or moa's agent
+/// isn't [`free`].
 fn due(state: &State, now: &Now) -> Option<(Source, UtcMs)> {
     if !free(state) {
         return None;

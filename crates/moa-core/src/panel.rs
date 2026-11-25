@@ -154,8 +154,6 @@ pub struct PanelReg {
     pub pane: Option<PaneId>,
     pub view: View,
     pub here: Option<String>,
-    /// This connection said `ui.here` already: `here` is what it said, not a default.
-    pub here_told: bool,
     /// The pane carries moa's `@moa_view`, which the view follows (L8).
     pub managed: bool,
     /// moa started this panel (it runs with `MOA_NO_AUTOSTART`): left untagged in `_moa`, it
@@ -205,15 +203,11 @@ pub(crate) fn register(
         state.panels.retain(|c, r| *c == conn || r.pane != Some(p));
     }
     // The same panel saying again which it is keeps its folder.
-    let (here, here_told) = state
-        .panels
-        .remove(&conn)
-        .map_or((None, false), |r| (r.here, r.here_told));
+    let here = state.panels.remove(&conn).and_then(|r| r.here);
     let mut reg = PanelReg {
         pane,
         view,
         here,
-        here_told,
         managed: false,
         placed,
         once,
@@ -317,29 +311,24 @@ pub(crate) fn server_changed(state: &mut State) -> Option<Effect> {
     publish_panels(state)
 }
 
-/// `ui.here`: the folder the panel's selection is in. Not published. Whether it moved: a
-/// folder other than the one this connection said last. A connection's first `ui.here` is
-/// the panel connecting, not a move (R7).
+/// `ui.here`: the folder the panel's selection is in. Not published.
 pub(crate) fn here(
     state: &mut State,
     conn: ConnId,
     req: ReqId,
     folder: Option<String>,
-) -> (Vec<Effect>, bool) {
-    let (result, moved) = match state.panels.get_mut(&conn) {
+) -> Vec<Effect> {
+    let result = match state.panels.get_mut(&conn) {
         Some(reg) => {
-            let moved = reg.here_told && reg.here != folder;
             reg.here = folder;
-            reg.here_told = true;
-            let done = Done {
+            Ok(Done {
                 text: String::new(),
                 data: json!({}),
-            };
-            (Ok(done), moved)
+            })
         }
-        None => (Err(OpError(NOT_A_PANEL.into())), false),
+        None => Err(OpError(NOT_A_PANEL.into())),
     };
-    (vec![reply(conn, req, result)], moved)
+    vec![reply(conn, req, result)]
 }
 
 /// The connection closed: its panel goes. A popup's program has ended, and tmux closes the
