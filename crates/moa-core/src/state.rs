@@ -332,6 +332,12 @@ pub struct TmuxLinkData {
     pub start: i64,
 }
 
+/// The key a suggestion's row has in a [`LoadNote`], as [`crate::change::Change::row`] gives
+/// it: `#ID`.
+pub(crate) fn suggestion_key(id: SuggestionId) -> String {
+    format!("#{id}")
+}
+
 pub struct State {
     deps: Deps,
     brain: BrainName,
@@ -675,7 +681,7 @@ impl State {
             s.status == SuggestionStatus::Accepted
                 && s.actions.is_empty()
                 && s.result.as_deref() == Some(YES_WAITING)
-                && !self.is_unknown("suggestions", &format!("#{}", s.id))
+                && !self.suggestion_unknown(s.id)
         })
     }
 
@@ -699,6 +705,11 @@ impl State {
         self.unknown
             .iter()
             .any(|n| n.table == table && n.key == key)
+    }
+
+    /// Whether suggestion `id`'s row was loaded with a value this build doesn't know.
+    pub fn suggestion_unknown(&self, id: SuggestionId) -> bool {
+        self.is_unknown("suggestions", &suggestion_key(id))
     }
 
     /// moa's threads (`moa_threads`).

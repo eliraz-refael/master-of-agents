@@ -4,6 +4,7 @@
 
 use moa_core::UtcMs;
 use moa_core::central::NOT_OFFERED;
+use moa_core::model::SuggestionId;
 use moa_core::op::{Done, NoParams, Op, PermAnswer};
 use moa_core::panel::View;
 use moa_core::publish::FeedRow;
@@ -16,7 +17,7 @@ use crate::editor::Editor;
 use crate::geometry::Geometry;
 use crate::keys::Key;
 use crate::line::Line;
-use crate::views::console::{self, Asked, Card, Waiting};
+use crate::views::console::{self, Answered, Asked, Card, Waiting};
 
 /// The same error text is drawn in the console at most once in this many milliseconds (B10).
 pub const ERROR_AGAIN_MS: i64 = 30_000;
@@ -59,6 +60,11 @@ impl Panel {
         let ui = &mut self.console;
         let asking = data.moa.as_ref().map_or(&[][..], |m| m.asking.as_slice());
         ui.answered.retain(|id| asking.contains(id));
+        // A pressed card's buttons come back once the topic shows its answer.
+        ui.pressed.retain(|id, then| {
+            let now = data.suggestions.get(&SuggestionId(*id));
+            now.is_some_and(|s| (s.status, s.resolved_at) == *then)
+        });
         // `older` grows for the panel's life once it has paged: it is never cut.
         if !ui.older.is_empty() && ui.kept_at != Some(data.revision()) {
             ui.kept_at = Some(data.revision());
@@ -137,7 +143,7 @@ impl Panel {
         {
             // Every waiting request answered from here already: their answers are on the way.
             return match console::waiting(data, up, &self.console.answered) {
-                Some(waiting) => self.answer(&waiting, answer, ctx.now),
+                Some(waiting) => self.answer(&waiting, answer, data, ctx.now),
                 None => Vec::new(),
             };
         }
@@ -146,14 +152,14 @@ impl Panel {
             Key::Enter => {
                 let line = self.console.draft.text.trim().to_string();
                 if !line.is_empty() {
-                    return self.send_line(line, true, ctx.now);
+                    return self.send_line(line, true, data, ctx.now);
                 }
                 let focused = self
                     .console
                     .focus
                     .and_then(|b| self.built.buttons.get(usize::from(b)));
                 if let Some(button) = focused {
-                    return self.press(button.command.clone(), ctx.now);
+                    return self.press(button.command.clone(), data, ctx.now);
                 }
             }
             Key::Esc if thinking(data) => return vec![Out::Send(Op::ConsoleCancel(NoParams))],
@@ -223,18 +229,24 @@ impl Panel {
     }
 
     /// A button pressed, by Enter or a click (B13): its command, sent; its reply is a card.
-    pub(super) fn press(&mut self, command: String, now: UtcMs) -> Vec<Out> {
-        self.send_line(command, false, now)
+    pub(super) fn press(&mut self, command: String, data: &Data, now: UtcMs) -> Vec<Out> {
+        self.send_line(command, false, data, now)
     }
 
     /// y, a or n with the input empty (K12): the oldest waiting card's button of that kind
     /// (skipping those answered from here whose answer moa's state doesn't show yet),
     /// pressed; one it doesn't offer is said in the footer.
-    fn answer(&mut self, waiting: &Waiting, answer: PermAnswer, now: UtcMs) -> Vec<Out> {
+    fn answer(
+        &mut self,
+        waiting: &Waiting,
+        answer: PermAnswer,
+        data: &Data,
+        now: UtcMs,
+    ) -> Vec<Out> {
         if !waiting.offered.contains(&answer) {
             return self.say(NOT_OFFERED);
         }
-        self.press(console::answer_line(waiting.id, answer), now)
+        self.press(console::answer_line(waiting.id, answer), data, now)
     }
 
     /// Sends `line`, `typed` in the input or pressed: a `/command` as `console.command`, else
@@ -244,7 +256,7 @@ impl Panel {
     /// (D7); one typed by hand is a command like any other. The feed goes back to its bottom, where
     /// the answer comes. A typed line waits for its reply before another goes; the draft is
     /// cleared only once it is accepted (B7).
-    fn send_line(&mut self, line: String, typed: bool, now: UtcMs) -> Vec<Out> {
+    fn send_line(&mut self, line: String, typed: bool, data: &Data, now: UtcMs) -> Vec<Out> {
         if quits(&line) {
             return if self.managed {
                 self.say(CONSOLE_MANAGED)
@@ -266,15 +278,18 @@ impl Panel {
         let (asked, op) = if let Some(id) = console::answer_id(&line) {
             ui.answered.insert(id);
             let asked = Asked::Answer {
-                id: Some(id),
+                to: Answered::Permission(id),
                 line: line.clone(),
                 at: now,
                 typed,
             };
             (asked, Op::ConsoleCommand { line })
-        } else if !typed && console::is_suggestion_answer(&line) {
+        } else if let Some(id) = console::suggestion_answer(&line).filter(|_| !typed) {
+            if let Some(s) = data.suggestions.get(&SuggestionId(id)) {
+                ui.pressed.insert(id, (s.status, s.resolved_at));
+            }
             let asked = Asked::Answer {
-                id: None,
+                to: Answered::Suggestion(id),
                 line: line.clone(),
                 at: now,
                 typed,
@@ -372,8 +387,20 @@ impl Panel {
         let done = match result {
             Ok(done) => done,
             Err(why) => {
-                if let Asked::Answer { id: Some(id), .. } = asked {
-                    self.console.answered.remove(&id);
+                match asked {
+                    Asked::Answer {
+                        to: Answered::Permission(id),
+                        ..
+                    } => {
+                        self.console.answered.remove(&id);
+                    }
+                    Asked::Answer {
+                        to: Answered::Suggestion(id),
+                        ..
+                    } => {
+                        self.console.pressed.remove(&id);
+                    }
+                    _ => {}
                 }
                 self.show(Err(why));
                 return;

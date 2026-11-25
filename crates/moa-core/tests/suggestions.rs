@@ -191,6 +191,57 @@ fn startup_leaves_a_suggestion_with_an_unknown_value_alone() {
     assert!(persists(&fx).is_empty());
 }
 
+/// Only the user says yes: moa's own `suggestion yes` is refused, with actions or without,
+/// and changes nothing; its `later` and `no` still go.
+#[test]
+fn only_the_user_says_yes() {
+    let (b, mut st) = typical();
+    let now = b.now();
+    let made = |st: &mut State, text: &str, actions: &[&str]| {
+        ok(st, suggest(text, actions), &now).data["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let plain = made(&mut st, "Read the Harbor notes before the call?", &[]);
+    let acting = made(
+        &mut st,
+        "Note that Kite waits?",
+        &["note 'Kite waits on the domain'"],
+    );
+    let moa = CallerInfo {
+        moa_session: Some("moa".into()),
+        ..CallerInfo::default()
+    };
+    let as_moa = |st: &mut State, op: Op| {
+        handle_checked(
+            st,
+            Input::Client {
+                conn: ConnId(1),
+                req: ReqId(1),
+                caller: moa.clone(),
+                op,
+            },
+            now.clone(),
+        )
+    };
+    for id in [plain, acting] {
+        let fx = as_moa(&mut st, answer(id, Answer::Yes));
+        let reply = moa_core::effect::reply_of(&fx).unwrap().clone();
+        assert_eq!(
+            reply.unwrap_err().0,
+            "only the user says yes to a suggestion"
+        );
+        assert!(persists(&fx).is_empty(), "{fx:?}");
+        assert_eq!(row(&st, id).status, SuggestionStatus::Open);
+    }
+    let fx = as_moa(&mut st, answer(plain, Answer::Later));
+    assert!(moa_core::effect::reply_of(&fx).unwrap().is_ok(), "{fx:?}");
+    assert_eq!(row(&st, plain).status, SuggestionStatus::Later);
+    let fx = as_moa(&mut st, answer(acting, Answer::No));
+    assert!(moa_core::effect::reply_of(&fx).unwrap().is_ok(), "{fx:?}");
+    assert_eq!(row(&st, acting).status, SuggestionStatus::Rejected);
+}
+
 #[test]
 fn imported_suggestion_two_runs() {
     let (b, mut st) = typical();
@@ -247,7 +298,7 @@ fn suggest_validates_and_refuses_duplicates() {
 
     assert_eq!(
         err(&mut st, suggest("Tidy", &["rm -rf x"]), &now),
-        "--do 'rm -rf x': a suggestion can run moactl archive, close, group, note, project, set, task, term"
+        "--do 'rm -rf x': a suggestion can run moactl archive, close, group, note, project, set, task, term close"
     );
     assert!(
         err(&mut st, suggest("Tidy", &["task 1 --status done"]), &now)

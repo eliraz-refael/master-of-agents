@@ -102,6 +102,9 @@ pub struct ConsoleUi {
     /// The permission requests answered from here that moa's state still has waiting: y, a
     /// and n skip them (K12).
     pub answered: BTreeSet<i64>,
+    /// The suggestions answered by their card's button, by id, with the status and answer
+    /// time the topic showed then: until it shows another, the card draws no buttons (D7).
+    pub pressed: BTreeMap<i64, (SuggestionStatus, Option<UtcMs>)>,
 }
 
 impl Default for ConsoleUi {
@@ -129,6 +132,7 @@ impl Default for ConsoleUi {
             closed: None,
             palette_rows: 0,
             answered: BTreeSet::new(),
+            pressed: BTreeMap::new(),
         }
     }
 }
@@ -150,15 +154,22 @@ pub enum Asked {
         at: UtcMs,
         typed: bool,
     },
-    /// An answer to permission request `id` (`/permission`, K12), typed or pressed at `at`,
-    /// or to a suggestion by its card's button (`id` `None`, D7): its reply makes no card, as
-    /// the request's or the suggestion's own card says it.
+    /// An answer to a permission request (`/permission`, K12), typed or pressed at `at`, or
+    /// to a suggestion by its card's button (D7): its reply makes no card, as the request's or
+    /// the suggestion's own card says it.
     Answer {
-        id: Option<i64>,
+        to: Answered,
         line: String,
         at: UtcMs,
         typed: bool,
     },
+}
+
+/// What an [`Asked::Answer`] answers, by id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Answered {
+    Permission(i64),
+    Suggestion(i64),
 }
 
 /// A line of the console, as a rebuild finds it again (F15): by the row drawn at or above
@@ -523,10 +534,13 @@ fn suggestion_line(word: &str, id: i64) -> String {
     format!("/suggestion {word} {id}")
 }
 
-/// Whether `line` is a [`suggestion_line`]: an answer to a suggestion.
-pub fn is_suggestion_answer(line: &str) -> bool {
+/// The suggestion `line` answers, when it is a [`suggestion_line`].
+pub fn suggestion_answer(line: &str) -> Option<i64> {
     let words: Vec<&str> = line.split_whitespace().collect();
-    matches!(&words[..], ["/suggestion", "yes" | "later" | "no", id] if id.parse::<i64>().is_ok())
+    match &words[..] {
+        ["/suggestion", "yes" | "later" | "no", id] => id.parse().ok(),
+        _ => None,
+    }
 }
 
 /// The request `line` answers, when it is an [`answer_line`].
@@ -818,6 +832,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, up: bool, width: u16) -> Co
     let mut draw = Draw {
         data,
         ctx,
+        pressed: &ui.pressed,
         up,
         width: usize::from(width),
         lines: Vec::new(),
@@ -969,6 +984,8 @@ enum Last {
 struct Draw<'a> {
     data: &'a Data,
     ctx: &'a Ctx,
+    /// [`ConsoleUi::pressed`]: those cards draw no buttons.
+    pressed: &'a BTreeMap<i64, (SuggestionStatus, Option<UtcMs>)>,
     /// The panel's connection is up.
     up: bool,
     width: usize,
@@ -1429,6 +1446,11 @@ impl<'a> Draw<'a> {
                 vec![dim(&actions.join("; "))],
                 inner,
             ));
+        }
+        if self.pressed.contains_key(&id) {
+            // Answered from here: its answer is on the way.
+            lines.extend(behind(CARD_GUTTER, card));
+            return Some(lines);
         }
         let words = ["yes", "later", "no"].into_iter();
         let buttons = self.button_spans(words.filter(|w| runs || *w != "yes").map(|word| Button {

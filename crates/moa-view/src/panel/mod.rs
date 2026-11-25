@@ -569,7 +569,7 @@ impl Panel {
                     }
                     // A click on a button presses it.
                     self.message = None;
-                    let out = self.press(command, ctx.now);
+                    let out = self.press(command, data, ctx.now);
                     return Handled { out, redraw: true };
                 }
                 let hit = self.row_at(g.body, x, y);

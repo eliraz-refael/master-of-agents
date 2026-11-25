@@ -710,7 +710,11 @@ struct Source {
 const SUGGESTION: Source = Source {
     verbs: ACTION_VERBS,
     other_verb: |_| {
-        let mut verbs = ACTION_VERBS.to_vec();
+        // Of `term`, a suggestion runs only `term close`.
+        let mut verbs: Vec<&str> = ACTION_VERBS
+            .iter()
+            .map(|v| if *v == "term" { "term close" } else { v })
+            .collect();
         verbs.sort_unstable();
         format!("a suggestion can run moactl {}", verbs.join(", "))
     },

@@ -20,11 +20,13 @@ use crate::model::{
     SessionId, Suggestion, SuggestionAction, SuggestionId, SuggestionStatus, YES_DONE, YES_WAITING,
 };
 use crate::op::{Answer, Done, Op, OpError};
-use crate::state::{Caller, State, Table};
+use crate::state::{Caller, State, Table, suggestion_key};
 use crate::terminals;
 use crate::tmux::link::log;
 
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
+/// What moa's own `suggestion yes` hears: a yes is the user's word, never moa's.
+const ONLY_THE_USER: &str = "only the user says yes to a suggestion";
 /// What a yes with no actions to run hears: moa's agent hears of it (D5).
 const PLAIN_YES: &str = "yes; moa acts on it when it's free";
 /// Why an open suggestion can't be run, as `Startup` records it.
@@ -58,7 +60,7 @@ pub(crate) fn startup_flags(state: &State) -> Vec<Suggestion> {
         .suggestions()
         .filter(|s| waiting(s))
         .filter(|s| s.actions_invalid.is_none() && !s.actions.is_empty())
-        .filter(|s| !is_unknown(state, s.id))
+        .filter(|s| !state.suggestion_unknown(s.id))
         .filter(|s| s.actions.iter().any(|a| parse(a, &deps.home).is_err()))
         .map(|s| {
             let mut s = s.clone();
@@ -66,10 +68,6 @@ pub(crate) fn startup_flags(state: &State) -> Vec<Suggestion> {
             s
         })
         .collect()
-}
-
-fn is_unknown(state: &State, id: SuggestionId) -> bool {
-    state.is_unknown("suggestions", &format!("#{id}"))
 }
 
 /// Open or later: not answered for good yet.
@@ -281,12 +279,12 @@ pub(crate) fn answer(
     };
     // Before any action runs: the actions would commit and then this row's own write be
     // refused.
-    if is_unknown(state, s.id) {
-        return Err(OpError(unknown_message(
-            state,
-            "suggestions",
-            &format!("#{}", s.id),
-        )));
+    if answer == Answer::Yes && *caller == Caller::Moa {
+        return Err(OpError(ONLY_THE_USER.into()));
+    }
+    if state.suggestion_unknown(s.id) {
+        let key = suggestion_key(s.id);
+        return Err(OpError(unknown_message(state, "suggestions", &key)));
     }
     if !waiting(&s) {
         return Err(OpError(format!(
