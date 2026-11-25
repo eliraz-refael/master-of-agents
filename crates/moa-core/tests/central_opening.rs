@@ -57,7 +57,8 @@ fn moa_caller() -> CallerInfo {
 
 /// Presence of D2's kind `kind` (0 to 8, then again), as an input: a client attached, a
 /// client active, a key, a prompt's answer, and the client ops `console.prompt`,
-/// `console.command`, `console.page`, `ui.here` and `ui.select_view` from `caller`.
+/// `console.command`, `console.page`, `ui.here` (a move, on connection 1 once [`panel_up`])
+/// and `ui.select_view` from `caller`.
 fn presence(kind: usize, caller: CallerInfo) -> Input {
     let message =
         |text: &str| Input::Tmux(TmuxIn::Notification(Notification::Message(text.into())));
@@ -74,7 +75,10 @@ fn presence(kind: usize, caller: CallerInfo) -> Input {
             line: "/help".into(),
         },
         6 => Op::ConsolePage { before: 10, n: 5 },
-        7 => Op::UiHere { folder: None },
+        // A panel's folder moved: [`panel_up`] said `~/private/lantern` first.
+        7 => Op::UiHere {
+            folder: Some("~/private/kite".into()),
+        },
         _ => Op::UiSelectView {
             pane: "%3".into(),
             view: View::Console,
@@ -136,7 +140,36 @@ fn system_prompt(fx: &[Effect]) -> String {
 }
 
 fn brief_due(st: &State) -> bool {
-    st.central().brief_due
+    st.central().brief_due.is_some()
+}
+
+/// Connection `conn` says it is a panel, then its folder `here`, as every panel's connect
+/// does (`first_ops`).
+fn panel_up(w: &mut World, ms: i64, conn: u64, here: &str) {
+    for op in [
+        Op::UiPanel {
+            pane: None,
+            view: Some(View::Tree),
+            placed: false,
+            once: false,
+        },
+        Op::UiHere {
+            folder: Some(here.into()),
+        },
+    ] {
+        let fx = input(w, ms, client(conn, op));
+        assert!(acps(&fx).is_empty(), "{fx:?}");
+    }
+}
+
+/// `op` from the user on connection `conn`.
+fn client(conn: u64, op: Op) -> Input {
+    Input::Client {
+        conn: ConnId(conn),
+        req: ReqId(1),
+        caller: CallerInfo::default(),
+        op,
+    }
 }
 
 #[test]
@@ -199,6 +232,8 @@ fn the_first_attach_of_the_day_briefs() {
 #[test]
 fn presence_bursts_brief_once() {
     let mut w = unopened(five_due, |_| vec![], "");
+    let ms = w.t(MIN);
+    panel_up(&mut w, ms, 1, "~/private/lantern");
     let mut all = Vec::new();
     for i in 0..20 {
         let ms = w.t(MIN + i * SEC);
@@ -229,6 +264,8 @@ fn every_kind_of_presence_counts() {
     for kind in 0..9 {
         let mut w = unopened(|_| vec![], |_| vec![], "");
         let ms = w.t(MIN);
+        panel_up(&mut w, ms, 1, "~/private/lantern");
+        assert!(!brief_due(&w.st));
         let fx = input(&mut w, ms, presence(kind, CallerInfo::default()));
         assert!(brief_due(&w.st), "kind {kind}");
         let fx = play(&mut w.st, ms, fx);
@@ -417,6 +454,7 @@ fn the_brief_goes_with_auto_off() {
 fn moas_own_ops_arent_presence() {
     let mut w = unopened(five_due, |_| vec![], "");
     let ms = w.t(MIN);
+    panel_up(&mut w, ms, 1, "~/private/lantern");
     for kind in [5, 6, 7, 8] {
         let fx = input(&mut w, ms, presence(kind, moa_caller()));
         assert!(!brief_due(&w.st), "kind {kind}");
@@ -469,4 +507,61 @@ fn the_brief_carries_reports_and_yeses() {
     // Nothing is left for a wake-up or a yes.
     let fx = fire(&mut w.st, ms + 5 * MIN);
     assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+}
+
+/// R7: a panel says its folder on every connect, by itself: a daemon restart in the night,
+/// its panels connecting again, opens nothing. Only the folder moving is the user.
+#[test]
+fn a_reconnecting_panel_isnt_the_user() {
+    let mut w = unopened(five_due, |_| vec![], "");
+    let ms = w.t(MIN);
+    panel_up(&mut w, ms, 1, "~/private/lantern");
+    assert!(!brief_due(&w.st));
+    // Said again, the same folder.
+    let here = |f: &str| Op::UiHere {
+        folder: Some(f.into()),
+    };
+    input(&mut w, ms, client(1, here("~/private/lantern")));
+    assert!(!brief_due(&w.st));
+    // The panel connects again, on a new connection, its folder another: its first word.
+    input(&mut w, ms, Input::ClientGone(ConnId(1)));
+    panel_up(&mut w, ms, 2, "~/private/harbor");
+    assert!(!brief_due(&w.st));
+    let fx = input(&mut w, ms, client(2, Op::UiHere { folder: None }));
+    assert!(brief_due(&w.st), "a move to no folder is a move");
+    let fx = play(&mut w.st, ms, fx);
+    assert_eq!(briefs(&fx), 1);
+    // A move on a connection that isn't a panel's is refused, and nobody is here.
+    let mut w = unopened(five_due, |_| vec![], "");
+    input(&mut w, ms, client(3, here("~/private/kite")));
+    assert!(!brief_due(&w.st));
+    // A move is the user.
+    panel_up(&mut w, ms, 3, "~/private/lantern");
+    input(&mut w, ms, client(3, here("~/private/kite")));
+    assert!(brief_due(&w.st));
+}
+
+/// R8: presence at 22:00 while writes are refused until 03:00 opens nothing at 03:00: the
+/// day it was due has passed. The next presence opens the new day.
+#[test]
+fn a_brief_due_yesterday_is_dropped() {
+    let mut w = unopened(five_due, |_| vec![], "");
+    let today = w.today();
+    let ten_pm = w.t(10 * HOUR);
+    let three_am = w.t(15 * HOUR);
+    w.refuse_writes(ten_pm, three_am);
+    let fx = w.message(ten_pm + SEC, ATTACH);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(w.st.central().brief_due, Some(today));
+    let fx = fire(&mut w.st, three_am);
+    let fx = play(&mut w.st, three_am, fx);
+    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+    assert!(briefed(&fx).is_empty());
+    assert!(!brief_due(&w.st));
+    // The user that morning: the new day's opening.
+    let eight_am = w.t(20 * HOUR);
+    let fx = w.message(eight_am, ATTACH);
+    let fx = play(&mut w.st, eight_am, fx);
+    assert_eq!(briefs(&fx), 1);
+    assert_eq!(briefed(&fx), [today.tomorrow().unwrap().to_string()]);
 }

@@ -17,11 +17,24 @@ pub const OPENING: &str = "(moa · the user is here for the first time today, no
                            Open the day: brief the user as a thread's first message does (see \
                            \"How to talk\" in your instructions).";
 
-/// The user is here (D2): when today isn't opened yet, the opening is due
+/// The user is here (D2): when today isn't opened yet, the opening is due today
 /// ([`super::Moa::brief_due`]). The callers are the user's own inputs only, never moa's.
 pub fn present(state: &mut State, now: &Now) {
     if !opened(state, now) {
-        state.central.brief_due = true;
+        state.central.brief_due = Some(now.local_day);
+    }
+}
+
+/// Whether the opening is due now: the user was here today, and today isn't opened yet.
+pub(crate) fn due_today(state: &State, now: &Now) -> bool {
+    state.central.brief_due == Some(now.local_day)
+}
+
+/// An opening due on a day that has passed is dropped (R8): the user being here yesterday
+/// doesn't open today, nor wake moa in the night.
+pub(crate) fn expire(state: &mut State, now: &Now) {
+    if !due_today(state, now) {
+        state.central.brief_due = None;
     }
 }
 

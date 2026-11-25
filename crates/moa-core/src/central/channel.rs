@@ -8,7 +8,7 @@
 
 use serde_json::json;
 
-use super::{Phase, launch, send};
+use super::{Phase, launch, opening, send};
 use crate::Now;
 use crate::UtcMs;
 use crate::change::Change;
@@ -98,7 +98,8 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     if fired {
         state.central.wake_armed = None;
     }
-    let mut next = due(state);
+    opening::expire(state, now);
+    let mut next = due(state, now);
     let refused = state
         .refuse_writes()
         .filter(|_| state.writes_refused(now.wall))
@@ -112,7 +113,7 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
             true => {
                 let more = send(state, now, source, String::new(), None);
                 fold_in(fx, more);
-                due(state)
+                due(state, now)
             }
         };
     }
@@ -124,12 +125,12 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     ));
 }
 
-/// The next automatic prompt, and when it is due: the day's opening and a waiting yes at
-/// once, the opening first, a wake-up when [`wake_due`] says, and none sooner than a gap
+/// The next automatic prompt, and when it is due: the day's opening (while due today) and a
+/// waiting yes at once, the opening first, a wake-up when [`wake_due`] says, and none sooner than a gap
 /// after an automatic prompt failed ([`super::Moa::failed_at`]). The sooner goes; whichever
 /// it is carries what the others would. `None` while none waits, or moa's agent isn't
 /// [`free`].
-fn due(state: &State) -> Option<(Source, UtcMs)> {
+fn due(state: &State, now: &Now) -> Option<(Source, UtcMs)> {
     if !free(state) {
         return None;
     }
@@ -139,7 +140,7 @@ fn due(state: &State) -> Option<(Source, UtcMs)> {
         .failed_at
         .map_or(i64::MIN, |f| f.0.saturating_add(gap));
     let at_once = UtcMs(i64::MIN);
-    let brief = state.central.brief_due.then_some((Source::Brief, at_once));
+    let brief = opening::due_today(state, now).then_some((Source::Brief, at_once));
     let yes = state.yeses().next().map(|_| (Source::Yes, at_once));
     let wake = wake_due(state).map(|at| (Source::Wake, at));
     // The first of the soonest goes.

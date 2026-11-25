@@ -27,6 +27,7 @@ pub mod wire;
 
 use std::collections::BTreeMap;
 
+use jiff::civil::Date;
 use serde_json::json;
 
 use self::channel::Source;
@@ -175,11 +176,12 @@ pub struct Moa {
     /// carried an idle block, and never moved back (the day's opening tells them all). Kept
     /// in memory.
     pub idle_told: Option<idle::IdleMark>,
-    /// The user is here, and today isn't opened yet ([`opening::present`]): the next prompt
-    /// opens it, the brief's or the user's own (D3). Cleared by the commit of the prompt that
-    /// carries the opening; kept while it is refused. Kept in memory: `meta` `moa.briefed`
-    /// says which day was opened.
-    pub brief_due: bool,
+    /// The local day the user was here on while it wasn't opened yet ([`opening::present`]):
+    /// the next prompt that day opens it, the brief's or the user's own (D3). Cleared by the
+    /// commit of the prompt that carries the opening, kept while it is refused, and dropped
+    /// once that day has passed: the next day waits for the user again. Kept in memory: `meta`
+    /// `moa.briefed` says which day was opened.
+    pub brief_due: Option<Date>,
     /// When the last automatic prompt, a brief's, a wake-up's or a yes's, failed to reach
     /// moa's agent:
     /// every automatic source waits a gap after it, rather than starting moa's agent, a thread
@@ -832,7 +834,7 @@ fn thread_row(
 /// never go alone (U18).
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let automatic = p.source != Source::You;
-    let opens = state.central.brief_due && matches!(p.source, Source::Brief | Source::You);
+    let opens = opening::due_today(state, now) && matches!(p.source, Source::Brief | Source::You);
     let wake = p.source == Source::Wake;
     let opening_block = opens.then(|| opening::OPENING.to_string());
     let yeses: Vec<&Suggestion> = state.yeses().collect();
@@ -949,7 +951,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         moa.idle_told = moa.idle_told.max(idle_told);
     }
     if opens {
-        moa.brief_due = false;
+        moa.brief_due = None;
     }
     moa.failed_at = None;
     moa.phase = Phase::Thinking;
