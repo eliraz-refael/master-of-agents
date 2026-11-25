@@ -1323,3 +1323,44 @@ fn a_click_on_y_answers() {
     assert_eq!(c.footer(), "that request isn't waiting any more");
     no_answer_card(&mut c);
 }
+
+/// D7: a suggestion card's buttons are pressed as any button is: the first Tab takes its
+/// `[yes]`, the next `[later]`, and Enter sends `/suggestion later 12`.
+#[test]
+fn the_card_buttons_answer() {
+    use moa_core::model::{Suggestion, SuggestionId, SuggestionStatus};
+    let text = "Set Kite's due date";
+    let card = FeedRow {
+        kind: "suggestion".into(),
+        body: json!({ "id": 12, "text": text }),
+        ..row(1, "suggestion", "")
+    };
+    let mut c = C::new(vec![card], SIZE);
+    c.data.suggestions.insert(
+        SuggestionId(12),
+        Suggestion {
+            id: SuggestionId(12),
+            text: text.into(),
+            status: SuggestionStatus::Open,
+            actions: Vec::new(),
+            actions_raw: None,
+            actions_invalid: None,
+            result: None,
+            created_at: UtcMs(1_000),
+            resolved_at: None,
+        },
+    );
+    c.data.touch();
+    c.key(Key::Tab);
+    assert_eq!(c.focused(), Some(("[yes]".to_string(), false)));
+    c.key(Key::Tab);
+    assert_eq!(c.focused(), Some(("[later]".to_string(), false)));
+    let outs = c.key(Key::Enter);
+    let (_, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/suggestion later 12".into()
+        }
+    );
+}

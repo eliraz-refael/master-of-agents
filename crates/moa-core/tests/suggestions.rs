@@ -545,3 +545,95 @@ fn a_suggestion_can_close_a_session() {
     assert!(saved < killed, "{fx:?}");
     assert_eq!(persists(&fx).len(), 1, "one transaction: {fx:?}");
 }
+
+/// `suggest`, from moa's agent (its caller is moa), at `now`.
+fn moa_suggests(st: &mut State, now: &Now, text: &str) -> Vec<Effect> {
+    let caller = CallerInfo {
+        moa_session: Some("moa".into()),
+        ..CallerInfo::default()
+    };
+    handle_checked(
+        st,
+        Input::Client {
+            conn: ConnId(1),
+            req: ReqId(9),
+            caller,
+            op: suggest(text, &[]),
+        },
+        now.clone(),
+    )
+}
+
+/// The `suggestion` rows `fx` saved: their thread and body.
+fn suggestion_cards(fx: &[Effect]) -> Vec<(String, serde_json::Value)> {
+    persists(fx)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| match c {
+            Change::Feed(r) if r.kind == "suggestion" => {
+                Some((r.thread_id.clone(), serde_json::from_str(&r.body).unwrap()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// D7: a new suggestion is a card in the console too: a `suggestion` row `{"id", "text"}` in
+/// the turn's thread, saved in the suggestion's own commit. A duplicate writes none.
+#[test]
+fn a_suggestion_is_carded() {
+    use common::central::{first_turn, moa};
+    let b = TypicalBrain::new();
+    let mut st = moa(&b);
+    let now = b.now();
+    first_turn(&mut st, &now, "th-1", false);
+    let text = "Archive the Beacon spike";
+    let fx = moa_suggests(&mut st, &now, text);
+    let commits = persists(&fx);
+    assert_eq!(commits.len(), 1, "one commit");
+    let id = commits[0]
+        .iter()
+        .find_map(|c| match c {
+            Change::Suggestion(s) => Some(s.id.0),
+            _ => None,
+        })
+        .expect("the suggestion is in the commit");
+    assert_eq!(
+        suggestion_cards(&fx),
+        [("th-1".into(), serde_json::json!({ "id": id, "text": text }))]
+    );
+    assert_eq!(row(&st, id).status, SuggestionStatus::Open);
+
+    let fx = moa_suggests(&mut st, &now, text);
+    assert!(persists(&fx).is_empty(), "a duplicate saves nothing");
+}
+
+/// D7: with no thread open the card goes in the newest saved thread, of any account; with no
+/// thread at all there is no card, and the suggestion is saved all the same.
+#[test]
+fn a_card_goes_to_the_newest_thread() {
+    use common::central::{moa, moa_with, thread};
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let t = now.wall.0;
+    let threads = vec![
+        thread(
+            "th-a",
+            "acct-a",
+            now.local_day.yesterday().unwrap(),
+            t - 86_400_000,
+        ),
+        thread("th-b", "acct-b", now.local_day, t - 60_000),
+    ];
+    let mut st = moa_with(&b, "acct-a", threads);
+    let fx = moa_suggests(&mut st, &now, "Set Kite's due date");
+    let cards = suggestion_cards(&fx);
+    assert_eq!(cards.len(), 1, "one card");
+    assert_eq!(cards[0].0, "th-b");
+
+    let mut st = moa(&b);
+    let fx = moa_suggests(&mut st, &now, "Set Kite's due date");
+    assert_eq!(persists(&fx).len(), 1, "the suggestion is saved");
+    assert!(suggestion_cards(&fx).is_empty(), "no card");
+    assert!(st.suggestions().any(|s| s.text == "Set Kite's due date"));
+}

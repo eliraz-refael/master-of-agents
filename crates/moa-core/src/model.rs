@@ -261,6 +261,14 @@ pub struct SuggestionAction {
     pub args: Vec<String>,
 }
 
+impl SuggestionAction {
+    /// The action as it would be typed, shell-quoted: what `yes runs:` shows.
+    pub fn line(&self) -> String {
+        let words = std::iter::once(self.verb.as_str()).chain(self.args.iter().map(String::as_str));
+        shell_words::join(words)
+    }
+}
+
 /// Who an ask is for: moa itself or one session. Stored as `"moa"` or the session uuid.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AskTarget {

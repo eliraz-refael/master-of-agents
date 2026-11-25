@@ -33,7 +33,7 @@ use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
-use crate::model::{FeedEntry, MoaThread, ThreadKind};
+use crate::model::{FeedEntry, MoaThread, SuggestionId, ThreadKind};
 use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
 use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
@@ -391,6 +391,34 @@ fn accounts(state: &State) -> Result<Done, OpError> {
 pub(crate) fn card(state: &State, tx: &mut Tx, thread: &str, what: &str, text: &str) -> FeedEntry {
     let body = feed::card_body(what, text);
     turn::new_row(state, tx, thread, kind::CARD, None, body, None)
+}
+
+/// A `suggestion` row of `thread` (D7): suggestion `id`, made with `text`. The caller commits
+/// it with the suggestion.
+pub(crate) fn suggestion_card(
+    state: &State,
+    tx: &mut Tx,
+    thread: &str,
+    id: SuggestionId,
+    text: &str,
+) -> FeedEntry {
+    let body = feed::suggestion_body(id, text);
+    turn::new_row(state, tx, thread, kind::SUGGESTION, None, body, None)
+}
+
+/// The thread a card goes in (F18, D7): the open one when it is saved, else the newest saved
+/// of any account; none when no thread is saved.
+pub(crate) fn card_thread(state: &State) -> Option<String> {
+    let open = state.central.thread.as_ref().map(|o| &o.row.thread_id);
+    let newest = || {
+        let newest = state
+            .threads()
+            .max_by(|a, b| (a.started_at, &a.thread_id).cmp(&(b.started_at, &b.thread_id)));
+        newest.map(|t| &t.thread_id)
+    };
+    open.filter(|id| state.thread(id).is_some())
+        .or_else(newest)
+        .cloned()
 }
 
 /// `console.new`: the next prompt starts a new thread.

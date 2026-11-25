@@ -10,6 +10,7 @@ use serde_json::json;
 use super::{brain_row, run, term};
 use crate::Now;
 use crate::activity;
+use crate::central;
 use crate::change::Change;
 use crate::core::{Tx, unknown_message};
 use crate::effect::Effect;
@@ -20,11 +21,6 @@ use crate::state::{Caller, State, Table};
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
 /// Why an open suggestion can't be run, as `Startup` records it.
 pub(crate) const INVALID: &str = "an action doesn't parse as moactl";
-
-/// The action as it was typed, shell-quoted.
-fn joined(a: &SuggestionAction) -> String {
-    shell_words::join(std::iter::once(a.verb.as_str()).chain(a.args.iter().map(String::as_str)))
-}
 
 /// Splits a typed action (or a console command after its `/`) into verb and arguments.
 pub(crate) fn split(act: &str) -> Result<SuggestionAction, String> {
@@ -117,7 +113,13 @@ pub(crate) fn suggest(
     };
     let activity = brain_row(state, tx, now, activity::suggests(id.0, text));
     let data = serde_json::to_value(&row).unwrap_or_default();
-    tx.commit(state, vec![Change::Suggestion(row), activity])?;
+    let mut changes = vec![Change::Suggestion(row), activity];
+    // Its card in the console (D7); with no thread, the today view shows it all the same.
+    if let Some(thread) = central::card_thread(state) {
+        let card = central::suggestion_card(state, tx, &thread, id, text);
+        changes.push(Change::Feed(card));
+    }
+    tx.commit(state, changes)?;
     Ok(Done {
         text: format!("suggestion #{id}: the user sees it with yes / later / no buttons"),
         data,
@@ -133,7 +135,7 @@ pub(crate) fn ls(state: &State) -> Result<Done, OpError> {
             if let Some(why) = &s.actions_invalid {
                 line.push_str(&format!("  (yes can't run its actions: {why})"));
             } else if !s.actions.is_empty() {
-                let acts: Vec<String> = s.actions.iter().map(joined).collect();
+                let acts: Vec<String> = s.actions.iter().map(SuggestionAction::line).collect();
                 line.push_str(&format!("  (yes runs: {})", acts.join("; ")));
             }
             line
@@ -189,7 +191,7 @@ pub(crate) fn answer(
     if answer == Answer::Yes {
         for a in &s.actions {
             if let Err(why) = run_action(state, tx, caller, now, a, logs) {
-                failed.push(format!("{}: {why}", joined(a)));
+                failed.push(format!("{}: {why}", a.line()));
             }
         }
     }

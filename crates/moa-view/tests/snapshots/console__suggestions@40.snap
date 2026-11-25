@@ -1,0 +1,26 @@
+---
+source: crates/moa-view/tests/console.rs
+expression: debug_lines(&view.lines)
+---
+[you]› [you]What's left today?
+[brain*]◆ moa  19:00
+[dim]│ [text]A few things.
+[dim]│ [brain]✦ [brain]moa suggests
+[dim]│ [dim]┊ [text]Close Kite's shell, it's been idle [text*]2
+[dim]│ [dim]┊ [text*]h  ‹more›
+[dim]│ [dim]┊ [dim]yes runs: [dim]term close 4; task add
+[dim]│ [dim]┊ [text]          [dim]Kite 'Write the release  ‹more›
+[dim]│ [dim]┊ [text]          [dim]notes'  ‹more›
+[dim]│ [dim]┊ [work#0][yes][text] [work#1][later][text] [work#2][no]
+[dim]│ [brain]✦ [brain]moa suggests [dim]· later
+[dim]│ [dim]┊ [text]Set Kite's due date
+[dim]│ [dim]┊ [work#3][yes][text] [work#4][later][text] [work#5][no]
+[dim]│ [brain]✦ [brain]moa suggests
+[dim]│ [dim]┊ [text]Read the Harbor notes before the
+[dim]│ [dim]┊ [text]call  ‹more›
+[dim]│ [dim]┊ [work#6][yes][text] [work#7][later][text] [work#8][no]
+[dim]│ [ok]✓ [ok]yes: Close Lantern's shell
+[dim]│ [ok]✓ [ok]yes: Close Beacon's shell
+[dim]│ [text]  [dim]but: term close 4: that terminal is
+[dim]│ [text]  [dim]gone  ‹more›
+[dim]│ [dim]✗ [dim]no: Archive the Beacon spike

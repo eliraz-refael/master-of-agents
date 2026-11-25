@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::wire::{PermOption, PlanEntry};
 use crate::UtcMs;
 use crate::core::Tx;
-use crate::model::FeedEntry;
+use crate::model::{FeedEntry, SuggestionId};
 use crate::state::{State, Table};
 use crate::text::cut;
 
@@ -20,6 +20,7 @@ pub mod kind {
     pub const ERROR: &str = "error";
     pub const PERMISSION: &str = "permission";
     pub const CARD: &str = "card";
+    pub const SUGGESTION: &str = "suggestion";
 }
 
 /// The most of a tool's input a `tool` row keeps, in characters.
@@ -74,6 +75,13 @@ pub fn permission_body(title: &str, options: &[PermOption]) -> String {
 /// Markdown.
 pub fn card_body(what: &str, text: &str) -> String {
     json!({ "what": what, "text": text }).to_string()
+}
+
+/// The body of a `suggestion` row (D7): `{"id", "text"}`, the suggestion's id and the text it
+/// was made with. The console draws the suggestion as its topic has it, this text standing in
+/// when the topic hasn't got it.
+pub fn suggestion_body(id: SuggestionId, text: &str) -> String {
+    json!({ "id": id, "text": text }).to_string()
 }
 
 /// A new row of `thread`, with the next id of the table (counting this transaction's). The

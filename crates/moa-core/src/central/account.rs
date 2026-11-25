@@ -4,7 +4,7 @@
 //! moa can run on. Nothing else changes: the next prompt is on the same account, and only
 //! your `/account` switches it.
 
-use super::{card, launch, warn};
+use super::{card, card_thread, launch, warn};
 use crate::Now;
 use crate::change::Change;
 use crate::config::AccountName;
@@ -55,7 +55,7 @@ pub(super) fn failed(state: &mut State, now: &Now, why: &str) -> Vec<Effect> {
     }
     moa.account_card = Some(account.clone());
     let text = card_text(state, &account, why);
-    let instead = match thread(state) {
+    let instead = match card_thread(state) {
         None => "no thread holds its card",
         Some(thread) => {
             let mut tx = Tx::new(now);
@@ -76,20 +76,6 @@ pub(super) fn failed(state: &mut State, now: &Now, why: &str) -> Vec<Effect> {
         )),
         Effect::Publish(Publish::Event(CoreEvent::Error { message: text })),
     ]
-}
-
-/// The thread the card goes in: the open one when it is saved, else the newest saved.
-fn thread(state: &State) -> Option<String> {
-    let open = state.central.thread.as_ref().map(|o| &o.row.thread_id);
-    let newest = || {
-        let newest = state
-            .threads()
-            .max_by(|a, b| (a.started_at, &a.thread_id).cmp(&(b.started_at, &b.thread_id)));
-        newest.map(|t| &t.thread_id)
-    };
-    open.filter(|id| state.thread(id).is_some())
-        .or_else(newest)
-        .cloned()
 }
 
 /// K11: `moa's account <A> failed: <why>.`, then the other accounts moa can run on, each a

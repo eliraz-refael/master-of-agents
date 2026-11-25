@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use moa_core::UtcMs;
+use moa_core::model::{Suggestion, SuggestionAction, SuggestionId, SuggestionStatus};
 use moa_core::panel::View;
 use moa_core::publish::{EventRow, FeedRow, Topic};
 use moa_core::state::EventWhat;
@@ -929,4 +930,212 @@ fn turn_text_only_when_auto_is_off() {
         ]
     );
     assert_eq!(text(&data, false), off);
+}
+
+/// Suggestion `id`, `status`, with `actions` (verb first) and `result`.
+fn suggestion(
+    id: i64,
+    text: &str,
+    status: SuggestionStatus,
+    actions: &[&[&str]],
+    result: Option<&str>,
+) -> Suggestion {
+    let actions = actions
+        .iter()
+        .map(|a| SuggestionAction {
+            verb: a[0].to_string(),
+            args: a[1..].iter().map(|s| s.to_string()).collect(),
+        })
+        .collect();
+    Suggestion {
+        id: SuggestionId(id),
+        text: text.into(),
+        status,
+        actions,
+        actions_raw: None,
+        actions_invalid: None,
+        result: result.map(str::to_string),
+        created_at: UtcMs(1_000),
+        resolved_at: None,
+    }
+}
+
+/// A `suggestion` row, id `row_id`, for suggestion `id` with the text it was made with.
+fn card_row(row_id: i64, id: i64, text: &str) -> FeedRow {
+    row(row_id, "suggestion", json!({"id": id, "text": text}), None)
+}
+
+/// A turn of moa's with six suggestion cards, one of each kind, and the suggestions.
+fn suggested() -> (Data, Ctx) {
+    use SuggestionStatus::{Accepted, Later, Open, Rejected};
+    let (_, ctx) = lantern();
+    let close: &[&str] = &["term", "close", "4"];
+    let task: &[&str] = &["task", "add", "Kite", "Write the release notes"];
+    let made = [
+        suggestion(
+            12,
+            "Close Kite's shell, it's been idle **2 h**",
+            Open,
+            &[close, task],
+            None,
+        ),
+        suggestion(13, "Set Kite's due date", Later, &[], None),
+        suggestion(14, "Read the Harbor notes before the call", Open, &[], None),
+        suggestion(
+            15,
+            "Close Lantern's shell",
+            Accepted,
+            &[close],
+            Some("done"),
+        ),
+        suggestion(
+            16,
+            "Close Beacon's shell",
+            Accepted,
+            &[close],
+            Some("term close 4: that terminal is gone"),
+        ),
+        suggestion(17, "Archive the Beacon spike", Rejected, &[], None),
+    ];
+    let mut data = Data::default();
+    let mut rows = vec![
+        row(1, "you", json!({"text": "What's left today?"}), None),
+        row(2, "moa", json!({"text": "A few things."}), None),
+    ];
+    for (i, s) in made.iter().enumerate() {
+        rows.push(card_row(3 + i as i64, s.id.0, &s.text));
+    }
+    for r in rows {
+        data.feed.insert(r.id, r);
+    }
+    for s in made {
+        data.suggestions.insert(s.id, s);
+    }
+    data.touch();
+    (data, ctx)
+}
+
+/// D7, D10: moa's suggestion is a card: open or later, `✦ moa suggests` (` · later`), its
+/// text as Markdown behind the card's gutter, what yes runs, and `[yes] [later] [no]`;
+/// answered, `✓ yes: <text>` (with `but:` and the failure unless it was done) or `✗ no:
+/// <text>`.
+#[test]
+fn suggestion_cards_at_40_and_80() {
+    let (data, ctx) = suggested();
+    for w in [40, 80] {
+        let view = build(&data, &ctx, &ConsoleUi::default(), true, w);
+        assert_fits(&view.lines, w);
+        insta::assert_snapshot!(format!("suggestions@{w}"), debug_lines(&view.lines));
+    }
+    let view = build(&data, &ctx, &ConsoleUi::default(), true, 80);
+    let buttons =
+        |n: i64| ["yes", "later", "no"].map(|a| (a.to_string(), format!("/suggestion {a} {n}")));
+    let want: Vec<(String, String)> = [12, 13, 14].into_iter().flat_map(buttons).collect();
+    let got: Vec<(String, String)> = pressed(&view)
+        .into_iter()
+        .map(|(l, c)| (l.to_string(), c.to_string()))
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// §6.12: a card answered anywhere (the today view, `moactl`) says so as soon as the
+/// suggestions topic does: the same feed draws `✓ yes: …`, with no buttons.
+#[test]
+fn answering_anywhere_redraws_the_card() {
+    let (_, ctx) = lantern();
+    let text = "Set Kite's due date";
+    let mut data = Data::default();
+    let r = card_row(1, 12, text);
+    data.feed.insert(r.id, r);
+    data.suggestions.insert(
+        SuggestionId(12),
+        suggestion(12, text, SuggestionStatus::Open, &[], None),
+    );
+    data.touch();
+    let view = build(&data, &ctx, &ConsoleUi::default(), true, 80);
+    assert_eq!(view.buttons.len(), 3);
+    let s = data.suggestions.get_mut(&SuggestionId(12)).unwrap();
+    s.status = SuggestionStatus::Accepted;
+    s.result = Some("done".into());
+    data.touch();
+    let view = build(&data, &ctx, &ConsoleUi::default(), true, 80);
+    let lines: Vec<String> = view.lines.iter().map(Line::text).collect();
+    assert_eq!(lines[1..], [format!("│ ✓ yes: {text}")], "{lines:#?}");
+    assert!(view.buttons.is_empty(), "{:?}", view.buttons);
+}
+
+/// Review focus 4: a card whose suggestion isn't there (`✦ suggestion #N: <text>`, from the
+/// row's text, dim), one whose actions can't run (`yes can't run its actions`, no `[yes]`),
+/// one with a status this build doesn't know (as one that isn't there), and 5 000 characters
+/// at 40: each drawn, and no line wider than its width at 40 to 200.
+#[test]
+fn odd_suggestion_cards_draw() {
+    let (_, ctx) = lantern();
+    let long = "Kite ".repeat(1_000);
+    let mut data = Data::default();
+    let rows = vec![
+        card_row(1, 99, "Tidy the **Harbor** folder"),
+        card_row(2, 12, "Close Kite's shell"),
+        card_row(3, 13, "From a newer moa"),
+        card_row(4, 14, &long),
+        row(5, "suggestion", json!({"text": "no id"}), None),
+    ];
+    for r in rows {
+        data.feed.insert(r.id, r);
+    }
+    let mut invalid = suggestion(
+        12,
+        "Close Kite's shell",
+        SuggestionStatus::Open,
+        &[&["term", "open", "4"]],
+        None,
+    );
+    invalid.actions_invalid = Some("an action doesn't parse as moactl".into());
+    data.suggestions.insert(SuggestionId(12), invalid);
+    data.suggestions.insert(
+        SuggestionId(14),
+        suggestion(14, &long, SuggestionStatus::Open, &[], None),
+    );
+    data.upsert(
+        Topic::Suggestions,
+        vec![json!({
+            "key": "13", "id": 13, "text": "From a newer moa", "status": "snoozed",
+            "actions": [], "actions_raw": null, "actions_invalid": null, "result": null,
+            "created_at": 1_000, "resolved_at": null,
+        })],
+    );
+    for w in 40..=200 {
+        let view = build(&data, &ctx, &ConsoleUi::default(), true, w);
+        assert_fits(&view.lines, w);
+    }
+    let view = build(&data, &ctx, &ConsoleUi::default(), true, 80);
+    let lines: Vec<String> = view.lines.iter().map(Line::text).collect();
+    assert_eq!(lines[1], "│ ✦ suggestion #99: Tidy the **Harbor** folder");
+    let tones: Vec<_> = view.lines[1].spans.iter().map(|s| s.tone).collect();
+    assert!(
+        tones.iter().all(|t| *t == moa_view::line::Tone::Dim),
+        "{tones:?}"
+    );
+    assert!(
+        lines.contains(&s("│ ┊ yes can't run its actions")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.contains(&s("│ ✦ suggestion #13: From a newer moa")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.contains(&s("│ · an entry moa couldn't show (#5)")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        pressed(&view),
+        [
+            ("later", "/suggestion later 12"),
+            ("no", "/suggestion no 12"),
+            ("yes", "/suggestion yes 14"),
+            ("later", "/suggestion later 14"),
+            ("no", "/suggestion no 14"),
+        ]
+    );
 }
