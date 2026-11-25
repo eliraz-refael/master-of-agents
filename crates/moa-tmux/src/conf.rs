@@ -272,11 +272,12 @@ fn hook_name(name: &str) -> String {
 /// The hooks moa sets, by tmux's name. Each tells the daemon what happened as
 /// `moa:hook <word> #{<format>}`; `client-detached` is the one that forgets the control
 /// client instead. `hooks` and `unhooks` both come from this table.
-const HOOK_TABLE: [(&str, Option<(&str, &str)>); 5] = [
+const HOOK_TABLE: [(&str, Option<(&str, &str)>); 6] = [
     ("pane-exited", Some(("pane-exited", "hook_pane"))),
     ("pane-died", Some(("pane-died", "hook_pane"))),
     ("window-layout-changed", Some(("layout", "hook_window"))),
     ("client-attached", Some(("client-attached", "hook_client"))),
+    ("client-active", Some(("client-active", "hook_client"))),
     ("client-detached", None),
 ];
 

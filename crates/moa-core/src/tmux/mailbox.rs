@@ -108,6 +108,8 @@ pub enum HookMsg {
     PaneDied(PaneId),
     Layout(WindowId),
     ClientAttached(ClientName),
+    /// A client became its session's latest active one: the user is at it (D2).
+    ClientActive(ClientName),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -171,6 +173,7 @@ impl Mailbox {
                     "pane-died" => HookMsg::PaneDied(id(arg)?),
                     "layout" => HookMsg::Layout(id(arg)?),
                     "client-attached" => HookMsg::ClientAttached(client(arg)?),
+                    "client-active" => HookMsg::ClientActive(client(arg)?),
                     _ => return Err(MailboxError::Bad),
                 }))
             }

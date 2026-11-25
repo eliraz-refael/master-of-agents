@@ -219,6 +219,10 @@ pub enum Op {
     UiHere {
         #[serde(default)]
         folder: Option<String>,
+        /// A key or click in the panel moved its selection there: the user is here. Never
+        /// set for the folder a connect restores, or one that data moved the selection to.
+        #[serde(default)]
+        by_user: bool,
     },
     /// A sheet (the picker or help, linked into your session) is done: its tab is unlinked
     /// from every session but moa's hidden one. Only a sheet's own panel sends it.

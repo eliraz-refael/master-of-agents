@@ -5,7 +5,8 @@
 #   scripts/verify quick                 fmt, clippy, nextest once (before a commit)
 #   scripts/verify [--runs N] [--no-flake]   quick, then the rest of a PR's checks
 #
-# Steps run one at a time: never run cargo while an e2e test runs.
+# Steps run one at a time: never run cargo while an e2e test runs. A disk with less than
+# MOA_VERIFY_MIN_FREE_GB (default 50) free gets `cargo clean` first.
 set -euo pipefail
 
 # Logs are read by an agent: no colour codes.
@@ -41,6 +42,17 @@ tmux_crates=(moa-tmux moa-core moa-daemon moa-testkit moa)
 tmux_pkgs=()
 for c in "${tmux_crates[@]}"; do tmux_pkgs+=(-p "$c"); done
 tmux34=${MOA_TMUX34:-/nix/store/3994kd3490zp24hs3d3rjq08h58g2xh7-tmux-3.4/bin}
+
+# cargo never deletes old builds, so target/ only grows (it once filled the disk at 270 GB).
+# With less than MOA_VERIFY_MIN_FREE_GB free on its disk (default 50), clean it first; the
+# rebuild costs a few minutes. Free space is read, not target/'s size: `du` over a large
+# target/ takes minutes.
+min_free_gb=${MOA_VERIFY_MIN_FREE_GB:-50}
+free_gb=$(($(df -Pk . | awk 'NR == 2 { print $4 }') / 1024 / 1024))
+if ((free_gb < min_free_gb)); then
+  echo "verify: ${free_gb} GB free (under ${min_free_gb} GB): cleaning target/ first"
+  cargo clean --quiet
+fi
 
 logs=target/verify
 mkdir -p "$logs"

@@ -119,6 +119,7 @@ fn first_ops_register_and_restore_here() {
             },
             Op::UiHere {
                 folder: Some("/x".into()),
+                by_user: false,
             },
         ]
     );
@@ -131,7 +132,10 @@ fn first_ops_register_and_restore_here() {
                 placed: false,
                 once: false,
             },
-            Op::UiHere { folder: None },
+            Op::UiHere {
+                folder: None,
+                by_user: false,
+            },
         ]
     );
 }

@@ -58,6 +58,7 @@ fn panel(pane: Option<&str>, view: Option<View>) -> Op {
 fn here(folder: &str) -> Op {
     Op::UiHere {
         folder: Some(folder.into()),
+        by_user: false,
     }
 }
 

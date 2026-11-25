@@ -188,8 +188,21 @@ pub fn first_ops(
             placed,
             once: false,
         },
-        Op::UiHere { folder: here },
+        Op::UiHere {
+            folder: here,
+            by_user: false,
+        },
     ]
+}
+
+/// What a turn tells the daemon of the selection's folder `here`: nothing while it is the
+/// folder last `told`, else `ui.here`, the user's (`by_user`) only when a key or click moved
+/// it (R9).
+pub fn here_op(told: &Option<String>, here: &Option<String>, by_user: bool) -> Option<Op> {
+    (here != told).then(|| Op::UiHere {
+        folder: here.clone(),
+        by_user,
+    })
 }
 
 /// What a popup (`--once`, S8) sends first: that it is one, showing `view`. It has no tab of
@@ -509,6 +522,9 @@ struct Loop {
     asked: BTreeSet<u64>,
     /// The folder the daemon was last told (`ui.here`).
     told_here: Option<String>,
+    /// A key or click this turn moved the selection's folder: the next `ui.here` is the
+    /// user's (R9). Data moving the selection never sets it.
+    moved_by_user: bool,
     /// A connect has worked: from now on connects don't start a daemon.
     linked_once: bool,
     /// The first connect has ended, either way.
@@ -550,6 +566,7 @@ impl Loop {
             delays: reconnect_delays(),
             asked: BTreeSet::new(),
             told_here: None,
+            moved_by_user: false,
             linked_once: false,
             first_ended: false,
             closing: false,
@@ -778,7 +795,9 @@ impl Loop {
                         DownKey::Panel => {}
                     }
                 }
+                let before = self.panel.here(&self.data);
                 let outs = self.panel.key(key, &self.data, &ctx, self.size);
+                self.moved_by_user |= self.panel.here(&self.data) != before;
                 if self.act(outs) {
                     return Turn::Quit;
                 }
@@ -792,7 +811,9 @@ impl Loop {
                 let Some(m) = mouse_of(m) else {
                     return Turn::Go(false);
                 };
+                let before = self.panel.here(&self.data);
                 let handled = self.panel.mouse(m, &self.data, &ctx, self.size);
+                self.moved_by_user |= self.panel.here(&self.data) != before;
                 let redraw = handled.redraw || !handled.out.is_empty();
                 if self.act(handled.out) {
                     return Turn::Quit;
@@ -959,8 +980,10 @@ impl Loop {
         changed
     }
 
-    /// Tells the daemon the selection's folder when it changed (V3). A popup never does.
+    /// Tells the daemon the selection's folder when it changed (V3), and whether a key or
+    /// click moved it this turn. A popup never does.
     fn tell_here(&mut self) {
+        let by_user = std::mem::take(&mut self.moved_by_user);
         if self.opts.once {
             return;
         }
@@ -968,11 +991,9 @@ impl Loop {
             return;
         };
         let here = self.panel.here(&self.data);
-        if here != self.told_here {
+        if let Some(op) = here_op(&self.told_here, &here, by_user) {
             // Its reply isn't the footer's.
-            live.send(Op::UiHere {
-                folder: here.clone(),
-            });
+            live.send(op);
             self.told_here = here;
         }
     }
@@ -1240,7 +1261,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use moa_client::LiveMsg;
-    use moa_core::op::Done;
+    use moa_core::op::{Done, Op};
     use moa_core::publish::CoreEvent;
     use moa_view::panel::Out;
 
@@ -1397,6 +1418,67 @@ mod tests {
         let mut term = terminal();
         asked.draw(&mut term).unwrap();
         assert!(shown(&term).contains("sessions"), "{}", shown(&term));
+    }
+
+    /// R9: only a key or click that moves the selection's folder makes the next `ui.here`
+    /// the user's. Data moving it (the first data picking a row, a row vanishing) never
+    /// does, and telling the folder spends the mark.
+    #[tokio::test]
+    async fn only_a_key_moving_the_selection_is_the_user() {
+        use moa_core::publish::Topic;
+        use moa_proto::Patch;
+
+        let (data, _) = moa_view::fixture::lantern();
+        let mut lp = looped(Some(View::Tree), true);
+        // Not down, so keys reach the panel.
+        lp.link = Link::Waiting {
+            waited: 0,
+            sleep: Box::pin(tokio::time::sleep(std::time::Duration::from_secs(3600))),
+        };
+        let patch = |delete: Vec<String>| {
+            LiveMsg::Patch(Patch {
+                rev: 1,
+                upsert: Default::default(),
+                delete: [(Topic::Sessions, delete)].into_iter().collect(),
+            })
+        };
+        // Its first data arrives, and the panel picks a row by itself.
+        lp.data = data;
+        lp.take(patch(vec![]));
+        assert!(!lp.moved_by_user);
+        // Keys down the tree, until one moves the folder.
+        let down = || Event::Key(KeyEvent::from(KeyCode::Down));
+        let mut moved = false;
+        for _ in 0..20 {
+            let here = lp.panel.here(&lp.data);
+            input(&mut lp, down());
+            if lp.panel.here(&lp.data) != here {
+                moved = true;
+                break;
+            }
+            assert!(!lp.moved_by_user);
+        }
+        assert!(moved, "no key moved the folder");
+        assert!(lp.moved_by_user);
+        let here = lp.panel.here(&lp.data);
+        let op = super::here_op(&None, &here, lp.moved_by_user);
+        assert!(
+            matches!(op, Some(Op::UiHere { by_user: true, .. })),
+            "{op:?}"
+        );
+        // Telling it spends the mark.
+        lp.tell_here();
+        assert!(!lp.moved_by_user);
+        // Every session vanishes: the selection's folder moves by itself.
+        let sessions: Vec<String> = lp.data.sessions.keys().map(|id| id.to_string()).collect();
+        lp.take(patch(sessions));
+        assert_ne!(lp.panel.here(&lp.data), here, "the folder stayed");
+        assert!(!lp.moved_by_user);
+        let op = super::here_op(&here, &lp.panel.here(&lp.data), lp.moved_by_user);
+        assert!(
+            matches!(op, Some(Op::UiHere { by_user: false, .. })),
+            "{op:?}"
+        );
     }
 
     /// L14: moa tags every panel it places as it starts it (L7), so a placed panel is

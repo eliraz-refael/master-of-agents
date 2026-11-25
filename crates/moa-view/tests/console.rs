@@ -924,6 +924,77 @@ fn moa_says_it_acts_on_your_yes() {
     }
 }
 
+/// D10: the prompt that opens the day says so first: `· moa opens the day` under an
+/// automatic one's header, `· opens the day` under your own (Dim).
+#[test]
+fn the_day_opens() {
+    let (_, ctx) = lantern();
+    let text = |rows: Vec<FeedRow>, w: u16| -> Vec<String> {
+        let view = only(rows, &ctx, w);
+        assert_fits(&view.lines, w);
+        view.lines.iter().map(Line::text).collect()
+    };
+    let mut brief = row(
+        1,
+        "you",
+        json!({"text": "(moa · the user is here)", "opening": true}),
+        None,
+    );
+    brief.automatic = true;
+    assert_eq!(
+        text(vec![brief.clone()], 80),
+        ["◆ moa  19:00 · on its own", "│ · moa opens the day"]
+    );
+    let view = only(vec![brief.clone()], &ctx, 80);
+    assert!(
+        view.lines[1]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|s| s.tone == moa_view::line::Tone::Dim)
+    );
+    brief.body["yeses"] = json!([12]);
+    brief.body["reports"] = json!(2);
+    assert_eq!(
+        text(vec![brief.clone()], 80)[1..],
+        [
+            "│ · moa opens the day",
+            "│ · moa acts on your yes to #12",
+            "│ · moa is reading 2 session reports…"
+        ]
+    );
+    for w in 1..=40 {
+        assert_fits(&only(vec![brief.clone()], &ctx, w).lines, w);
+    }
+
+    let hi = row(
+        2,
+        "you",
+        json!({"text": "hi", "opening": true, "yeses": [12], "reports": 1, "carried": "(moa · …)"}),
+        None,
+    );
+    assert_eq!(
+        text(vec![hi.clone()], 80),
+        [
+            "› hi",
+            "  · opens the day",
+            "  · with your yes to #12",
+            "  · with 1 session report"
+        ]
+    );
+    let view = only(vec![hi.clone()], &ctx, 80);
+    assert!(
+        view.lines[1]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|s| s.tone == moa_view::line::Tone::Dim)
+    );
+    for w in 1..=40 {
+        assert_fits(&only(vec![hi.clone()], &ctx, w).lines, w);
+    }
+}
+
 /// K12: your prompt that carried session reports says how many under it (Dim): `· with 2
 /// session reports`. One without says nothing more.
 #[test]

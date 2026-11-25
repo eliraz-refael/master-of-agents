@@ -1097,6 +1097,8 @@ impl TmuxState {
             // Hooks say the tree changed in a way no notification does.
             // The log lines never carry the message text.
             Notification::Message(m) => match Mailbox::parse(m) {
+                // Only that the user is at a terminal (D2): nothing in the tree changed.
+                Ok(Mailbox::Hook(HookMsg::ClientActive(_))) => Vec::new(),
                 Ok(Mailbox::Hook(_)) => self.refresh(),
                 // The core takes every key before the link sees it (`keys::run`).
                 Ok(Mailbox::Key { .. }) => Vec::new(),

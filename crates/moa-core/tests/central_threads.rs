@@ -4,8 +4,9 @@
 mod common;
 
 use common::central::{
-    acps, caps, ended, feed_rows, first_turn, hear, hear_at, moa, moa_with, opened, phase, prompt,
-    prompt_at, prompts_sent, published_state, saved, started, text_of, thread, thread_rows,
+    acps, caps, ended, feed_rows, first_turn, hear, hear_at, moa, moa_with, opened, opened_today,
+    phase, prompt, prompt_at, prompts_sent, published_state, saved, started, text_of, thread,
+    thread_rows,
 };
 use common::{at, changes, replies, send, send_on};
 use jiff::ToSpan;
@@ -257,7 +258,10 @@ fn a_new_day_starts_a_thread_with_the_brief() {
         [&thread("th-2", "acct-a", today.local_day, today.wall.0)]
     );
     assert_eq!(feed_rows(&fx)[0].thread_id, "th-2");
-    assert_eq!(prompts_sent(&fx), ["good morning"]);
+    // The new day's first prompt opens it (D3).
+    let sent = prompts_sent(&fx);
+    assert!(sent[0].starts_with("(moa · the user is here for the first time today"));
+    assert!(sent[0].ends_with("\n\n---\n\ngood morning"), "{sent:?}");
 }
 
 #[test]
@@ -743,13 +747,15 @@ fn a_refused_first_prompt_keeps_the_reopen_line() {
     hear(&b, &mut st, started(1, caps(true, true, true)));
     // The store refuses writes for a minute.
     let until = UtcMs(now.wall.0 + 60_000);
+    let mut snapshot = Snapshot {
+        threads,
+        ..b.snapshot()
+    };
+    opened_today(&mut snapshot, &now);
     handle_checked(
         &mut st,
         Input::Reload {
-            snapshot: Box::new(Snapshot {
-                threads,
-                ..b.snapshot()
-            }),
+            snapshot: Box::new(snapshot),
             refuse_writes: Some(RefuseWrites {
                 until,
                 reason: "the disk is full".into(),

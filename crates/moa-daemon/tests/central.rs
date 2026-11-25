@@ -10,7 +10,11 @@ use std::time::Duration;
 use common::Client;
 use common::hooks::ago;
 use common::rig::{Rig, WAIT, answer, end, gate, prompt, refusal, say, session_stop};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
+use moa_core::central::opening::OPENING;
 use moa_platform::{kill_term, spawn};
+use moa_testkit::brain::{TYPICAL_NOW, TYPICAL_TZ};
 use moa_testkit::{StubStep, stub_moa_toml_two_accounts, wait_for};
 use serde_json::{Value, json};
 
@@ -345,5 +349,23 @@ async fn an_auth_failure_shows_the_account_card() {
     assert_eq!(card_row, [json!({"what": "account", "text": card})]);
     let on = c.call("console.account", json!({}));
     assert_eq!(answer(&on), "moa is on acct-a; others: acct-b");
+    up.stop().await;
+}
+
+/// D2, review M2: paging back in the console, answered by the daemon from the store, reaches
+/// the core as the user being here. On a day not opened yet, moa's agent is sent the opening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paging_the_console_opens_the_day() {
+    let rig = Rig::new(&[say("good morning", "m1"), end()]);
+    let today: Timestamp = TYPICAL_NOW.parse().unwrap();
+    let today = today.to_zoned(TimeZone::posix(TYPICAL_TZ).unwrap()).date();
+    rig.tb.opened_on(today.yesterday().unwrap());
+    let up = rig.start().await;
+    let mut c = up.client();
+    let page = c.call("console.page", json!({"before": 10, "n": 5}));
+    assert!(page["result"]["data"]["rows"].is_array(), "{page}");
+    let sent = wait_prompts(&rig, 1);
+    assert!(sent[0].starts_with(OPENING), "{}", sent[0]);
+    assert_eq!(you_automatic(&rig), [true]);
     up.stop().await;
 }

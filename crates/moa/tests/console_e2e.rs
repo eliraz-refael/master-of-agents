@@ -27,6 +27,8 @@ fn console(steps: &[StubStep]) -> Console {
 /// [`console`], with `toml` as the root's `moa.toml`.
 fn console_with(toml: &str, steps: &[StubStep]) -> Console {
     let tb = TempBrain::new(Some(toml));
+    // moa opened the day already: attaching opens nothing here (D2).
+    tb.opened_today();
     let agent = tb.paths().agent_dir(B);
     ensure_private_dir(&agent).expect("the agent folder");
     write_stub_script(&agent, steps);

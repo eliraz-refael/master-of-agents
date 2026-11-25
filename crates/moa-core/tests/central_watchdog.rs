@@ -456,7 +456,10 @@ fn a_restart_past_midnight_opens_todays_thread() {
 
     // Its first prompt goes to it and saves it, with no line about a failed reopen.
     let fx = prompt_at(&mut st, at(t + 7 * MIN), 2, "go on", false);
-    assert_eq!(prompts_sent(&fx), ["go on"]);
+    // The new day's first prompt opens it (D3).
+    let sent = prompts_sent(&fx);
+    assert!(sent[0].starts_with("(moa · the user is here for the first time today"));
+    assert!(sent[0].ends_with("\n\n---\n\ngo on"), "{sent:?}");
     assert_eq!(thread_rows(&fx).len(), 1);
     let rows = feed_rows(&fx);
     assert!(rows.iter().all(|r| r.thread_id == "th-2"), "{rows:?}");

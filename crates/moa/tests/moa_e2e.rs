@@ -27,6 +27,8 @@ fn end() -> StubStep {
 /// A root whose moa runs the stub, with `steps` as its script.
 fn rig(steps: &[StubStep]) -> TempBrain {
     let tb = TempBrain::new(Some(&stub_moa_toml()));
+    // moa opened the day already: a prompt opens nothing here (D2).
+    tb.opened_today();
     let agent = tb.paths().agent_dir(B);
     ensure_private_dir(&agent).expect("the agent folder");
     write_stub_script(&agent, steps);

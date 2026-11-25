@@ -13,7 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use jiff::Timestamp;
+use jiff::civil::Date;
 use moa_agents::claude::find_transcript;
+use moa_core::central::opening::BRIEFED_KEY;
+use moa_core::change::Change;
 use moa_platform::{Paths, ensure_private_dir, kill_term, pid_alive};
 use moa_store::Store;
 use moa_store::accounts::AccountMap;
@@ -74,6 +78,25 @@ impl TempBrain {
 
     pub fn paths(&self) -> Paths {
         Paths::with_root(self.root())
+    }
+
+    /// moa opened `day` already in the default brain: `meta` `moa.briefed` is saved, so the
+    /// user's presence that day doesn't open it again (D2). For tests whose prompts mean what
+    /// they did before the opening.
+    pub fn opened_on(&self, day: Date) {
+        let paths = self.paths();
+        let mut store =
+            Store::open(&paths.db("default"), &paths.backups("default")).expect("the brain's db");
+        let opened = Change::Meta {
+            key: BRIEFED_KEY.to_string(),
+            value: Some(day.to_string()),
+        };
+        store.apply(&[opened]).expect("moa.briefed is saved");
+    }
+
+    /// [`TempBrain::opened_on`] today, as a `moa` run with [`TempBrain::env`] tells the day.
+    pub fn opened_today(&self) {
+        self.opened_on(Timestamp::now().to_zoned(tz()).date());
     }
 
     pub fn db(&self, brain: &str) -> PathBuf {

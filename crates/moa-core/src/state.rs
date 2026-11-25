@@ -712,6 +712,12 @@ impl State {
         self.is_unknown("suggestions", &suggestion_key(id))
     }
 
+    /// Whether moa was told on `day` that task `task` is due on `due` (C20): its `nags` row
+    /// is saved.
+    pub fn nagged(&self, task: TaskId, due: Date, day: Date) -> bool {
+        self.nags.contains_key(&(task, due, day))
+    }
+
     /// moa's threads (`moa_threads`).
     pub fn threads(&self) -> impl Iterator<Item = &MoaThread> {
         self.threads.values()

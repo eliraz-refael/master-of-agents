@@ -159,7 +159,10 @@ async fn first_ops_are_answered_before_the_snapshot() {
             placed: false,
             once: false,
         },
-        Op::UiHere { folder: None },
+        Op::UiHere {
+            folder: None,
+            by_user: false,
+        },
     ];
     let (_live, replies, snap) = timeout(WAIT, client.live(&[Topic::Panels], first))
         .await
@@ -195,7 +198,13 @@ async fn a_slow_reply_doesnt_hold_back_pushes() {
     let client = Client::connect(opts).await.unwrap();
     let (mut live, _, _) = client.live(&[Topic::Panels], vec![]).await.unwrap();
     assert_eq!(live.send(Op::SessionFocus { q: "s1".into() }), 1);
-    assert_eq!(live.send(Op::UiHere { folder: None }), 2);
+    assert_eq!(
+        live.send(Op::UiHere {
+            folder: None,
+            by_user: false,
+        }),
+        2
+    );
     assert_eq!(next(&mut live).await, LiveMsg::Patch(patch(2)));
     assert_eq!(
         next(&mut live).await,
@@ -246,6 +255,7 @@ async fn a_write_that_waits_doesnt_stop_the_reading() {
     for _ in 0..OPS {
         live.send(Op::UiHere {
             folder: Some(format!("/{}", "y".repeat(4096))),
+            by_user: false,
         });
     }
     for rev in 2..2 + PUSHES {

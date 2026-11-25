@@ -57,6 +57,8 @@ impl Rig {
         ensure_private_dir(&agent).expect("the agent folder");
         write_stub_script(&agent, steps);
         let now: Timestamp = TYPICAL_NOW.parse().unwrap();
+        // moa opened the day already: the user's presence opens nothing here (D2).
+        tb.opened_on(now.to_zoned(TimeZone::posix(TYPICAL_TZ).unwrap()).date());
         let time = FakeTime::new(UtcMs(now.as_millisecond()));
         Rig {
             tb,
