@@ -168,6 +168,10 @@ pub struct Moa {
     /// When the last prompt that carried session reports on its own was saved: the next
     /// wake waits a gap after it. Kept in memory.
     pub last_wake: Option<UtcMs>,
+    /// Where the idle terminals told on a wake-up end ([`idle::mark`] of the last one told):
+    /// the next wake-up tells only those after it. Set only by the commit of a prompt that
+    /// carried an idle block. Kept in memory.
+    pub idle_told: Option<idle::IdleMark>,
     /// When the last automatic prompt, a wake-up's or a yes's, failed to reach moa's agent:
     /// every automatic source waits a gap after it, rather than starting moa's agent, a thread
     /// or a commit again at once. A prompt that reaches moa's agent ends it. Kept in memory.
@@ -824,12 +828,13 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         false => Vec::new(),
     };
     let due_block = (!due.is_empty()).then(|| due::block(state, now, &due));
-    // The terminals idle since the last wake-up: `last_wake` moves only once this commits.
+    // The idle terminals not told yet; the mark moves past them once this commits.
     let idle: Vec<&Terminal> = match wake {
-        true => idle::idle_terms(state, now, state.central.last_wake),
+        true => idle::idle_terms(state, now, state.central.idle_told),
         false => Vec::new(),
     };
     let idle_block = (!idle.is_empty()).then(|| idle::block(state, now, &idle));
+    let idle_told = idle.last().map(|t| idle::mark(state, t));
     // The reports' room is what the other blocks leave of the prompt.
     let used: usize = [&yes_block, &due_block, &idle_block]
         .into_iter()
@@ -918,6 +923,9 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let moa = &mut state.central;
     if automatic && n > 0 {
         moa.last_wake = Some(now.wall);
+    }
+    if idle_told.is_some() {
+        moa.idle_told = idle_told;
     }
     moa.failed_at = None;
     moa.phase = Phase::Thinking;

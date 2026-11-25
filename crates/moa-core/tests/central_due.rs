@@ -4,7 +4,7 @@
 mod common;
 
 use common::central::{
-    body_of, end_turn, fire, moa_at, play, prompt_at, prompts_sent, sent, wake_timer, you_commit,
+    body_of, end_turn, fire, play, prompt_at, prompts_sent, sent, toml, wake_timer, you_commit,
     you_row,
 };
 use common::{at, changes, generation, link_up};
@@ -12,13 +12,14 @@ use jiff::ToSpan;
 use jiff::civil::Date;
 use moa_core::central::{due, idle};
 use moa_core::change::Change;
-use moa_core::effect::{Effect, Input, handle_checked};
+use moa_core::effect::{Effect, Input, RefuseWrites, handle_checked};
 use moa_core::hook::HookKind;
 use moa_core::model::{
-    AgentKind, Lifecycle, Location, Nag, OpenedBy, Task, TaskId, TaskStatus, TermId, Terminal,
+    AgentKind, Lifecycle, Location, Nag, OpenedBy, Suggestion, SuggestionId, SuggestionStatus,
+    Task, TaskId, TaskStatus, TermId, Terminal, YES_TOLD,
 };
-use moa_core::op::{ConnId, Op, ReqId, TaskSet};
-use moa_core::state::State;
+use moa_core::op::{Answer, ConnId, Op, ReqId, TaskSet};
+use moa_core::state::{Deps, Snapshot, State};
 use moa_core::time::start_of_next_day;
 use moa_core::{Now, UtcMs};
 use moa_testkit::brain::TypicalBrain;
@@ -34,14 +35,20 @@ const DUE_BLOCK: &str = "Due by tomorrow (end your reply with these lines as the
                          ⏰ Due today: Merge PR #3\n\
                          ⏰ Due tomorrow: Book the venue";
 
-/// The typical brain with the tasks and open terminals given, moa's account `acct-a` and
-/// `settings` after its `moa.toml`, and the tmux link up; a session of it that reports.
+/// The suggestion each world has open, with nothing to run: a yes to it waits for moa.
+const YES_ID: i64 = 900;
+
+/// The typical brain with the tasks and open terminals given, open suggestion [`YES_ID`],
+/// moa's account `acct-a` and `settings` after its `moa.toml`, and the tmux link up; a
+/// session of it that reports.
 struct World {
     b: TypicalBrain,
     st: State,
     /// What the start said.
     start: Vec<Effect>,
     session: (String, String),
+    /// The open terminals it started with.
+    terminals: Vec<Terminal>,
     seq: u32,
     req: u64,
 }
@@ -58,8 +65,25 @@ impl World {
         snap.tasks = tasks(b.now().local_day);
         let terminals = terminals(&b);
         snap.next_ids.terminal = terminals.iter().map(|t| t.id.0 + 1).max().unwrap_or(1);
-        snap.terminals = terminals;
-        let (mut st, start) = moa_at(&b, "acct-a", settings, snap, b.now());
+        snap.terminals = terminals.clone();
+        snap.suggestions.push(Suggestion {
+            id: SuggestionId(YES_ID),
+            text: "Kite has 3 overdue tasks blocked on the domain; move them to Friday?".into(),
+            status: SuggestionStatus::Open,
+            actions: vec![],
+            actions_raw: None,
+            actions_invalid: None,
+            result: None,
+            created_at: UtcMs(1),
+            resolved_at: None,
+        });
+        let deps = Deps {
+            home: b.home.clone(),
+            parse_action: Some(moa_proto::cli::parse_action),
+            ..Deps::default()
+        };
+        let settings = format!("{}{settings}", toml("acct-a"));
+        let (mut st, start) = common::started_at(&b, &settings, deps, snap, b.now());
         link_up(&b, &mut st);
         let session = st
             .sessions()
@@ -77,6 +101,7 @@ impl World {
             st,
             start,
             session,
+            terminals,
             seq: 0,
             req: 0,
         }
@@ -116,6 +141,43 @@ impl World {
         let w = ms + 45 * SEC;
         let fx = fire(&mut self.st, w);
         play(&mut self.st, w, fx)
+    }
+
+    /// Your yes to [`YES_ID`] at `ms`; moa's agent starts and opens what it is asked.
+    fn yes(&mut self, ms: i64) -> Vec<Effect> {
+        self.req += 1;
+        let input = Input::Client {
+            conn: ConnId(1),
+            req: ReqId(self.req),
+            caller: Default::default(),
+            op: Op::SuggestionAnswer {
+                id: Some(YES_ID),
+                answer: Answer::Yes,
+            },
+        };
+        let fx = handle_checked(&mut self.st, input, at(UtcMs(ms)));
+        play(&mut self.st, ms, fx)
+    }
+
+    /// From `ms` until `until` the store refuses writes; the core reloads what it saved.
+    fn refuse_writes(&mut self, ms: i64, until: i64) -> Vec<Effect> {
+        let mut snapshot = Snapshot {
+            tasks: self.st.tasks().cloned().collect(),
+            reports: self.st.reports().cloned().collect(),
+            threads: self.st.threads().cloned().collect(),
+            terminals: self.terminals.clone(),
+            ..self.b.snapshot()
+        };
+        let next = self.terminals.iter().map(|t| t.id.0 + 1).max().unwrap_or(1);
+        snapshot.next_ids.terminal = next;
+        let input = Input::Reload {
+            snapshot: Box::new(snapshot),
+            refuse_writes: Some(RefuseWrites {
+                until: UtcMs(until),
+                reason: "the disk is full".into(),
+            }),
+        };
+        handle_checked(&mut self.st, input, at(UtcMs(ms)))
     }
 
     /// `task set ID --due DUE` at `ms`.
@@ -461,7 +523,7 @@ fn the_idle_block() {
     assert_eq!(block, IDLE_BLOCK);
     insta::assert_snapshot!(block);
     // Since a moment after #4 went idle, only #7 is newly idle.
-    let since = Some(UtcMs(now.wall.0 - 3 * HOUR + MIN));
+    let since = Some((UtcMs(now.wall.0 - 3 * HOUR + MIN), TermId(0)));
     let ids: Vec<i64> = idle::idle_terms(&w.st, &now, since)
         .iter()
         .map(|t| t.id.0)
@@ -536,4 +598,123 @@ fn a_wake_carries_due_then_idle() {
         "{text}"
     );
     assert!(idle.contains("- #4 kite · ~/private/kite · idle 5 h · at its prompt\n"));
+}
+
+/// Review I1, ruling R6: a yes's prompt that carries the reports, and no idle block, between
+/// two wake-ups hides no terminal from the second.
+#[test]
+fn a_yes_between_wakes_hides_no_idle_terminal() {
+    let terms = |b: &TypicalBrain| {
+        let now = b.now().wall.0;
+        vec![
+            term(
+                b,
+                4,
+                "kite",
+                "private/kite",
+                "zsh",
+                now - 9 * HOUR,
+                Some(now - 5 * HOUR),
+            ),
+            term(
+                b,
+                8,
+                "beacon",
+                "private/beacon",
+                "zsh",
+                now - 9 * HOUR,
+                Some(now - HOUR),
+            ),
+        ]
+    };
+    let mut w = World::new(|_| vec![], terms, "");
+    let text = sent(&w.wake(w.t(MIN)));
+    assert!(text.contains("- #4 kite"), "{text}");
+    // #8 goes idle an hour after the typical time. Then a session reports, and your yes goes
+    // at once, carrying the report too.
+    let ms = w.t(2 * HOUR);
+    end_turn(&mut w.st, ms);
+    w.report(ms);
+    let fx = w.yes(ms + SEC);
+    let text = sent(&fx);
+    assert!(text.contains("(moa · the user said yes"), "{text}");
+    assert!(text.contains("(moa · a wake-up, not typed by the user) 1 session report(s)"));
+    assert!(!text.contains("Idle terminals"), "{text}");
+    assert_eq!(body_of(you_row(&fx))["reports"], 1);
+    assert!(
+        w.st.suggestions()
+            .any(|s| s.result.as_deref() == Some(YES_TOLD))
+    );
+    // The next wake-up tells #8.
+    let text = sent(&w.wake(w.t(3 * HOUR)));
+    assert!(
+        text.ends_with("\n- #8 beacon · ~/private/beacon · idle 4 h · at its prompt"),
+        "{text}"
+    );
+}
+
+/// Review m1: past [`idle::IDLE_MAX`], the rest come with the next wake-up, even the one
+/// that went idle at the same moment as the last one told.
+#[test]
+fn idle_terminals_past_ten_come_next_time() {
+    const { assert!(idle::IDLE_MAX == 10) };
+    let terms = |b: &TypicalBrain| {
+        let now = b.now().wall.0;
+        (1..=12)
+            .map(|id| {
+                // #11 was touched with #10.
+                let touched = now - 20 * HOUR + id.min(10) * MIN;
+                let name = format!("kite-{id}");
+                term(
+                    b,
+                    id,
+                    &name,
+                    "private/kite",
+                    "zsh",
+                    now - 30 * HOUR,
+                    Some(touched),
+                )
+            })
+            .collect()
+    };
+    let mut w = World::new(|_| vec![], terms, "");
+    let told = |text: &str| -> Vec<String> {
+        let lines = text.lines().filter(|l| l.starts_with("- #"));
+        lines
+            .map(|l| l.split(' ').nth(1).unwrap().to_string())
+            .collect()
+    };
+    let text = sent(&w.wake(w.t(MIN)));
+    let first: Vec<String> = (1..=10).map(|id| format!("#{id}")).collect();
+    assert_eq!(told(&text), first, "{text}");
+    let text = sent(&w.wake(w.t(10 * MIN)));
+    assert_eq!(told(&text), ["#11", "#12"], "{text}");
+    let text = sent(&w.wake(w.t(20 * MIN)));
+    assert!(!text.contains("Idle terminals"), "{text}");
+}
+
+/// Review m2: a wake-up whose commit is refused saves no `nags` row, and what's due goes with
+/// the next one once writes are back. The idle terminals it would have told wait too.
+#[test]
+fn a_refused_wake_saves_no_nag() {
+    let mut w = World::new(five_due, d10_terminals, "");
+    let ms = w.t(MIN);
+    w.report(ms);
+    let wake = ms + 45 * SEC;
+    let fx = fire(&mut w.st, wake);
+    // Writes are refused while moa's agent starts for the wake.
+    w.refuse_writes(wake, wake + 10 * MIN);
+    let fx = play(&mut w.st, wake, fx);
+    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+    let saved = changes(&fx).into_iter().cloned().collect::<Vec<_>>();
+    assert!(nags(&saved).is_empty(), "{saved:?}");
+    assert_eq!(due::due_now(&w.st, &at(UtcMs(wake))).len(), 5);
+    assert_eq!(w.st.central().idle_told, None);
+    // Writes are back: the wake goes, with what's due and the idle terminals.
+    let back = wake + 10 * MIN;
+    let fx = fire(&mut w.st, back);
+    let fx = play(&mut w.st, back, fx);
+    let text = sent(&fx);
+    assert!(text.contains(&format!("\n\n---\n\n{DUE_BLOCK}\n\n---\n\nIdle terminals")));
+    assert_eq!(nags(you_commit(&fx)).len(), 5);
 }
