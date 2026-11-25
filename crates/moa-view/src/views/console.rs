@@ -1,10 +1,11 @@
 //! The console (B6): moa's conversation, the newest at the bottom. Your prompts, and the
-//! session reports each carried (K12); moa's turns, each under a header and behind a gutter
-//! (what a wake-up carried, its answers as Markdown, its thoughts, tool calls, plans and
-//! notes, its permission requests as cards you answer, K12, and the cards moa's core writes,
-//! K7); the sessions' events, one line per session (B3); your commands' cards; errors; and a
-//! separator where the thread changes (B2). A row it can't read is one dim line (B10):
-//! nothing here panics, whatever the daemon sends.
+//! session reports and yeses each carried (K12, D1); moa's turns, each under a header and
+//! behind a gutter (what an automatic prompt carried, its answers as Markdown, its thoughts,
+//! tool calls, plans and notes, its permission requests as cards you answer, K12, the cards
+//! moa's core writes, K7, and its suggestions as cards you answer, D7); the sessions' events,
+//! one line per session (B3); your commands' cards; errors; and a separator where the thread
+//! changes (B2). A row it can't read is one dim line (B10): nothing here panics, whatever the
+//! daemon sends.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
@@ -13,7 +14,7 @@ use moa_core::UtcMs;
 use moa_core::central::feed::kind;
 use moa_core::central::wire::PermKind;
 use moa_core::console::{COMMANDS, permission_args};
-use moa_core::model::SessionId;
+use moa_core::model::{SessionId, SuggestionId, SuggestionStatus, YES_DONE, YES_TOLD, YES_WAITING};
 use moa_core::op::PermAnswer;
 use moa_core::publish::{EventRow, FeedRow, MoaRow};
 use moa_core::state::EventWhat;
@@ -28,6 +29,8 @@ use crate::markdown::{self, button_span};
 use crate::text::{self, clean, cut, cut_spans, ellipsize, width, wrap_spans};
 use crate::views::{label, spinner};
 
+/// The results of a yes that went as planned: a suggestion's card says nothing more of them.
+const YES_WENT_WELL: [&str; 3] = [YES_DONE, YES_WAITING, YES_TOLD];
 /// What a moa turn draws in front of each of its lines.
 const GUTTER: &str = "│ ";
 /// What a card draws in front of each line of its reply.
@@ -99,6 +102,9 @@ pub struct ConsoleUi {
     /// The permission requests answered from here that moa's state still has waiting: y, a
     /// and n skip them (K12).
     pub answered: BTreeSet<i64>,
+    /// The suggestions answered by their card's button, by id, with the status and answer
+    /// time the topic showed then: until it shows another, the card draws no buttons (D7).
+    pub pressed: BTreeMap<i64, (SuggestionStatus, Option<UtcMs>)>,
 }
 
 impl Default for ConsoleUi {
@@ -126,6 +132,7 @@ impl Default for ConsoleUi {
             closed: None,
             palette_rows: 0,
             answered: BTreeSet::new(),
+            pressed: BTreeMap::new(),
         }
     }
 }
@@ -147,14 +154,22 @@ pub enum Asked {
         at: UtcMs,
         typed: bool,
     },
-    /// An answer to permission request `id` (`/permission`, K12), typed or pressed at `at`:
-    /// its reply makes no card, as the request's own card says it.
+    /// An answer to a permission request (`/permission`, K12), typed or pressed at `at`, or
+    /// to a suggestion by its card's button (D7): its reply makes no card, as the request's or
+    /// the suggestion's own card says it.
     Answer {
-        id: i64,
+        to: Answered,
         line: String,
         at: UtcMs,
         typed: bool,
     },
+}
+
+/// What an [`Asked::Answer`] answers, by id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Answered {
+    Permission(i64),
+    Suggestion(i64),
 }
 
 /// A line of the console, as a rebuild finds it again (F15): by the row drawn at or above
@@ -514,6 +529,20 @@ pub fn answer_line(id: i64, answer: PermAnswer) -> String {
     format!("/permission {id} {}", answer.name())
 }
 
+/// The line a suggestion card's button sends: `/suggestion yes|later|no ID` (D7).
+fn suggestion_line(word: &str, id: i64) -> String {
+    format!("/suggestion {word} {id}")
+}
+
+/// The suggestion `line` answers, when it is a [`suggestion_line`].
+pub fn suggestion_answer(line: &str) -> Option<i64> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match &words[..] {
+        ["/suggestion", "yes" | "later" | "no", id] => id.parse().ok(),
+        _ => None,
+    }
+}
+
 /// The request `line` answers, when it is an [`answer_line`].
 pub fn answer_id(line: &str) -> Option<i64> {
     let words: Vec<&str> = line.split_whitespace().collect();
@@ -803,6 +832,7 @@ pub fn build(data: &Data, ctx: &Ctx, ui: &ConsoleUi, up: bool, width: u16) -> Co
     let mut draw = Draw {
         data,
         ctx,
+        pressed: &ui.pressed,
         up,
         width: usize::from(width),
         lines: Vec::new(),
@@ -954,6 +984,8 @@ enum Last {
 struct Draw<'a> {
     data: &'a Data,
     ctx: &'a Ctx,
+    /// [`ConsoleUi::pressed`]: those cards draw no buttons.
+    pressed: &'a BTreeMap<i64, (SuggestionStatus, Option<UtcMs>)>,
     /// The panel's connection is up.
     up: bool,
     width: usize,
@@ -983,13 +1015,26 @@ impl<'a> Draw<'a> {
                     let lines = self.row(row, self.width);
                     self.lines.extend(lines);
                     self.last = Last::Row;
-                } else if let Some(n) = carried(row) {
-                    // A wake-up: its text is the reports, and it says so under the header
-                    // as soon as it is sent.
-                    self.header(row.at);
-                    let text = format!("moa is reading {}…", session_reports(n));
-                    let lines = hanging(dim("· "), vec![dim(&text)], self.room());
-                    self.push_row(lines);
+                } else {
+                    // An automatic prompt: its text is what it carried (D1), and it says so
+                    // under the header as soon as it is sent.
+                    let mut said = Vec::new();
+                    let ids = yeses(row);
+                    if !ids.is_empty() {
+                        said.push(format!("moa acts on your yes to {}", id_list(&ids)));
+                    }
+                    if let Some(n) = carried(row) {
+                        said.push(format!("moa is reading {}…", session_reports(n)));
+                    }
+                    if !said.is_empty() {
+                        self.header(row.at);
+                        let room = self.room();
+                        let lines = said
+                            .iter()
+                            .flat_map(|t| hanging(dim("· "), vec![dim(t)], room))
+                            .collect();
+                        self.push_row(lines);
+                    }
                 }
             }
             other => {
@@ -1156,8 +1201,11 @@ impl<'a> Draw<'a> {
             kind::YOU => text.map(|t| {
                 let you = |s: &str| Span::new(s, Tone::You);
                 let mut lines = hanging(you("› "), vec![you(&clean(t))], room);
-                if let Some(n) = carried(row) {
-                    let with = format!("· with {}", session_reports(n));
+                let ids = yeses(row);
+                let yes =
+                    (!ids.is_empty()).then(|| format!("· with your yes to {}", id_list(&ids)));
+                let reports = carried(row).map(|n| format!("· with {}", session_reports(n)));
+                for with in yes.into_iter().chain(reports) {
                     lines.extend(hanging(Span::new("  ", Tone::Text), vec![dim(&with)], room));
                 }
                 lines
@@ -1182,6 +1230,7 @@ impl<'a> Draw<'a> {
             kind::ERROR => text.map(|t| hanging(fail("✗ "), vec![fail(&clean(t))], room)),
             kind::PERMISSION => self.permission(row, room),
             kind::CARD => self.core_card(row, room),
+            kind::SUGGESTION => self.suggestion(row, room),
             _ => None,
         };
         lines.unwrap_or_else(|| {
@@ -1255,19 +1304,10 @@ impl<'a> Draw<'a> {
             return Some(lines);
         }
         let inner = room - width(CARD_GUTTER);
-        let mut buttons = Vec::new();
-        for answer in offered(&row.body) {
-            let button = Button {
-                label: format!("{} {}", answer_key(answer), answer.name()),
-                command: answer_line(row.id, answer),
-            };
-            if let Some(span) = button_span(&mut self.buttons, button, false) {
-                if !buttons.is_empty() {
-                    buttons.push(Span::new(" ", Tone::Text));
-                }
-                buttons.push(span);
-            }
-        }
+        let buttons = self.button_spans(offered(&row.body).into_iter().map(|answer| Button {
+            label: format!("{} {}", answer_key(answer), answer.name()),
+            command: answer_line(row.id, answer),
+        }));
         let mut card: Vec<Line> = Vec::new();
         if !buttons.is_empty() {
             card.extend(wrap_spans(&buttons, inner).into_iter().map(Line::new));
@@ -1331,8 +1371,8 @@ impl<'a> Draw<'a> {
 
     /// `▸ <command>`, then its reply as Markdown behind the card's gutter.
     fn card(&mut self, card: &Card) {
-        let head = Span::new(clean(&card.line), Tone::Dim);
-        let lines = self.carded(head, &card.text, self.width);
+        let head = vec![Span::new(clean(&card.line), Tone::Dim)];
+        let lines = self.carded(Span::new("▸ ", Tone::Dim), head, &card.text, self.width);
         self.lines.extend(lines);
     }
 
@@ -1346,13 +1386,100 @@ impl<'a> Draw<'a> {
             Some("account") => "moa's account failed",
             _ => "moa",
         };
-        Some(self.carded(Span::new(head, Tone::Warn), text, room))
+        let warn = |s: &str| Span::new(s, Tone::Warn);
+        Some(self.carded(warn("▸ "), vec![warn(head)], text, room))
     }
 
-    /// `▸ ` and `head`, then `text` as Markdown behind the card's gutter, `w` cells wide in
-    /// all.
-    fn carded(&mut self, head: Span, text: &str, w: usize) -> Vec<Line> {
-        let mut lines = hanging(Span::new("▸ ", head.tone), vec![head], w);
+    /// moa's suggestion (D7, D10), as the suggestions topic has it now: answered anywhere,
+    /// it is redrawn. Open or later: `✦ moa suggests` (` · later`), its text as Markdown
+    /// behind the card's gutter, what yes runs (or that it can't run its actions), and
+    /// `[yes] [later] [no]`, with no `[yes]` when it can't. Answered: `✓ yes: <text>`, with
+    /// `but: <result>` unless that is one of [`YES_WENT_WELL`]; `✗ no: <text>`. One the topic
+    /// hasn't got, or whose status this build doesn't know: `✦ suggestion #N: <text>`, the
+    /// row's text. `None` without an id, or without a text from either.
+    fn suggestion(&mut self, row: &FeedRow, room: usize) -> Option<Vec<Line>> {
+        let id = row.body.get("id")?.as_i64()?;
+        let Some(s) = self.data.suggestions.get(&SuggestionId(id)) else {
+            let text = clean(row.body.get("text")?.as_str()?);
+            let text = dim(&format!("suggestion #{id}: {text}"));
+            return Some(hanging(dim("✦ "), vec![text], room));
+        };
+        let text = clean(&s.text);
+        let later = match s.status {
+            SuggestionStatus::Open => false,
+            SuggestionStatus::Later => true,
+            SuggestionStatus::Accepted => {
+                let ok = |t: &str| Span::new(t, Tone::Ok);
+                let mut lines = hanging(ok("✓ "), vec![ok(&format!("yes: {text}"))], room);
+                let result = s.result.as_deref().map(clean);
+                if let Some(but) = result.filter(|r| !YES_WENT_WELL.contains(&r.as_str())) {
+                    let but = vec![dim(&format!("but: {but}"))];
+                    lines.extend(hanging(Span::new("  ", Tone::Text), but, room));
+                }
+                return Some(lines);
+            }
+            SuggestionStatus::Rejected => {
+                return Some(hanging(dim("✗ "), vec![dim(&format!("no: {text}"))], room));
+            }
+        };
+        let brain = |t: &str| Span::new(t, Tone::Brain);
+        let mut head = vec![brain("moa suggests")];
+        if later {
+            head.push(dim(" · later"));
+        }
+        let mut lines = self.carded(brain("✦ "), head, &s.text, room);
+        if room <= width(CARD_GUTTER) {
+            return Some(lines);
+        }
+        let inner = room - width(CARD_GUTTER);
+        let mut card = Vec::new();
+        let runs = s.actions_invalid.is_none();
+        if !runs {
+            card.push(Line::new(cut_spans(
+                vec![dim("yes can't run its actions")],
+                inner,
+            )));
+        } else if !s.actions.is_empty() {
+            let actions: Vec<String> = s.actions.iter().map(|a| clean(&a.line())).collect();
+            card.extend(hanging(
+                dim("yes runs: "),
+                vec![dim(&actions.join("; "))],
+                inner,
+            ));
+        }
+        if self.pressed.contains_key(&id) {
+            // Answered from here: its answer is on the way.
+            lines.extend(behind(CARD_GUTTER, card));
+            return Some(lines);
+        }
+        let words = ["yes", "later", "no"].into_iter();
+        let buttons = self.button_spans(words.filter(|w| runs || *w != "yes").map(|word| Button {
+            label: word.to_string(),
+            command: suggestion_line(word, id),
+        }));
+        card.extend(wrap_spans(&buttons, inner).into_iter().map(Line::new));
+        lines.extend(behind(CARD_GUTTER, card));
+        Some(lines)
+    }
+
+    /// `buttons`, each pushed on the build's ([`button_span`]), as spans a space apart.
+    fn button_spans(&mut self, buttons: impl IntoIterator<Item = Button>) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for button in buttons {
+            if let Some(span) = button_span(&mut self.buttons, button, false) {
+                if !spans.is_empty() {
+                    spans.push(Span::new(" ", Tone::Text));
+                }
+                spans.push(span);
+            }
+        }
+        spans
+    }
+
+    /// `lead` and `head`, then `text` as Markdown behind the card's gutter, `w` cells wide
+    /// in all.
+    fn carded(&mut self, lead: Span, head: Vec<Span>, text: &str, w: usize) -> Vec<Line> {
+        let mut lines = hanging(lead, head, w);
         if w <= width(CARD_GUTTER) {
             return lines;
         }
@@ -1368,20 +1495,13 @@ impl<'a> Draw<'a> {
     /// none. Its buttons come after the text's (those left out included, never drawn).
     fn bar(&mut self) -> Vec<Line> {
         let commands = self.data.bar.iter().flat_map(|b| &b.commands);
-        let mut spans = Vec::new();
-        for command in commands {
+        let spans = self.button_spans(commands.map(|command| {
             let command = clean(command);
-            let button = Button {
+            Button {
                 label: command.clone(),
                 command,
-            };
-            if let Some(span) = button_span(&mut self.buttons, button, false) {
-                if !spans.is_empty() {
-                    spans.push(Span::new(" ", Tone::Text));
-                }
-                spans.push(span);
             }
-        }
+        }));
         if spans.is_empty() {
             return Vec::new();
         }
@@ -1449,6 +1569,25 @@ fn carried(row: &FeedRow) -> Option<u64> {
         .get("reports")
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
+}
+
+/// The suggestions whose yes a `you` row carried (D1), by id.
+fn yeses(row: &FeedRow) -> Vec<i64> {
+    let ids = row.body.get("yeses").and_then(Value::as_array);
+    ids.into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .collect()
+}
+
+/// `#12`, `#12 and #14`, `#12, #14 and #15`.
+fn id_list(ids: &[i64]) -> String {
+    let ids: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+    match ids.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// `N session reports`, or `1 session report`.

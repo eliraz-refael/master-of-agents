@@ -191,6 +191,57 @@ fn startup_leaves_a_suggestion_with_an_unknown_value_alone() {
     assert!(persists(&fx).is_empty());
 }
 
+/// Only the user says yes: moa's own `suggestion yes` is refused, with actions or without,
+/// and changes nothing; its `later` and `no` still go.
+#[test]
+fn only_the_user_says_yes() {
+    let (b, mut st) = typical();
+    let now = b.now();
+    let made = |st: &mut State, text: &str, actions: &[&str]| {
+        ok(st, suggest(text, actions), &now).data["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let plain = made(&mut st, "Read the Harbor notes before the call?", &[]);
+    let acting = made(
+        &mut st,
+        "Note that Kite waits?",
+        &["note 'Kite waits on the domain'"],
+    );
+    let moa = CallerInfo {
+        moa_session: Some("moa".into()),
+        ..CallerInfo::default()
+    };
+    let as_moa = |st: &mut State, op: Op| {
+        handle_checked(
+            st,
+            Input::Client {
+                conn: ConnId(1),
+                req: ReqId(1),
+                caller: moa.clone(),
+                op,
+            },
+            now.clone(),
+        )
+    };
+    for id in [plain, acting] {
+        let fx = as_moa(&mut st, answer(id, Answer::Yes));
+        let reply = moa_core::effect::reply_of(&fx).unwrap().clone();
+        assert_eq!(
+            reply.unwrap_err().0,
+            "only the user says yes to a suggestion"
+        );
+        assert!(persists(&fx).is_empty(), "{fx:?}");
+        assert_eq!(row(&st, id).status, SuggestionStatus::Open);
+    }
+    let fx = as_moa(&mut st, answer(plain, Answer::Later));
+    assert!(moa_core::effect::reply_of(&fx).unwrap().is_ok(), "{fx:?}");
+    assert_eq!(row(&st, plain).status, SuggestionStatus::Later);
+    let fx = as_moa(&mut st, answer(acting, Answer::No));
+    assert!(moa_core::effect::reply_of(&fx).unwrap().is_ok(), "{fx:?}");
+    assert_eq!(row(&st, acting).status, SuggestionStatus::Rejected);
+}
+
 #[test]
 fn imported_suggestion_two_runs() {
     let (b, mut st) = typical();
@@ -247,7 +298,7 @@ fn suggest_validates_and_refuses_duplicates() {
 
     assert_eq!(
         err(&mut st, suggest("Tidy", &["rm -rf x"]), &now),
-        "--do 'rm -rf x': a suggestion can run moactl archive, close, group, note, project, set, task"
+        "--do 'rm -rf x': a suggestion can run moactl archive, close, group, note, project, set, task, term close"
     );
     assert!(
         err(&mut st, suggest("Tidy", &["task 1 --status done"]), &now)
@@ -456,6 +507,27 @@ fn suggestion_ls_matches_the_spike_layout() {
     insta::assert_snapshot!("suggestion_ls_matches_the_spike_layout", text);
 }
 
+/// A suggestion may close a terminal, and run `term` no other way: opening one on a yes is
+/// nothing anybody asked for.
+#[test]
+fn a_suggestion_may_close_terminals() {
+    let (b, mut st) = typical();
+    let now = b.now();
+    let made = ok(
+        &mut st,
+        suggest("Close Kite's shell", &["term close 4"]),
+        &now,
+    );
+    let n = made.data["id"].as_i64().unwrap();
+    assert_eq!(row(&st, n).actions[0].args, ["close", "4"]);
+    for act in ["term ~/private/kite", "term ls"] {
+        assert_eq!(
+            err(&mut st, suggest("Open Kite", &[act]), &now),
+            format!("--do '{act}': a suggestion can run term only as term close")
+        );
+    }
+}
+
 /// `close` runs from a suggestion through the same transaction (R15): the session ends,
 /// and its tab is killed once the whole answer is saved.
 #[test]
@@ -523,4 +595,96 @@ fn a_suggestion_can_close_a_session() {
         .unwrap();
     assert!(saved < killed, "{fx:?}");
     assert_eq!(persists(&fx).len(), 1, "one transaction: {fx:?}");
+}
+
+/// `suggest`, from moa's agent (its caller is moa), at `now`.
+fn moa_suggests(st: &mut State, now: &Now, text: &str) -> Vec<Effect> {
+    let caller = CallerInfo {
+        moa_session: Some("moa".into()),
+        ..CallerInfo::default()
+    };
+    handle_checked(
+        st,
+        Input::Client {
+            conn: ConnId(1),
+            req: ReqId(9),
+            caller,
+            op: suggest(text, &[]),
+        },
+        now.clone(),
+    )
+}
+
+/// The `suggestion` rows `fx` saved: their thread and body.
+fn suggestion_cards(fx: &[Effect]) -> Vec<(String, serde_json::Value)> {
+    persists(fx)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| match c {
+            Change::Feed(r) if r.kind == "suggestion" => {
+                Some((r.thread_id.clone(), serde_json::from_str(&r.body).unwrap()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// D7: a new suggestion is a card in the console too: a `suggestion` row `{"id", "text"}` in
+/// the turn's thread, saved in the suggestion's own commit. A duplicate writes none.
+#[test]
+fn a_suggestion_is_carded() {
+    use common::central::{first_turn, moa};
+    let b = TypicalBrain::new();
+    let mut st = moa(&b);
+    let now = b.now();
+    first_turn(&mut st, &now, "th-1", false);
+    let text = "Archive the Beacon spike";
+    let fx = moa_suggests(&mut st, &now, text);
+    let commits = persists(&fx);
+    assert_eq!(commits.len(), 1, "one commit");
+    let id = commits[0]
+        .iter()
+        .find_map(|c| match c {
+            Change::Suggestion(s) => Some(s.id.0),
+            _ => None,
+        })
+        .expect("the suggestion is in the commit");
+    assert_eq!(
+        suggestion_cards(&fx),
+        [("th-1".into(), serde_json::json!({ "id": id, "text": text }))]
+    );
+    assert_eq!(row(&st, id).status, SuggestionStatus::Open);
+
+    let fx = moa_suggests(&mut st, &now, text);
+    assert!(persists(&fx).is_empty(), "a duplicate saves nothing");
+}
+
+/// D7: with no thread open the card goes in the newest saved thread, of any account; with no
+/// thread at all there is no card, and the suggestion is saved all the same.
+#[test]
+fn a_card_goes_to_the_newest_thread() {
+    use common::central::{moa, moa_with, thread};
+    let b = TypicalBrain::new();
+    let now = b.now();
+    let t = now.wall.0;
+    let threads = vec![
+        thread(
+            "th-a",
+            "acct-a",
+            now.local_day.yesterday().unwrap(),
+            t - 86_400_000,
+        ),
+        thread("th-b", "acct-b", now.local_day, t - 60_000),
+    ];
+    let mut st = moa_with(&b, "acct-a", threads);
+    let fx = moa_suggests(&mut st, &now, "Set Kite's due date");
+    let cards = suggestion_cards(&fx);
+    assert_eq!(cards.len(), 1, "one card");
+    assert_eq!(cards[0].0, "th-b");
+
+    let mut st = moa(&b);
+    let fx = moa_suggests(&mut st, &now, "Set Kite's due date");
+    assert_eq!(persists(&fx).len(), 1, "the suggestion is saved");
+    assert!(suggestion_cards(&fx).is_empty(), "no card");
+    assert!(st.suggestions().any(|s| s.text == "Set Kite's due date"));
 }

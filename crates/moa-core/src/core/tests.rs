@@ -182,6 +182,36 @@ fn linked() -> State {
     s
 }
 
+/// A yes's terminal close starts only after its answer is saved: with the commit refused, or
+/// the op's answer `Err`, none starts and nothing is said. (A saved one with no record to
+/// close logs that it didn't close: it ran.)
+#[test]
+fn tx_closes_follow_the_commit() {
+    let logs = |fx: &[Effect]| fx.iter().filter(|e| matches!(e, Effect::Log(_))).count();
+    let mut s = linked();
+    s.refuse_writes = Some(RefuseWrites {
+        until: UtcMs(2_000_000),
+        reason: "disk full".into(),
+    });
+    let mut tx = Tx::new(&now());
+    tx.close_terminal(TermId(1));
+    assert!(tx.commit(&mut s, vec![group("A")]).is_err());
+    let fx = post_commit(&mut s, tx);
+    assert!(sends(&fx).is_empty() && logs(&fx) == 0, "{fx:?}");
+    s.refuse_writes = None;
+
+    let mut tx = Tx::new(&now());
+    tx.close_terminal(TermId(1));
+    let fx = finish_op(&mut s, tx, ConnId(1), ReqId(1), Err(OpError("no".into())));
+    assert!(sends(&fx).is_empty() && logs(&fx) == 0, "{fx:?}");
+
+    let mut tx = Tx::new(&now());
+    tx.close_terminal(TermId(1));
+    tx.commit(&mut s, vec![group("B")]).unwrap();
+    let fx = post_commit(&mut s, tx);
+    assert_eq!(logs(&fx), 1, "{fx:?}");
+}
+
 fn kill() -> Cmd {
     Cmd::new("kill-pane").args(["-t", "%3"])
 }

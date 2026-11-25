@@ -13,7 +13,9 @@ use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, T
 use crate::hooks;
 use crate::keys;
 use crate::live::{QUIET_AFTER, quiet_candidate};
-use crate::model::{ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind, SessionId};
+use crate::model::{
+    ActivityId, ActivityRow, ActivityWho, Event, EventId, EventKind, OpenedBy, SessionId, TermId,
+};
 use crate::op::{ConnId, Done, Op, OpError, ReqId};
 use crate::ops;
 use crate::ops::term::Tell;
@@ -22,7 +24,7 @@ use crate::prompt;
 use crate::publish::{CoreEvent, Topic};
 use crate::reconcile;
 use crate::sleep;
-use crate::state::{State, Table};
+use crate::state::{Caller, State, Table};
 use crate::terminals;
 use crate::time::start_of_next_day;
 use crate::tmux::cmd::Cmd;
@@ -253,9 +255,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     Asked::Ls { conn, req, all } => {
                         lists.push((conn, req, all, link::all_lines(answers)))
                     }
-                    Asked::Term { tell, name, path } => {
-                        terms.push((tell, name, path, link::all_lines(answers)))
-                    }
+                    Asked::Term {
+                        tell,
+                        name,
+                        path,
+                        opened_by,
+                    } => terms.push((tell, name, path, opened_by, link::all_lines(answers))),
                     Asked::TermClose { tell, id } => {
                         closes.push((tell, id, link::all_lines(answers)))
                     }
@@ -301,9 +306,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                     panes_of(answer),
                 ));
             }
-            for (tell, name, path, answer) in terms {
+            for (tell, name, path, opened_by, answer) in terms {
                 more.extend(ops::term::term_opened(
-                    state, now, tell, &name, &path, answer, replied,
+                    state, now, tell, &name, &path, opened_by, answer, replied,
                 ));
             }
             for (client, answer) in heres {
@@ -562,13 +567,21 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             ..
         } => ops::launch::focus(state, now, conn, req, &q),
         // Answered once tmux says which pane the new tab has. It binds nothing, so it
-        // needs the link up but not the tabs reconciled.
+        // needs the link up but not the tabs reconciled. moa's own agent's terminal is
+        // recorded as moa's; anyone else's as yours.
         Input::Client {
             conn,
             req,
+            caller,
             op: Op::TermOpen { path, title },
-            ..
-        } => ops::term::term(state, Tell::Reply(conn, req), &path, title.as_deref()),
+        } => {
+            let opened_by = match state.caller(&caller) {
+                Caller::Moa => OpenedBy::Moa,
+                _ => OpenedBy::You,
+            };
+            let tell = Tell::Reply(conn, req);
+            ops::term::term(state, tell, &path, title.as_deref(), opened_by)
+        }
         // Answered once a fresh listing of the tabs lands, or at once with the link down.
         Input::Client {
             conn,
@@ -729,6 +742,7 @@ pub(crate) fn finish_op(
         tx.events.clear();
         tx.cmds.clear();
         tx.vacates.clear();
+        tx.closes.clear();
     }
     let mut fx = post_commit(state, tx);
     fx.push(Effect::Reply { conn, req, result });
@@ -737,15 +751,17 @@ pub(crate) fn finish_op(
 
 /// What a transaction's commits owe the world, in order: the `Persist`, the model it
 /// changed, its events, then its tmux commands (R15), then its vacates queued in the
-/// cockpit's queue (L17). The caller adds any reply after. The commands go only for a saved
-/// change, on the link's connection: with nothing saved or the link down, they are
-/// dropped. A vacate of a saved change waits for the link instead.
+/// cockpit's queue (L17), then the questions its terminal closes start with. The caller
+/// adds any reply after. The commands go only for a saved change, on the link's
+/// connection: with nothing saved or the link down, they are dropped. A vacate of a saved
+/// change waits for the link instead. A close starts only for a saved change.
 pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
     let Tx {
         changes,
         events,
         cmds,
         vacates,
+        closes,
         ..
     } = tx;
     let topics = topics_of(&changes);
@@ -785,6 +801,7 @@ pub(crate) fn post_commit(state: &mut State, tx: Tx) -> Vec<Effect> {
                 cockpit::run::CockpitOp::Vacate { pane, id },
             ));
         }
+        fx.extend(ops::term::close_quietly(state, closes));
     }
     fx
 }
@@ -887,6 +904,8 @@ pub(crate) struct Tx {
     /// Agents' tabs taken down through the cockpit's queue after the commit: see
     /// [`Tx::vacate`].
     pub(crate) vacates: Vec<(PaneId, SessionId)>,
+    /// Terminals a suggestion's yes closes after the commit: see [`Tx::close_terminal`].
+    pub(crate) closes: Vec<TermId>,
     /// The last id handed out per table, for ids asked for before the commit.
     issued: Vec<(Table, i64)>,
 }
@@ -900,6 +919,7 @@ impl Tx {
             events: Vec::new(),
             cmds: Vec::new(),
             vacates: Vec::new(),
+            closes: Vec::new(),
             issued: Vec::new(),
         }
     }
@@ -918,6 +938,13 @@ impl Tx {
     pub(crate) fn vacate(&mut self, pane: PaneId, id: SessionId) {
         debug_assert!(!self.changes.is_empty(), "a vacate before any commit");
         self.vacates.push((pane, id));
+    }
+
+    /// Queues terminal record `id` to start closing gently, telling nobody, once this
+    /// transaction is saved ([`crate::ops::term::close_quietly`]): a suggestion's yes, whose
+    /// own commit comes after its actions run. A refused commit starts none.
+    pub(crate) fn close_terminal(&mut self, id: TermId) {
+        self.closes.push(id);
     }
 
     /// Checks every change, then applies all of them to `state` and records them. A refusal

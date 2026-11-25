@@ -40,7 +40,7 @@ pub(crate) fn run(
         Op::SessionSet { q, title, group } => {
             sessions::set(state, tx, now, &q, title.as_deref(), group.as_deref())
         }
-        Op::SessionArchive { qs } => sessions::archive(state, tx, now, &qs),
+        Op::SessionArchive { qs } => sessions::archive(state, tx, now, &qs, logs),
         Op::SessionClose { q } => sessions::close(state, tx, now, &q, logs),
         Op::SessionSleep {
             qs,

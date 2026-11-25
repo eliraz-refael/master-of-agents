@@ -334,7 +334,7 @@ pub(crate) fn open_told(
         // Nothing queued is said: the refusal is all there is.
         Err(e) => match tell {
             Tell::Reply(conn, req) => finish_op(state, tx, conn, req, Err(e)),
-            Tell::Notice(_) => told(state, Some(tell), Err(e)).into_iter().collect(),
+            Tell::Notice(_) | Tell::Quiet => told(state, Some(tell), Err(e)).into_iter().collect(),
         },
     }
 }

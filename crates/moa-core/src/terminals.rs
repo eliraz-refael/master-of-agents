@@ -66,6 +66,12 @@ pub(crate) fn open_by_pane(state: &State) -> BTreeMap<&str, &Terminal> {
         .collect()
 }
 
+/// The terminal number a `term.*` op's `target` gives (`7` or `#7`), as [`find`] reads it.
+pub(crate) fn numbered(target: &str) -> Option<i64> {
+    let target = target.trim();
+    target.strip_prefix('#').unwrap_or(target).parse().ok()
+}
+
 /// The open terminal a `term.*` op's `target` names: its number (`7` or `#7`), its pane
 /// (`%12`), or its name exactly, whatever the case. The one lookup every `term.*` op uses.
 pub fn find<'a>(state: &'a State, target: &str) -> Result<&'a Terminal, OpError> {
@@ -74,8 +80,7 @@ pub fn find<'a>(state: &'a State, target: &str) -> Result<&'a Terminal, OpError>
     if target.starts_with('%') {
         return open_for(state, &target.parse().map_err(|_| none())?).ok_or_else(none);
     }
-    let number = target.strip_prefix('#').unwrap_or(target);
-    if let Ok(id) = number.parse::<i64>() {
+    if let Some(id) = numbered(target) {
         return open_records(state).find(|t| t.id.0 == id).ok_or_else(none);
     }
     let lower = target.to_lowercase();
@@ -110,6 +115,13 @@ pub(crate) fn open_records(state: &State) -> impl Iterator<Item = &Terminal> {
         .terminals
         .values()
         .filter(move |t| generation.is_some_and(|g| on(t, g)))
+}
+
+/// The open records of sessions `ids` ([`open_records`]), by id.
+pub(crate) fn of_sessions<'a>(state: &'a State, ids: &[SessionId]) -> Vec<&'a Terminal> {
+    open_records(state)
+        .filter(|t| t.session_id.is_some_and(|id| ids.contains(&id)))
+        .collect()
 }
 
 /// Whether record `t` names a pane of server `generation`.
@@ -385,8 +397,8 @@ pub fn parse_after(text: &str) -> Result<Option<i64>, String> {
 /// Starts closing open record `t` (T8): one fresh question of what runs in its tab, which
 /// decides how it closes once tmux answers ([`crate::ops::term::close_answered`]). The
 /// close is held in `state.closing` meanwhile, so a second one is said to be under way.
-/// `tell` is whom to tell; none for moa's own close. `None` while the link isn't up on
-/// the record's server, or its record names no tab.
+/// `tell` is whom to tell; none for moa's own close, `Quiet` for a suggestion's yes. `None`
+/// while the link isn't up on the record's server, or its record names no tab.
 pub(crate) fn close(state: &mut State, tell: Option<Tell>, t: &Terminal) -> Option<Effect> {
     let generation = state.tmux().generation()?;
     let pane: PaneId = t.pane_id.parse().ok()?;

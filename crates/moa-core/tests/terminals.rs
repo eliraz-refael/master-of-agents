@@ -15,11 +15,11 @@ use moa_core::effect::{
 };
 use moa_core::model::{
     Activity, ActivityWho, AgentKind, Inspected, Lifecycle, Location, OpenedBy, PaneAgent,
-    PaneBinding, Session, SessionId, TermId, Terminal,
+    PaneBinding, Session, SessionId, SuggestionStatus, TermId, Terminal,
 };
-use moa_core::op::{NoParams, Op, OpError};
+use moa_core::op::{Answer, ConnId, NoParams, Op, OpError, ReqId};
 use moa_core::panel::View;
-use moa_core::state::{Deps, LoadNote, Snapshot, State};
+use moa_core::state::{CallerInfo, Deps, LoadNote, Snapshot, State};
 use moa_core::terminals::{find, is_idle, open_for, parse_after};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
@@ -217,6 +217,7 @@ impl Rig {
             home: b.home.clone(),
             inspect,
             process_name: shell_name,
+            parse_action: Some(moa_proto::cli::parse_action),
             ..Deps::default()
         };
         let mut snap = b.snapshot();
@@ -2459,6 +2460,496 @@ fn thirty_idle_terminals_cost_nothing() {
             .any(|c| c.argv().iter().any(|a| terminals.contains(a)));
         assert!(!named, "{fx:?}");
     }
+}
+
+/// `term` from moa's own agent records the terminal as moa's; from a session's agent, or
+/// from anyone moa doesn't know, as yours.
+#[test]
+fn moa_opens_terminals_as_moa() {
+    let callers = [
+        (Some("moa"), OpenedBy::Moa),
+        (Some(S), OpenedBy::You),
+        (None, OpenedBy::You),
+    ];
+    for (moa_session, want) in callers {
+        let mut r = Rig::found();
+        let caller = CallerInfo {
+            moa_session: moa_session.map(str::to_string),
+            ..CallerInfo::default()
+        };
+        let op = Op::TermOpen {
+            path: r.b.home.join("work"),
+            title: None,
+        };
+        let input = Input::Client {
+            conn: ConnId(1),
+            req: ReqId(1),
+            caller,
+            op,
+        };
+        let fx = handle_checked(&mut r.st, input, r.b.now());
+        let [(n, _)] = queries(&fx)[..] else {
+            panic!("one query: {fx:?}");
+        };
+        let conn = r.conn();
+        let fx = feed(
+            &r.b,
+            &mut r.st,
+            TmuxIn::Replies {
+                conn,
+                token: TmuxToken::Query(n),
+                results: vec![Ok(vec!["P %8 1008".into()])],
+            },
+        );
+        let made: Vec<OpenedBy> = records(&fx).iter().map(|t| t.opened_by).collect();
+        assert_eq!(made, [want], "{moa_session:?}: {fx:?}");
+        assert_eq!(r.open(8).map(|t| t.opened_by), Some(want));
+    }
+}
+
+/// moa suggests `text` with `actions`: the suggestion's number.
+fn suggested(r: &mut Rig, req: u64, text: &str, actions: &[&str]) -> i64 {
+    let op = Op::Suggest {
+        text: text.into(),
+        actions: actions.iter().map(|a| a.to_string()).collect(),
+    };
+    let fx = send(&r.b, &mut r.st, req, op);
+    the_reply(&fx).1["id"].as_i64().unwrap()
+}
+
+/// The user answers suggestion `id` yes.
+fn yes(r: &mut Rig, req: u64, id: i64) -> Vec<Effect> {
+    let op = Op::SuggestionAnswer {
+        id: Some(id),
+        answer: Answer::Yes,
+    };
+    send(&r.b, &mut r.st, req, op)
+}
+
+/// What `fx` tells moa's log.
+fn logged(fx: &[Effect]) -> Vec<String> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(l.message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A yes on `term close` closes the terminal as `term.close` does (Ctrl-c first for a
+/// running program, the kill 3 seconds later), once the answer is saved, and tells nobody:
+/// its activity says it closed. A terminal that closed since, or is closing already, or a
+/// link that is down, is the yes's result.
+#[test]
+fn a_yes_closes_terminals_gently() {
+    let t = t0().0;
+    let mut r = closable();
+    let id = suggested(
+        &mut r,
+        1,
+        "Close Kite and Beacon",
+        &["term close 1", "term close 2"],
+    );
+    let fx = yes(&mut r, 2, id);
+    assert_eq!(the_reply(&fx).0, "done");
+    let (k, b) = (close_query(&fx, "%5"), close_query(&fx, "%6"));
+    // The questions go out after the answer's commit, and before its reply.
+    let saved = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
+    let asked = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Tmux { token: Some(_), .. }));
+    let replied = fx.iter().position(|e| matches!(e, Effect::Reply { .. }));
+    assert!(saved < asked && asked < replied, "{fx:?}");
+    assert_eq!(sent(&fx), [what_runs("%5"), what_runs("%6")]);
+
+    let fx = runs(&mut r, k, Ok("zsh"));
+    assert_eq!(sent(&fx), [kill("%5")]);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        lines(&fx),
+        [(ActivityWho::You, "closed terminal Kite".to_string())]
+    );
+    let fx = runs(&mut r, b, Ok("node"));
+    assert_eq!(sent(&fx), [Cmd::interrupt(PaneId(6))]);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        lines(&fx),
+        [(ActivityWho::You, "closed terminal Beacon".to_string())]
+    );
+    assert_eq!(timers(&fx, TimerKey::Terminals), [&set_at(t + 3_000)]);
+
+    // Beacon is closing already: the yes is done, and nothing more is sent.
+    let again = suggested(&mut r, 3, "Close Beacon", &["term close 2"]);
+    let fx = yes(&mut r, 4, again);
+    assert_eq!(the_reply(&fx).0, "done");
+    assert!(!closes_any(&fx), "{fx:?}");
+    assert_eq!(sent(&fire(&mut r, t + 3_000)), [kill("%6")]);
+
+    // Both have closed: a yes says Kite is gone, and sends nothing.
+    r.list_at(at(UtcMs(t + 4_000)), &[], &[]);
+    assert!(r.open(5).is_none());
+    let late = suggested(&mut r, 5, "Close Kite", &["term close 1"]);
+    let fx = yes(&mut r, 6, late);
+    assert_eq!(
+        the_reply(&fx).0,
+        "done; but term close 1: that terminal is gone"
+    );
+    assert!(!closes_any(&fx), "{fx:?}");
+
+    // The link is down: the result says why.
+    let mut r = closable();
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let id = suggested(&mut r, 1, "Close Kite", &["term close 1"]);
+    let fx = yes(&mut r, 2, id);
+    assert_eq!(
+        the_reply(&fx).0,
+        "done; but term close 1: moa isn't open in a terminal yet; run moa first"
+    );
+    assert!(!closes_any(&fx), "{fx:?}");
+
+    // The tab went before tmux answered: nobody is told, and moa's log says so.
+    let mut r = closable();
+    let id = suggested(&mut r, 1, "Close Kite", &["term close 1"]);
+    let n = close_query(&yes(&mut r, 2, id), "%5");
+    let fx = runs(&mut r, n, Err("can't find pane: %5"));
+    assert!(replies(&fx).is_empty() && !closes_any(&fx), "{fx:?}");
+    assert!(lines(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        logged(&fx),
+        ["terminal #1 wasn't closed for a suggestion: that terminal is gone"]
+    );
+}
+
+/// After a reload with writes refused, the yes is refused and no close starts: nothing asks
+/// tmux, and the suggestion still waits. The tabs aren't reconciled again while writes are
+/// refused, so this yes fails before its commit; the core's `tx_closes_follow_the_commit`
+/// pins the commit's gate itself, with the link ready.
+#[test]
+fn a_yes_after_a_refusing_reload_closes_nothing() {
+    let t = t0().0;
+    let mut r = closable();
+    let id = suggested(&mut r, 1, "Close Kite", &["term close 1"]);
+    let row = r.st.suggestions().find(|s| s.id.0 == id).unwrap().clone();
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(session_s(&r.b));
+    hold(&mut snap, vec![kite(), beacon()]);
+    snap.suggestions.push(row);
+    let reload = Input::Reload {
+        snapshot: Box::new(snap),
+        refuse_writes: Some(RefuseWrites {
+            until: UtcMs(t + HOUR),
+            reason: "disk full".into(),
+        }),
+    };
+    handle_checked(&mut r.st, reload, r.b.now());
+    r.list(&[P5, P6], &tabs56());
+
+    let fx = yes(&mut r, 2, id);
+    assert!(
+        refusal(&fx).starts_with("moa can't save right now"),
+        "{fx:?}"
+    );
+    assert!(queries(&fx).is_empty() && !closes_any(&fx), "{fx:?}");
+    let row = r.st.suggestions().find(|s| s.id.0 == id).unwrap();
+    assert_eq!(row.status, SuggestionStatus::Open);
+}
+
+// D9: closing or archiving a session offers, as one suggestion, to close its terminals.
+
+const LANTERN: &str = "Lantern · Rust scaffold";
+
+/// The splits `%8` and `%9` of S's tab `%7` (`@4`); `%5` and `%6` are tabs of their own.
+const P8: &str = "P %8 @4 $0 0 1 0 0  0 ";
+const P9: &str = "P %9 @4 $0 0 0 0 0  0 ";
+
+/// A split of S's tab: record `id` of `pane`, named `name`.
+fn split_of_s(id: i64, pane: &str, name: &str) -> Terminal {
+    Terminal {
+        session_id: Some(s_id()),
+        ..record(id, pane, name)
+    }
+}
+
+/// S, titled Lantern, with its splits kite (#4, `%8`) and logs (#7, `%9`), and Harbor (#2,
+/// `%5`) no session's, its own tab, and `%6` a shell; a thread saved, so a suggestion is
+/// carded. With `agent` S's agent runs in `%7`; without, it left: `%7` is gone and the
+/// splits stay. Listed and reconciled.
+fn lantern(agent: bool) -> Rig {
+    let open = vec![
+        record(2, "%5", "Harbor"),
+        split_of_s(4, "%8", "kite"),
+        split_of_s(7, "%9", "logs"),
+    ];
+    lantern_with(agent, open)
+}
+
+/// [`lantern`] with `open` the open records.
+fn lantern_with(agent: bool, open: Vec<Terminal>) -> Rig {
+    let mut r = Rig::linked_with(|snap| {
+        let s = snap.sessions.iter_mut().find(|s| s.id == s_id()).unwrap();
+        s.title = Some(LANTERN.into());
+        let now = TypicalBrain::new().now();
+        snap.threads = vec![common::central::thread(
+            "th-1",
+            "acct-a",
+            now.local_day,
+            now.wall.0 - MIN,
+        )];
+        hold(snap, open);
+    });
+    AGENT_IN_7.with(|a| a.set(agent));
+    let mut panes = vec![P5, P6, P8, P9];
+    let mut tabs = vec![
+        pane_line("%5", "1", "zsh", "/r", "⌨ Harbor"),
+        pane_line("%6", "1", "zsh", "/r", "⌨ Beacon"),
+        pane_line("%8", "1", "zsh", "/r", "⌨ kite"),
+        pane_line("%9", "1", "zsh", "/r", "⌨ logs"),
+    ];
+    let mut info_lines = vec![info("%5"), info("%6"), info("%8"), info("%9")];
+    if agent {
+        panes.push(P7);
+        tabs.push(pane_line("%7", "", "claude", "/r", ""));
+        info_lines.push(info("%7"));
+    }
+    r.list(&panes, &tabs);
+    let info_refs: Vec<&str> = info_lines.iter().map(String::as_str).collect();
+    r.reconcile(&info_refs);
+    assert_eq!(r.st.binding(s_id()).is_some(), agent);
+    r
+}
+
+fn archive(r: &mut Rig, req: u64, qs: &[String]) -> Vec<Effect> {
+    send(&r.b, &mut r.st, req, Op::SessionArchive { qs: qs.to_vec() })
+}
+
+fn close_session(r: &mut Rig, req: u64) -> Vec<Effect> {
+    send(&r.b, &mut r.st, req, Op::SessionClose { q: S.into() })
+}
+
+/// The suggestions `fx` saved: their text and actions, as typed.
+fn offered(fx: &[Effect]) -> Vec<(String, Vec<String>)> {
+    changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Suggestion(s) => {
+                Some((s.text.clone(), s.actions.iter().map(|a| a.line()).collect()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The suggestion cards `fx` saved: their thread and text.
+fn offer_cards(fx: &[Effect]) -> Vec<(String, String)> {
+    changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Feed(row) if row.kind == "suggestion" => {
+                let body: serde_json::Value = serde_json::from_str(&row.body).unwrap();
+                Some((row.thread_id.clone(), body["text"].as_str()?.to_string()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The number of commits `fx` saves.
+fn commits(fx: &[Effect]) -> usize {
+    fx.iter()
+        .filter(|e| matches!(e, Effect::Persist(_)))
+        .count()
+}
+
+/// Archiving Lantern offers, in the archive's own commit, to close its two splits: one
+/// suggestion with a `term close` each, and its card. Harbor, no session's, isn't in it.
+#[test]
+fn archiving_offers_to_close_its_terminals() {
+    let mut r = lantern(true);
+    let fx = archive(&mut r, 1, &[S.into()]);
+    let text = format!("{LANTERN} is archived. Close its 2 terminals too (kite, logs)?");
+    assert_eq!(
+        offered(&fx),
+        [(
+            text.clone(),
+            vec!["term close 4".to_string(), "term close 7".to_string()]
+        )]
+    );
+    assert_eq!(offer_cards(&fx), [("th-1".to_string(), text)]);
+    assert_eq!(commits(&fx), 1, "one commit: {fx:?}");
+    assert!(r.st.session(s_id()).unwrap().archived_at.is_some());
+    assert!(!closes_any(&fx), "nothing closes unasked: {fx:?}");
+}
+
+/// An archive refused (writes are refused after a reload) offers nothing: the offer is in
+/// its commit.
+#[test]
+fn a_refused_archive_offers_nothing() {
+    let t = t0().0;
+    let mut r = lantern(true);
+    let before = r.st.suggestions().count();
+    let mut snap = r.b.snapshot();
+    let mut s = session_s(&r.b);
+    s.title = Some(LANTERN.into());
+    snap.sessions.push(s);
+    hold(
+        &mut snap,
+        vec![split_of_s(4, "%8", "kite"), split_of_s(7, "%9", "logs")],
+    );
+    let reload = Input::Reload {
+        snapshot: Box::new(snap),
+        refuse_writes: Some(RefuseWrites {
+            until: UtcMs(t + HOUR),
+            reason: "disk full".into(),
+        }),
+    };
+    handle_checked(&mut r.st, reload, r.b.now());
+    assert!(find(&r.st, "4").is_ok(), "kite is still open");
+
+    let fx = archive(&mut r, 1, &[S.into()]);
+    assert!(
+        refusal(&fx).starts_with("moa can't save right now"),
+        "{fx:?}"
+    );
+    assert!(changes(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.st.suggestions().count(), before);
+    assert!(r.st.session(s_id()).unwrap().archived_at.is_none());
+}
+
+/// Two sessions archived together, with three terminals between them: one offer, in the
+/// several sessions' words, its names by number.
+#[test]
+fn archiving_several_offers_once() {
+    // Imported ids are derived, the same in every typical brain.
+    let other = TypicalBrain::new()
+        .state()
+        .resolve(moa_testkit::ids::S2_IDLE)
+        .unwrap();
+    let mut r = lantern_with(
+        true,
+        vec![
+            Terminal {
+                session_id: Some(other),
+                ..record(2, "%5", "Harbor")
+            },
+            split_of_s(4, "%8", "kite"),
+            split_of_s(7, "%9", "logs"),
+        ],
+    );
+    let fx = archive(&mut r, 1, &[S.into(), other.to_string()]);
+    assert_eq!(
+        offered(&fx),
+        [(
+            "You archived 2 sessions with open terminals. Close their 3 terminals too \
+             (Harbor, kite, logs)?"
+                .to_string(),
+            vec![
+                "term close 2".to_string(),
+                "term close 4".to_string(),
+                "term close 7".to_string()
+            ]
+        )]
+    );
+    assert_eq!(commits(&fx), 1, "one commit: {fx:?}");
+}
+
+/// A close of a running session kills only its agent's pane (`%7`): its splits outlive it,
+/// and the close offers to close them, in its own commit, before the kill goes out.
+#[test]
+fn a_close_that_kills_the_agent_offers_its_splits() {
+    let mut r = lantern(true);
+    let fx = close_session(&mut r, 1);
+    assert_eq!(the_reply(&fx).0, "closed");
+    assert!(sent(&fx).contains(&kill("%7")), "{fx:?}");
+    assert!(!sent(&fx).contains(&kill("%8")) && !sent(&fx).contains(&kill("%9")));
+    let saved = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
+    let killed = fx.iter().position(|e| matches!(e, Effect::Tmux { .. }));
+    assert!(saved < killed, "{fx:?}");
+    let text = format!("{LANTERN} is closed. Close its 2 terminals too (kite, logs)?");
+    assert_eq!(
+        offered(&fx),
+        [(
+            text.clone(),
+            vec!["term close 4".to_string(), "term close 7".to_string()]
+        )]
+    );
+    assert_eq!(offer_cards(&fx), [("th-1".to_string(), text)]);
+    assert_eq!(commits(&fx), 1, "one commit: {fx:?}");
+    assert_eq!(r.st.session(s_id()).unwrap().lifecycle, Lifecycle::Ended);
+}
+
+/// The agent already left: the close kills no tab, and its splits are still open, so the
+/// close offers to close them, in its own commit. Closing it again offers nothing new.
+#[test]
+fn a_close_that_leaves_the_tab_offers() {
+    let mut r = lantern(false);
+    let before = r.st.suggestions().count();
+    let fx = close_session(&mut r, 1);
+    assert_eq!(the_reply(&fx).0, "closed");
+    assert!(!sent(&fx).iter().any(|c| c.name() == "kill-pane"), "{fx:?}");
+    let text = format!("{LANTERN} is closed. Close its 2 terminals too (kite, logs)?");
+    assert_eq!(
+        offered(&fx),
+        [(
+            text.clone(),
+            vec!["term close 4".to_string(), "term close 7".to_string()]
+        )]
+    );
+    assert_eq!(offer_cards(&fx), [("th-1".to_string(), text)]);
+    assert_eq!(commits(&fx), 1, "one commit: {fx:?}");
+    assert_eq!(r.st.session(s_id()).unwrap().lifecycle, Lifecycle::Ended);
+
+    let fx = close_session(&mut r, 2);
+    assert!(
+        offered(&fx).is_empty(),
+        "the same offer still waits: {fx:?}"
+    );
+    assert_eq!(r.st.suggestions().count(), before + 1);
+}
+
+/// One terminal is named in the singular; a session with none is offered nothing.
+#[test]
+fn no_terminals_no_offer() {
+    let mut r = lantern_with(false, vec![record(2, "%5", "Harbor")]);
+    let before = r.st.suggestions().count();
+    let fx = close_session(&mut r, 1);
+    assert_eq!(the_reply(&fx).0, "closed");
+    assert!(offered(&fx).is_empty(), "{fx:?}");
+    let fx = archive(&mut r, 2, &[S.into()]);
+    assert!(offered(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.st.suggestions().count(), before);
+
+    let mut r = lantern_with(false, vec![split_of_s(4, "%8", "kite")]);
+    let fx = archive(&mut r, 1, &[S.into()]);
+    let text = format!("{LANTERN} is archived. Close its terminal kite too?");
+    assert_eq!(offered(&fx), [(text, vec!["term close 4".to_string()])]);
+}
+
+/// Archiving again changes nothing and offers nothing new; four terminals or more show three
+/// names, then `…`.
+#[test]
+fn archiving_again_offers_nothing_new() {
+    let mut r = lantern_with(
+        true,
+        vec![
+            split_of_s(1, "%5", "Harbor"),
+            split_of_s(4, "%8", "kite"),
+            split_of_s(7, "%9", "logs"),
+            split_of_s(9, "%6", "Beacon"),
+        ],
+    );
+    let before = r.st.suggestions().count();
+    let fx = archive(&mut r, 1, &[S.into()]);
+    let [(text, actions)] = &offered(&fx)[..] else {
+        panic!("one offer: {fx:?}");
+    };
+    assert_eq!(
+        text,
+        &format!("{LANTERN} is archived. Close its 4 terminals too (Harbor, kite, logs…)?")
+    );
+    assert_eq!(actions.len(), 4);
+    let fx = archive(&mut r, 2, &[S.into()]);
+    assert!(offered(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.st.suggestions().count(), before + 1);
 }
 
 #[test]

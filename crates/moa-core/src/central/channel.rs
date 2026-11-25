@@ -1,8 +1,9 @@
 //! The one channel (K3, K4): what goes to moa's agent, from whom ([`Source`]), and when. Your
-//! prompts go through it, and in 6c its only automatic source is the wake-up, which carries
-//! the session reports once they settle; your prompts carry them too. What a prompt carries
-//! is chosen at its commit ([`super::reports::batch`]), and that commit deletes it: each
-//! report reaches moa once.
+//! prompts go through it, and so do moa's automatic ones: the wake-up, which carries the
+//! session reports once they settle, and your yes to a suggestion with nothing to run (D5).
+//! Each automatic source goes only while [`may_send`] says so. What a prompt carries is
+//! chosen at its commit ([`super::reports::batch`], [`State::yeses`]), and that commit marks
+//! it delivered: each report and each yes reaches moa once.
 
 use serde_json::json;
 
@@ -25,6 +26,8 @@ pub enum Source {
     You,
     /// A wake-up, with the session reports.
     Wake,
+    /// Your yes to a suggestion with nothing to run, which waits for moa (D5).
+    Yes,
 }
 
 /// Whether moa reads session reports on its own: `meta` `moa.auto` isn't `off`.
@@ -54,10 +57,40 @@ pub(crate) fn set_auto(state: &mut State, tx: &mut Tx, on: Option<bool>) -> Resu
     })
 }
 
-/// The wake-up's check at the end of every input: a wake that is due goes, and the `Wake`
-/// timer is armed for the next one, or cancelled when none can come. While writes are
-/// refused a wake waits for the refusal's end too; when moa's agent can't be started, it
-/// waits for the next input that changes something.
+/// Whether an automatic prompt may go now (D3's gates), whatever its source: moa's agent is
+/// [`free`], writes aren't refused, and it runs or can be started. `/auto` isn't one of them:
+/// it stops the wake-ups only, which test it on top.
+pub fn may_send(state: &State) -> bool {
+    free(state)
+        && !state.writes_refused(state.now)
+        && (state.central.running() || launch::spec(state).is_ok())
+}
+
+/// moa's agent is free for an automatic prompt: it is off or ready (not failed to start, not
+/// starting), with no prompt under way, no live turn, no request waiting for your answer, no
+/// thread replaying and no restart reopening one. A turn whose agent exited is over for this:
+/// the prompt's start takes it, as any prompt's does.
+fn free(state: &State) -> bool {
+    let moa = &state.central;
+    // A request waits for you only within a live turn, which shuts the gate too; `asking`
+    // shuts it on its own as well.
+    debug_assert!(
+        moa.asking.is_empty() || moa.turn.as_ref().is_some_and(|t| t.exited.is_none()),
+        "a permission request waits outside a live turn"
+    );
+    matches!(moa.phase, Phase::Off | Phase::Ready)
+        && moa.pending.is_none()
+        && moa.turn.as_ref().is_none_or(|t| t.exited.is_some())
+        && moa.asking.is_empty()
+        && moa.replaying.is_none()
+        && moa.restarting.is_none()
+}
+
+/// The channel's check at the end of every input: an automatic prompt that is due goes when
+/// [`may_send`] says it may, and the `Wake` timer is armed for the next one, or cancelled
+/// when none can come. While writes are refused it waits for the refusal's end too; when
+/// moa's agent can't be started, it waits for the next input that changes something (a yes,
+/// for your next prompt, which carries it).
 pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect>) {
     if fired {
         state.central.wake_armed = None;
@@ -69,13 +102,12 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
         .map(|r| r.until);
     if let Some(until) = refused {
         // Nothing else ends a refusal from the core's side.
-        next = next.map(|at| at.max(until));
-    } else if next.is_some_and(|at| at <= now.wall) {
-        // A running agent needs no start, so only a stopped one's launch can hold a wake.
-        next = match state.central.running() || launch::spec(state).is_ok() {
+        next = next.map(|(source, at)| (source, at.max(until)));
+    } else if let Some((source, _)) = next.filter(|(_, at)| *at <= now.wall) {
+        next = match may_send(state) {
             false => None,
             true => {
-                let more = send(state, now, Source::Wake, String::new(), None);
+                let more = send(state, now, source, String::new(), None);
                 fold_in(fx, more);
                 due(state)
             }
@@ -84,38 +116,41 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     fx.extend(rearm(
         &mut state.central.wake_armed,
         TimerKey::Wake,
-        next,
+        next.map(|(_, at)| at),
         fired,
     ));
 }
 
-/// When the next wake-up is due (K4): once the reports settle (`wake_settle` after the
-/// newest), or once the oldest has waited `wake_gap`, whichever comes first, and never
-/// sooner than `wake_gap` after the last wake. `None` while nothing is queued, or while a
-/// wake can't go: `/auto` is off, or moa's agent failed to start, is starting, has a prompt
-/// under way, waits for your answer, is replaying a thread or is reopening one after the
-/// watchdog restarted it. A turn whose agent exited is over for this: the wake's start takes
-/// it, as any prompt's does.
-fn due(state: &State) -> Option<UtcMs> {
-    let mut reports = state.reports().peekable();
-    reports.peek()?;
-    let moa = &state.central;
-    // A request waits for you only within a live turn, which shuts the gate too; `asking`
-    // shuts it on its own as well.
-    debug_assert!(
-        moa.asking.is_empty() || moa.turn.as_ref().is_some_and(|t| t.exited.is_none()),
-        "a permission request waits outside a live turn"
-    );
-    let open = auto_on(state)
-        && matches!(moa.phase, Phase::Off | Phase::Ready)
-        && moa.pending.is_none()
-        && moa.turn.as_ref().is_none_or(|t| t.exited.is_some())
-        && moa.asking.is_empty()
-        && moa.replaying.is_none()
-        && moa.restarting.is_none();
-    if !open {
+/// The next automatic prompt, and when it is due: a waiting yes at once, a wake-up when
+/// [`wake_due`] says, and neither sooner than a gap after an automatic prompt failed
+/// ([`super::Moa::failed_at`]). The sooner goes; whichever it is carries both. `None` while
+/// neither waits, or moa's agent isn't [`free`].
+fn due(state: &State) -> Option<(Source, UtcMs)> {
+    if !free(state) {
         return None;
     }
+    let gap = state.config().moa.wake_gap_ms;
+    let held = state
+        .central
+        .failed_at
+        .map_or(i64::MIN, |f| f.0.saturating_add(gap));
+    let yes = state.yeses().next().map(|_| (Source::Yes, UtcMs(i64::MIN)));
+    let wake = wake_due(state).map(|at| (Source::Wake, at));
+    let next = yes.into_iter().chain(wake).min_by_key(|(_, at)| *at);
+    next.map(|(source, at)| (source, UtcMs(at.0.max(held))))
+}
+
+/// When the next wake-up is due (K4): once the reports settle (`wake_settle` after the
+/// newest), or once the oldest has waited `wake_gap`, whichever comes first, and never
+/// sooner than `wake_gap` after the last wake. `None` while nothing is queued, or `/auto` is
+/// off.
+fn wake_due(state: &State) -> Option<UtcMs> {
+    let mut reports = state.reports().peekable();
+    reports.peek()?;
+    if !auto_on(state) {
+        return None;
+    }
+    let moa = &state.central;
     let (first, last) = reports.fold((i64::MAX, i64::MIN), |(first, last), r| {
         (first.min(r.queued_at.0), last.max(r.last_at.0))
     });

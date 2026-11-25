@@ -101,7 +101,7 @@ impl Change {
             Change::Project(r) => ("projects", format!("#{}", r.id)),
             Change::Task(r) => ("tasks", format!("#{}", r.id)),
             Change::Note(r) => ("notes", format!("#{}", r.id)),
-            Change::Suggestion(r) => ("suggestions", format!("#{}", r.id)),
+            Change::Suggestion(r) => ("suggestions", crate::state::suggestion_key(r.id)),
             Change::Session(r) => ("sessions", r.id.to_string()),
             Change::Conversation(r) => (
                 "conversations",

@@ -248,8 +248,10 @@ pub fn project_slot(cwd: &std::path::Path) -> String {
 
 // ---------- suggestions and asks ----------
 
+/// The verbs a suggestion's action may run. `term` only as `term close` (the grammar
+/// refuses the rest): a yes never opens a terminal.
 pub const ACTION_VERBS: &[&str] = &[
-    "task", "set", "archive", "close", "group", "note", "project",
+    "task", "set", "archive", "close", "group", "note", "project", "term",
 ];
 
 /// One proposed action of a suggestion, such as verb `task` with its arguments.
@@ -257,6 +259,14 @@ pub const ACTION_VERBS: &[&str] = &[
 pub struct SuggestionAction {
     pub verb: String,
     pub args: Vec<String>,
+}
+
+impl SuggestionAction {
+    /// The action as it would be typed, shell-quoted: what `yes runs:` shows.
+    pub fn line(&self) -> String {
+        let words = std::iter::once(self.verb.as_str()).chain(self.args.iter().map(String::as_str));
+        shell_words::join(words)
+    }
 }
 
 /// Who an ask is for: moa itself or one session. Stored as `"moa"` or the session uuid.
@@ -340,6 +350,14 @@ pub struct Note {
     pub text: String,
     pub created_at: UtcMs,
 }
+
+/// An accepted suggestion's `result` when its actions all ran.
+pub const YES_DONE: &str = "done";
+/// An accepted suggestion's `result` while its yes, with no actions to run, waits for moa
+/// (D5).
+pub const YES_WAITING: &str = "waiting for moa";
+/// An accepted suggestion's `result` once a prompt carried its yes to moa (D1).
+pub const YES_TOLD: &str = "told moa";
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Suggestion {

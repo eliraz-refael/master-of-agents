@@ -446,7 +446,8 @@ fn actions_parse_with_the_same_grammar() {
             .unwrap_err()
             .starts_with("invalid value '1'")
     );
-    let wl = "a suggestion can run moactl archive, close, group, note, project, set, task";
+    let wl =
+        "a suggestion can run moactl archive, close, group, note, project, set, task, term close";
     assert_eq!(act("rm", &["-rf", "x"]).unwrap_err(), wl);
     assert_eq!(act("open", &["~/x"]).unwrap_err(), wl);
     assert_eq!(
@@ -459,6 +460,14 @@ fn actions_parse_with_the_same_grammar() {
         act("project", &["X", "--add", "rel"]).unwrap_err(),
         "use a full path in a suggestion"
     );
+    assert_eq!(
+        act("term", &["close", "4"]),
+        Ok(Op::TermClose { target: "4".into() })
+    );
+    let only_close = "a suggestion can run term only as term close";
+    assert_eq!(act("term", &["~/private/kite"]).unwrap_err(), only_close);
+    assert_eq!(act("term", &["ls"]).unwrap_err(), only_close);
+    assert_eq!(act("term", &["note", "4", "x"]).unwrap_err(), only_close);
 }
 
 fn cmd(cwd: Option<&str>, verb: &str, args: &[&str]) -> Result<Op, String> {

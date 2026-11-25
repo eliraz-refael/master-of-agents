@@ -1323,3 +1323,89 @@ fn a_click_on_y_answers() {
     assert_eq!(c.footer(), "that request isn't waiting any more");
     no_answer_card(&mut c);
 }
+
+/// D7: a suggestion card's buttons are pressed as any button is: the first Tab takes its
+/// `[yes]`, the next `[later]`, and Enter sends `/suggestion later 12`. Once pressed, the
+/// card's buttons go until the suggestions topic shows the answer, so a quick second press
+/// sends nothing; a refused answer brings them back. Its reply makes no card.
+#[test]
+fn the_card_buttons_answer() {
+    use moa_core::model::{Suggestion, SuggestionId, SuggestionStatus};
+    let text = "Set Kite's due date";
+    let card = FeedRow {
+        kind: "suggestion".into(),
+        body: json!({ "id": 12, "text": text }),
+        ..row(1, "suggestion", "")
+    };
+    let mut c = C::new(vec![card], SIZE);
+    c.data.suggestions.insert(
+        SuggestionId(12),
+        Suggestion {
+            id: SuggestionId(12),
+            text: text.into(),
+            status: SuggestionStatus::Open,
+            actions: Vec::new(),
+            actions_raw: None,
+            actions_invalid: None,
+            result: None,
+            created_at: UtcMs(1_000),
+            resolved_at: None,
+        },
+    );
+    c.data.touch();
+    let buttons = |c: &mut C| c.body().iter().any(|l| l.contains("[yes]"));
+    let no_reply_card = |c: &mut C| {
+        let body = c.body();
+        assert!(
+            !body.iter().any(|l| l.contains("▸ /suggestion")),
+            "{body:#?}"
+        );
+    };
+    c.key(Key::Tab);
+    assert_eq!(c.focused(), Some(("[yes]".to_string(), false)));
+    c.key(Key::Tab);
+    assert_eq!(c.focused(), Some(("[later]".to_string(), false)));
+    let outs = c.key(Key::Enter);
+    let (tag, op) = c.send(outs);
+    assert_eq!(
+        op,
+        Op::ConsoleCommand {
+            line: "/suggestion later 12".into()
+        }
+    );
+    // Pressed: the buttons go, and a second press has nothing to press.
+    assert!(!buttons(&mut c), "{:#?}", c.body());
+    assert!(c.key(Key::Enter).is_empty());
+    assert!(c.key(Key::Tab).is_empty());
+    assert_eq!(c.focused(), None);
+    // Its reply makes no card, as a permission answer's doesn't: the card says it. The
+    // buttons stay away until the topic shows the answer.
+    c.reply(tag, Ok(done("later")));
+    no_reply_card(&mut c);
+    assert!(!buttons(&mut c));
+    let s = c.data.suggestions.get_mut(&SuggestionId(12)).unwrap();
+    s.status = SuggestionStatus::Later;
+    s.resolved_at = Some(UtcMs(2_000));
+    c.data.touch();
+    assert!(buttons(&mut c), "later: the card asks again");
+    // A refused one says why in the footer, and its buttons come back.
+    c.key(Key::Tab);
+    assert_eq!(c.focused(), Some(("[yes]".to_string(), false)));
+    let outs = c.key(Key::Enter);
+    let (tag, _) = c.send(outs);
+    assert!(!buttons(&mut c));
+    c.reply(tag, Err("suggestion #12 is already accepted".into()));
+    assert_eq!(c.footer(), "suggestion #12 is already accepted");
+    assert!(buttons(&mut c));
+    no_reply_card(&mut c);
+    // Typed by hand, its reply is a card as any command's is.
+    c.typed("/suggestion yes 12");
+    let outs = c.key(Key::Enter);
+    let (tag, _) = c.send(outs);
+    c.reply(tag, Ok(done("yes; moa acts on it when it's free")));
+    let body = c.body();
+    assert!(
+        body.contains(&"▸ /suggestion yes 12".to_string()),
+        "{body:#?}"
+    );
+}

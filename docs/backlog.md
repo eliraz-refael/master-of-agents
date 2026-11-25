@@ -47,11 +47,14 @@ the one you want. moa needs a better way to open a terminal, find it, and end it
 - **The terminals view, on `Ctrl-a T`:** one row per terminal, and keys to jump, close,
   rename, note and set a timeout. The picker shows a terminal's folder and program.
 
+**Built in slice 6d:**
+- **Opened by moa** (`opened_by = moa`): a terminal moa's own connection opens.
+- **Idle terminals** come to moa with the day's opening and wake-ups; it may suggest closing
+  one that looks forgotten, and never closes one unasked.
+- **Closing or archiving a session offers to close its terminals:** one suggestion, with a
+  `term close` per terminal. A close kills only the agent's pane; its splits outlive it.
+
 **Still open, and where it goes:**
-- **Opened by moa** (`opened_by = moa`): slice 6, from moa's own connection.
-- **Asking about idle terminals** (an agent that looks every few hours and asks you), and
-  offering to close a session's terminals when it's closed or archived: slice 6 or 7,
-  through the `term.*` ops.
 - **Pruning closed records:** with the retention decision (Q1).
 
 ## 2. Goes into a later slice's plan

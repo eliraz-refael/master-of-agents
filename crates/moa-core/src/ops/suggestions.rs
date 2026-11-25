@@ -1,29 +1,36 @@
 //! `suggest`, and `suggestion yes|no|later|ls`. A suggestion is moa's proposal with buttons;
 //! `yes` runs its actions in-process, through the same `ops::run` and the same transaction as
-//! a typed command, so the whole answer is one `Persist`.
+//! a typed command, so the whole answer is one `Persist`. A `yes` with no actions waits for
+//! moa instead ([`YES_WAITING`]): the channel carries it to moa's agent (D5). A `term close`
+//! is checked here instead, and its terminal starts closing once that `Persist` is made.
 
 use std::path::Path;
 
 use serde_json::json;
 
-use super::{brain_row, run};
+use super::launch::title_of;
+use super::{brain_row, run, term};
 use crate::Now;
 use crate::activity;
+use crate::central;
 use crate::change::Change;
 use crate::core::{Tx, unknown_message};
-use crate::effect::Effect;
-use crate::model::{Suggestion, SuggestionAction, SuggestionId, SuggestionStatus};
-use crate::op::{Answer, Done, OpError};
-use crate::state::{Caller, State, Table};
+use crate::effect::{Effect, LogLevel};
+use crate::model::{
+    SessionId, Suggestion, SuggestionAction, SuggestionId, SuggestionStatus, YES_DONE, YES_WAITING,
+};
+use crate::op::{Answer, Done, Op, OpError};
+use crate::state::{Caller, State, Table, suggestion_key};
+use crate::terminals;
+use crate::tmux::link::log;
 
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
+/// What moa's own `suggestion yes` hears: a yes is the user's word, never moa's.
+const ONLY_THE_USER: &str = "only the user says yes to a suggestion";
+/// What a yes with no actions to run hears: moa's agent hears of it (D5).
+const PLAIN_YES: &str = "yes; moa acts on it when it's free";
 /// Why an open suggestion can't be run, as `Startup` records it.
 pub(crate) const INVALID: &str = "an action doesn't parse as moactl";
-
-/// The action as it was typed, shell-quoted.
-fn joined(a: &SuggestionAction) -> String {
-    shell_words::join(std::iter::once(a.verb.as_str()).chain(a.args.iter().map(String::as_str)))
-}
 
 /// Splits a typed action (or a console command after its `/`) into verb and arguments.
 pub(crate) fn split(act: &str) -> Result<SuggestionAction, String> {
@@ -53,7 +60,7 @@ pub(crate) fn startup_flags(state: &State) -> Vec<Suggestion> {
         .suggestions()
         .filter(|s| waiting(s))
         .filter(|s| s.actions_invalid.is_none() && !s.actions.is_empty())
-        .filter(|s| !is_unknown(state, s.id))
+        .filter(|s| !state.suggestion_unknown(s.id))
         .filter(|s| s.actions.iter().any(|a| parse(a, &deps.home).is_err()))
         .map(|s| {
             let mut s = s.clone();
@@ -61,10 +68,6 @@ pub(crate) fn startup_flags(state: &State) -> Vec<Suggestion> {
             s
         })
         .collect()
-}
-
-fn is_unknown(state: &State, id: SuggestionId) -> bool {
-    state.is_unknown("suggestions", &format!("#{id}"))
 }
 
 /// Open or later: not answered for good yet.
@@ -79,35 +82,69 @@ pub(crate) fn suggest(
     text: &str,
     actions: &[String],
 ) -> Result<Done, OpError> {
-    let mut parsed = Vec::new();
-    if !actions.is_empty() {
-        let deps = state.deps();
-        let Some(parse) = deps.parse_action else {
-            return Err(OpError("suggestions need the moactl grammar".into()));
-        };
-        // Checked now, so a bad action fails for moa, not later for the user.
-        for act in actions {
-            let a = split(act)
-                .and_then(|a| parse(&a, &deps.home).map(|_| a))
-                .map_err(|why| OpError(format!("--do '{act}': {why}")))?;
-            parsed.push(a);
+    let parsed = checked(state, actions)?;
+    let (row, changes) = match made(state, tx, now, text, parsed) {
+        Ok(made) => made,
+        Err(dup) => {
+            return Ok(Done {
+                text: format!("already suggested (#{dup})"),
+                data: json!({ "id": dup, "duplicate": true }),
+            });
         }
+    };
+    let data = serde_json::to_value(&row).unwrap_or_default();
+    tx.commit(state, changes)?;
+    Ok(Done {
+        text: format!(
+            "suggestion #{}: the user sees it with yes / later / no buttons",
+            row.id
+        ),
+        data,
+    })
+}
+
+/// `actions` checked against the moactl grammar now, so a bad one fails for moa, not later
+/// for the user.
+fn checked(state: &State, actions: &[String]) -> Result<Vec<SuggestionAction>, OpError> {
+    if actions.is_empty() {
+        return Ok(Vec::new());
     }
+    let deps = state.deps();
+    let Some(parse) = deps.parse_action else {
+        return Err(OpError("suggestions need the moactl grammar".into()));
+    };
+    actions
+        .iter()
+        .map(|act| {
+            split(act)
+                .and_then(|a| parse(&a, &deps.home).map(|_| a))
+                .map_err(|why| OpError(format!("--do '{act}': {why}")))
+        })
+        .collect()
+}
+
+/// A new open suggestion `text` and what saves it: its row, moa's activity line and its card
+/// in the console (D7), for the caller to commit. `Err` is the open suggestion with the same
+/// text, which a new one would only repeat.
+fn made(
+    state: &State,
+    tx: &mut Tx,
+    now: &Now,
+    text: &str,
+    actions: Vec<SuggestionAction>,
+) -> Result<(Suggestion, Vec<Change>), SuggestionId> {
     if let Some(dup) = state
         .suggestions()
         .find(|s| s.status == SuggestionStatus::Open && s.text == text)
     {
-        return Ok(Done {
-            text: format!("already suggested (#{})", dup.id),
-            data: json!({ "id": dup.id, "duplicate": true }),
-        });
+        return Err(dup.id);
     }
     let id = SuggestionId(tx.next_id(state, Table::Suggestion));
     let row = Suggestion {
         id,
         text: text.to_string(),
         status: SuggestionStatus::Open,
-        actions: parsed,
+        actions,
         actions_raw: None,
         actions_invalid: None,
         result: None,
@@ -115,12 +152,89 @@ pub(crate) fn suggest(
         resolved_at: None,
     };
     let activity = brain_row(state, tx, now, activity::suggests(id.0, text));
-    let data = serde_json::to_value(&row).unwrap_or_default();
-    tx.commit(state, vec![Change::Suggestion(row), activity])?;
-    Ok(Done {
-        text: format!("suggestion #{id}: the user sees it with yes / later / no buttons"),
-        data,
-    })
+    let mut changes = vec![Change::Suggestion(row.clone()), activity];
+    // With no thread, the today view shows it all the same.
+    if let Some(thread) = central::card_thread(state) {
+        let card = central::suggestion_card(state, tx, &thread, id, text);
+        changes.push(Change::Feed(card));
+    }
+    Ok((row, changes))
+}
+
+/// moa's offer to close the open terminals of sessions `ids`, just `done` (`closed` or
+/// `archived`) (D9): one suggestion made as [`suggest`] makes it, with a `term close` per
+/// terminal, for the caller to commit with what it did. Nothing when they have none open, or
+/// an open suggestion has the same text; an action that doesn't check is a warning in
+/// `logs`. moa closes none unasked.
+pub(crate) fn close_offer(
+    state: &State,
+    tx: &mut Tx,
+    now: &Now,
+    ids: &[SessionId],
+    done: &str,
+    logs: &mut Vec<Effect>,
+) -> Vec<Change> {
+    let open = terminals::of_sessions(state, ids);
+    if open.is_empty() {
+        return Vec::new();
+    }
+    let actions: Vec<String> = open
+        .iter()
+        .map(|t| format!("term close {}", t.id.0))
+        .collect();
+    let parsed = match checked(state, &actions) {
+        Ok(parsed) => parsed,
+        Err(why) => {
+            let ids: Vec<String> = ids.iter().map(SessionId::to_string).collect();
+            logs.push(log(
+                LogLevel::Warn,
+                format!(
+                    "no offer to close the terminals of sessions {}: {}",
+                    ids.join(", "),
+                    why.0
+                ),
+            ));
+            return Vec::new();
+        }
+    };
+    let names: Vec<&str> = open.iter().map(|t| t.name.as_str()).collect();
+    let mut owners: Vec<SessionId> = open.iter().filter_map(|t| t.session_id).collect();
+    owners.sort();
+    owners.dedup();
+    let text = match owners[..] {
+        [one] => {
+            let title = state
+                .session(one)
+                .map(|s| title_of(state, s))
+                .unwrap_or_else(|| state.handle_of(one));
+            match names[..] {
+                [name] => format!("{title} is {done}. Close its terminal {name} too?"),
+                _ => format!(
+                    "{title} is {done}. Close its {} terminals too ({})?",
+                    names.len(),
+                    listed(&names)
+                ),
+            }
+        }
+        _ => format!(
+            "You {done} {} sessions with open terminals. Close their {} terminals too ({})?",
+            owners.len(),
+            names.len(),
+            listed(&names)
+        ),
+    };
+    made(state, tx, now, &text, parsed)
+        .map(|(_, changes)| changes)
+        .unwrap_or_default()
+}
+
+/// An offer's terminal names: the first three, then `…` when there are more.
+fn listed(names: &[&str]) -> String {
+    let mut list = names.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    if names.len() > 3 {
+        list.push('…');
+    }
+    list
 }
 
 pub(crate) fn ls(state: &State) -> Result<Done, OpError> {
@@ -132,7 +246,7 @@ pub(crate) fn ls(state: &State) -> Result<Done, OpError> {
             if let Some(why) = &s.actions_invalid {
                 line.push_str(&format!("  (yes can't run its actions: {why})"));
             } else if !s.actions.is_empty() {
-                let acts: Vec<String> = s.actions.iter().map(joined).collect();
+                let acts: Vec<String> = s.actions.iter().map(SuggestionAction::line).collect();
                 line.push_str(&format!("  (yes runs: {})", acts.join("; ")));
             }
             line
@@ -165,12 +279,12 @@ pub(crate) fn answer(
     };
     // Before any action runs: the actions would commit and then this row's own write be
     // refused.
-    if is_unknown(state, s.id) {
-        return Err(OpError(unknown_message(
-            state,
-            "suggestions",
-            &format!("#{}", s.id),
-        )));
+    if answer == Answer::Yes && *caller == Caller::Moa {
+        return Err(OpError(ONLY_THE_USER.into()));
+    }
+    if state.suggestion_unknown(s.id) {
+        let key = suggestion_key(s.id);
+        return Err(OpError(unknown_message(state, "suggestions", &key)));
     }
     if !waiting(&s) {
         return Err(OpError(format!(
@@ -188,12 +302,15 @@ pub(crate) fn answer(
     if answer == Answer::Yes {
         for a in &s.actions {
             if let Err(why) = run_action(state, tx, caller, now, a, logs) {
-                failed.push(format!("{}: {why}", joined(a)));
+                failed.push(format!("{}: {why}", a.line()));
             }
         }
     }
+    // A yes with nothing to run is a signal for moa: it waits for the channel (D5).
+    let plain = answer == Answer::Yes && s.actions.is_empty();
     let (status, word) = match answer {
-        Answer::Yes => (SuggestionStatus::Accepted, "done"),
+        Answer::Yes if plain => (SuggestionStatus::Accepted, PLAIN_YES),
+        Answer::Yes => (SuggestionStatus::Accepted, YES_DONE),
         Answer::No => (SuggestionStatus::Rejected, "rejected"),
         Answer::Later => (SuggestionStatus::Later, "later"),
     };
@@ -202,10 +319,10 @@ pub(crate) fn answer(
     row.status = status;
     row.resolved_at = Some(now.wall);
     if answer == Answer::Yes {
-        row.result = Some(if failed.is_empty() {
-            "done".to_string()
-        } else {
-            failures.clone()
+        row.result = Some(match (plain, failed.is_empty()) {
+            (true, _) => YES_WAITING.to_string(),
+            (false, true) => YES_DONE.to_string(),
+            (false, false) => failures.clone(),
         });
     }
     let mut ui = format!("{status} suggestion #{}: {}", s.id, s.text);
@@ -219,7 +336,8 @@ pub(crate) fn answer(
     Ok(Done { text, data })
 }
 
-/// One action of a `yes`. An `Err` is the reason it didn't run, and applied nothing.
+/// One action of a `yes`. An `Err` is the reason it didn't run, and applied nothing. A
+/// `term close` is checked now and starts once the answer is saved (D8).
 fn run_action(
     state: &mut State,
     tx: &mut Tx,
@@ -234,6 +352,9 @@ fn run_action(
     };
     let home: &Path = &deps.home;
     let op = parse(a, home)?;
+    if let Op::TermClose { target } = &op {
+        return term::close_on_yes(state, tx, target).map_err(|e| e.0);
+    }
     run(state, tx, caller, op, now, logs)
         .map(|_| ())
         .map_err(|e| e.0)

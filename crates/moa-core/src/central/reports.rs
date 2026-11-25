@@ -18,7 +18,7 @@ use crate::text::{cut, one_line};
 use crate::time::local_format;
 
 /// `text` cut to `n` characters, with a `…` after the cut: the stored text says it was cut.
-fn cut_marked(text: &str, n: usize) -> String {
+pub(crate) fn cut_marked(text: &str, n: usize) -> String {
     let kept = cut(text, n);
     if kept.len() < text.len() {
         format!("{kept}…")
@@ -114,9 +114,10 @@ const HEADING_FIELD_MAX: usize = 80;
 const FRAME: usize = 200;
 
 /// What one prompt carries: the queued reports in line, until `sessions` sessions, each
-/// with every report of its own, and while their text stays within [`PROMPT_MAX`]. The first
-/// session always goes; the rest wait for the next prompt.
-pub fn batch<'a>(state: &'a State, now: &Now, sessions: usize) -> Vec<&'a Report> {
+/// with every report of its own, and while their text and the `used` characters already
+/// in the prompt stay within [`PROMPT_MAX`]. The first session always goes; the rest wait
+/// for the next prompt.
+pub fn batch<'a>(state: &'a State, now: &Now, sessions: usize, used: usize) -> Vec<&'a Report> {
     // The sessions in line, each with its reports.
     let mut line: Vec<(SessionId, Vec<&Report>)> = Vec::new();
     for r in state.reports() {
@@ -127,7 +128,7 @@ pub fn batch<'a>(state: &'a State, now: &Now, sessions: usize) -> Vec<&'a Report
     }
     // A session's reports go together, in its place in line.
     let mut chosen: Vec<&Report> = Vec::new();
-    let mut size = FRAME;
+    let mut size = FRAME.saturating_add(used);
     for (_, reports) in line.into_iter().take(sessions) {
         // Each section, and the blank line before it.
         let more: usize = reports

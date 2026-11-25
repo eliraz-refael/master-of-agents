@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use common::central::{Disk, acps, caps, hear_at, opened, prompt_at, prompts_sent, started as up};
 use jiff::tz::TimeZone;
+use moa_core::central::carry::YES_MAX;
 use moa_core::central::channel::{AUTO_KEY, auto_on};
 use moa_core::central::reports::{EARLIER_MAX, LAST_MAX, TURNS_KEPT};
 use moa_core::central::wire::{AcpCmd, AcpIn, Opened, PermKind, PermOption, ThreadHow};
@@ -21,9 +22,10 @@ use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind};
 use moa_core::model::{
     Activity, AgentKind, Conversation, ConversationReason, FeedEntry, Lifecycle, Location, Project,
-    ProjectId, ProjectStatus, Report, ReportKind, Session, SessionId,
+    ProjectId, ProjectStatus, Report, ReportKind, Session, SessionId, Suggestion, SuggestionAction,
+    SuggestionId, SuggestionStatus, YES_DONE, YES_TOLD, YES_WAITING,
 };
-use moa_core::op::{ConnId, Op, PermAnswer, ReqId};
+use moa_core::op::{Answer, ConnId, Done, Op, OpError, PermAnswer, ReqId};
 use moa_core::publish::Topic;
 use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::{Now, UtcMs};
@@ -1279,9 +1281,357 @@ fn no_timer_with_nothing_queued() {
     assert!(common::timers(&all, TimerKey::Wake).is_empty(), "{all:?}");
 }
 
+// ---------- a plain yes reaches moa (D1, D5) ----------
+
+const KITE_YES: &str = "Kite has 3 overdue tasks blocked on the domain; move them to Friday?";
+const YES_BLOCK: &str = "(moa · the user said yes to your suggestion(s), not typed by the user)\n\
+                         - #12: Kite has 3 overdue tasks blocked on the domain; move them to \
+                         Friday?\nDo what each one proposed.";
+
+/// Suggestion `id`, open, with `text` and `actions`.
+fn open_suggestion(id: i64, text: &str, actions: Vec<SuggestionAction>) -> Suggestion {
+    Suggestion {
+        id: SuggestionId(id),
+        text: text.into(),
+        status: SuggestionStatus::Open,
+        actions,
+        actions_raw: None,
+        actions_invalid: None,
+        result: None,
+        created_at: UtcMs(T0),
+        resolved_at: None,
+    }
+}
+
+/// [`moa_brain`] of one session, with `meta`, the moactl grammar, and open suggestion #12
+/// ([`KITE_YES`], `actions` its actions).
+fn moa_suggesting(meta: Vec<(String, String)>, actions: Vec<SuggestionAction>) -> State {
+    let snapshot = Snapshot {
+        suggestions: vec![open_suggestion(12, KITE_YES, actions)],
+        ..moa_snapshot(&TITLES[..1], meta)
+    };
+    let config = Config::parse(&common::central::toml("acct-a"), Path::new(HOME)).unwrap();
+    let deps = Deps {
+        home: PathBuf::from(HOME),
+        parse_action: Some(moa_proto::cli::parse_action),
+        ..Deps::default()
+    };
+    load(config, deps, snapshot, at(T0)).0
+}
+
+/// `suggestion yes ID` at `ms`, as request `req`.
+fn yes_at(st: &mut State, ms: i64, req: u64, id: i64) -> Vec<Effect> {
+    let input = Input::Client {
+        conn: ConnId(1),
+        req: ReqId(req),
+        caller: Default::default(),
+        op: Op::SuggestionAnswer {
+            id: Some(id),
+            answer: Answer::Yes,
+        },
+    };
+    handle_checked(st, input, at(ms))
+}
+
+/// The suggestion rows `fx` saves.
+fn suggestion_rows(fx: &[Effect]) -> Vec<&Suggestion> {
+    common::changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Suggestion(s) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one commit of `fx` that saves a `you` row.
+fn you_commit(fx: &[Effect]) -> &Vec<Change> {
+    let commits: Vec<&Vec<Change>> = commits(fx)
+        .into_iter()
+        .filter(|c| {
+            c.iter()
+                .any(|c| matches!(c, Change::Feed(r) if r.kind == "you"))
+        })
+        .collect();
+    match commits[..] {
+        [c] => c,
+        _ => panic!("{} commits save a you row", commits.len()),
+    }
+}
+
+/// Suggestion #12's result now.
+fn result_of_12(st: &State) -> Option<String> {
+    let s = st.suggestions().find(|s| s.id == SuggestionId(12));
+    s.and_then(|s| s.result.clone())
+}
+
+/// D5: yes on a suggestion with no actions is a signal for moa. It waits for moa, and moa,
+/// idle, hears it at once in an automatic prompt; that prompt's commit marks it told.
+#[test]
+fn a_yes_without_actions_tells_moa() {
+    let mut st = moa_suggesting(vec![], vec![]);
+    let fx = yes_at(&mut st, T, 1, 12);
+    match &common::replies(&fx)[..] {
+        [(ReqId(1), Ok(done))] => assert_eq!(done.text, "yes; moa acts on it when it's free"),
+        other => panic!("one answer: {other:?}"),
+    }
+    let saved = suggestion_rows(&fx);
+    assert_eq!(saved[0].status, SuggestionStatus::Accepted);
+    assert_eq!(saved[0].result.as_deref(), Some(YES_WAITING));
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Start { .. }]), "{fx:?}");
+    let fx = play(&mut st, T, fx);
+    assert_eq!(sent(&fx), YES_BLOCK);
+    let commit = you_commit(&fx);
+    let told = commit.iter().find_map(|c| match c {
+        Change::Suggestion(s) if s.id == SuggestionId(12) => s.result.as_deref(),
+        _ => None,
+    });
+    assert_eq!(told, Some(YES_TOLD), "{commit:?}");
+    let you = you_row(&fx);
+    assert!(you.automatic);
+    let body = body_of(you);
+    assert_eq!(
+        body,
+        serde_json::json!({ "text": YES_BLOCK, "yeses": [12] }),
+        "{body}"
+    );
+    assert_eq!(result_of_12(&st).as_deref(), Some(YES_TOLD));
+    assert_eq!(st.yeses().count(), 0);
+    // Told once: the turn's end sends nothing more.
+    let fx = end_turn(&mut st, T + SEC);
+    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+}
+
+/// Review focus 2: a yes waits for moa: while moa answers it goes at the turn's end; while
+/// moa's agent restarts it goes once the thread reopens; after a failed start it rides on
+/// your next prompt. A second yes is refused.
+#[test]
+fn a_yes_waits_for_moa() {
+    // While moa answers.
+    let mut st = moa_suggesting(vec![], vec![]);
+    let fx = prompt_at(&mut st, at(T0), 1, "hello", false);
+    play(&mut st, T0, fx);
+    let fx = yes_at(&mut st, T, 2, 12);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(wake_timer(&fx), None);
+    let again = yes_at(&mut st, T, 3, 12);
+    match &common::replies(&again)[..] {
+        [(ReqId(3), Err(e))] => assert_eq!(e.0, "suggestion #12 is already accepted"),
+        other => panic!("one refusal: {other:?}"),
+    }
+    let fx = end_turn(&mut st, T + SEC);
+    assert_eq!(sent(&fx), YES_BLOCK);
+    assert!(you_row(&fx).automatic);
+
+    // While moa's agent restarts.
+    let mut st = moa_suggesting(vec![], vec![]);
+    let fx = prompt_at(&mut st, at(T0), 1, "hello", false);
+    play(&mut st, T0, fx);
+    let dog = |st: &mut State, ms| handle_checked(st, Input::Timer(TimerKey::Watchdog), at(ms));
+    dog(&mut st, T0 + 300 * SEC);
+    let restart = T0 + 330 * SEC;
+    dog(&mut st, restart);
+    assert!(st.central().restarting.is_some());
+    let fx = yes_at(&mut st, restart, 2, 12);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    let generation = st.central().generation;
+    let fx = hear_at(&mut st, at(restart), up(generation, caps(true, true, true)));
+    assert!(
+        matches!(acps(&fx)[..], [AcpCmd::Open { .. }]),
+        "only the reopen: {fx:?}"
+    );
+    let thread = st.threads().next().unwrap().thread_id.clone();
+    let reopened = opened(generation, &thread, Opened::Resumed);
+    let fx = hear_at(&mut st, at(restart), reopened);
+    assert_eq!(sent(&fx), YES_BLOCK);
+
+    // After a failed start.
+    let mut st = moa_suggesting(vec![], vec![]);
+    let fx = yes_at(&mut st, T, 1, 12);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Start { .. }]), "{fx:?}");
+    let generation = st.central().generation;
+    let why = "no login".to_string();
+    let fx = hear_at(&mut st, at(T), AcpIn::Exited { generation, why });
+    assert!(matches!(st.central().phase, Phase::Failed(_)));
+    assert!(!matches!(wake_timer(&fx), Some(Some(_))), "{fx:?}");
+    let fx = fire(&mut st, T + 600 * SEC);
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(result_of_12(&st).as_deref(), Some(YES_WAITING));
+    let fx = prompt_at(&mut st, at(T + 601 * SEC), 2, "hi", false);
+    let fx = play(&mut st, T + 601 * SEC, fx);
+    assert_eq!(sent(&fx), format!("{YES_BLOCK}\n\n---\n\nhi"));
+    assert_eq!(result_of_12(&st).as_deref(), Some(YES_TOLD));
+}
+
+/// `/auto` stops the wake-ups only: a yes goes all the same.
+#[test]
+fn a_yes_goes_with_auto_off() {
+    let meta = vec![(AUTO_KEY.to_string(), "off".to_string())];
+    let mut st = moa_suggesting(meta, vec![]);
+    let fx = yes_at(&mut st, T, 1, 12);
+    let fx = play(&mut st, T, fx);
+    assert_eq!(sent(&fx), YES_BLOCK);
+    assert!(you_row(&fx).automatic);
+}
+
+/// D1, ruling R1: your prompt, on a thread that had its first prompt, carries the waiting
+/// yes before your text, in the one commit that saves its row.
+#[test]
+fn your_prompt_carries_yeses() {
+    let mut st = moa_suggesting(vec![], vec![]);
+    let fx = prompt_at(&mut st, at(T0), 1, "hello", false);
+    play(&mut st, T0, fx);
+    end_turn(&mut st, T0 + SEC);
+    let thread = st.threads().next().unwrap().thread_id.clone();
+    // moa's agent stops; the yes's start of it fails: the yes waits for you.
+    let generation = st.central().generation;
+    let why = "killed".to_string();
+    hear_at(&mut st, at(T), AcpIn::Exited { generation, why });
+    let fx = yes_at(&mut st, T + SEC, 2, 12);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Start { .. }]), "{fx:?}");
+    let generation = st.central().generation;
+    let why = "no login".to_string();
+    hear_at(&mut st, at(T + SEC), AcpIn::Exited { generation, why });
+    assert_eq!(st.yeses().count(), 1);
+
+    let mut fx = prompt_at(&mut st, at(T + 2 * SEC), 3, "hi", false);
+    let generation = st.central().generation;
+    fx.extend(hear_at(
+        &mut st,
+        at(T + 2 * SEC),
+        up(generation, caps(true, true, true)),
+    ));
+    let reopened = opened(generation, &thread, Opened::Resumed);
+    fx.extend(hear_at(&mut st, at(T + 2 * SEC), reopened));
+    let commit = you_commit(&fx);
+    assert!(
+        commit.iter().any(|c| matches!(c,
+            Change::Suggestion(s) if s.result.as_deref() == Some(YES_TOLD))),
+        "{commit:?}"
+    );
+    let you = you_row(&fx);
+    assert!(!you.automatic);
+    assert_eq!(you.thread_id, thread);
+    let body = body_of(you);
+    assert_eq!(body["text"], "hi");
+    assert_eq!(body["yeses"], serde_json::json!([12]));
+    assert_eq!(body["carried"], YES_BLOCK);
+    assert!(body.get("reports").is_none(), "{body}");
+    assert_eq!(sent(&fx), format!("{YES_BLOCK}\n\n---\n\nhi"));
+}
+
+/// D1: a wake-up under way when a yes comes carries it too, before the reports.
+#[test]
+fn a_wake_carries_yeses_too() {
+    let mut st = moa_suggesting(vec![], vec![]);
+    finished(&mut st, 0, T, "Merged PR #3");
+    let w = T + 45 * SEC;
+    let fx = fire(&mut st, w);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Start { .. }]), "{fx:?}");
+    // moa's agent starts for the wake: the yes waits for it.
+    let yes = yes_at(&mut st, w, 1, 12);
+    assert!(acps(&yes).is_empty(), "{yes:?}");
+    let fx = play(&mut st, w, fx);
+    let text = sent(&fx);
+    let head = format!("{YES_BLOCK}\n\n---\n\n{WAKE}1 session report(s) since your last look:");
+    assert!(text.starts_with(&head), "{text}");
+    let you = you_row(&fx);
+    assert!(you.automatic);
+    let body = body_of(you);
+    assert_eq!(body["text"].as_str(), Some(text.as_str()));
+    assert_eq!(body["reports"], 1);
+    assert_eq!(body["yeses"], serde_json::json!([12]));
+    assert_eq!(st.reports().count(), 0);
+    assert_eq!(st.yeses().count(), 0);
+}
+
+/// A yes whose prompt can't reach moa's agent (its thread can't open) isn't tried again at
+/// once: the next try is a gap later, and the yes still waits.
+#[test]
+fn a_yes_whose_thread_cant_open_waits_the_gap() {
+    let mut st = moa_suggesting(vec![], vec![]);
+    yes_at(&mut st, T, 1, 12);
+    let generation = st.central().generation;
+    hear_at(&mut st, at(T), up(generation, caps(true, true, true)));
+    let result = Err("not logged in".to_string());
+    let fx = hear_at(&mut st, at(T), AcpIn::Opened { generation, result });
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(wake_timer(&fx), Some(Some(UtcMs(T + 180 * SEC))));
+    assert_eq!(st.yeses().count(), 1);
+    let fx = fire(&mut st, T + 180 * SEC);
+    assert!(matches!(acps(&fx)[..], [AcpCmd::Open { .. }]), "{fx:?}");
+}
+
+/// One backoff for every automatic source: a wake-up whose thread can't open holds back the
+/// yes that waits too, for the same gap; then one prompt carries both.
+#[test]
+fn a_failed_try_holds_back_every_source() {
+    let mut st = moa_suggesting(vec![], vec![]);
+    finished(&mut st, 0, T, "Merged PR #3");
+    let w = T + 45 * SEC;
+    fire(&mut st, w);
+    yes_at(&mut st, w, 1, 12);
+    let generation = st.central().generation;
+    hear_at(&mut st, at(w), up(generation, caps(true, true, true)));
+    let result = Err("not logged in".to_string());
+    let fx = hear_at(&mut st, at(w), AcpIn::Opened { generation, result });
+    assert!(acps(&fx).is_empty(), "the yes waits too: {fx:?}");
+    assert_eq!(wake_timer(&fx), Some(Some(UtcMs(w + 180 * SEC))));
+    let fx = fire(&mut st, w + 180 * SEC);
+    let text = sent(&play(&mut st, w + 180 * SEC, fx));
+    assert!(
+        text.starts_with(&format!("{YES_BLOCK}\n\n---\n\n{WAKE}")),
+        "{text}"
+    );
+}
+
+/// A long suggestion's line in the yes block is its first 500 characters, then `…`: the
+/// suggestion itself keeps all of it.
+#[test]
+fn a_long_yes_is_cut() {
+    let long = "Kite ".repeat(1_000);
+    let snapshot = Snapshot {
+        suggestions: vec![open_suggestion(12, &long, vec![])],
+        ..moa_snapshot(&TITLES[..1], vec![])
+    };
+    let (mut st, _) = moa_load(snapshot, "");
+    let fx = yes_at(&mut st, T, 1, 12);
+    let text = sent(&play(&mut st, T, fx));
+    const { assert!(YES_MAX == 500) };
+    let line = format!("- #12: {}…\n", &long[..YES_MAX]);
+    assert!(text.contains(&line), "{text}");
+    assert_eq!(
+        text.chars().count(),
+        YES_BLOCK.chars().count() - KITE_YES.len() + 501
+    );
+    let kept = st.suggestions().find(|s| s.id == SuggestionId(12)).unwrap();
+    assert_eq!(kept.text, long);
+}
+
+/// A yes with actions runs them: moa hears nothing of it.
+#[test]
+fn a_yes_with_actions_tells_moa_nothing() {
+    let note = SuggestionAction {
+        verb: "note".into(),
+        args: vec!["Kite waits on the domain".into()],
+    };
+    let mut st = moa_suggesting(vec![], vec![note]);
+    let fx = yes_at(&mut st, T, 1, 12);
+    match &common::replies(&fx)[..] {
+        [(ReqId(1), Ok(done))] => assert_eq!(done.text, "done"),
+        other => panic!("one answer: {other:?}"),
+    }
+    assert_eq!(result_of_12(&st).as_deref(), Some(YES_DONE));
+    assert!(acps(&fx).is_empty(), "{fx:?}");
+    assert_eq!(st.yeses().count(), 0);
+    let fx = prompt_at(&mut st, at(T + SEC), 2, "hi", false);
+    let fx = play(&mut st, T + SEC, fx);
+    assert_eq!(sent(&fx), "hi");
+}
+
 // ---------- exactly once, across restarts ----------
 
-/// The world of [`each_report_reaches_moa_exactly_once`]: settle, gap and batch small.
+/// The world of [`a_yes_reaches_moa_once`]: settle, gap and batch small.
 const SMALL: &str = "[moa]\nwake_settle_seconds = 5\nwake_gap_seconds = 20\nwake_batch = 2\n";
 
 /// One step of the property.
@@ -1307,6 +1657,10 @@ enum Step {
     /// from 0 to all of them (this index picks it): the rest are lost, and nothing it said
     /// reaches moa's agent.
     Restart(prop::sample::Index),
+    /// moa suggests, with no actions, a token of its own its text.
+    Suggest,
+    /// You answer yes to one of moa's suggestions (this index picks it), answered or not.
+    Yes(prop::sample::Index),
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -1320,6 +1674,8 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::AutoOnDisk),
         1 => Just(Step::Refuse),
         2 => any::<prop::sample::Index>().prop_map(Step::Restart),
+        1 => Just(Step::Suggest),
+        2 => any::<prop::sample::Index>().prop_map(Step::Yes),
     ]
 }
 
@@ -1353,11 +1709,15 @@ fn once(found: &BTreeMap<String, usize>, what: &str) -> Result<(), TestCaseError
     Ok(())
 }
 
-/// A hook event the expected queue takes once its commit reaches the disk.
-struct Event {
-    session: usize,
-    kind: ReportKind,
-    token: String,
+/// What the expected queue takes once its commit reaches the disk: a hook event's report, or
+/// your yes to the suggestion whose text is `token`.
+enum Event {
+    Report {
+        session: usize,
+        kind: ReportKind,
+        token: String,
+    },
+    Yes(String),
 }
 
 /// The queue as K2's rules alone keep it, commit by commit as the disk takes them.
@@ -1365,6 +1725,8 @@ struct Event {
 struct Expected {
     /// Each session's tokens of each kind, waiting.
     queues: HashMap<(usize, ReportKind), Vec<String>>,
+    /// The yeses waiting for moa, by their suggestion's token.
+    yeses: BTreeSet<String>,
     /// Carried in a saved `you` row.
     carried: BTreeSet<String>,
     /// Pushed out by a 7th turn, replaced by a newer need, resolved by a turn, or never
@@ -1374,35 +1736,53 @@ struct Expected {
 
 impl Expected {
     fn queue(&mut self, e: Event) {
-        let q = self.queues.entry((e.session, e.kind)).or_default();
-        match e.kind {
+        let (session, kind, token) = match e {
+            Event::Report {
+                session,
+                kind,
+                token,
+            } => (session, kind, token),
+            Event::Yes(token) => {
+                self.yeses.insert(token);
+                return;
+            }
+        };
+        let q = self.queues.entry((session, kind)).or_default();
+        match kind {
             ReportKind::TurnEnded => {
-                q.push(e.token);
+                q.push(token);
                 if q.len() > TURNS_KEPT {
                     self.gone.insert(q.remove(0));
                 }
                 // The turn ended, so the session needs nothing now: its need is deleted.
-                if let Some(need) = self.queues.remove(&(e.session, ReportKind::NeedsYou)) {
+                if let Some(need) = self.queues.remove(&(session, ReportKind::NeedsYou)) {
                     self.gone.extend(need);
                 }
             }
             ReportKind::NeedsYou => {
                 self.gone.extend(q.drain(..));
-                q.push(e.token);
+                q.push(token);
             }
         }
     }
 
-    /// A `you` row carrying `tokens` is saved: each was waiting, and each report it takes
-    /// goes whole.
+    /// A `you` row carrying `tokens` is saved: each was waiting, each yes goes once, and each
+    /// report it takes goes whole.
     fn carry(&mut self, tokens: &BTreeMap<String, usize>) -> Result<(), TestCaseError> {
-        for t in tokens.keys() {
+        let mut reports = BTreeMap::new();
+        for (t, n) in tokens {
+            if self.yeses.remove(t) {
+                self.carried.insert(t.clone());
+                continue;
+            }
             prop_assert!(
                 self.queues.values().any(|q| q.contains(t)),
                 "{} is carried, but isn't waiting: carried twice, or never queued",
                 t
             );
+            reports.insert(t.clone(), *n);
         }
+        let tokens = &reports;
         let taken: Vec<(usize, ReportKind)> = self
             .queues
             .iter()
@@ -1449,6 +1829,9 @@ struct Daemon {
     token: u32,
     req: u64,
     thread: u32,
+    /// The ids of moa's suggestions asked for. One whose commit was lost may be another's
+    /// now: its token is its text.
+    suggested: Vec<i64>,
     expected: Expected,
 }
 
@@ -1487,6 +1870,7 @@ impl Daemon {
             token: 0,
             req: 0,
             thread: 0,
+            suggested: Vec::new(),
             expected: Expected::default(),
         };
         d.flush()?;
@@ -1531,11 +1915,13 @@ impl Daemon {
                     if let Some(e) = event.take() {
                         self.expected.queue(e);
                     }
-                    let wakes = changes
-                        .iter()
-                        .any(|c| matches!(c, Change::Feed(r) if r.kind == "you" && r.automatic));
+                    // An automatic prompt goes with /auto off for a yes, but carries no reports.
+                    let reads = changes.iter().any(|c| {
+                        matches!(c, Change::Feed(r) if r.kind == "you" && r.automatic
+                            && serde_json::from_str::<Value>(&r.body).unwrap()["reports"].is_u64())
+                    });
                     prop_assert!(
-                        !wakes || self.disk.meta(AUTO_KEY).as_deref() != Some("off"),
+                        !reads || self.disk.meta(AUTO_KEY).as_deref() != Some("off"),
                         "a wake-up was saved with /auto off"
                     );
                     self.disk.apply(&changes);
@@ -1568,8 +1954,10 @@ impl Daemon {
                 _ => {}
             }
         }
-        if let Some(e) = event {
-            self.expected.gone.insert(e.token);
+        // A report whose event wasn't saved is gone; a yes that wasn't saved leaves its
+        // suggestion open, to be answered again.
+        if let Some(Event::Report { token, .. }) = event {
+            self.expected.gone.insert(token);
         }
         if let (Some(on), None) = (auto_set, commits) {
             let off = self.disk.meta(AUTO_KEY).as_deref() == Some("off");
@@ -1634,7 +2022,7 @@ impl Daemon {
                 self.expected.gone.insert(token);
             }
             false => {
-                self.event = Some(Event {
+                self.event = Some(Event::Report {
                     session: n,
                     kind,
                     token,
@@ -1710,6 +2098,72 @@ impl Daemon {
         self.restart()
     }
 
+    /// One of `console`'s requests, its reply.
+    fn client(&mut self, op: Op) -> Option<Result<Done, OpError>> {
+        self.req += 1;
+        self.run(Input::Client {
+            conn: ConnId(1),
+            req: ReqId(self.req),
+            caller: Default::default(),
+            op,
+        });
+        common::replies(&self.last).pop().map(|(_, r)| r)
+    }
+
+    /// moa suggests a token of its own, with no actions.
+    fn suggest(&mut self) -> Result<(), TestCaseError> {
+        self.next()?;
+        self.token += 1;
+        let token = format!("tok-{:04}", self.token);
+        let op = Op::Suggest {
+            text: token.clone(),
+            actions: Vec::new(),
+        };
+        if let Some(Ok(done)) = self.client(op) {
+            let id = done.data["id"].as_i64().expect("its id");
+            if !self.suggested.contains(&id) {
+                self.suggested.push(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Yes to the suggestion `k` picks: one that waits is accepted, its yes waiting for moa
+    /// once its commit reaches the disk; one already answered is refused.
+    fn yes(&mut self, k: prop::sample::Index) -> Result<(), TestCaseError> {
+        if self.suggested.is_empty() {
+            return Ok(());
+        }
+        let refused = self.next()?;
+        let id = self.suggested[k.index(self.suggested.len())];
+        let was = self.st.suggestions().find(|s| s.id.0 == id).cloned();
+        let op = Op::SuggestionAnswer {
+            id: Some(id),
+            answer: Answer::Yes,
+        };
+        let reply = self.client(op);
+        match (was, reply) {
+            (Some(s), Some(Ok(done))) => {
+                prop_assert!(!refused, "a yes went while writes were refused");
+                prop_assert_eq!(s.status, SuggestionStatus::Open);
+                prop_assert_eq!(done.text, "yes; moa acts on it when it's free");
+                self.event = Some(Event::Yes(s.text));
+            }
+            (Some(s), Some(Err(e))) if s.status == SuggestionStatus::Accepted => {
+                prop_assert_eq!(e.0, format!("suggestion #{id} is already accepted"));
+            }
+            (Some(_), Some(Err(e))) => {
+                prop_assert!(refused, "an open suggestion's yes was refused: {}", e.0);
+                let why = "moa can't save right now (the disk is full); nothing was changed";
+                prop_assert_eq!(e.0, why);
+            }
+            // Its commit was lost to a restart: no suggestion has the id.
+            (None, Some(Err(e))) => prop_assert_eq!(e.0, "moactl suggestion yes|no|later ID"),
+            (was, reply) => prop_assert!(false, "{:?} answered {:?}", was, reply),
+        }
+        Ok(())
+    }
+
     /// `/auto` set by hand on the disk, `None` for on, and the daemon restarted to read it.
     fn set_auto(&mut self, value: Option<&str>) -> Result<(), TestCaseError> {
         self.flush()?;
@@ -1765,6 +2219,8 @@ impl Daemon {
                 let k = k.index(self.commits() + 1);
                 self.restart_after(k)
             }
+            Step::Suggest => self.suggest(),
+            Step::Yes(k) => self.yes(k),
         }
     }
 
@@ -1773,7 +2229,7 @@ impl Daemon {
     fn drain(&mut self) -> Result<(), TestCaseError> {
         self.set_auto(None)?;
         for _ in 0..50 {
-            if self.st.reports().next().is_none() {
+            if self.st.reports().next().is_none() && self.st.yeses().next().is_none() {
                 break;
             }
             self.step(Step::Advance(60))?;
@@ -1788,17 +2244,26 @@ impl Daemon {
         self.flush()
     }
 
-    /// What the disk holds at the end: no report waits, no token is in two `you` rows, each
-    /// token kept is in one, and each pushed out or never saved is in none.
+    /// What the disk holds at the end: no report or yes waits, no token is in two `you` rows,
+    /// each token kept is in one, and each pushed out or never saved is in none.
     fn check(&self) -> Result<(), TestCaseError> {
+        let disk = self.disk.snapshot();
+        prop_assert!(disk.reports.is_empty(), "reports still wait");
         prop_assert!(
-            self.disk.snapshot().reports.is_empty(),
-            "reports still wait"
+            disk.suggestions
+                .iter()
+                .all(|s| s.result.as_deref() != Some(YES_WAITING)),
+            "yeses still wait"
         );
         prop_assert!(
             self.expected.queues.values().all(Vec::is_empty),
             "never carried: {:?}",
             self.expected.queues
+        );
+        prop_assert!(
+            self.expected.yeses.is_empty(),
+            "never told: {:?}",
+            self.expected.yeses
         );
         let mut rows: BTreeMap<String, usize> = BTreeMap::new();
         for body in self.disk.you_bodies() {
@@ -1826,10 +2291,11 @@ impl Daemon {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Whatever the sessions report, whatever you prompt and wherever the daemon restarts,
-    /// each report that isn't pushed out reaches moa's agent in exactly one saved row.
+    /// Whatever the sessions report, whatever you prompt or say yes to and wherever the
+    /// daemon restarts, each report that isn't pushed out, and each yes, reaches moa's agent
+    /// in exactly one saved row (Review focus 2: `a_yes_reaches_moa_once`).
     #[test]
-    fn each_report_reaches_moa_exactly_once(steps in prop::collection::vec(step(), 1..=60)) {
+    fn a_yes_reaches_moa_once(steps in prop::collection::vec(step(), 1..=60)) {
         let mut d = Daemon::new()?;
         for s in steps {
             d.step(s)?;

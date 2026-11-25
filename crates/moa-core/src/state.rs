@@ -332,6 +332,12 @@ pub struct TmuxLinkData {
     pub start: i64,
 }
 
+/// The key a suggestion's row has in a [`LoadNote`], as [`crate::change::Change::row`] gives
+/// it: `#ID`.
+pub(crate) fn suggestion_key(id: SuggestionId) -> String {
+    format!("#{id}")
+}
+
 pub struct State {
     deps: Deps,
     brain: BrainName,
@@ -667,6 +673,18 @@ impl State {
         self.suggestions.values()
     }
 
+    /// The yeses waiting for moa (D5): accepted suggestions with no actions whose result is
+    /// [`YES_WAITING`], by id. A row with a value this build doesn't know is left out: no
+    /// commit could mark it told, so it would hold back every prompt.
+    pub fn yeses(&self) -> impl Iterator<Item = &Suggestion> {
+        self.suggestions.values().filter(|s| {
+            s.status == SuggestionStatus::Accepted
+                && s.actions.is_empty()
+                && s.result.as_deref() == Some(YES_WAITING)
+                && !self.suggestion_unknown(s.id)
+        })
+    }
+
     pub fn conversations_of(&self, id: SessionId) -> impl Iterator<Item = &Conversation> {
         self.conversations
             .values()
@@ -687,6 +705,11 @@ impl State {
         self.unknown
             .iter()
             .any(|n| n.table == table && n.key == key)
+    }
+
+    /// Whether suggestion `id`'s row was loaded with a value this build doesn't know.
+    pub fn suggestion_unknown(&self, id: SuggestionId) -> bool {
+        self.is_unknown("suggestions", &suggestion_key(id))
     }
 
     /// moa's threads (`moa_threads`).
