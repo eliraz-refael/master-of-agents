@@ -1,0 +1,6 @@
+---
+source: crates/moa-core/tests/asks.rs
+expression: done.text
+---
+#3  moa → Kite  pending  5m ago  Which of the three lamps did you rewire on Friday, and was t
+#1  Kite → Harbor  answered  1h ago  Is the domain renewed?

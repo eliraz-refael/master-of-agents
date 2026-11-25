@@ -1635,6 +1635,105 @@ expression: all
               "method",
               "params"
             ]
+          },
+          {
+            "description": "The agents the caller can ask: moa, then every live session but the caller's own.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "peers"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Asks agent `to` (a session's name, or `moa`) `text`, and waits up to `timeout_s`\nseconds for the answer. Only a session or moa can ask.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "ask"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "to": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "timeout_s": {
+                    "type": "integer",
+                    "format": "int64",
+                    "default": 540
+                  }
+                },
+                "required": [
+                  "to",
+                  "text"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "Waits again, up to `timeout_s` seconds, for the answer to ask `id`.",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "reply"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "timeout_s": {
+                    "type": "integer",
+                    "format": "int64",
+                    "default": 540
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
+          },
+          {
+            "description": "The caller's recent asks, from it or to it (every ask for a caller that is neither a\nsession nor moa).",
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "const": "asks"
+              },
+              "params": {
+                "$ref": "#/$defs/NoParams"
+              }
+            },
+            "required": [
+              "method",
+              "params"
+            ]
           }
         ]
       },

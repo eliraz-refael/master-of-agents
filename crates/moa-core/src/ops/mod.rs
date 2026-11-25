@@ -72,6 +72,8 @@ pub(crate) fn run(
         Op::TermName { target, name } => term::name(state, tx, &target, &name),
         Op::TermNote { target, note } => term::note(state, tx, &target, &note),
         Op::TermTimeout { target, after_ms } => term::timeout(state, tx, now, &target, after_ms),
+        Op::Peers(_) => crate::asks::peers(state, caller, now),
+        Op::Asks(_) => crate::asks::list(state, caller, now),
         // `handle` answers these with the link, or moa's agent; they are never run as ops.
         Op::TmuxEnsure { .. }
         | Op::SessionOpen { .. }
@@ -98,7 +100,9 @@ pub(crate) fn run(
         | Op::ConsoleNew(_)
         | Op::ConsoleCommand { .. }
         | Op::ConsolePermission { .. }
-        | Op::ConsoleAccount { .. } => Err(OpError("moa can't answer that here".into())),
+        | Op::ConsoleAccount { .. }
+        | Op::Ask { .. }
+        | Op::Reply { .. } => Err(OpError("moa can't answer that here".into())),
         // The text is fixed: a panic message reaches the log.
         Op::DebugPanic => panic!("debug.panic was asked for"),
     }

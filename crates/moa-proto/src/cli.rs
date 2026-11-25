@@ -682,13 +682,19 @@ impl Verb {
                     ))
                 })?,
             },
+            Verb::Peers => Op::Peers(NoParams),
+            Verb::Ask { to, text, timeout } => Op::Ask {
+                to: to.clone(),
+                text: text.clone(),
+                timeout_s: *timeout,
+            },
+            Verb::Reply { id, timeout } => Op::Reply {
+                id: *id,
+                timeout_s: *timeout,
+            },
+            Verb::Asks => Op::Asks(NoParams),
             // Listed one by one, so a new verb can't become "not yet" by default.
-            Verb::Peers
-            | Verb::Ask { .. }
-            | Verb::Reply { .. }
-            | Verb::Asks
-            | Verb::Setup { .. }
-            | Verb::ImportHerdr => return Err(VerbError::NotYet(self.name())),
+            Verb::Setup { .. } | Verb::ImportHerdr => return Err(VerbError::NotYet(self.name())),
         })
     }
 }

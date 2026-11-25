@@ -1,0 +1,7 @@
+---
+source: crates/moa-core/tests/asks.rs
+expression: done.text
+---
+moa       moa                  off       -                        -
+b9e0c3d5  Beacon               idle      ~/private/beacon         -
+3f2a91c4  Harbor               working   ~/private/harbor         asked 5m ago

@@ -11,3 +11,10 @@ pub fn one_line(s: &str) -> String {
 pub fn cut(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }
+
+/// Whether an ask's text loses `c` when it is cleaned (A2): a control character other than
+/// `\n` and `\t`, which takes DEL and the C1 controls too. An `ESC` would end a bracketed
+/// paste early, a `\r` would send it. The one test: tmux's `set-buffer` check uses it too.
+pub fn is_unpastable(c: char) -> bool {
+    c.is_control() && c != '\n' && c != '\t'
+}

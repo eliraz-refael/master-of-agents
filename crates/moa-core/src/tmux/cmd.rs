@@ -570,7 +570,7 @@ fn is_digits(d: &str) -> bool {
 /// An ask's text as cleaning leaves it (A2): not empty, and no control character but `\n`
 /// and `\t`. A backstop: an `ESC[201~` would end the bracketed paste early.
 fn is_clean_text(t: &str) -> bool {
-    !t.is_empty() && !t.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+    !t.is_empty() && !t.chars().any(crate::text::is_unpastable)
 }
 
 /// A window in a session, by both ids: `$N:@N`.

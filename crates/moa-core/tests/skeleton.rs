@@ -547,6 +547,17 @@ fn op_methods_match_the_variants() {
             commands: vec!["/ls".into()],
             user: true,
         },
+        Op::Peers(NoParams),
+        Op::Ask {
+            to: "Kite".into(),
+            text: "Is the domain renewed?".into(),
+            timeout_s: 540,
+        },
+        Op::Reply {
+            id: 12,
+            timeout_s: 60,
+        },
+        Op::Asks(NoParams),
     ];
     // `DebugPanic` is the one variant that is not on the wire: it isn't in METHODS and can't
     // be serialized or parsed.
@@ -604,6 +615,7 @@ const WRITES: &[&str] = &[
     "console.sleep_after",
     "console.account",
     "bar.set",
+    "ask",
 ];
 
 #[test]

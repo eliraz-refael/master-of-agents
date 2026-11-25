@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::asks;
 use crate::central::channel::{self, Source};
 use crate::central::{self, Waiter};
 use crate::central::{opening, watchdog};
@@ -45,6 +46,7 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     let terminals_fired = matches!(input, Input::Timer(TimerKey::Terminals));
     let wake_fired = matches!(input, Input::Timer(TimerKey::Wake));
     let watchdog_fired = matches!(input, Input::Timer(TimerKey::Watchdog));
+    let asks_fired = matches!(input, Input::Timer(TimerKey::Asks));
     // A reconcile that was refused or failed is asked again as the next input starts (R10).
     let mut fx: Vec<Effect> = reconcile::ask_if_due(state, &now).into_iter().collect();
     fx.extend(decide(state, input, &now));
@@ -55,6 +57,9 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     sleep::run(state, &now, sleep_fired, &mut fx);
     // So does a terminal's kill or timeout, once moa may act on its tab (T8).
     terminals::run(state, &now, terminals_fired, &mut fx);
+    // A request waiting for an ask's answer hears it, or that its wait ran out (A4); before
+    // the watchdog, which counts an ask's end as news.
+    asks::run(state, &now, asks_fired, &mut fx);
     // moa's turn that hangs is cancelled, then cut short (K6); before the wake's check, which
     // a restart shuts.
     watchdog::run(state, &now, watchdog_fired, &mut fx);
@@ -146,6 +151,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.terminals_at = None;
             state.central.wake_armed = None;
             state.central.watchdog.armed = None;
+            state.asks_mem.armed = None;
             // The closes under way may have been half-changed: they are forgotten.
             state.closing.clear();
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
@@ -447,7 +453,11 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         }
         // The checks at the end of every input do the work.
         Input::Timer(
-            TimerKey::Sleep | TimerKey::Terminals | TimerKey::Wake | TimerKey::Watchdog,
+            TimerKey::Sleep
+            | TimerKey::Terminals
+            | TimerKey::Wake
+            | TimerKey::Watchdog
+            | TimerKey::Asks,
         ) => Vec::new(),
         // Its waiters are dropped; a launch it asked for goes on, as does moa's turn, and a
         // terminal's tab still gets its tags (R26). A panel on it goes, and `panels` says so;
@@ -462,6 +472,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.tmux.client_gone(conn);
             state.term_ls.retain(|(c, _)| *c != conn);
             central::client_gone(state, conn);
+            asks::client_gone(state, conn);
             cockpit::run::client_gone(state, conn);
             let mut fx = panel::gone(state, conn);
             if ended {
@@ -734,6 +745,27 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             }],
         },
         Input::Acp(heard) => central::heard(state, now, heard),
+        // Answered once the ask ends or its wait runs out (A4), or at once when refused.
+        Input::Client {
+            conn,
+            req,
+            caller,
+            op:
+                Op::Ask {
+                    to,
+                    text,
+                    timeout_s,
+                },
+        } => {
+            let caller = state.caller(&caller);
+            asks::ask(state, now, conn, req, &caller, &to, &text, timeout_s)
+        }
+        Input::Client {
+            conn,
+            req,
+            op: Op::Reply { id, timeout_s },
+            ..
+        } => asks::reply(state, now, conn, req, id, timeout_s),
         Input::Client {
             conn,
             req,

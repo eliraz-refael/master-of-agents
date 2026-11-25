@@ -302,8 +302,49 @@ fn goto_parses() {
 
 #[test]
 fn later_verbs_say_not_yet() {
-    assert_eq!(err(&["peers"]), "moactl peers isn't in this build yet");
+    assert_eq!(
+        err(&["import-herdr"]),
+        "moactl import-herdr isn't in this build yet"
+    );
     assert_eq!(err(&["setup"]), "moactl setup isn't in this build yet");
+}
+
+/// The asks' verbs (slice 7): the wait is in seconds, 540 when not given; the daemon checks
+/// its range.
+#[test]
+fn ask_verbs_parse() {
+    assert_eq!(op(&["peers"]), Op::Peers(NoParams));
+    assert_eq!(op(&["asks"]), Op::Asks(NoParams));
+    assert_eq!(
+        op(&["ask", "Kite", "Is the domain renewed?"]),
+        Op::Ask {
+            to: "Kite".into(),
+            text: "Is the domain renewed?".into(),
+            timeout_s: 540,
+        }
+    );
+    assert_eq!(
+        op(&["ask", "moa", "Which account?", "--timeout", "60"]),
+        Op::Ask {
+            to: "moa".into(),
+            text: "Which account?".into(),
+            timeout_s: 60,
+        }
+    );
+    assert_eq!(
+        op(&["reply", "12"]),
+        Op::Reply {
+            id: 12,
+            timeout_s: 540
+        }
+    );
+    assert_eq!(
+        op(&["reply", "12", "--timeout", "5"]),
+        Op::Reply {
+            id: 12,
+            timeout_s: 5
+        }
+    );
 }
 
 #[test]
