@@ -812,11 +812,14 @@ fn thread_row(
 /// prompt that finds nothing left to carry saves and sends nothing.
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let automatic = p.source != Source::You;
+    let yeses: Vec<&Suggestion> = state.yeses().collect();
+    let yes_block = (!yeses.is_empty()).then(|| carry::yes_text(&yeses));
+    // The reports' room is what the yes block leaves of the prompt.
+    let used = yes_block.as_ref().map_or(0, |b| b.chars().count());
     let reports = match automatic && !channel::auto_on(state) {
         true => Vec::new(),
-        false => reports::batch(state, now, state.config().moa.wake_batch),
+        false => reports::batch(state, now, state.config().moa.wake_batch, used),
     };
-    let yeses: Vec<&Suggestion> = state.yeses().collect();
     if automatic && reports.is_empty() && yeses.is_empty() {
         return Vec::new();
     }
@@ -825,10 +828,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let yes_ids: Vec<i64> = yeses.iter().map(|s| s.id.0).collect();
     let told = carry::told(&yeses);
     // The blocks before your text, in D1's order; an automatic prompt is only them.
-    let mut blocks = Vec::new();
-    if !yeses.is_empty() {
-        blocks.push(carry::yes_text(&yeses));
-    }
+    let mut blocks: Vec<String> = yes_block.into_iter().collect();
     if n > 0 {
         blocks.push(match automatic {
             true => reports::wake_text(state, now, &reports),
