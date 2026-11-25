@@ -237,6 +237,28 @@ impl Stub {
                     let child = self.spawn_child(CHILD)?;
                     publish_pid(&self.dir, child.id()).map_err(fail)?;
                 }
+                StubStep::Run { argv } => {
+                    let (exe, args) = argv
+                        .split_first()
+                        .ok_or_else(|| fail("run needs a command"))?;
+                    let out = tokio::process::Command::new(exe)
+                        .args(args)
+                        .current_dir(&self.dir)
+                        .stdin(Stdio::null())
+                        .output()
+                        .await
+                        .inspect_err(|e| {
+                            self.log("run.failed", &argv, json!({"error": e.to_string()}))
+                        })
+                        .map_err(fail)?;
+                    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+                    let done = json!({
+                        "code": out.status.code(),
+                        "stdout": text(&out.stdout),
+                        "stderr": text(&out.stderr),
+                    });
+                    self.log("run.done", &argv, done);
+                }
                 StubStep::Wait { file } => {
                     while !self.path(&file).exists() {
                         tokio::time::sleep(Duration::from_millis(10)).await;

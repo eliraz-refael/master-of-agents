@@ -15,6 +15,7 @@ use moa_core::config::BrainName;
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{DaemonError, Ready, RunOptions, run};
 use moa_platform::Paths;
+use moa_testkit::TempBrain;
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -98,6 +99,38 @@ pub async fn boot_with(setup: impl FnOnce(&Paths), tweak: impl FnOnce(&mut RunOp
 
 pub async fn boot() -> Daemon {
     boot_with(|_| {}, |_| {}).await
+}
+
+/// Creates the default brain's terminal server exactly as the front door does (T1): `_moa`,
+/// then the user's `moa` session at home. Its config is the daemon's, so a daemon has started
+/// on `paths` first.
+pub fn create_server(tb: &TempBrain, paths: &Paths) {
+    let conf = paths.tmux_conf("default").to_string_lossy().into_owned();
+    let home = paths.home().to_string_lossy().into_owned();
+    let args = [
+        "-f",
+        &conf,
+        "new-session",
+        "-d",
+        "-s",
+        "_moa",
+        "-x",
+        "10",
+        "-y",
+        "3",
+        "/bin/sh",
+        ";",
+        "new-session",
+        "-d",
+        "-s",
+        "moa",
+        "-n",
+        "moa",
+        "-c",
+        &home,
+    ];
+    tb.tmux("default", &args)
+        .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"));
 }
 
 pub fn request(id: i64, method: &str, params: Value) -> String {

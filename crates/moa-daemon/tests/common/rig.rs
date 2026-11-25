@@ -10,8 +10,10 @@ use jiff::tz::TimeZone;
 use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::config::BrainName;
+use moa_core::effect::TmuxIn;
 use moa_core::model::SessionId;
 use moa_core::publish::Topic;
+use moa_core::tmux::notify::Notification;
 use moa_daemon::testing::FakeTime;
 use moa_daemon::{CoreHandle, DaemonError, Ready, RunOptions, load_config, run};
 use moa_platform::{Paths, ensure_private_dir};
@@ -159,6 +161,20 @@ impl Rig {
         ids
     }
 
+    /// The `meta` row `key`'s value, if it is saved.
+    pub fn meta(&self, key: &str) -> Option<String> {
+        let store = self.store();
+        store
+            .conn()
+            // Always one row: NULL when the key isn't saved. An error is the test's to see.
+            .query_row(
+                "SELECT (SELECT value FROM meta WHERE key = ?1)",
+                [key],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("meta {key}: {e}"))
+    }
+
     /// The `moa_threads` rows' ids.
     pub fn threads(&self) -> Vec<String> {
         let store = self.store();
@@ -223,9 +239,28 @@ impl Up {
         c
     }
 
+    /// A client that says it is moa's own agent, as `moactl` run by moa's agent does.
+    pub fn moa_client(&self) -> Client {
+        let mut c = Client::connect(&self.sock);
+        let hello = json!({
+            "client": "test",
+            "build": moa_platform::build_id(),
+            "caller": {"moa_session": "moa"},
+        });
+        c.call("hello", hello);
+        c
+    }
+
     /// Sends hook `line` as a hook does: a notice, with no `hello`.
     pub fn hook(&self, line: &Value) {
         Client::connect(&self.sock).write(&hook_notice(line));
+    }
+
+    /// Sends `line` as tmux's mailbox does (`moa:hook client-attached /dev/ttys1`, ...): a
+    /// message notification from the terminal server, with no link to one needed.
+    pub fn mailbox(&self, line: &str) {
+        self.core
+            .tmux_input(TmuxIn::Notification(Notification::Message(line.into())));
     }
 
     /// The `feed` topic's `state` row, as published now; `null` while it isn't.

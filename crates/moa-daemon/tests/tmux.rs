@@ -80,30 +80,7 @@ impl Rig {
 
     /// Creates the server exactly as the front door does (T1).
     fn create_server(&self) {
-        let conf = self.paths.tmux_conf(B);
-        let home = self.paths.home().to_string_lossy().into_owned();
-        self.tmux(&[
-            "-f",
-            &conf.to_string_lossy(),
-            "new-session",
-            "-d",
-            "-s",
-            "_moa",
-            "-x",
-            "10",
-            "-y",
-            "3",
-            "/bin/sh",
-            ";",
-            "new-session",
-            "-d",
-            "-s",
-            "moa",
-            "-n",
-            "moa",
-            "-c",
-            &home,
-        ]);
+        create_server(&self.tb, &self.paths);
     }
 
     fn tmux(&self, args: &[&str]) -> String {

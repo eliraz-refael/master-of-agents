@@ -1,10 +1,11 @@
-//! Slices 6b and 6c end to end: the console panel of the cockpit on a TempBrain, with
+//! Slices 6b to 6d end to end: the console panel of the cockpit on a TempBrain, with
 //! `stub-acp` as moa's agent. Keys go to the console's pane as tmux `send-keys`; what moa did
 //! is read back from the pane's screen, the status line and the store. Every wait is for what
 //! the screen or the store shows, never for a fixed time.
 
 mod common;
 
+use moa_core::central::opening::{BRIEFED_KEY, OPENING};
 use moa_platform::ensure_private_dir;
 use moa_testkit::{StubStep, TempBrain, Terminal, stub_moa_toml, wait_for, write_stub_script};
 
@@ -29,6 +30,11 @@ fn console_with(toml: &str, steps: &[StubStep]) -> Console {
     let tb = TempBrain::new(Some(toml));
     // moa opened the day already: attaching opens nothing here (D2).
     tb.opened_today();
+    console_in(tb, steps)
+}
+
+/// [`console`] on `tb`, a root already set up.
+fn console_in(tb: TempBrain, steps: &[StubStep]) -> Console {
     let agent = tb.paths().agent_dir(B);
     ensure_private_dir(&agent).expect("the agent folder");
     write_stub_script(&agent, steps);
@@ -66,14 +72,12 @@ impl Console {
 
     /// The feed's kinds and texts, oldest first, as `kind text`.
     fn feed(&self) -> Vec<String> {
-        let o = run(
-            &self.tb,
-            &[
-                "sql",
-                "SELECT kind || ' ' || json_extract(body, '$.text') FROM feed ORDER BY id",
-            ],
-            &[],
-        );
+        self.sql("SELECT kind || ' ' || json_extract(body, '$.text') FROM feed ORDER BY id")
+    }
+
+    /// The rows of `query`, as `moa sql` prints them, less its header.
+    fn sql(&self, query: &str) -> Vec<String> {
+        let o = run(&self.tb, &["sql", query], &[]);
         assert!(o.status.success(), "{}{}", out(&o), err(&o));
         out(&o).lines().skip(1).map(str::to_string).collect()
     }
@@ -120,6 +124,19 @@ impl Console {
             self.feed(),
             what_happened(&self.tb, &self.term)
         );
+    }
+
+    /// Waits for the stub's `run.done` line, which must say its command succeeded.
+    #[track_caller]
+    fn ran(&self) {
+        let done = wait_for(SHOWS, || stub_logged(&self.tb, "run.done").pop());
+        let done = done.unwrap_or_else(|| {
+            panic!(
+                "the stub never ran its command\n{}",
+                what_happened(&self.tb, &self.term)
+            )
+        });
+        assert_eq!(done["code"], 0, "{done}");
     }
 }
 
@@ -313,4 +330,128 @@ fn a_hard_hang_shows_the_watchdog_card() {
     c.shows_wrapped("so moa's agent was restarted and today's thread reopened.");
     c.shows(&["● ready"]);
     assert_eq!(stub_logged(&c.tb, "session/resume").len(), 1);
+}
+
+/// The stub runs `moactl suggest text --do action…` in its turn, as moa's agent does from a
+/// tool call, then says `then`.
+fn suggest(text: &str, actions: &[&str], then: &str) -> Vec<StubStep> {
+    let mut argv = vec!["moactl".to_string(), "suggest".into(), text.into()];
+    for action in actions {
+        argv.extend(["--do".into(), action.to_string()]);
+    }
+    vec![StubStep::Run { argv }, say(then, "m1"), end()]
+}
+
+/// A suggestion card's buttons, while it waits for the user.
+const SUGGESTION_BUTTONS: &str = "[yes] [later] [no]";
+
+/// D7, R5: moa suggests archiving Kite in a turn; the card offers yes, later and no, and the
+/// user's yes from the card's button runs the archive, and redraws the card as answered.
+#[test]
+fn a_suggestion_card_answered_with_a_button() {
+    // Opening a session needs an account to open it with.
+    let base = stub_moa_toml();
+    let toml = base.replacen(
+        "moa_account = \"acct-a\"\n",
+        "moa_account = \"acct-a\"\nopen_account = \"acct-a\"\n",
+        1,
+    );
+    assert_ne!(toml, base, "open_account isn't set: {base}");
+    let c = console_with(&toml, &[]);
+    let kite = open_session(&c.tb, &c.term, "kite", "Kite", None).id;
+    // The stub reads its script at each prompt: this one is the next turn's.
+    let archive = format!("archive {kite}");
+    let steps = suggest("Archive Kite?", &[&archive], "Kite looks done");
+    write_stub_script(&c.tb.paths().agent_dir(B), &steps);
+    let archived = || {
+        c.sql(&format!(
+            "SELECT archived_at IS NOT NULL FROM sessions WHERE id = '{kite}'"
+        ))
+    };
+
+    c.say("anything to tidy");
+    c.ran();
+    c.shows(&[
+        "✦ moa suggests",
+        "Archive Kite?",
+        "yes runs: archive",
+        SUGGESTION_BUTTONS,
+    ]);
+    c.shows(&["Kite looks done", "● ready"]);
+    assert_eq!(archived(), ["0"], "archived before the yes");
+
+    // The first Tab focuses the newest text button: the card's first, `[yes]`.
+    c.keys(&["Tab", "Enter"]);
+
+    c.shows(&["✓ yes: Archive Kite?"]);
+    let done = wait_for(SHOWS, || (archived() == ["1"]).then_some(()));
+    assert!(
+        done.is_some(),
+        "Kite isn't archived: {:?}\n{}",
+        archived(),
+        what_happened(&c.tb, &c.term)
+    );
+    let screen = screen_of(&c.tb, &c.pane);
+    assert!(!screen.contains(SUGGESTION_BUTTONS), "{screen}");
+    assert!(!screen.contains("moa suggests"), "{screen}");
+}
+
+/// D7: a card answered from the command line is redrawn in the console as the suggestions
+/// topic now has it.
+#[test]
+fn a_card_answered_elsewhere_updates() {
+    let c = console(&suggest("Rename the Kite build", &[], "an idea"));
+    c.say("any ideas");
+    c.ran();
+    c.shows(&[
+        "✦ moa suggests",
+        "Rename the Kite build",
+        SUGGESTION_BUTTONS,
+        "● ready",
+    ]);
+    let ids = c.sql("SELECT id FROM suggestions");
+    let [id] = ids.as_slice() else {
+        panic!("one suggestion: {ids:?}");
+    };
+
+    let no = run(&c.tb, &["suggestion", "no", id], &[("MOA_BRAIN", B)]);
+    assert!(no.status.success(), "{}{}", out(&no), err(&no));
+
+    c.shows(&["✗ no: Rename the Kite build"]);
+    let screen = screen_of(&c.tb, &c.pane);
+    assert!(!screen.contains(SUGGESTION_BUTTONS), "{screen}");
+    assert!(!screen.contains("moa suggests"), "{screen}");
+    assert_eq!(
+        c.sql(&format!("SELECT status FROM suggestions WHERE id = {id}")),
+        ["rejected"]
+    );
+}
+
+/// D2, R8: moa opened yesterday; the user attaching today opens the day. The console shows
+/// moa's turn as one moa started, that it opens the day, and the stub's answer; the day is
+/// saved as opened.
+#[test]
+fn attaching_opens_the_day() {
+    let tb = TempBrain::new(Some(&stub_moa_toml()));
+    let yesterday = TempBrain::today().yesterday().expect("a day before today");
+    tb.opened_on(yesterday);
+
+    let c = console_in(tb, &[say("good morning", "m1"), end()]);
+
+    let opens = "· moa opens the day";
+    c.shows(&["◆ moa", opens, "good morning", "● ready"]);
+    let screen = screen_of(&c.tb, &c.pane);
+    let at = |text: &str| screen.find(text).unwrap_or_else(|| panic!("{screen}"));
+    assert!(at("◆ moa") < at(opens), "{screen}");
+    assert!(at(opens) < at("good morning"), "{screen}");
+    let prompts = stub_logged(&c.tb, "session/prompt");
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    let sent = prompts[0]["params"]["prompt"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(sent.starts_with(OPENING), "{sent}");
+    let briefed = c.sql(&format!(
+        "SELECT value FROM meta WHERE key = '{BRIEFED_KEY}'"
+    ));
+    assert_eq!(briefed, [TempBrain::today().to_string()]);
 }

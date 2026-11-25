@@ -52,6 +52,10 @@ pub enum StubStep {
     /// Like `Spawn`, but the child ignores `SIGTERM`. Its pid is written by the child itself,
     /// once it ignores the signal, so a test that has read the pid can signal it at once.
     SpawnStubborn,
+    /// Run `argv` (its first word looked up on `PATH`) in `<cwd>` with the stub's
+    /// environment, and wait for it to exit: as moa's agent runs `moactl` from a tool call.
+    /// Its exit code, stdout and stderr are logged as a `run.done` line.
+    Run { argv: Vec<String> },
     /// Wait until `<cwd>/<file>` exists: a test opens the gate once it has seen what the steps
     /// before it did, so no step races the clock.
     Wait { file: String },
@@ -78,7 +82,8 @@ pub fn write_stub_script(dir: &Path, steps: &[StubStep]) {
 }
 
 /// What stub-acp has logged in `<dir>/.stub-acp.log`: every request and notification it
-/// received as `{"method", "params"}`, plus its own `permission.outcome` and `burst.done` lines.
+/// received as `{"method", "params"}`, plus its own `permission.outcome`, `burst.done` and
+/// `run.done` lines.
 /// The `initialize` line also has `env` (a few variables' values), `env_names` (every
 /// variable's name), `cwd` and the stub's `pid`.
 pub fn stub_log(dir: &Path) -> Vec<Value> {
