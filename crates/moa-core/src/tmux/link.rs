@@ -15,7 +15,7 @@ use super::topology::{AGENT_MARK, Applied, Topology, refresh_cmds};
 use crate::UtcMs;
 use crate::effect::{Down, Effect, LogLevel, LogLine, TimerKey, TmuxIn, TmuxToken};
 use crate::hook::HookEnvelope;
-use crate::model::{SessionId, TermId};
+use crate::model::{OpenedBy, SessionId, TermId};
 use crate::op::{ConnId, Done, OpError, ReqId};
 use crate::ops::adopt::AdoptArgs;
 use crate::ops::launch::ResumeAsk;
@@ -208,16 +208,19 @@ pub(crate) enum Asked {
         req: ReqId,
         all: bool,
     },
-    /// A terminal's new window (R16), named `name` and opened in `path`: its tab is tagged
-    /// and brought to the screen once tmux says which pane it has. `tell` is whom to tell:
-    /// nobody, once the caller's connection closed, though the tab still gets its tags (R26).
+    /// A terminal's new window (R16), named `name` and opened in `path` for `opened_by`:
+    /// its tab is tagged and brought to the screen once tmux says which pane it has. `tell`
+    /// is whom to tell: nobody, once the caller's connection closed, though the tab still
+    /// gets its tags (R26).
     Term {
         tell: Option<Tell>,
         name: String,
         path: String,
+        opened_by: OpenedBy,
     },
     /// A close of terminal record `id` (T8): what runs in its tab now, which decides how it
-    /// closes. `tell` is whom to tell; none for moa's own close, when a timeout ran out.
+    /// closes. `tell` is whom to tell; none for moa's own close, when a timeout ran out, and
+    /// `Quiet` for a suggestion's yes.
     TermClose {
         tell: Option<Tell>,
         id: TermId,

@@ -768,13 +768,21 @@ fn parse_verb(a: &SuggestionAction, ctx: &VerbCtx, from: &Source) -> Result<Op, 
 }
 
 /// Parse a suggestion's action with the `moactl` grammar. No cwd: paths must be full.
+/// `term` runs only as `term close`: a yes never opens a terminal or changes one.
 pub fn parse_action(a: &SuggestionAction, home: &Path) -> Result<Op, String> {
     let ctx = VerbCtx {
         cwd: None,
         home: home.to_path_buf(),
     };
-    parse_verb(a, &ctx, &SUGGESTION)
+    let op = parse_verb(a, &ctx, &SUGGESTION)?;
+    if a.verb == "term" && !matches!(op, Op::TermClose { .. }) {
+        return Err(TERM_ONLY_CLOSE.into());
+    }
+    Ok(op)
 }
+
+/// What a suggestion's `term` action that isn't `term close` is told.
+const TERM_ONLY_CLOSE: &str = "a suggestion can run term only as term close";
 
 /// Parse a console command's verb with the `moactl` grammar; a relative path is relative to
 /// `cwd`, and refused without one.

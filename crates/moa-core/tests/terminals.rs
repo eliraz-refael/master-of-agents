@@ -15,11 +15,11 @@ use moa_core::effect::{
 };
 use moa_core::model::{
     Activity, ActivityWho, AgentKind, Inspected, Lifecycle, Location, OpenedBy, PaneAgent,
-    PaneBinding, Session, SessionId, TermId, Terminal,
+    PaneBinding, Session, SessionId, SuggestionStatus, TermId, Terminal,
 };
-use moa_core::op::{NoParams, Op, OpError};
+use moa_core::op::{Answer, ConnId, NoParams, Op, OpError, ReqId};
 use moa_core::panel::View;
-use moa_core::state::{Deps, LoadNote, Snapshot, State};
+use moa_core::state::{CallerInfo, Deps, LoadNote, Snapshot, State};
 use moa_core::terminals::{find, is_idle, open_for, parse_after};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, PaneId, TmuxSessionId, WindowId};
@@ -217,6 +217,7 @@ impl Rig {
             home: b.home.clone(),
             inspect,
             process_name: shell_name,
+            parse_action: Some(moa_proto::cli::parse_action),
             ..Deps::default()
         };
         let mut snap = b.snapshot();
@@ -2459,6 +2460,198 @@ fn thirty_idle_terminals_cost_nothing() {
             .any(|c| c.argv().iter().any(|a| terminals.contains(a)));
         assert!(!named, "{fx:?}");
     }
+}
+
+/// `term` from moa's own agent records the terminal as moa's; from a session's agent, or
+/// from anyone moa doesn't know, as yours.
+#[test]
+fn moa_opens_terminals_as_moa() {
+    let callers = [
+        (Some("moa"), OpenedBy::Moa),
+        (Some(S), OpenedBy::You),
+        (None, OpenedBy::You),
+    ];
+    for (moa_session, want) in callers {
+        let mut r = Rig::found();
+        let caller = CallerInfo {
+            moa_session: moa_session.map(str::to_string),
+            ..CallerInfo::default()
+        };
+        let op = Op::TermOpen {
+            path: r.b.home.join("work"),
+            title: None,
+        };
+        let input = Input::Client {
+            conn: ConnId(1),
+            req: ReqId(1),
+            caller,
+            op,
+        };
+        let fx = handle_checked(&mut r.st, input, r.b.now());
+        let [(n, _)] = queries(&fx)[..] else {
+            panic!("one query: {fx:?}");
+        };
+        let conn = r.conn();
+        let fx = feed(
+            &r.b,
+            &mut r.st,
+            TmuxIn::Replies {
+                conn,
+                token: TmuxToken::Query(n),
+                results: vec![Ok(vec!["P %8 1008".into()])],
+            },
+        );
+        let made: Vec<OpenedBy> = records(&fx).iter().map(|t| t.opened_by).collect();
+        assert_eq!(made, [want], "{moa_session:?}: {fx:?}");
+        assert_eq!(r.open(8).map(|t| t.opened_by), Some(want));
+    }
+}
+
+/// moa suggests `text` with `actions`: the suggestion's number.
+fn suggested(r: &mut Rig, req: u64, text: &str, actions: &[&str]) -> i64 {
+    let op = Op::Suggest {
+        text: text.into(),
+        actions: actions.iter().map(|a| a.to_string()).collect(),
+    };
+    let fx = send(&r.b, &mut r.st, req, op);
+    the_reply(&fx).1["id"].as_i64().unwrap()
+}
+
+/// The user answers suggestion `id` yes.
+fn yes(r: &mut Rig, req: u64, id: i64) -> Vec<Effect> {
+    let op = Op::SuggestionAnswer {
+        id: Some(id),
+        answer: Answer::Yes,
+    };
+    send(&r.b, &mut r.st, req, op)
+}
+
+/// What `fx` tells moa's log.
+fn logged(fx: &[Effect]) -> Vec<String> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(l.message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A yes on `term close` closes the terminal as `term.close` does (Ctrl-c first for a
+/// running program, the kill 3 seconds later), once the answer is saved, and tells nobody:
+/// its activity says it closed. A terminal that closed since, or is closing already, or a
+/// link that is down, is the yes's result.
+#[test]
+fn a_yes_closes_terminals_gently() {
+    let t = t0().0;
+    let mut r = closable();
+    let id = suggested(
+        &mut r,
+        1,
+        "Close Kite and Beacon",
+        &["term close 1", "term close 2"],
+    );
+    let fx = yes(&mut r, 2, id);
+    assert_eq!(the_reply(&fx).0, "done");
+    let (k, b) = (close_query(&fx, "%5"), close_query(&fx, "%6"));
+    // The questions go out after the answer's commit, and before its reply.
+    let saved = fx.iter().position(|e| matches!(e, Effect::Persist(_)));
+    let asked = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Tmux { token: Some(_), .. }));
+    let replied = fx.iter().position(|e| matches!(e, Effect::Reply { .. }));
+    assert!(saved < asked && asked < replied, "{fx:?}");
+    assert_eq!(sent(&fx), [what_runs("%5"), what_runs("%6")]);
+
+    let fx = runs(&mut r, k, Ok("zsh"));
+    assert_eq!(sent(&fx), [kill("%5")]);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        lines(&fx),
+        [(ActivityWho::You, "closed terminal Kite".to_string())]
+    );
+    let fx = runs(&mut r, b, Ok("node"));
+    assert_eq!(sent(&fx), [Cmd::interrupt(PaneId(6))]);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        lines(&fx),
+        [(ActivityWho::You, "closed terminal Beacon".to_string())]
+    );
+    assert_eq!(timers(&fx, TimerKey::Terminals), [&set_at(t + 3_000)]);
+
+    // Beacon is closing already: the yes is done, and nothing more is sent.
+    let again = suggested(&mut r, 3, "Close Beacon", &["term close 2"]);
+    let fx = yes(&mut r, 4, again);
+    assert_eq!(the_reply(&fx).0, "done");
+    assert!(!closes_any(&fx), "{fx:?}");
+    assert_eq!(sent(&fire(&mut r, t + 3_000)), [kill("%6")]);
+
+    // Both have closed: a yes says Kite is gone, and sends nothing.
+    r.list_at(at(UtcMs(t + 4_000)), &[], &[]);
+    assert!(r.open(5).is_none());
+    let late = suggested(&mut r, 5, "Close Kite", &["term close 1"]);
+    let fx = yes(&mut r, 6, late);
+    assert_eq!(
+        the_reply(&fx).0,
+        "done; but term close 1: that terminal is gone"
+    );
+    assert!(!closes_any(&fx), "{fx:?}");
+
+    // The link is down: the result says why.
+    let mut r = closable();
+    feed(&r.b, &mut r.st, TmuxIn::Down(Down::Lost));
+    let id = suggested(&mut r, 1, "Close Kite", &["term close 1"]);
+    let fx = yes(&mut r, 2, id);
+    assert_eq!(
+        the_reply(&fx).0,
+        "done; but term close 1: moa isn't open in a terminal yet; run moa first"
+    );
+    assert!(!closes_any(&fx), "{fx:?}");
+
+    // The tab went before tmux answered: nobody is told, and moa's log says so.
+    let mut r = closable();
+    let id = suggested(&mut r, 1, "Close Kite", &["term close 1"]);
+    let n = close_query(&yes(&mut r, 2, id), "%5");
+    let fx = runs(&mut r, n, Err("can't find pane: %5"));
+    assert!(replies(&fx).is_empty() && !closes_any(&fx), "{fx:?}");
+    assert!(lines(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        logged(&fx),
+        ["terminal #1 wasn't closed for a suggestion: that terminal is gone"]
+    );
+}
+
+/// With writes refused, the yes is refused and no close starts: nothing asks tmux, and the
+/// suggestion still waits. (The tabs aren't reconciled again while writes are refused, so
+/// the close couldn't have started either: the core's `tx_closes_follow_the_commit` pins
+/// a refused commit with the link ready.)
+#[test]
+fn a_refused_yes_closes_nothing() {
+    let t = t0().0;
+    let mut r = closable();
+    let id = suggested(&mut r, 1, "Close Kite", &["term close 1"]);
+    let row = r.st.suggestions().find(|s| s.id.0 == id).unwrap().clone();
+    let mut snap = r.b.snapshot();
+    snap.sessions.push(session_s(&r.b));
+    hold(&mut snap, vec![kite(), beacon()]);
+    snap.suggestions.push(row);
+    let reload = Input::Reload {
+        snapshot: Box::new(snap),
+        refuse_writes: Some(RefuseWrites {
+            until: UtcMs(t + HOUR),
+            reason: "disk full".into(),
+        }),
+    };
+    handle_checked(&mut r.st, reload, r.b.now());
+    r.list(&[P5, P6], &tabs56());
+
+    let fx = yes(&mut r, 2, id);
+    assert!(
+        refusal(&fx).starts_with("moa can't save right now"),
+        "{fx:?}"
+    );
+    assert!(queries(&fx).is_empty() && !closes_any(&fx), "{fx:?}");
+    let row = r.st.suggestions().find(|s| s.id.0 == id).unwrap();
+    assert_eq!(row.status, SuggestionStatus::Open);
 }
 
 #[test]

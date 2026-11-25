@@ -248,8 +248,10 @@ pub fn project_slot(cwd: &std::path::Path) -> String {
 
 // ---------- suggestions and asks ----------
 
+/// The verbs a suggestion's action may run. `term` only as `term close` (the grammar
+/// refuses the rest): a yes never opens a terminal.
 pub const ACTION_VERBS: &[&str] = &[
-    "task", "set", "archive", "close", "group", "note", "project",
+    "task", "set", "archive", "close", "group", "note", "project", "term",
 ];
 
 /// One proposed action of a suggestion, such as verb `task` with its arguments.

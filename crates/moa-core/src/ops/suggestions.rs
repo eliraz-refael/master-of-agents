@@ -6,14 +6,14 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::{brain_row, run};
+use super::{brain_row, run, term};
 use crate::Now;
 use crate::activity;
 use crate::change::Change;
 use crate::core::{Tx, unknown_message};
 use crate::effect::Effect;
 use crate::model::{Suggestion, SuggestionAction, SuggestionId, SuggestionStatus};
-use crate::op::{Answer, Done, OpError};
+use crate::op::{Answer, Done, Op, OpError};
 use crate::state::{Caller, State, Table};
 
 const ANSWER_USAGE: &str = "moactl suggestion yes|no|later ID";
@@ -219,7 +219,8 @@ pub(crate) fn answer(
     Ok(Done { text, data })
 }
 
-/// One action of a `yes`. An `Err` is the reason it didn't run, and applied nothing.
+/// One action of a `yes`. An `Err` is the reason it didn't run, and applied nothing. A
+/// `term close` is checked now and starts once the answer is saved (D8).
 fn run_action(
     state: &mut State,
     tx: &mut Tx,
@@ -234,6 +235,9 @@ fn run_action(
     };
     let home: &Path = &deps.home;
     let op = parse(a, home)?;
+    if let Op::TermClose { target } = &op {
+        return term::close_on_yes(state, tx, target).map_err(|e| e.0);
+    }
     run(state, tx, caller, op, now, logs)
         .map(|_| ())
         .map_err(|e| e.0)

@@ -385,7 +385,8 @@ pub fn parse_after(text: &str) -> Result<Option<i64>, String> {
 /// Starts closing open record `t` (T8): one fresh question of what runs in its tab, which
 /// decides how it closes once tmux answers ([`crate::ops::term::close_answered`]). The
 /// close is held in `state.closing` meanwhile, so a second one is said to be under way.
-/// `tell` is whom to tell; none for moa's own close. `None` while the link isn't up on
+/// `tell` is whom to tell; none for moa's own close, `Quiet` for a suggestion's yes. `None`
+/// while the link isn't up on
 /// the record's server, or its record names no tab.
 pub(crate) fn close(state: &mut State, tell: Option<Tell>, t: &Terminal) -> Option<Effect> {
     let generation = state.tmux().generation()?;

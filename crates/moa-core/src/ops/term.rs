@@ -38,11 +38,13 @@ const NOTE_CUT: usize = 200;
 const OUT_OF_DATE: &str = "moa isn't connected to tmux right now; this list may be out of date";
 
 /// Whom a terminal's tab is told about: the `term` op's caller, by its reply, or the client
-/// whose `Ctrl-a $` asked for it, by a notice.
+/// whose `Ctrl-a $` asked for it, by a notice. `Quiet` tells nobody: a suggestion's yes
+/// closing a terminal, whose answer was already given ([`close_on_yes`]).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Tell {
     Reply(ConnId, ReqId),
     Notice(ClientName),
+    Quiet,
 }
 
 /// What tells `tell` how a terminal turned out: the reply, or a notice on the key's client
@@ -54,6 +56,7 @@ pub(crate) fn told(
 ) -> Option<Effect> {
     match tell? {
         Tell::Reply(conn, req) => Some(Effect::Reply { conn, req, result }),
+        Tell::Quiet => None,
         Tell::Notice(client) => {
             // The same test `ask` makes, so the key's query and its notice agree.
             let conn = state.tmux().conn()?;
@@ -139,13 +142,20 @@ fn term_here(state: &mut State, client: ClientName, folder: Option<&str>) -> Vec
         .map(Path::new)
         .filter(|p| p.is_absolute() && (deps.is_dir)(p))
         .map_or_else(|| deps.home.clone(), Path::to_path_buf);
-    term(state, Tell::Notice(client), &path, None)
+    term(state, Tell::Notice(client), &path, None, OpenedBy::You)
 }
 
 /// `term [PATH]` (R16): a plain shell in a new tab, in folder `path`. The window runs no
 /// command, so it is the user's shell with no moa environment, and nothing is bound.
-/// [`term_opened`] records and tags it once tmux says which pane it has, and tells `tell`.
-pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&str>) -> Vec<Effect> {
+/// [`term_opened`] records and tags it once tmux says which pane it has, as opened by
+/// `opened_by`, and tells `tell`.
+pub(crate) fn term(
+    state: &mut State,
+    tell: Tell,
+    path: &Path,
+    title: Option<&str>,
+    opened_by: OpenedBy,
+) -> Vec<Effect> {
     if !path.is_absolute() {
         let refused = Err(OpError(TERM_NOT_FULL.into()));
         return told(state, Some(tell), refused).into_iter().collect();
@@ -175,6 +185,7 @@ pub(crate) fn term(state: &mut State, tell: Tell, path: &Path, title: Option<&st
         tell: Some(tell.clone()),
         name,
         path: folder,
+        opened_by,
     };
     // Asked only while the link is up.
     match state.tmux.ask(asked, vec![cmd]) {
@@ -192,20 +203,22 @@ fn tab_label(name: &str) -> String {
     cut(&format!("⌨ {name}"), WINDOW_NAME_CUT)
 }
 
-/// tmux answered a terminal's new window, named `name`: it is recorded as yours, with that
-/// name whole. Its tab is tagged as a terminal with its label (literal, so a `#[…]` in it
-/// doesn't style the border), then brought to the screen; the topology has the terminal at
-/// once, so the `terms` topic does. The commands go out after the record's commit, and
+/// tmux answered a terminal's new window, named `name`: it is recorded as opened by
+/// `opened_by`, with that name whole. Its tab is tagged as a terminal with its label
+/// (literal, so a `#[…]` in it doesn't style the border), then brought to the screen; the
+/// topology has the terminal at once, so the `terms` topic does. The commands go out after the record's commit, and
 /// still do when it wasn't saved (the next listing records the terminal then), before the
 /// reply or notice. A caller that went has nobody to tell, and the tab is still tagged.
 /// `replied` is whether tmux answered: otherwise the link went before it did, and the
 /// answer says so as a launch's does.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn term_opened(
     state: &mut State,
     now: &Now,
     tell: Option<Tell>,
     name: &str,
     path: &str,
+    opened_by: OpenedBy,
     answer: Answer,
     replied: bool,
 ) -> Vec<Effect> {
@@ -225,7 +238,7 @@ pub(crate) fn term_opened(
             // The topology has the terminal before the record's commit publishes the topic.
             let label = tab_label(name);
             state.tmux.term_sent(pane, &label);
-            fx.extend(record_opened(state, now, pane, pid, name, path));
+            fx.extend(record_opened(state, now, pane, pid, name, path, opened_by));
             let mut cmds = terminals::mark(pane, &label).to_vec();
             cmds.extend(focus_cmds(pane));
             fx.push(Effect::Tmux {
@@ -255,9 +268,10 @@ pub(crate) fn term_opened(
     fx
 }
 
-/// The record of terminal `pane` (process `pid`) that moa just opened for you in folder
-/// `path`, named `name`: its shell is the process's name (when that can't be read, the next
-/// listing's program), and nothing else runs yet. A commit that wasn't saved saves nothing;
+/// The record of terminal `pane` (process `pid`) that moa just opened in folder `path`,
+/// named `name`, for `opened_by` (moa, when its own agent asked): its shell is the
+/// process's name (when that can't be read, the next listing's program), and nothing else
+/// runs yet. A commit that wasn't saved saves nothing;
 /// the next listing records the terminal.
 fn record_opened(
     state: &mut State,
@@ -266,6 +280,7 @@ fn record_opened(
     pid: i64,
     name: &str,
     path: &str,
+    opened_by: OpenedBy,
 ) -> Vec<Effect> {
     let Some(generation) = state.tmux().generation() else {
         return Vec::new();
@@ -285,7 +300,7 @@ fn record_opened(
         name: name.to_string(),
         shell: shell.clone(),
         command: shell,
-        ..terminals::opened(id, generation, pane, OpenedBy::You, now.wall)
+        ..terminals::opened(id, generation, pane, opened_by, now.wall)
     };
     if tx.commit(state, vec![Change::Terminal(t)]).is_err() {
         return vec![log(
@@ -529,12 +544,70 @@ pub(crate) fn close(state: &mut State, conn: ConnId, req: ReqId, target: &str) -
     }
 }
 
+/// A suggestion's `term close TARGET`, on its yes (D8): checked now, so the yes's result says
+/// why it can't, and started once the answer is saved ([`Tx::close_terminal`],
+/// [`close_quietly`]). One already closing is done, and nothing more is sent. A terminal
+/// named by its number that isn't open any more has closed since moa suggested it: gone.
+pub(crate) fn close_on_yes(state: &State, tx: &mut Tx, target: &str) -> Result<(), OpError> {
+    ready(state)?;
+    let t = terminals::find(state, target).map_err(|why| {
+        let number = target.trim();
+        let number = number.strip_prefix('#').unwrap_or(number);
+        if number.parse::<i64>().is_ok() {
+            OpError(TERM_GONE.into())
+        } else {
+            why
+        }
+    })?;
+    if state.closing.contains_key(&t.id) {
+        return Ok(());
+    }
+    let pane = t.pane_id.parse::<PaneId>().ok();
+    let closable = state
+        .tmux()
+        .generation()
+        .zip(pane)
+        .is_some_and(|(generation, pane)| terminals::may_close(state, generation, pane));
+    if !closable {
+        return Err(OpError(TERM_GONE.into()));
+    }
+    tx.close_terminal(t.id);
+    Ok(())
+}
+
+/// The closes a saved yes asked for ([`close_on_yes`]) start, telling nobody: a record
+/// already closing is left alone, and one that can't start any more is logged.
+pub(crate) fn close_quietly(state: &mut State, ids: Vec<TermId>) -> Vec<Effect> {
+    let mut fx = Vec::new();
+    for id in ids {
+        if state.closing.contains_key(&id) {
+            continue;
+        }
+        let started = state
+            .terminals
+            .get(&id)
+            .cloned()
+            .and_then(|t| terminals::close(state, Some(Tell::Quiet), &t));
+        fx.push(started.unwrap_or_else(|| not_closed_for_yes(id, TERM_GONE)));
+    }
+    fx
+}
+
+/// moa's log: the close a yes asked for didn't happen, and why.
+fn not_closed_for_yes(id: TermId, why: &str) -> Effect {
+    log(
+        LogLevel::Warn,
+        format!("terminal #{} wasn't closed for a suggestion: {why}", id.0),
+    )
+}
+
 /// tmux said what runs in record `id`'s tab, for a close: that decides it. A tab that went,
 /// or isn't a terminal any more, is gone. A shell at its prompt (the record's shell) is
 /// killed at once; a running program gets Ctrl-c, and the kill 3 seconds later
-/// ([`terminals::run`]). A close you asked for is saved as yours in the activity before
-/// anything is sent; moa's own (`tell` none) said so when its timeout ran out. `replied` is
-/// whether tmux answered: otherwise the link went first.
+/// ([`terminals::run`]). A close you asked for (by `term.close` or a suggestion's yes) is
+/// saved as yours in the activity before anything is sent; moa's own (`tell` none) said so
+/// when its timeout ran out. A yes's close (`Quiet`) tells nobody: its failure is logged.
+/// `replied` is whether tmux answered: otherwise the link went first.
 pub(crate) fn close_answered(
     state: &mut State,
     now: &Now,
@@ -543,11 +616,11 @@ pub(crate) fn close_answered(
     answer: Answer,
     replied: bool,
 ) -> Vec<Effect> {
-    // moa's own close has nobody to tell, and its activity already said it closed: the log
-    // says it didn't.
+    // moa's own close and a yes's have nobody to tell: the log says it didn't close.
     let end = |state: &mut State, why: &str| {
         state.closing.remove(&id);
         match tell.clone() {
+            Some(Tell::Quiet) => vec![not_closed_for_yes(id, why)],
             None => vec![log(
                 LogLevel::Warn,
                 format!(

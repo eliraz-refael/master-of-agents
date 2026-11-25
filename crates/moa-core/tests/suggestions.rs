@@ -247,7 +247,7 @@ fn suggest_validates_and_refuses_duplicates() {
 
     assert_eq!(
         err(&mut st, suggest("Tidy", &["rm -rf x"]), &now),
-        "--do 'rm -rf x': a suggestion can run moactl archive, close, group, note, project, set, task"
+        "--do 'rm -rf x': a suggestion can run moactl archive, close, group, note, project, set, task, term"
     );
     assert!(
         err(&mut st, suggest("Tidy", &["task 1 --status done"]), &now)
@@ -454,6 +454,27 @@ fn suggestion_ls_matches_the_spike_layout() {
     let now = b.now();
     let text = ok(&mut st, Op::SuggestionLs(NoParams), &now).text;
     insta::assert_snapshot!("suggestion_ls_matches_the_spike_layout", text);
+}
+
+/// A suggestion may close a terminal, and run `term` no other way: opening one on a yes is
+/// nothing anybody asked for.
+#[test]
+fn a_suggestion_may_close_terminals() {
+    let (b, mut st) = typical();
+    let now = b.now();
+    let made = ok(
+        &mut st,
+        suggest("Close Kite's shell", &["term close 4"]),
+        &now,
+    );
+    let n = made.data["id"].as_i64().unwrap();
+    assert_eq!(row(&st, n).actions[0].args, ["close", "4"]);
+    for act in ["term ~/private/kite", "term ls"] {
+        assert_eq!(
+            err(&mut st, suggest("Open Kite", &[act]), &now),
+            format!("--do '{act}': a suggestion can run term only as term close")
+        );
+    }
 }
 
 /// `close` runs from a suggestion through the same transaction (R15): the session ends,
