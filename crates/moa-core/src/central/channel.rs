@@ -121,21 +121,23 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     ));
 }
 
-/// The next automatic prompt, and when it is due: a waiting yes at once, or a gap after its
-/// last try failed; a wake-up when [`wake_due`] says. The sooner goes; whichever it is
-/// carries both. `None` while neither waits, or moa's agent isn't [`free`].
+/// The next automatic prompt, and when it is due: a waiting yes at once, a wake-up when
+/// [`wake_due`] says, and neither sooner than a gap after an automatic prompt failed
+/// ([`super::Moa::failed_at`]). The sooner goes; whichever it is carries both. `None` while
+/// neither waits, or moa's agent isn't [`free`].
 fn due(state: &State) -> Option<(Source, UtcMs)> {
     if !free(state) {
         return None;
     }
-    let yes = state.yeses().next().map(|_| {
-        let gap = state.config().moa.wake_gap_ms;
-        let failed = state.central.yes_failed;
-        let at = failed.map_or(i64::MIN, |f| f.0.saturating_add(gap));
-        (Source::Yes, UtcMs(at))
-    });
+    let gap = state.config().moa.wake_gap_ms;
+    let held = state
+        .central
+        .failed_at
+        .map_or(i64::MIN, |f| f.0.saturating_add(gap));
+    let yes = state.yeses().next().map(|_| (Source::Yes, UtcMs(i64::MIN)));
     let wake = wake_due(state).map(|at| (Source::Wake, at));
-    yes.into_iter().chain(wake).min_by_key(|(_, at)| *at)
+    let next = yes.into_iter().chain(wake).min_by_key(|(_, at)| *at);
+    next.map(|(source, at)| (source, UtcMs(at.0.max(held))))
 }
 
 /// When the next wake-up is due (K4): once the reports settle (`wake_settle` after the

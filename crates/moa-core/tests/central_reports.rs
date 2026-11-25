@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use common::central::{Disk, acps, caps, hear_at, opened, prompt_at, prompts_sent, started as up};
 use jiff::tz::TimeZone;
+use moa_core::central::carry::YES_MAX;
 use moa_core::central::channel::{AUTO_KEY, auto_on};
 use moa_core::central::reports::{EARLIER_MAX, LAST_MAX, TURNS_KEPT};
 use moa_core::central::wire::{AcpCmd, AcpIn, Opened, PermKind, PermOption, ThreadHow};
@@ -1561,6 +1562,52 @@ fn a_yes_whose_thread_cant_open_waits_the_gap() {
     assert!(matches!(acps(&fx)[..], [AcpCmd::Open { .. }]), "{fx:?}");
 }
 
+/// One backoff for every automatic source: a wake-up whose thread can't open holds back the
+/// yes that waits too, for the same gap; then one prompt carries both.
+#[test]
+fn a_failed_try_holds_back_every_source() {
+    let mut st = moa_suggesting(vec![], vec![]);
+    finished(&mut st, 0, T, "Merged PR #3");
+    let w = T + 45 * SEC;
+    fire(&mut st, w);
+    yes_at(&mut st, w, 1, 12);
+    let generation = st.central().generation;
+    hear_at(&mut st, at(w), up(generation, caps(true, true, true)));
+    let result = Err("not logged in".to_string());
+    let fx = hear_at(&mut st, at(w), AcpIn::Opened { generation, result });
+    assert!(acps(&fx).is_empty(), "the yes waits too: {fx:?}");
+    assert_eq!(wake_timer(&fx), Some(Some(UtcMs(w + 180 * SEC))));
+    let fx = fire(&mut st, w + 180 * SEC);
+    let text = sent(&play(&mut st, w + 180 * SEC, fx));
+    assert!(
+        text.starts_with(&format!("{YES_BLOCK}\n\n---\n\n{WAKE}")),
+        "{text}"
+    );
+}
+
+/// A long suggestion's line in the yes block is its first 500 characters, then `…`: the
+/// suggestion itself keeps all of it.
+#[test]
+fn a_long_yes_is_cut() {
+    let long = "Kite ".repeat(1_000);
+    let snapshot = Snapshot {
+        suggestions: vec![open_suggestion(12, &long, vec![])],
+        ..moa_snapshot(&TITLES[..1], vec![])
+    };
+    let (mut st, _) = moa_load(snapshot, "");
+    let fx = yes_at(&mut st, T, 1, 12);
+    let text = sent(&play(&mut st, T, fx));
+    const { assert!(YES_MAX == 500) };
+    let line = format!("- #12: {}…\n", &long[..YES_MAX]);
+    assert!(text.contains(&line), "{text}");
+    assert_eq!(
+        text.chars().count(),
+        YES_BLOCK.chars().count() - KITE_YES.len() + 501
+    );
+    let kept = st.suggestions().find(|s| s.id == SuggestionId(12)).unwrap();
+    assert_eq!(kept.text, long);
+}
+
 /// A yes with actions runs them: moa hears nothing of it.
 #[test]
 fn a_yes_with_actions_tells_moa_nothing() {
@@ -2105,7 +2152,13 @@ impl Daemon {
             (Some(s), Some(Err(e))) if s.status == SuggestionStatus::Accepted => {
                 prop_assert_eq!(e.0, format!("suggestion #{id} is already accepted"));
             }
-            (_, Some(Err(_))) => {}
+            (Some(_), Some(Err(e))) => {
+                prop_assert!(refused, "an open suggestion's yes was refused: {}", e.0);
+                let why = "moa can't save right now (the disk is full); nothing was changed";
+                prop_assert_eq!(e.0, why);
+            }
+            // Its commit was lost to a restart: no suggestion has the id.
+            (None, Some(Err(e))) => prop_assert_eq!(e.0, "moactl suggestion yes|no|later ID"),
             (was, reply) => prop_assert!(false, "{:?} answered {:?}", was, reply),
         }
         Ok(())

@@ -18,7 +18,7 @@ use crate::text::{cut, one_line};
 use crate::time::local_format;
 
 /// `text` cut to `n` characters, with a `…` after the cut: the stored text says it was cut.
-fn cut_marked(text: &str, n: usize) -> String {
+pub(crate) fn cut_marked(text: &str, n: usize) -> String {
     let kept = cut(text, n);
     if kept.len() < text.len() {
         format!("{kept}…")

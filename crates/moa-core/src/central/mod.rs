@@ -163,12 +163,13 @@ pub struct Moa {
     /// thread of kind `Manual`, even the same day. Kept in memory; it ends once that thread
     /// is open.
     pub new_thread: bool,
-    /// When the last prompt that carried session reports on its own was saved, or a wake-up
-    /// failed to reach moa's agent: the next wake waits a gap after it. Kept in memory.
+    /// When the last prompt that carried session reports on its own was saved: the next
+    /// wake waits a gap after it. Kept in memory.
     pub last_wake: Option<UtcMs>,
-    /// When the last prompt sent for a yes failed to reach moa's agent: the next tries a gap
-    /// after it, rather than at once. A prompt that carries yeses ends it. Kept in memory.
-    pub yes_failed: Option<UtcMs>,
+    /// When the last automatic prompt, a wake-up's or a yes's, failed to reach moa's agent:
+    /// every automatic source waits a gap after it, rather than starting moa's agent, a thread
+    /// or a commit again at once. A prompt that reaches moa's agent ends it. Kept in memory.
+    pub failed_at: Option<UtcMs>,
     /// The deadline the `Wake` timer is armed at, if any, as `State::sleep_at` is.
     pub wake_armed: Option<UtcMs>,
     /// The turn's permission requests that wait for your answer, by row id: oldest first.
@@ -891,9 +892,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     if automatic && n > 0 {
         moa.last_wake = Some(now.wall);
     }
-    if !yes_ids.is_empty() {
-        moa.yes_failed = None;
-    }
+    moa.failed_at = None;
     moa.phase = Phase::Thinking;
     moa.written.clear();
     moa.watchdog.watch(now.wall);
@@ -979,14 +978,11 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     fx
 }
 
-/// Pending prompt `p` never reached moa's agent. An automatic prompt's attempt counts: a
-/// wake-up's as a wake, a yes's as a failed try. The next waits a gap, rather than starting
-/// moa's agent, a thread or a commit again at once.
+/// Pending prompt `p` never reached moa's agent. An automatic prompt's failed try holds back
+/// every automatic source for a gap ([`Moa::failed_at`]).
 fn failed_wake(moa: &mut Moa, p: &Pending, now: &Now) {
-    match p.source {
-        Source::Wake => moa.last_wake = Some(now.wall),
-        Source::Yes => moa.yes_failed = Some(now.wall),
-        Source::You => {}
+    if p.source != Source::You {
+        moa.failed_at = Some(now.wall);
     }
 }
 
