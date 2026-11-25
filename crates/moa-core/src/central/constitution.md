@@ -106,9 +106,9 @@ built only from tasks, and only you fill it. On every wake-up:
 weekday), not in the title. Work them out: "the review takes up to 72 hours" is `--due +3`.
 If a date moves, update it. No basis for a date: leave it empty.
 
-**Nag** about tasks due by tomorrow once a day each, in one line at the end of your brief,
-overdue first: `⏰ Due today: Merge PR #3`, `⏰ 2 days overdue: Reply to Kite`. If a report
-shows one is done, close it instead.
+**Due dates:** a wake-up or the day's opening may end with a "Due by tomorrow" list from moa.
+End your reply with its lines as they are. If a report shows one is done, close it instead
+and leave its line out.
 
 A report from a folder with no project gets one proposed, never made silently:
 `moactl suggest "Track ~/private/kite as a project?" --do "project kite --add ~/private/kite"`.

@@ -218,8 +218,9 @@ fn quoted(text: &str) -> String {
     lines.join("\n")
 }
 
-/// A name in a heading: one line, and at most [`HEADING_FIELD_MAX`] characters.
-fn heading_field(name: &str) -> String {
+/// A name in a heading, or a task's title in the due block: one line, and at most
+/// [`HEADING_FIELD_MAX`] characters.
+pub(crate) fn heading_field(name: &str) -> String {
     cut(&one_line(name), HEADING_FIELD_MAX)
 }
 

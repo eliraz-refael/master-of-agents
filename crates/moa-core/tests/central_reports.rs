@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use common::central::{Disk, acps, caps, hear_at, opened, prompt_at, prompts_sent, started as up};
+use common::central::{
+    Disk, acps, body_of, caps, commits, end_turn, fire, hear_at, opened, play, prompt_at,
+    prompts_sent, sent, started as up, wake_timer, you_commit, you_row,
+};
+use jiff::ToSpan;
+use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use moa_core::central::carry::YES_MAX;
 use moa_core::central::channel::{AUTO_KEY, auto_on};
@@ -21,13 +26,14 @@ use moa_core::config::{BrainName, Config};
 use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, handle_checked};
 use moa_core::hook::{HookEnvelope, HookKind};
 use moa_core::model::{
-    Activity, AgentKind, Conversation, ConversationReason, FeedEntry, Lifecycle, Location, Project,
-    ProjectId, ProjectStatus, Report, ReportKind, Session, SessionId, Suggestion, SuggestionAction,
-    SuggestionId, SuggestionStatus, YES_DONE, YES_TOLD, YES_WAITING,
+    Activity, AgentKind, Conversation, ConversationReason, Lifecycle, Location, Project, ProjectId,
+    ProjectStatus, Report, ReportKind, Session, SessionId, Suggestion, SuggestionAction,
+    SuggestionId, SuggestionStatus, Task, TaskId, TaskStatus, YES_DONE, YES_TOLD, YES_WAITING,
 };
-use moa_core::op::{Answer, ConnId, Done, Op, OpError, PermAnswer, ReqId};
+use moa_core::op::{Answer, ConnId, Done, Op, OpError, PermAnswer, ReqId, TaskSet};
 use moa_core::publish::Topic;
 use moa_core::state::{Deps, LoadNote, Snapshot, State};
+use moa_core::time::{HOUR, start_of_next_day};
 use moa_core::{Now, UtcMs};
 use moa_testkit::brain::TypicalBrain;
 use proptest::prelude::*;
@@ -149,16 +155,6 @@ fn feed(st: &mut State, envelope: HookEnvelope) -> Vec<Effect> {
         },
         now(),
     )
-}
-
-/// The commits `fx` saves.
-fn commits(fx: &[Effect]) -> Vec<&Vec<Change>> {
-    fx.iter()
-        .filter_map(|e| match e {
-            Effect::Persist(c) => Some(c),
-            _ => None,
-        })
-        .collect()
 }
 
 /// The reports `fx` saves.
@@ -570,72 +566,6 @@ fn finished(st: &mut State, n: usize, ms: i64, text: &str) -> Vec<Effect> {
         last_message: text.into(),
     };
     hook_at(st, n, ms, kind)
-}
-
-/// The `Wake` timer as `fx` leaves it: `Some(Some(at))` set, `Some(None)` cancelled, `None`
-/// untouched.
-fn wake_timer(fx: &[Effect]) -> Option<Option<UtcMs>> {
-    common::timers(fx, TimerKey::Wake).last().map(|e| match e {
-        Effect::SetTimer { at, .. } => Some(*at),
-        _ => None,
-    })
-}
-
-/// The `Wake` timer fires at `ms`.
-fn fire(st: &mut State, ms: i64) -> Vec<Effect> {
-    handle_checked(st, Input::Timer(TimerKey::Wake), at(ms))
-}
-
-/// moa's agent answers at `ms` what `fx` asks of it: it starts, and opens a new thread, as
-/// each is asked for. Every effect, `fx`'s first.
-fn play(st: &mut State, ms: i64, mut fx: Vec<Effect>) -> Vec<Effect> {
-    let mut i = 0;
-    while i < fx.len() {
-        let heard = match &fx[i] {
-            Effect::Acp(AcpCmd::Start { generation, .. }) => {
-                Some(up(*generation, caps(true, true, true)))
-            }
-            Effect::Acp(AcpCmd::Open { generation, .. }) => Some(opened(
-                *generation,
-                &format!("thread-{generation}"),
-                Opened::New,
-            )),
-            _ => None,
-        };
-        if let Some(input) = heard {
-            let more = hear_at(st, at(ms), input);
-            fx.extend(more);
-        }
-        i += 1;
-    }
-    fx
-}
-
-/// The turn under way ends at `ms`.
-fn end_turn(st: &mut State, ms: i64) -> Vec<Effect> {
-    let generation = st.central().generation;
-    let prompt = st.central().turn.as_ref().expect("a turn").prompt;
-    hear_at(st, at(ms), common::central::ended(generation, prompt))
-}
-
-/// The one prompt `fx` sends.
-fn sent(fx: &[Effect]) -> String {
-    match prompts_sent(fx)[..] {
-        [text] => text.to_string(),
-        ref other => panic!("{} prompts sent", other.len()),
-    }
-}
-
-/// The `you` row `fx` saves.
-fn you_row(fx: &[Effect]) -> &FeedEntry {
-    common::central::feed_rows(fx)
-        .into_iter()
-        .find(|r| r.kind == "you")
-        .expect("a you row")
-}
-
-fn body_of(row: &FeedEntry) -> Value {
-    serde_json::from_str(&row.body).unwrap()
 }
 
 fn queued(st: &State) -> Value {
@@ -1344,21 +1274,6 @@ fn suggestion_rows(fx: &[Effect]) -> Vec<&Suggestion> {
         .collect()
 }
 
-/// The one commit of `fx` that saves a `you` row.
-fn you_commit(fx: &[Effect]) -> &Vec<Change> {
-    let commits: Vec<&Vec<Change>> = commits(fx)
-        .into_iter()
-        .filter(|c| {
-            c.iter()
-                .any(|c| matches!(c, Change::Feed(r) if r.kind == "you"))
-        })
-        .collect();
-    match commits[..] {
-        [c] => c,
-        _ => panic!("{} commits save a you row", commits.len()),
-    }
-}
-
 /// Suggestion #12's result now.
 fn result_of_12(st: &State) -> Option<String> {
     let s = st.suggestions().find(|s| s.id == SuggestionId(12));
@@ -1661,7 +1576,16 @@ enum Step {
     Suggest,
     /// You answer yes to one of moa's suggestions (this index picks it), answered or not.
     Yes(prop::sample::Index),
+    /// One of [`DUE_TASKS`] (this index picks it) becomes due this many days from today, -2
+    /// to 1: a task becomes due, or its date moves.
+    Due(prop::sample::Index, i64),
+    /// The day turns: time moves to the next day's first hour, and the `Wake` timer fires if
+    /// it is due.
+    Day,
 }
+
+/// The daemon's tasks with no due date at first, titled `due-<id>`, by id.
+const DUE_TASKS: [i64; 3] = [101, 102, 103];
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
@@ -1676,6 +1600,8 @@ fn step() -> impl Strategy<Value = Step> {
         2 => any::<prop::sample::Index>().prop_map(Step::Restart),
         1 => Just(Step::Suggest),
         2 => any::<prop::sample::Index>().prop_map(Step::Yes),
+        2 => (any::<prop::sample::Index>(), -2..=1i64).prop_map(|(k, d)| Step::Due(k, d)),
+        1 => Just(Step::Day),
     ]
 }
 
@@ -1833,12 +1759,19 @@ struct Daemon {
     /// now: its token is its text.
     suggested: Vec<i64>,
     expected: Expected,
+    /// Each (task title, due date, day) a prompt sent to moa's agent told was due.
+    told_due: BTreeSet<(String, Date, Date)>,
 }
 
 impl Daemon {
     fn new() -> Result<Daemon, TestCaseError> {
         let b = TypicalBrain::new();
-        let disk = Disk::new(&b, SMALL);
+        let mut disk = Disk::new(&b, SMALL);
+        let tasks: Vec<Change> = DUE_TASKS
+            .iter()
+            .map(|&id| Change::Task(due_task(id)))
+            .collect();
+        disk.apply(&tasks);
         let now = b.now().wall.0;
         let (st, last) = disk.restart(&b, at(now));
         let sessions: Vec<(SessionId, String)> = st
@@ -1872,6 +1805,7 @@ impl Daemon {
             thread: 0,
             suggested: Vec::new(),
             expected: Expected::default(),
+            told_due: BTreeSet::new(),
         };
         d.flush()?;
         Ok(d)
@@ -1943,6 +1877,14 @@ impl Daemon {
                         let sent = tokens(text);
                         once(&sent, "its prompt")?;
                         prop_assert_eq!(Some(sent), saved);
+                        let day = at(self.now).local_day;
+                        for told in told_due(text, day) {
+                            prop_assert!(
+                                self.told_due.insert(told.clone()),
+                                "{:?} is in two prompts",
+                                told
+                            );
+                        }
                     }
                     self.out.push_back(cmd);
                 }
@@ -2186,12 +2128,24 @@ impl Daemon {
             Step::Advance(s) => {
                 self.flush()?;
                 self.now += s * SEC;
-                if self.wake_at.is_some_and(|w| w <= self.now) {
-                    self.next()?;
-                    // The scheduler forgets a timer that fired.
-                    self.wake_at = None;
-                    self.run(Input::Timer(TimerKey::Wake));
-                }
+                self.fire_due()
+            }
+            Step::Day => {
+                self.flush()?;
+                let today = at(self.now).local_day;
+                self.now = start_of_next_day(today, &common::tz()).0 + HOUR;
+                self.fire_due()
+            }
+            Step::Due(k, days) => {
+                self.next()?;
+                let today = at(self.now).local_day;
+                let due = today.checked_add(days.days()).unwrap();
+                let op = Op::TaskSet(TaskSet {
+                    id: DUE_TASKS[k.index(DUE_TASKS.len())],
+                    due: Some(due.to_string()),
+                    ..TaskSet::default()
+                });
+                self.client(op);
                 Ok(())
             }
             Step::Answer => self.answer(),
@@ -2222,6 +2176,17 @@ impl Daemon {
             Step::Suggest => self.suggest(),
             Step::Yes(k) => self.yes(k),
         }
+    }
+
+    /// The `Wake` timer fires, if it is due now.
+    fn fire_due(&mut self) -> Result<(), TestCaseError> {
+        if self.wake_at.is_some_and(|w| w <= self.now) {
+            self.next()?;
+            // The scheduler forgets a timer that fired.
+            self.wake_at = None;
+            self.run(Input::Timer(TimerKey::Wake));
+        }
+        Ok(())
     }
 
     /// `/auto` on, then a minute at a time, moa's agent answering all it is asked, until
@@ -2288,12 +2253,56 @@ impl Daemon {
     }
 }
 
+/// Task `id` of [`DUE_TASKS`]: open, titled `due-<id>`, with no due date yet.
+fn due_task(id: i64) -> Task {
+    Task {
+        id: TaskId(id),
+        project_id: None,
+        title: format!("due-{id}"),
+        status: TaskStatus::Todo,
+        blocked_on: None,
+        today: None,
+        session_id: None,
+        note: None,
+        who: None,
+        due: None,
+        priority: None,
+        created_at: UtcMs(1),
+        updated_at: UtcMs(1),
+        done_at: None,
+    }
+}
+
+/// Each of [`DUE_TASKS`] that prompt `text`, sent on `day`, tells is due: its title, its due
+/// date (from its line's lateness) and `day`.
+fn told_due(text: &str, day: Date) -> Vec<(String, Date, Date)> {
+    let mut told = Vec::new();
+    for line in text.lines() {
+        let Some((label, titles)) = line.strip_prefix("⏰ ").and_then(|l| l.split_once(": "))
+        else {
+            continue;
+        };
+        let late: i64 = match label {
+            "Due tomorrow" => -1,
+            "Due today" => 0,
+            "1 day overdue" => 1,
+            l => l.trim_end_matches(" days overdue").parse().unwrap(),
+        };
+        let due = day.checked_sub(late.days()).unwrap();
+        let ours = titles.split("; ").filter(|t| t.starts_with("due-"));
+        told.extend(ours.map(|t| (t.to_string(), due, day)));
+    }
+    told
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Whatever the sessions report, whatever you prompt or say yes to and wherever the
-    /// daemon restarts, each report that isn't pushed out, and each yes, reaches moa's agent
-    /// in exactly one saved row (Review focus 2: `a_yes_reaches_moa_once`).
+    /// Whatever the sessions report, whatever you prompt or say yes to, whatever comes due,
+    /// however the days turn and wherever the daemon restarts, each report that isn't pushed
+    /// out, and each yes, reaches moa's agent in exactly one saved row (Review focus 2:
+    /// `a_yes_reaches_moa_once`); and each (task, due date, day) is in at most one prompt
+    /// sent (Review focus 3: `nags_are_once_a_day`).
     #[test]
     fn a_yes_reaches_moa_once(steps in prop::collection::vec(step(), 1..=60)) {
         let mut d = Daemon::new()?;

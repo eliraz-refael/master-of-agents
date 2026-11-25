@@ -1,0 +1,9 @@
+---
+source: crates/moa-core/tests/central_due.rs
+expression: block
+---
+Due by tomorrow (end your reply with these lines as they are):
+⏰ 2 days overdue: Reply to Kite; Renew the domain
+⏰ 1 day overdue: Send the invoice
+⏰ Due today: Merge PR #3
+⏰ Due tomorrow: Book the venue

@@ -4,7 +4,7 @@ use jiff::civil::Date;
 use moa_core::central::Phase;
 use moa_core::central::wire::{AcpCmd, AcpIn, Caps, Opened, StopReason};
 use moa_core::change::Change;
-use moa_core::effect::{Effect, Input, Publish, RefuseWrites, handle_checked};
+use moa_core::effect::{Effect, Input, Publish, RefuseWrites, TimerKey, handle_checked};
 use moa_core::model::{FeedEntry, MoaThread, ThreadKind};
 use moa_core::op::{ConnId, Op, ReqId};
 use moa_core::publish::Topic;
@@ -306,4 +306,95 @@ pub fn refuse_writes(b: &TypicalBrain, st: &mut State) {
         },
         b.now(),
     );
+}
+
+/// The commits `fx` saves.
+pub fn commits(fx: &[Effect]) -> Vec<&Vec<Change>> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Persist(c) => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `Wake` timer as `fx` leaves it: `Some(Some(at))` set, `Some(None)` cancelled, `None`
+/// untouched.
+pub fn wake_timer(fx: &[Effect]) -> Option<Option<UtcMs>> {
+    super::timers(fx, TimerKey::Wake).last().map(|e| match e {
+        Effect::SetTimer { at, .. } => Some(*at),
+        _ => None,
+    })
+}
+
+/// The `Wake` timer fires at `ms`.
+pub fn fire(st: &mut State, ms: i64) -> Vec<Effect> {
+    handle_checked(st, Input::Timer(TimerKey::Wake), super::at(UtcMs(ms)))
+}
+
+/// moa's agent answers at `ms` what `fx` asks of it: it starts, and opens a new thread, as
+/// each is asked for. Every effect, `fx`'s first.
+pub fn play(st: &mut State, ms: i64, mut fx: Vec<Effect>) -> Vec<Effect> {
+    let mut i = 0;
+    while i < fx.len() {
+        let heard = match &fx[i] {
+            Effect::Acp(AcpCmd::Start { generation, .. }) => {
+                Some(started(*generation, caps(true, true, true)))
+            }
+            Effect::Acp(AcpCmd::Open { generation, .. }) => Some(opened(
+                *generation,
+                &format!("thread-{generation}"),
+                Opened::New,
+            )),
+            _ => None,
+        };
+        if let Some(input) = heard {
+            let more = hear_at(st, super::at(UtcMs(ms)), input);
+            fx.extend(more);
+        }
+        i += 1;
+    }
+    fx
+}
+
+/// The turn under way ends at `ms`.
+pub fn end_turn(st: &mut State, ms: i64) -> Vec<Effect> {
+    let generation = st.central().generation;
+    let prompt = st.central().turn.as_ref().expect("a turn").prompt;
+    hear_at(st, super::at(UtcMs(ms)), ended(generation, prompt))
+}
+
+/// The one prompt `fx` sends.
+pub fn sent(fx: &[Effect]) -> String {
+    match prompts_sent(fx)[..] {
+        [text] => text.to_string(),
+        ref other => panic!("{} prompts sent", other.len()),
+    }
+}
+
+/// The `you` row `fx` saves.
+pub fn you_row(fx: &[Effect]) -> &FeedEntry {
+    feed_rows(fx)
+        .into_iter()
+        .find(|r| r.kind == "you")
+        .expect("a you row")
+}
+
+/// The one commit of `fx` that saves a `you` row.
+pub fn you_commit(fx: &[Effect]) -> &Vec<Change> {
+    let commits: Vec<&Vec<Change>> = commits(fx)
+        .into_iter()
+        .filter(|c| {
+            c.iter()
+                .any(|c| matches!(c, Change::Feed(r) if r.kind == "you"))
+        })
+        .collect();
+    match commits[..] {
+        [c] => c,
+        _ => panic!("{} commits save a you row", commits.len()),
+    }
+}
+
+pub fn body_of(row: &FeedEntry) -> Value {
+    serde_json::from_str(&row.body).unwrap()
 }

@@ -12,7 +12,9 @@
 pub mod account;
 pub mod carry;
 pub mod channel;
+pub mod due;
 pub mod feed;
+pub mod idle;
 pub mod launch;
 pub mod prompt;
 pub mod reports;
@@ -34,7 +36,7 @@ use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
-use crate::model::{FeedEntry, MoaThread, Suggestion, SuggestionId, ThreadKind};
+use crate::model::{FeedEntry, MoaThread, Suggestion, SuggestionId, Task, Terminal, ThreadKind};
 use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
 use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
@@ -805,17 +807,35 @@ fn thread_row(
 /// Saves prompt `p`'s `you` row in the open thread, then sends it. The thread's first prompt
 /// (the one that saves its row) also saves the line a failed reopen leaves, and carries the
 /// brief. What waits goes with it (D1): your yeses ([`State::yeses`], [`carry::yes_text`]),
-/// then the session reports queued now ([`reports::batch`]), and your text after them; an
-/// automatic prompt's text is those blocks, and it reads the reports only while `/auto` is
-/// on. The same commit marks each delivered: a report deleted, a yes told. While writes are
-/// refused the prompt is refused too: nothing is sent, and all of it stays. An automatic
-/// prompt that finds nothing left to carry saves and sends nothing.
+/// then the session reports queued now ([`reports::batch`]), then, on a wake-up, what's due
+/// ([`due`]) and the terminals that went idle since the last one ([`idle`]), and your text
+/// after them; an automatic prompt's text is those blocks, and it reads the reports only
+/// while `/auto` is on. The same commit marks each delivered: a report deleted, a yes told,
+/// a due task told today. While writes are refused the prompt is refused too: nothing is
+/// sent, and all of it stays. An automatic prompt that finds no report or yes left to carry
+/// saves and sends nothing: what's due and the idle terminals never go alone (U18).
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let automatic = p.source != Source::You;
+    let wake = p.source == Source::Wake;
     let yeses: Vec<&Suggestion> = state.yeses().collect();
     let yes_block = (!yeses.is_empty()).then(|| carry::yes_text(&yeses));
-    // The reports' room is what the yes block leaves of the prompt.
-    let used = yes_block.as_ref().map_or(0, |b| b.chars().count());
+    let due: Vec<&Task> = match wake {
+        true => due::due_now(state, now),
+        false => Vec::new(),
+    };
+    let due_block = (!due.is_empty()).then(|| due::block(state, now, &due));
+    // The terminals idle since the last wake-up: `last_wake` moves only once this commits.
+    let idle: Vec<&Terminal> = match wake {
+        true => idle::idle_terms(state, now, state.central.last_wake),
+        false => Vec::new(),
+    };
+    let idle_block = (!idle.is_empty()).then(|| idle::block(state, now, &idle));
+    // The reports' room is what the other blocks leave of the prompt.
+    let used: usize = [&yes_block, &due_block, &idle_block]
+        .into_iter()
+        .flatten()
+        .map(|b| b.chars().count() + PART_GAP.len())
+        .sum();
     let reports = match automatic && !channel::auto_on(state) {
         true => Vec::new(),
         false => reports::batch(state, now, state.config().moa.wake_batch, used),
@@ -826,7 +846,9 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let n = reports.len();
     let ids: Vec<i64> = reports.iter().map(|r| r.id).collect();
     let yes_ids: Vec<i64> = yeses.iter().map(|s| s.id.0).collect();
-    let told = carry::told(&yeses);
+    let mut told = carry::told(&yeses);
+    told.extend(due::told(now, &due));
+    let nags = due.len();
     // The blocks before your text, in D1's order; an automatic prompt is only them.
     let mut blocks: Vec<String> = yes_block.into_iter().collect();
     if n > 0 {
@@ -835,6 +857,8 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
             false => reports::prefix_text(state, now, &reports),
         });
     }
+    blocks.extend(due_block);
+    blocks.extend(idle_block);
     let carried = blocks.join(PART_GAP);
     let mut body = serde_json::Map::new();
     let row_text = if automatic { &carried } else { &p.text };
@@ -847,6 +871,9 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     }
     if !yes_ids.is_empty() {
         body.insert("yeses".into(), yes_ids.clone().into());
+    }
+    if nags > 0 {
+        body.insert("nags".into(), nags.into());
     }
     let body = serde_json::Value::Object(body).to_string();
     let thread = open.row.thread_id.clone();
