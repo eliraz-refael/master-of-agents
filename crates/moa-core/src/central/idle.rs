@@ -8,7 +8,7 @@ use crate::ops::term::with_tilde;
 use crate::state::State;
 use crate::terminals::{is_active, is_idle, open_records};
 use crate::text::{cut, one_line};
-use crate::time::{HOUR, words};
+use crate::time::{span, words};
 use crate::{Now, UtcMs};
 
 /// The most terminals one prompt carries.
@@ -48,21 +48,21 @@ pub fn idle_terms<'a>(state: &'a State, now: &Now, since: Option<IdleMark>) -> V
     idle
 }
 
-/// The idle block (D10) of `terms`: a line each, with its folder, how many whole hours it
-/// has been untouched, and what it runs.
+/// The idle block (D10) of `terms`: a line each, with its folder, how long it has been
+/// untouched ([`span`]: `terminal_idle_hours` may be under an hour), and what it runs.
 pub fn block(state: &State, now: &Now, terms: &[&Terminal]) -> String {
     let deps = state.deps();
     let field = |s: &str| cut(&one_line(s), FIELD_MAX);
     let lines: Vec<String> = terms
         .iter()
         .map(|t| {
-            let hours = now.wall.0.saturating_sub(last_touched(t).0) / HOUR;
+            let idle = span(now.wall.0.saturating_sub(last_touched(t).0));
             let runs = match t.command == t.shell {
                 true => "at its prompt".to_string(),
                 false => format!("running {}", field(&t.command)),
             };
             format!(
-                "- #{} {} · {} · idle {hours} h · {runs}",
+                "- #{} {} · {} · idle {idle} · {runs}",
                 t.id.0,
                 field(&t.name),
                 one_line(&with_tilde(&t.cwd, &deps.home, deps.canonical)),

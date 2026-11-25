@@ -166,12 +166,15 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 _ => None,
             };
             // A terminal attached or active, a key, or a typed answer: the user is here (D2).
-            if let Some(
-                Mailbox::Key { .. }
-                | Mailbox::Prompt { .. }
-                | Mailbox::Hook(HookMsg::ClientAttached(_) | HookMsg::ClientActive(_)),
-            ) = &mailbox
-            {
+            // moa's own control client attaching or turning active isn't.
+            let present = match &mailbox {
+                Some(Mailbox::Key { .. } | Mailbox::Prompt { .. }) => true,
+                Some(Mailbox::Hook(HookMsg::ClientAttached(c) | HookMsg::ClientActive(c))) => {
+                    !matches!(&state.tmux().link, Link::Up { ctl, .. } if ctl == c)
+                }
+                _ => false,
+            };
+            if present {
                 opening::present(state, now);
             }
             if let Some(Mailbox::Key {

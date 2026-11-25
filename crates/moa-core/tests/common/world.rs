@@ -359,5 +359,5 @@ pub fn d10_terminals(b: &TypicalBrain) -> Vec<Terminal> {
 
 pub const IDLE_BLOCK: &str = "Idle terminals (untouched for 2 h or more; offer to close one that \
                           looks forgotten, as a suggestion with --do \"term close ID\"):\n\
-                          - #4 kite · ~/private/kite · idle 5 h · at its prompt\n\
-                          - #7 logs · ~/private/lantern · idle 3 h · running tail";
+                          - #4 kite · ~/private/kite · idle 5h · at its prompt\n\
+                          - #7 logs · ~/private/lantern · idle 3h · running tail";

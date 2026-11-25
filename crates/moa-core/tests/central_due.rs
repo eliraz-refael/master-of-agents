@@ -259,7 +259,7 @@ fn a_wake_tells_only_newly_idle_terminals() {
     let idle = text.find("Idle terminals").expect("the idle block");
     assert!(wake < idle, "{text}");
     assert!(
-        text.ends_with("\n- #4 kite · ~/private/kite · idle 5 h · at its prompt"),
+        text.ends_with("\n- #4 kite · ~/private/kite · idle 5h · at its prompt"),
         "{text}"
     );
     assert!(!text.contains("#8 beacon"), "{text}");
@@ -267,7 +267,7 @@ fn a_wake_tells_only_newly_idle_terminals() {
     let text = sent(&w.wake(w.t(2 * HOUR)));
     assert!(!text.contains("#4 kite"), "{text}");
     assert!(
-        text.ends_with("\n- #8 beacon · ~/private/beacon · idle 3 h · at its prompt"),
+        text.ends_with("\n- #8 beacon · ~/private/beacon · idle 3h · at its prompt"),
         "{text}"
     );
     // Nothing went idle since: no idle block.
@@ -287,7 +287,7 @@ fn a_wake_carries_due_then_idle() {
         idle.starts_with("Idle terminals (untouched for 2 h"),
         "{text}"
     );
-    assert!(idle.contains("- #4 kite · ~/private/kite · idle 5 h · at its prompt\n"));
+    assert!(idle.contains("- #4 kite · ~/private/kite · idle 5h · at its prompt\n"));
 }
 
 /// Review I1, ruling R6: a yes's prompt that carries the reports, and no idle block, between
@@ -338,7 +338,7 @@ fn a_yes_between_wakes_hides_no_idle_terminal() {
     // The next wake-up tells #8.
     let text = sent(&w.wake(w.t(3 * HOUR)));
     assert!(
-        text.ends_with("\n- #8 beacon · ~/private/beacon · idle 4 h · at its prompt"),
+        text.ends_with("\n- #8 beacon · ~/private/beacon · idle 4h · at its prompt"),
         "{text}"
     );
 }
