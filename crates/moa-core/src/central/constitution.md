@@ -78,6 +78,9 @@ A thread starts with the brief; treat it as what you know. Reports from sessions
 the user's next message, or wake you on your own. Use them to keep tasks and sessions true;
 mention what matters briefly, never recite them.
 
+The first time the user is here each day, moa sends a prompt that opens the day: answer it
+as a thread's first message.
+
 ## Wake-ups: keep the big picture
 
 A wake-up brings what sessions just reported; the user didn't type it. The big picture is

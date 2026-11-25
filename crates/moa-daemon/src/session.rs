@@ -375,12 +375,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
     }
 
     /// `console.page`: older feed rows, read from the store here rather than through the core.
+    /// The core hears of it too, as the user being here (D2); it answers nothing.
     async fn page(&mut self, id: &Id, before: i64, n: u16) -> Flow {
         if !(1..=PAGE_MAX).contains(&n) {
             return self
                 .refuse(id, code::INVALID_PARAMS, &format!("n is 1 to {PAGE_MAX}"))
                 .await;
         }
+        self.next_req += 1;
+        let caller = self.greeted.as_ref().map(|g| g.caller.clone());
+        let op = Op::ConsolePage { before, n };
+        self.core.send(
+            self.conn,
+            ReqId(self.next_req),
+            caller.unwrap_or_default(),
+            op,
+        );
         match self.core.feed_page(before, usize::from(n)).await {
             Ok(rows) => {
                 let done = Done {

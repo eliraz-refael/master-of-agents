@@ -5,7 +5,8 @@
 //! open ([`threads`]), saves the prompt's `you` row, and only then sends it: the prompt waits
 //! for the commit. One prompt at a time. What moa says in its turn lands in the feed as it
 //! comes, and the turn's end answers whoever waits ([`turn`]). The session reports and your
-//! yeses ride on the prompts ([`carry`]), or reach moa on their own ([`channel`]). A turn
+//! yeses ride on the prompts ([`carry`]), or reach moa on their own ([`channel`]), as the
+//! day's opening does ([`opening`]). A turn
 //! that hangs is cancelled, then cut short and moa's agent restarted ([`watchdog`]). One that
 //! fails for its account's sake says so in a card ([`account`]).
 
@@ -16,6 +17,7 @@ pub mod due;
 pub mod feed;
 pub mod idle;
 pub mod launch;
+pub mod opening;
 pub mod prompt;
 pub mod reports;
 pub mod threads;
@@ -170,9 +172,16 @@ pub struct Moa {
     pub last_wake: Option<UtcMs>,
     /// Where the idle terminals told on a wake-up end ([`idle::mark`] of the last one told):
     /// the next wake-up tells only those after it. Set only by the commit of a prompt that
-    /// carried an idle block. Kept in memory.
+    /// carried an idle block, and never moved back (the day's opening tells them all). Kept
+    /// in memory.
     pub idle_told: Option<idle::IdleMark>,
-    /// When the last automatic prompt, a wake-up's or a yes's, failed to reach moa's agent:
+    /// The user is here, and today isn't opened yet ([`opening::present`]): the next prompt
+    /// opens it, the brief's or the user's own (D3). Cleared by the commit of the prompt that
+    /// carries the opening; kept while it is refused. Kept in memory: `meta` `moa.briefed`
+    /// says which day was opened.
+    pub brief_due: bool,
+    /// When the last automatic prompt, a brief's, a wake-up's or a yes's, failed to reach
+    /// moa's agent:
     /// every automatic source waits a gap after it, rather than starting moa's agent, a thread
     /// or a commit again at once. A prompt that reaches moa's agent ends it. Kept in memory.
     pub failed_at: Option<UtcMs>,
@@ -810,33 +819,40 @@ fn thread_row(
 
 /// Saves prompt `p`'s `you` row in the open thread, then sends it. The thread's first prompt
 /// (the one that saves its row) also saves the line a failed reopen leaves, and carries the
-/// brief. What waits goes with it (D1): your yeses ([`State::yeses`], [`carry::yes_text`]),
-/// then the session reports queued now ([`reports::batch`]), then, on a wake-up, what's due
-/// ([`due`]) and the terminals that went idle since the last one ([`idle`]), and your text
-/// after them; an automatic prompt's text is those blocks, and it reads the reports only
-/// while `/auto` is on. The same commit marks each delivered: a report deleted, a yes told,
-/// a due task told today. While writes are refused the prompt is refused too: nothing is
-/// sent, and all of it stays. An automatic prompt that finds no report or yes left to carry
-/// saves and sends nothing: what's due and the idle terminals never go alone (U18).
+/// brief. What waits goes with it (D1), in this order: the day's opening, on the brief's
+/// prompt or yours while it is due ([`opening`]); your yeses ([`State::yeses`],
+/// [`carry::yes_text`]); the session reports queued now ([`reports::batch`]); then, on a
+/// wake-up or a prompt that opens the day, what's due ([`due`]) and the idle terminals
+/// ([`idle`]: a wake-up's since the last told, the opening's all of them); and your text after
+/// them. An automatic prompt's text is those blocks, and it reads the reports only while
+/// `/auto` is on. The same commit marks each delivered: a report deleted, a yes told, a due
+/// task told today, the day opened. While writes are refused the prompt is refused too:
+/// nothing is sent, and all of it stays. An automatic prompt other than the opening that finds
+/// no report or yes left to carry saves and sends nothing: what's due and the idle terminals
+/// never go alone (U18).
 fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let automatic = p.source != Source::You;
+    let opens = state.central.brief_due && matches!(p.source, Source::Brief | Source::You);
     let wake = p.source == Source::Wake;
+    let opening_block = opens.then(|| opening::OPENING.to_string());
     let yeses: Vec<&Suggestion> = state.yeses().collect();
     let yes_block = (!yeses.is_empty()).then(|| carry::yes_text(&yeses));
-    let due: Vec<&Task> = match wake {
+    let due: Vec<&Task> = match wake || opens {
         true => due::due_now(state, now),
         false => Vec::new(),
     };
     let due_block = (!due.is_empty()).then(|| due::block(state, now, &due));
-    // The idle terminals not told yet; the mark moves past them once this commits.
-    let idle: Vec<&Terminal> = match wake {
-        true => idle::idle_terms(state, now, state.central.idle_told),
-        false => Vec::new(),
+    // The idle terminals not told yet, or every one when the day opens; the mark moves past
+    // them once this commits.
+    let idle: Vec<&Terminal> = match (wake, opens) {
+        (_, true) => idle::idle_terms(state, now, None),
+        (true, false) => idle::idle_terms(state, now, state.central.idle_told),
+        (false, false) => Vec::new(),
     };
     let idle_block = (!idle.is_empty()).then(|| idle::block(state, now, &idle));
     let idle_told = idle.last().map(|t| idle::mark(state, t));
     // The reports' room is what the other blocks leave of the prompt.
-    let used: usize = [&yes_block, &due_block, &idle_block]
+    let used: usize = [&opening_block, &yes_block, &due_block, &idle_block]
         .into_iter()
         .flatten()
         .map(|b| b.chars().count() + PART_GAP.len())
@@ -845,7 +861,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         true => Vec::new(),
         false => reports::batch(state, now, state.config().moa.wake_batch, used),
     };
-    if automatic && reports.is_empty() && yeses.is_empty() {
+    if automatic && !opens && reports.is_empty() && yeses.is_empty() {
         return Vec::new();
     }
     let n = reports.len();
@@ -853,9 +869,10 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     let yes_ids: Vec<i64> = yeses.iter().map(|s| s.id.0).collect();
     let mut told = carry::told(&yeses);
     told.extend(due::told(now, &due));
+    told.extend(opens.then(|| opening::told(now)));
     let nags = due.len();
     // The blocks before your text, in D1's order; an automatic prompt is only them.
-    let mut blocks: Vec<String> = yes_block.into_iter().collect();
+    let mut blocks: Vec<String> = opening_block.into_iter().chain(yes_block).collect();
     if n > 0 {
         blocks.push(match automatic {
             true => reports::wake_text(state, now, &reports),
@@ -879,6 +896,9 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     }
     if nags > 0 {
         body.insert("nags".into(), nags.into());
+    }
+    if opens {
+        body.insert("opening".into(), true.into());
     }
     let body = serde_json::Value::Object(body).to_string();
     let thread = open.row.thread_id.clone();
@@ -924,8 +944,12 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     if automatic && n > 0 {
         moa.last_wake = Some(now.wall);
     }
+    // The opening tells every idle terminal: the mark never moves back for it.
     if idle_told.is_some() {
-        moa.idle_told = idle_told;
+        moa.idle_told = moa.idle_told.max(idle_told);
+    }
+    if opens {
+        moa.brief_due = false;
     }
     moa.failed_at = None;
     moa.phase = Phase::Thinking;

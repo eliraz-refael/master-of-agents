@@ -2,6 +2,7 @@
 
 use jiff::civil::Date;
 use moa_core::central::Phase;
+use moa_core::central::opening::BRIEFED_KEY;
 use moa_core::central::wire::{AcpCmd, AcpIn, Caps, Opened, StopReason};
 use moa_core::change::Change;
 use moa_core::effect::{Effect, Input, Publish, RefuseWrites, TimerKey, handle_checked};
@@ -54,14 +55,16 @@ pub fn moa_from(b: &TypicalBrain, account: &str, snapshot: Snapshot) -> State {
 }
 
 /// [`moa_from`] with `settings` (TOML, such as a `[moa]` table) after the `moa.toml`,
-/// started at `now`; what its start said too.
+/// started at `now`; what its start said too. moa opened `now`'s day already, unless
+/// `snapshot` says which day it did: the user's presence opens nothing here (D2).
 pub fn moa_at(
     b: &TypicalBrain,
     account: &str,
     settings: &str,
-    snapshot: Snapshot,
+    mut snapshot: Snapshot,
     now: Now,
 ) -> (State, Vec<Effect>) {
+    opened_today(&mut snapshot, &now);
     let deps = Deps {
         home: b.home.clone(),
         ..Deps::default()
@@ -73,6 +76,15 @@ pub fn moa_at(
         snapshot,
         now,
     )
+}
+
+/// moa opened `now`'s day already, unless `snapshot` says which day it did: the user's
+/// presence opens nothing (D2), and prompts carry what they did before the opening.
+pub fn opened_today(snapshot: &mut Snapshot, now: &Now) {
+    if !snapshot.meta.iter().any(|(k, _)| k == BRIEFED_KEY) {
+        let today = now.local_day.to_string();
+        snapshot.meta.push((BRIEFED_KEY.to_string(), today));
+    }
 }
 
 /// The daemon's disk: the typical brain's own store, which holds only the commits a test
@@ -288,6 +300,10 @@ pub fn saved(b: &TypicalBrain, st: &State) -> Snapshot {
     if let Some(last) = snapshot.feed_tail.last() {
         snapshot.next_ids.feed = last.id + 1;
     }
+    let briefed = st
+        .meta(BRIEFED_KEY)
+        .map(|d| (BRIEFED_KEY.to_string(), d.to_string()));
+    snapshot.meta.extend(briefed);
     snapshot
 }
 

@@ -1019,6 +1019,9 @@ impl<'a> Draw<'a> {
                     // An automatic prompt: its text is what it carried (D1), and it says so
                     // under the header as soon as it is sent.
                     let mut said = Vec::new();
+                    if opening(row) {
+                        said.push("moa opens the day".to_string());
+                    }
                     let ids = yeses(row);
                     if !ids.is_empty() {
                         said.push(format!("moa acts on your yes to {}", id_list(&ids)));
@@ -1201,11 +1204,12 @@ impl<'a> Draw<'a> {
             kind::YOU => text.map(|t| {
                 let you = |s: &str| Span::new(s, Tone::You);
                 let mut lines = hanging(you("› "), vec![you(&clean(t))], room);
+                let opens = opening(row).then(|| "· opens the day".to_string());
                 let ids = yeses(row);
                 let yes =
                     (!ids.is_empty()).then(|| format!("· with your yes to {}", id_list(&ids)));
                 let reports = carried(row).map(|n| format!("· with {}", session_reports(n)));
-                for with in yes.into_iter().chain(reports) {
+                for with in opens.into_iter().chain(yes).chain(reports) {
                     lines.extend(hanging(Span::new("  ", Tone::Text), vec![dim(&with)], room));
                 }
                 lines
@@ -1569,6 +1573,11 @@ fn carried(row: &FeedRow) -> Option<u64> {
         .get("reports")
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
+}
+
+/// Whether a `you` row opened the day (D1, D3).
+fn opening(row: &FeedRow) -> bool {
+    row.body.get("opening").and_then(Value::as_bool) == Some(true)
 }
 
 /// The suggestions whose yes a `you` row carried (D1), by id.

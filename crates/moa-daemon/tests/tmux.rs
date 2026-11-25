@@ -242,11 +242,12 @@ async fn the_daemon_adopts_a_running_server() {
         "pane-died[90]",
         "window-layout-changed[90]",
         "client-attached[90]",
+        "client-active[90]",
         "client-detached[90]",
     ] {
         assert!(hooks.contains(h), "{h} isn't set:\n{hooks}");
     }
-    assert_eq!(hooks.matches("[90]").count(), 5, "{hooks}");
+    assert_eq!(hooks.matches("[90]").count(), 6, "{hooks}");
 
     let ctl = rig.control_clients();
     assert_eq!(ctl.len(), 1, "{ctl:?}");

@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use crate::central::channel::{self, Source};
-use crate::central::watchdog;
 use crate::central::{self, Waiter};
+use crate::central::{opening, watchdog};
 use crate::change::Change;
 use crate::cockpit;
 use crate::console;
@@ -80,6 +80,14 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
 }
 
 fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
+    // The user's console and panels say the user is here (D2), before the op runs: a prompt
+    // that opens the day carries the opening.
+    if let Input::Client { caller, op, .. } = &input
+        && present_op(op)
+        && state.caller(caller) != Caller::Moa
+    {
+        opening::present(state, now);
+    }
     match input {
         Input::Startup(snapshot) => {
             state.refuse_writes = None;
@@ -157,6 +165,15 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 TmuxIn::Notification(Notification::Message(m)) => Mailbox::parse(m).ok(),
                 _ => None,
             };
+            // A terminal attached or active, a key, or a typed answer: the user is here (D2).
+            if let Some(
+                Mailbox::Key { .. }
+                | Mailbox::Prompt { .. }
+                | Mailbox::Hook(HookMsg::ClientAttached(_) | HookMsg::ClientActive(_)),
+            ) = &mailbox
+            {
+                opening::present(state, now);
+            }
             if let Some(Mailbox::Key {
                 action,
                 pane,
@@ -657,6 +674,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             op: Op::ConsoleCancel(_),
             ..
         } => central::cancel(state, now, conn, req),
+        // The daemon answers it from the store, and tells the core only that the user is here
+        // (D2, above): nothing to answer.
+        Input::Client {
+            op: Op::ConsolePage { .. },
+            ..
+        } => Vec::new(),
         Input::Client {
             conn,
             req,
@@ -722,6 +745,19 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             fx
         }
     }
+}
+
+/// Whether `op` from the user says the user is here (D2): the console's prompts, commands and
+/// paging, and a panel's folder or view.
+fn present_op(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::ConsolePrompt { .. }
+            | Op::ConsoleCommand { .. }
+            | Op::ConsolePage { .. }
+            | Op::UiHere { .. }
+            | Op::UiSelectView { .. }
+    )
 }
 
 /// An op's transaction, then its reply. Handlers commit once, last: a refusal has applied

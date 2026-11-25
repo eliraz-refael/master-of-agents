@@ -1072,6 +1072,8 @@ async fn user_hooks_at_other_indexes_survive() {
     let before = shown(&sb);
     assert!(before.contains("pane-exited[90]"), "{before}");
     assert!(before.contains("client-detached[90]"), "{before}");
+    assert!(before.contains("client-active[90]"), "{before}");
+    assert!(before.contains("client-attached[90]"), "{before}");
     for c in unhooks() {
         client.run(&c).await.unwrap();
     }
@@ -1151,6 +1153,21 @@ async fn every_hook_reaches_the_mailbox() {
     })
     .await;
     assert_eq!(c.0, term.tty());
+
+    // A second terminal attaches, and a key in the first makes it its session's latest
+    // active client again.
+    let other = attach(&sb);
+    next_hook(&mut events, "client-attached", |h| match h {
+        HookMsg::ClientAttached(c) => (c.0 == other.tty()).then_some(()),
+        _ => None,
+    })
+    .await;
+    term.press(b"x");
+    next_hook(&mut events, "client-active", |h| match h {
+        HookMsg::ClientActive(c) => (c.0 == term.tty()).then_some(()),
+        _ => None,
+    })
+    .await;
     client.close().await;
 }
 

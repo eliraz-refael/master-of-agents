@@ -111,7 +111,8 @@ fn session(n: usize, title: Option<&str>, cwd: &str) -> (Session, Conversation) 
 
 /// A state under `config` and `deps`, started at `now` from `snapshot`, and what its start
 /// said.
-fn load(config: Config, deps: Deps, snapshot: Snapshot, now: Now) -> (State, Vec<Effect>) {
+fn load(config: Config, deps: Deps, mut snapshot: Snapshot, now: Now) -> (State, Vec<Effect>) {
+    common::central::opened_today(&mut snapshot, &now);
     let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
     let fx = handle_checked(&mut st, Input::Startup(Box::new(snapshot)), now);
     (st, fx)

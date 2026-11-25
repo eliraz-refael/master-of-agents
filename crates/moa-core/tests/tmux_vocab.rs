@@ -410,6 +410,16 @@ fn mailbox_lines_parse() {
         ))))
     );
     assert_eq!(
+        Mailbox::parse("moa:hook client-active /dev/ttys1"),
+        Ok(Mailbox::Hook(HookMsg::ClientActive(ClientName(
+            "/dev/ttys1".into()
+        ))))
+    );
+    assert_eq!(
+        Mailbox::parse("moa:hook client-active "),
+        Err(MailboxError::Bad)
+    );
+    assert_eq!(
         Mailbox::parse(r#"moa:prompt 7 it's "a" \$HOME"#),
         Ok(Mailbox::Prompt {
             token: 7,

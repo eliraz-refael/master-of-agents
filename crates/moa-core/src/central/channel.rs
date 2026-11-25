@@ -1,6 +1,7 @@
 //! The one channel (K3, K4): what goes to moa's agent, from whom ([`Source`]), and when. Your
-//! prompts go through it, and so do moa's automatic ones: the wake-up, which carries the
-//! session reports once they settle, and your yes to a suggestion with nothing to run (D5).
+//! prompts go through it, and so do moa's automatic ones: the day's opening once you are here
+//! (D3), the wake-up, which carries the session reports once they settle, and your yes to a
+//! suggestion with nothing to run (D5).
 //! Each automatic source goes only while [`may_send`] says so. What a prompt carries is
 //! chosen at its commit ([`super::reports::batch`], [`State::yeses`]), and that commit marks
 //! it delivered: each report and each yes reaches moa once.
@@ -24,6 +25,8 @@ pub const AUTO_KEY: &str = "moa.auto";
 pub enum Source {
     /// You, from the console.
     You,
+    /// The day's opening, the first time you are here today (D3).
+    Brief,
     /// A wake-up, with the session reports.
     Wake,
     /// Your yes to a suggestion with nothing to run, which waits for moa (D5).
@@ -121,10 +124,11 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     ));
 }
 
-/// The next automatic prompt, and when it is due: a waiting yes at once, a wake-up when
-/// [`wake_due`] says, and neither sooner than a gap after an automatic prompt failed
-/// ([`super::Moa::failed_at`]). The sooner goes; whichever it is carries both. `None` while
-/// neither waits, or moa's agent isn't [`free`].
+/// The next automatic prompt, and when it is due: the day's opening and a waiting yes at
+/// once, the opening first, a wake-up when [`wake_due`] says, and none sooner than a gap
+/// after an automatic prompt failed ([`super::Moa::failed_at`]). The sooner goes; whichever
+/// it is carries what the others would. `None` while none waits, or moa's agent isn't
+/// [`free`].
 fn due(state: &State) -> Option<(Source, UtcMs)> {
     if !free(state) {
         return None;
@@ -134,9 +138,16 @@ fn due(state: &State) -> Option<(Source, UtcMs)> {
         .central
         .failed_at
         .map_or(i64::MIN, |f| f.0.saturating_add(gap));
-    let yes = state.yeses().next().map(|_| (Source::Yes, UtcMs(i64::MIN)));
+    let at_once = UtcMs(i64::MIN);
+    let brief = state.central.brief_due.then_some((Source::Brief, at_once));
+    let yes = state.yeses().next().map(|_| (Source::Yes, at_once));
     let wake = wake_due(state).map(|at| (Source::Wake, at));
-    let next = yes.into_iter().chain(wake).min_by_key(|(_, at)| *at);
+    // The first of the soonest goes.
+    let next = brief
+        .into_iter()
+        .chain(yes)
+        .chain(wake)
+        .min_by_key(|(_, at)| *at);
     next.map(|(source, at)| (source, UtcMs(at.0.max(held))))
 }
 
