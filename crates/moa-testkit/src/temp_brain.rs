@@ -94,9 +94,14 @@ impl TempBrain {
         store.apply(&[opened]).expect("moa.briefed is saved");
     }
 
-    /// [`TempBrain::opened_on`] today, as a `moa` run with [`TempBrain::env`] tells the day.
+    /// [`TempBrain::opened_on`] [`TempBrain::today`].
     pub fn opened_today(&self) {
-        self.opened_on(Timestamp::now().to_zoned(tz()).date());
+        self.opened_on(Self::today());
+    }
+
+    /// Today, as a `moa` run with [`TempBrain::env`] tells the day.
+    pub fn today() -> Date {
+        Timestamp::now().to_zoned(tz()).date()
     }
 
     pub fn db(&self, brain: &str) -> PathBuf {

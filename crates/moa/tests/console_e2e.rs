@@ -5,12 +5,8 @@
 
 mod common;
 
-use jiff::Timestamp;
-use jiff::civil::Date;
-use jiff::tz::TimeZone;
 use moa_core::central::opening::{BRIEFED_KEY, OPENING};
 use moa_platform::ensure_private_dir;
-use moa_testkit::brain::TYPICAL_TZ;
 use moa_testkit::{StubStep, TempBrain, Terminal, stub_moa_toml, wait_for, write_stub_script};
 
 use common::*;
@@ -354,11 +350,13 @@ const SUGGESTION_BUTTONS: &str = "[yes] [later] [no]";
 #[test]
 fn a_suggestion_card_answered_with_a_button() {
     // Opening a session needs an account to open it with.
-    let toml = stub_moa_toml().replacen(
+    let base = stub_moa_toml();
+    let toml = base.replacen(
         "moa_account = \"acct-a\"\n",
         "moa_account = \"acct-a\"\nopen_account = \"acct-a\"\n",
         1,
     );
+    assert_ne!(toml, base, "open_account isn't set: {base}");
     let c = console_with(&toml, &[]);
     let kite = open_session(&c.tb, &c.term, "kite", "Kite", None).id;
     // The stub reads its script at each prompt: this one is the next turn's.
@@ -429,19 +427,13 @@ fn a_card_answered_elsewhere_updates() {
     );
 }
 
-/// Today, as a `moa` run with [`TempBrain::env`] tells the day.
-fn today() -> Date {
-    let tz = TimeZone::posix(TYPICAL_TZ).expect("a valid zone");
-    Timestamp::now().to_zoned(tz).date()
-}
-
 /// D2, R8: moa opened yesterday; the user attaching today opens the day. The console shows
 /// moa's turn as one moa started, that it opens the day, and the stub's answer; the day is
 /// saved as opened.
 #[test]
 fn attaching_opens_the_day() {
     let tb = TempBrain::new(Some(&stub_moa_toml()));
-    let yesterday = today().yesterday().expect("a day before today");
+    let yesterday = TempBrain::today().yesterday().expect("a day before today");
     tb.opened_on(yesterday);
 
     let c = console_in(tb, &[say("good morning", "m1"), end()]);
@@ -461,5 +453,5 @@ fn attaching_opens_the_day() {
     let briefed = c.sql(&format!(
         "SELECT value FROM meta WHERE key = '{BRIEFED_KEY}'"
     ));
-    assert_eq!(briefed, [today().to_string()]);
+    assert_eq!(briefed, [TempBrain::today().to_string()]);
 }
