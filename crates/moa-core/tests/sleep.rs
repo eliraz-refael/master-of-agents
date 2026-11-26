@@ -7,7 +7,6 @@ mod common;
 use std::cell::Cell;
 use std::path::PathBuf;
 
-use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
@@ -27,6 +26,7 @@ use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
 use moa_core::tmux::topology::refresh_cmds;
+use moa_core::{Now, UtcMs};
 use moa_testkit::brain::TypicalBrain;
 use proptest::prelude::*;
 use serde_json::json;
@@ -274,6 +274,7 @@ impl World {
     /// Loaded, linked, drained and (unless not asked to) reconciled, with the topology in.
     fn up(self) -> Rig {
         let mut st = loaded_with(&self.b, &self.toml, self.deps.clone(), self.snapshot());
+        moa_answers(&mut st, self.b.now());
         let mut setup = Vec::new();
         setup.extend(feed(
             &self.b,
@@ -489,10 +490,17 @@ fn sleep_eligibility_table() {
     cases.push(("failed", w, "not idle"));
     for (to, from) in [(true, false), (false, true)] {
         let mut w = World::new();
+        if from {
+            w.toml = moa_runs(TOML);
+        }
         let me = Some(AskTarget::Session(s_id()));
         w.asks.push(Ask {
             id: AskId(900),
-            at: if from { WAITS_ON_MOA } else { UtcMs(1) },
+            at: if from {
+                UtcMs(w.b.now().wall.0 - MINUTE)
+            } else {
+                UtcMs(1)
+            },
             from_session: if from { me } else { Some(AskTarget::Moa) },
             from_name: None,
             to_session: if to { me } else { Some(AskTarget::Moa) },
@@ -1472,10 +1480,38 @@ fn a_tag_moa_sent_outlives_an_older_listing() {
     assert_eq!(r.st.tmux().topology.moa_session(PaneId(7)), None);
 }
 
-/// When a session's ask to moa was saved, so that it stays `pending` through every test
-/// here: moa has no account to answer it, and it is dropped only at its wait after this (a
-/// taken ask to moa with no turn of moa's answering it fails at once, A9 e).
-const WAITS_ON_MOA: UtcMs = UtcMs(4_000_000_000_000);
+const MINUTE: i64 = 60_000;
+
+/// `toml` (whose last table is the account `acct-a`) with moa running on `acct-a`, its
+/// watchdog never firing within these tests: a session's ask to moa stays open while moa's
+/// turn answers it ([`moa_answers`]). An ask moa can't answer would end at once (A9).
+fn moa_runs(toml: &str) -> String {
+    let toml = toml.replacen(
+        "[brains.default]\n",
+        "[brains.default]\nmoa_account = \"acct-a\"\n",
+        1,
+    );
+    format!(
+        "{toml}acp = \"{}\"\n\n[moa]\nwatchdog_seconds = 2592000\n",
+        common::central::STUB
+    )
+}
+
+/// moa's agent, started for the ask waiting for it, starts and opens its thread at `now`:
+/// its turn answers the ask, which stays open. Nothing when moa isn't starting.
+fn moa_answers(st: &mut State, now: Now) {
+    use common::central::{caps, opened, started};
+    use moa_core::central::Phase;
+    use moa_core::central::wire::{AcpIn, Opened};
+    if st.central().phase != Phase::Starting {
+        return;
+    }
+    let generation = st.central().generation;
+    let hear = |st: &mut State, input: AcpIn| handle_checked(st, Input::Acp(input), now.clone());
+    hear(st, started(generation, caps(true, true, true)));
+    hear(st, opened(generation, "thread-1", Opened::New));
+    assert!(st.central().turn.is_some(), "moa answers the ask");
+}
 
 // --- the property ---
 
@@ -1524,6 +1560,19 @@ fn sess() -> impl Strategy<Value = Sess> {
                 archived,
             },
         )
+}
+
+/// At most one session waits on moa: moa answers one ask at a time, and an ask waiting
+/// behind it is dropped at its wait, which the model doesn't follow. Any other has an ask to
+/// it instead, which keeps it awake as well.
+fn one_waits_on_moa(mut sess: Vec<Sess>) -> Vec<Sess> {
+    let mut seen = false;
+    for p in sess.iter_mut().filter(|p| p.ask == 2) {
+        if std::mem::replace(&mut seen, true) {
+            p.ask = 1;
+        }
+    }
+    sess
 }
 
 fn nth_id(k: usize) -> SessionId {
@@ -1626,6 +1675,10 @@ fn rows(st: &State, n: usize) -> Rows {
 
 const BASE: i64 = 1_789_000_000_000;
 
+/// The property's `moa.toml` when moa answers an ask ([`moa_runs`] adds moa to it).
+const PROPERTY_MOA: &str = "[brains.default]\n\n[accounts.acct-a]\nkind = \"claude\"\n\
+                            store = \"~/.claude-a\"\nlauncher = \"/opt/claude\"\n";
+
 fn property_state(sess: &[Sess]) -> State {
     let mut snap = Snapshot::default();
     for (k, p) in sess.iter().enumerate() {
@@ -1684,7 +1737,11 @@ fn property_state(sess: &[Sess]) -> State {
             let me = Some(AskTarget::Session(id));
             snap.asks.push(Ask {
                 id: AskId(k as i64 + 1),
-                at: if p.ask == 2 { WAITS_ON_MOA } else { UtcMs(1) },
+                at: if p.ask == 2 {
+                    UtcMs(BASE - MINUTE)
+                } else {
+                    UtcMs(1)
+                },
                 from_session: if p.ask == 2 { me } else { Some(AskTarget::Moa) },
                 from_name: None,
                 to_session: if p.ask == 2 { Some(AskTarget::Moa) } else { me },
@@ -1704,8 +1761,14 @@ fn property_state(sess: &[Sess]) -> State {
         inspect: agents,
         ..Deps::default()
     };
-    let mut st = State::new(BrainName::default_brain(), Config::default()).with_deps(deps);
+    // A session waiting on moa needs moa to answer it.
+    let config = match sess.iter().any(|p| p.ask == 2) {
+        true => Config::parse(&moa_runs(PROPERTY_MOA), &PathBuf::from("/tmp/moa-sleep")).unwrap(),
+        false => Config::default(),
+    };
+    let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
     handle_checked(&mut st, Input::Startup(Box::new(snap)), at(UtcMs(BASE)));
+    moa_answers(&mut st, at(UtcMs(BASE)));
     st
 }
 
@@ -1748,7 +1811,7 @@ proptest! {
     /// whatever it allows does once due.
     #[test]
     fn nothing_ineligible_ever_sleeps(
-        sess in prop::collection::vec(sess(), 1..5),
+        sess in prop::collection::vec(sess(), 1..5).prop_map(one_waits_on_moa),
         inputs in prop::collection::vec((any::<bool>(), 0u32..7, 0i64..240), 0..12),
     ) {
         let mut st = property_state(&sess);

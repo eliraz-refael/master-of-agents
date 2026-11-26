@@ -20,14 +20,16 @@
 //!
 //! An ask to moa goes through moa's channel instead (A9): the oldest `pending` one is a hidden
 //! prompt of its own ([`for_moa`]), and that turn's end is its answer ([`moa_ended`]); one moa
-//! took whose turn is gone fails ([`MOA_RESTARTED`]). While moa waits on an ask of its own, its
-//! watchdog holds ([`moa_waits`]).
+//! took whose turn is gone fails ([`MOA_RESTARTED`]), and while moa's agent can't take a turn
+//! without you an ask to moa is refused, or dropped while `pending` ([`end_unanswerable`]).
+//! While moa itself waits on an ask (its `moactl ask` or `reply`), its watchdog holds
+//! ([`moa_waits`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
-use crate::central::channel::Source;
+use crate::central;
 use crate::change::Change;
 use crate::core::{Tx, finish_op, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, TimerKey, rearm};
@@ -94,13 +96,14 @@ const EMPTY: &str = "an ask can't be empty";
 const BAD_WAIT: &str = "a timeout is 1 to 3600 seconds";
 
 /// A request (an `ask`, or a `reply` that waits again) that waits for ask `ask`'s answer
-/// until `until`.
+/// until `until`, from `by`: the session or moa that made it (`None` for anyone else).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Parked {
     pub conn: ConnId,
     pub req: ReqId,
     pub ask: AskId,
     pub until: UtcMs,
+    pub by: Option<AskTarget>,
 }
 
 /// The asks' memory, kept in memory only:
@@ -161,7 +164,7 @@ pub(crate) fn ask(
             let fx = post_commit(state, tx);
             let until = wait_until(now, timeout_s);
             state.asks_mem.waits.insert(id, until);
-            park(state, conn, req, id, until);
+            park(state, conn, req, target_of(caller), id, until);
             fx
         }
         Err(e) => finish_op(state, tx, conn, req, Err(e)),
@@ -192,14 +195,19 @@ fn save(
     if target == from {
         return Err(OpError(YOURSELF.into()));
     }
-    if let AskTarget::Session(id) = target
-        && !state.is_live(id)
-    {
-        return Err(OpError(format!(
-            "{} isn't running; `moactl resume {}` starts it, then ask again",
-            state.label_of(target),
-            state.handle_of(id)
-        )));
+    match target {
+        AskTarget::Session(id) if !state.is_live(id) => {
+            return Err(OpError(format!(
+                "{}; `moactl resume {}` starts it, then ask again",
+                isnt_running(state, target),
+                state.handle_of(id)
+            )));
+        }
+        // Only you start moa's agent again: there's no resume to name.
+        AskTarget::Moa if !central::can_answer(state) => {
+            return Err(OpError(isnt_running(state, target)));
+        }
+        _ => {}
     }
     // Two agents each waiting on the other would both wait out their whole wait.
     if let Some(theirs) = open_ask(state, target, from) {
@@ -226,13 +234,14 @@ fn save(
     Ok(id)
 }
 
-/// `reply ID` (A4 d): an ask that ended is answered at once; an open one waits again, up to
-/// `timeout_s` seconds. Saves nothing.
+/// `reply ID` (A4 d) from `caller`: an ask that ended is answered at once; an open one waits
+/// again, up to `timeout_s` seconds. Saves nothing.
 pub(crate) fn reply(
     state: &mut State,
     now: &Now,
     conn: ConnId,
     req: ReqId,
+    caller: &Caller,
     id: i64,
     timeout_s: i64,
 ) -> Vec<Effect> {
@@ -243,7 +252,14 @@ pub(crate) fn reply(
         (Ok(()), Some(a)) => match answer_of(state, a) {
             Some(result) => result,
             None => {
-                park(state, conn, req, id, wait_until(now, timeout_s));
+                park(
+                    state,
+                    conn,
+                    req,
+                    target_of(caller),
+                    id,
+                    wait_until(now, timeout_s),
+                );
                 return Vec::new();
             }
         },
@@ -270,12 +286,20 @@ fn wait_until(now: &Now, timeout_s: i64) -> UtcMs {
     UtcMs(now.wall.0 + timeout_s * 1_000)
 }
 
-fn park(state: &mut State, conn: ConnId, req: ReqId, ask: AskId, until: UtcMs) {
+fn park(
+    state: &mut State,
+    conn: ConnId,
+    req: ReqId,
+    by: Option<AskTarget>,
+    ask: AskId,
+    until: UtcMs,
+) {
     state.asks_mem.parked.push(Parked {
         conn,
         req,
         ask,
         until,
+        by,
     });
 }
 
@@ -423,8 +447,8 @@ fn to_label(state: &State, a: &Ask) -> String {
 /// - a request waiting on an ask that has ended is answered (its row ended by a hook or a
 ///   tab's exit in this input, or changed by a reload);
 /// - every open ask to a session that isn't live ends, while the link is up
-///   ([`end_unreachable`]), and every ask moa took whose turn is gone fails
-///   ([`fail_orphans`]);
+///   ([`end_unreachable`]), and every ask to moa that moa can't answer any more ends
+///   ([`end_unanswerable`]);
 /// - an Enter that is due goes to its tab, while its ask is still `sent` there;
 /// - a `sent` ask with no receipt [`ASK_RECEIPT_MS`] after its claim fails ([`NO_RECEIPT`]),
 ///   and holds its peer back until moa hears from it again ([`heard_from`]);
@@ -437,9 +461,9 @@ fn to_label(state: &State, a: &Ask) -> String {
 /// - the `Asks` timer is armed at the next deadline ([`deadline`]), or cancelled, when that
 ///   changed or when this input is the timer firing (`fired`).
 ///
-/// Asks to moa are its channel's to deliver ([`for_moa`]). While writes are refused nothing fails, nothing
-/// is dropped and nothing is claimed; what fell due meanwhile acts once writes are back
-/// ([`deadline`]).
+/// Asks to moa are its channel's to deliver ([`for_moa`]). While writes are refused nothing
+/// fails, nothing is dropped and nothing is claimed; what fell due meanwhile acts once writes
+/// are back ([`deadline`]).
 pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect>) {
     if fired {
         state.asks_mem.armed = None;
@@ -458,7 +482,7 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     let writes = !state.writes_refused(now.wall);
     if writes {
         end_unreachable(state, now, fx);
-        fail_orphans(state, now, fx);
+        end_unanswerable(state, now, fx);
     }
     press_enters(state, now.wall, fx);
     if writes {
@@ -820,7 +844,7 @@ fn gone_endings(state: &State, id: SessionId) -> Vec<(AskId, AskStatus, String)>
         .asks()
         .filter(|a| a.to_session == Some(me) && is_open(a.status))
         .map(|a| match a.status {
-            AskStatus::Pending => (a.id, AskStatus::Dropped, format!("{label} isn't running")),
+            AskStatus::Pending => (a.id, AskStatus::Dropped, isnt_running(state, me)),
             _ => (a.id, AskStatus::Failed, format!("{label} ended")),
         })
         .collect()
@@ -865,6 +889,11 @@ fn end_unreachable(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
     }
     fold_in(fx, post_commit(state, tx));
     fold_in(fx, replies);
+}
+
+/// `<label> isn't running` (A13): why an ask to `who` is refused, or dropped while `pending`.
+fn isnt_running(state: &State, who: AskTarget) -> String {
+    format!("{} isn't running", state.label_of(who))
 }
 
 /// Connection `conn` is gone: its waiting requests are dropped, and nothing else. Their asks
@@ -945,51 +974,49 @@ pub(crate) fn moa_ended(
     fx
 }
 
-/// Every ask moa took (`sent` or `received`) with no live turn of moa's for it fails
-/// ([`MOA_RESTARTED`], A9 e), in one commit of its own: moa's agent went in the middle of its
-/// turn, the watchdog restarted it, or the daemon started again. Nothing else would end it.
-fn fail_orphans(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
-    let answering = state
-        .central()
-        .turn
-        .as_ref()
-        .filter(|t| t.exited.is_none())
-        .and_then(|t| match t.source {
-            Source::Ask(id) => Some(id),
-            _ => None,
-        });
-    let orphans: Vec<AskId> = state
+/// Every ask to moa that moa can't answer any more ends, in one commit of its own:
+///
+/// - one moa took (`sent` or `received`) with no live turn of moa's for it fails
+///   ([`MOA_RESTARTED`], A9 e): moa's agent went in the middle of its turn, the watchdog
+///   restarted it, or the daemon started again. Nothing else would end it;
+/// - a `pending` one is dropped, `moa isn't running`, while moa's agent can't take a turn
+///   without you ([`central::can_answer`]: it failed to start, or has no account it can run
+///   on), rather than waiting out its wait.
+fn end_unanswerable(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    let answering = central::answering(state);
+    let can_answer = central::can_answer(state);
+    let moa = AskTarget::Moa;
+    let endings: Vec<(AskId, AskStatus, String)> = state
         .asks()
-        .filter(|a| a.to_session == Some(AskTarget::Moa))
-        .filter(|a| matches!(a.status, AskStatus::Sent | AskStatus::Received))
-        .filter(|a| Some(a.id) != answering)
-        .map(|a| a.id)
+        .filter(|a| a.to_session == Some(moa))
+        .filter_map(|a| match a.status {
+            AskStatus::Sent | AskStatus::Received if Some(a.id) != answering => {
+                Some((a.id, AskStatus::Failed, MOA_RESTARTED.to_string()))
+            }
+            AskStatus::Pending if !can_answer => {
+                Some((a.id, AskStatus::Dropped, isnt_running(state, moa)))
+            }
+            _ => None,
+        })
         .collect();
-    if orphans.is_empty() {
+    if endings.is_empty() {
         return;
     }
     let mut tx = Tx::new(now);
     let mut replies = Vec::new();
-    for id in orphans {
-        replies.extend(end(
-            state,
-            &mut tx,
-            id,
-            AskStatus::Failed,
-            MOA_RESTARTED.into(),
-        ));
+    for (id, status, why) in endings {
+        replies.extend(end(state, &mut tx, id, status, why));
     }
     fold_in(fx, post_commit(state, tx));
     fold_in(fx, replies);
 }
 
-/// Whether moa waits on an ask of its own (A10): a request waits for an open ask from moa
-/// (its `moactl ask`, or a `reply` that waits again). Its watchdog holds meanwhile.
+/// Whether moa waits on an ask (A10): a request moa made (its `moactl ask`, or a `reply`
+/// that waits again) waits for an open ask. Its watchdog holds meanwhile; anyone else's wait
+/// holds nothing.
 pub(crate) fn moa_waits(state: &State) -> bool {
     state.asks_mem.parked.iter().any(|p| {
-        state
-            .ask(p.ask)
-            .is_some_and(|a| a.from_session == Some(AskTarget::Moa) && is_open(a.status))
+        p.by == Some(AskTarget::Moa) && state.ask(p.ask).is_some_and(|a| is_open(a.status))
     })
 }
 

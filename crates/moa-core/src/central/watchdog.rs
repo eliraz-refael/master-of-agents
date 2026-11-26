@@ -5,8 +5,8 @@
 //! says what happened, and is updated in place at each step (K7, K11).
 //!
 //! Until the cancel it watches only while no request of moa's agent waits for you, and moa
-//! waits on no ask of its own (A10: its `moactl ask` blocks its turn for up to the ask's
-//! wait): you, or the peer, may take as long as you like, and the turn gets a fresh span once
+//! itself waits on no ask (A10: its `moactl ask` or `reply` blocks its turn for up to its
+//! wait; anyone else's wait on moa's ask holds nothing): you, or the peer, may take as long as you like, and the turn gets a fresh span once
 //! nothing waits. After the cancel the turn should stop, so a request or an ask then doesn't
 //! hold the restart off.
 //!

@@ -492,4 +492,93 @@ fn the_watchdog_holds_only_while_moa_waits() {
     assert_eq!(watchdog_timer(&fx), Some(Some(UtcMs(gone + watchdog))));
     // The ask goes on, pending.
     assert_eq!(r.row(2).status, AskStatus::Pending);
+    // Beacon waits on moa's ask too: that holds nothing of moa's.
+    let fx = r.op(
+        6,
+        from(BEACON),
+        Op::Reply {
+            id: 2,
+            timeout_s: 540,
+        },
+        gone + SEC,
+    );
+    assert!(replies(&fx).is_empty(), "it waits: {fx:?}");
+    assert!(!matches!(watchdog_timer(&fx), Some(None)), "{fx:?}");
+    let fx = fire_watchdog(&mut r, gone + watchdog);
+    assert!(cancels(&fx), "{fx:?}");
+}
+
+/// Review Focus 4, the other "never": Kite takes moa's ask and never answers. The watchdog
+/// holds until moa's wait ends with "no reply yet", then counts from then.
+#[test]
+fn the_watchdog_waits_out_a_taken_ask() {
+    let mut r = rig();
+    let watchdog = r.st.config().moa.watchdog_ms;
+    your_prompt(&mut r, T0, "Ask Kite which branch");
+    let asked = T0 + 10 * SEC;
+    moa_asks(&mut r, asked, "Kite");
+    r.started(asked + 2 * SEC, KITE, &framed(1, "moa", "Which branch?"));
+    assert_eq!(r.row(1).status, AskStatus::Received);
+    let fx = fire_watchdog(&mut r, T0 + watchdog + MIN);
+    assert!(!cancels(&fx), "{fx:?}");
+    let waited = asked + 540 * SEC;
+    let fx = r.fire(waited);
+    assert_eq!(
+        replies(&fx)[0].2.as_ref().map(|d| d.text.as_str()),
+        Ok("no reply yet from Kite; `moactl reply 1` waits again")
+    );
+    assert_eq!(r.row(1).status, AskStatus::Received);
+    assert_eq!(watchdog_timer(&fx), Some(Some(UtcMs(waited + watchdog))));
+    let fx = fire_watchdog(&mut r, waited + watchdog);
+    assert!(cancels(&fx), "{fx:?}");
+}
+
+// ---------- moa can't answer ----------
+
+/// A9, A2: with no account moa's agent can run on, an ask to moa is refused at once.
+#[test]
+fn an_ask_to_moa_that_cant_run_is_refused() {
+    let mut r = Rig::linked(snapshot());
+    let fx = kite_asks_moa(&mut r);
+    assert_eq!(the_error(&fx), "moa isn't running");
+    assert!(saved_asks(&fx).is_empty(), "{fx:?}");
+}
+
+/// A9: moa's agent fails to start while an ask waits for it: the ask is dropped at once, and
+/// a new one is refused, until your prompt starts moa again.
+#[test]
+fn an_ask_to_moa_that_fails_to_start_is_dropped() {
+    let mut r = rig();
+    let fx = kite_asks_moa(&mut r);
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Acp(AcpCmd::Start { .. }))),
+        "{fx:?}"
+    );
+    let generation = r.st.central().generation;
+    let fx = hear(
+        &mut r,
+        T0 + SEC,
+        AcpIn::Exited {
+            generation,
+            why: "no such program".into(),
+        },
+    );
+    assert_eq!(r.row(1).status, AskStatus::Dropped);
+    assert_eq!(r.row(1).reply.as_deref(), Some("moa isn't running"));
+    assert_eq!(
+        kite_hears(&fx),
+        Err(OpError("moa isn't running; ask #1 was dropped".into()))
+    );
+    let fx = r.op(
+        KITE_CONN,
+        from(KITE),
+        Op::Ask {
+            to: "moa".into(),
+            text: "Is it?".into(),
+            timeout_s: 540,
+        },
+        T0 + 2 * SEC,
+    );
+    assert_eq!(the_error(&fx), "moa isn't running");
 }

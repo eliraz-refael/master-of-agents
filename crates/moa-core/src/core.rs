@@ -763,9 +763,12 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         Input::Client {
             conn,
             req,
+            caller,
             op: Op::Reply { id, timeout_s },
-            ..
-        } => asks::reply(state, now, conn, req, id, timeout_s),
+        } => {
+            let caller = state.caller(&caller);
+            asks::reply(state, now, conn, req, &caller, id, timeout_s)
+        }
         Input::Client {
             conn,
             req,

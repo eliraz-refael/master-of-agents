@@ -435,6 +435,23 @@ pub(crate) fn suggestion_card(
     turn::new_row(state, tx, thread, kind::SUGGESTION, None, body, None)
 }
 
+/// The ask moa's turn under way answers (A9): its turn's, while its agent hasn't gone.
+pub(crate) fn answering(state: &State) -> Option<AskId> {
+    let turn = state.central.turn.as_ref().filter(|t| t.exited.is_none())?;
+    match turn.source {
+        Source::Ask(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// Whether moa's agent can take a turn without you (A9, A2): it runs, or a wake-up could
+/// start it, busy or starting as it may be. Not when it failed to start (only your prompt
+/// starts it again), or has no account it can run on.
+pub(crate) fn can_answer(state: &State) -> bool {
+    let moa = &state.central;
+    !matches!(moa.phase, Phase::Failed(_)) && (moa.running() || launch::spec(state).is_ok())
+}
+
 /// The thread a card goes in (F18, D7): the open one when it is saved, else the newest saved
 /// of any account; none when no thread is saved.
 pub(crate) fn card_thread(state: &State) -> Option<String> {

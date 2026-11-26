@@ -60,7 +60,8 @@ fn an_ask_waits_pending() {
 
 #[test]
 fn a_session_asks_moa() {
-    let mut r = Rig::new(snapshot());
+    // moa has an account, so its agent can answer.
+    let (mut r, _) = Rig::started_with(snapshot(), &common::central::toml("acct-a"), T0);
     let fx = r.ask(1, from(KITE), "moa", "Which account is Harbor on?", 540);
     assert!(replies(&fx).is_empty(), "{fx:?}");
     assert_eq!(saved_asks(&fx)[0].to_session, Some(AskTarget::Moa));
@@ -1063,9 +1064,11 @@ fn stale_asks_fail_before_a_new_claim() {
     assert_eq!(typed(&fx).len(), 2, "{fx:?}");
 }
 
-/// Harbor (in `%5`) has Kite's ask in flight, Beacon's waiting, and its own to moa.
+/// Harbor (in `%5`) has Kite's ask in flight, Beacon's waiting, and its own to moa (whose
+/// agent is starting for it).
 fn harbor_in_asks() -> Rig {
-    let mut r = Rig::linked(harbor_idle());
+    let (mut r, _) = Rig::started_with(harbor_idle(), &common::central::toml("acct-a"), T0);
+    r.link_up(T0);
     r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
     r.ask(2, from(BEACON), "Harbor", "Which branch?", 540);
     r.ask(3, from(HARBOR), "moa", "Which account am I on?", 540);
