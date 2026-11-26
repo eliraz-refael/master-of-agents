@@ -35,7 +35,9 @@ pub(crate) struct Follow {
     /// `None` once the watch couldn't be armed: the daemon goes on without one until its
     /// next start.
     watch: Option<PathWatch>,
-    /// The last build asked for its build, whatever it said: each is asked once.
+    /// The last build that said its build and was wanted: each is wanted once. One that
+    /// couldn't say it (not executable yet, or too slow) is asked again on the next change,
+    /// which may leave its build as it was (a `chmod +x` keeps size and mtime).
     probed: Option<String>,
     /// The watch failed on the last change too: a second failure in a row turns it off,
     /// rather than arming it again and again.
@@ -109,9 +111,9 @@ impl Follow {
         if build == self.build || self.probed.as_ref() == Some(&build) {
             return;
         }
-        self.probed = Some(build.clone());
         let exe = self.exe.display();
         if probe(&self.exe, &build).await {
+            self.probed = Some(build.clone());
             tracing::info!("{exe} is a new build ({build}); it takes over between moa's turns");
             core.want_upgrade(Why::Rebuilt);
         } else {

@@ -63,6 +63,15 @@ pub(crate) fn exec_sent(state: &State) -> bool {
     state.upgrade.is_some_and(|w| w.sent)
 }
 
+/// At a reload: an exec that went out may have been lost with the input that sent it (a
+/// panic after it), so it goes out again at this input's end ([`run`]); a second one is
+/// harmless, while a lost one would leave every prompt refused with no exec coming.
+pub(crate) fn reload(state: &mut State) {
+    if let Some(want) = &mut state.upgrade {
+        want.sent = false;
+    }
+}
+
 /// What `status` says about an upgrade: [`WAITING`] while it waits for moa's turn.
 pub fn status(state: &State) -> Option<&'static str> {
     state.upgrade.filter(|w| !w.sent).map(|_| WAITING)

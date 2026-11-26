@@ -156,6 +156,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             state.central.wake_armed = None;
             state.central.watchdog.armed = None;
             state.asks_mem.armed = None;
+            upgrade::reload(state);
             // The closes under way may have been half-changed: they are forgotten.
             state.closing.clear();
             let mut fx = vec![backup_timer(now), quiet_timer(state, now.wall)];
