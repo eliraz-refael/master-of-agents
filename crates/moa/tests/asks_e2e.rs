@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use moa_platform::ensure_private_dir;
@@ -24,6 +25,10 @@ const GREEN: &str = "Is the Kite build green?";
 const HELLO: &str = "hello there";
 /// moa's answer to Harbor.
 const MOA_SAYS: &str = "Green: 212 tests pass.";
+
+/// The terminal: tall enough that the console holds a hello, an ask's card and moa's answer
+/// at once, so none scrolls off while a test reads them.
+const SIZE: (u16, u16) = (120, 50);
 
 /// A root whose moa runs the stub with `steps`, opening sessions with fake-claude, and `moa`
 /// on a terminal with the cockpit built.
@@ -49,7 +54,7 @@ fn cockpit(moa: &[StubStep]) -> Cockpit {
     let agent = tb.paths().agent_dir(B);
     ensure_private_dir(&agent).expect("the agent folder");
     write_stub_script(&agent, moa);
-    let term = cockpit_up(&tb);
+    let term = cockpit_up_sized(&tb, SIZE);
     let console = cockpit_panes(&tb)
         .into_iter()
         .find(|p| p.tag == "console")
@@ -116,6 +121,68 @@ impl Cockpit {
     fn shows(&self, pane: &str, texts: &[&str]) {
         shows(&self.tb, pane, texts);
     }
+
+    /// Waits until a session's tab has printed each of `texts`: its screen and the lines
+    /// scrolled above it, each line whole however the tab's width wrapped it (`-J`).
+    #[track_caller]
+    fn printed(&self, pane: &str, texts: &[&str]) {
+        let all = || {
+            tmux(
+                &self.tb,
+                &["capture-pane", "-p", "-J", "-S", "-", "-t", pane],
+            )
+        };
+        let seen = wait_for(SHOWS, || {
+            let printed = all();
+            texts.iter().all(|t| printed.contains(t)).then_some(())
+        });
+        assert!(
+            seen.is_some(),
+            "{pane} never printed {texts:?}:\n{}\n{}",
+            all(),
+            what_happened(&self.tb, &self.term)
+        );
+    }
+
+    /// The feed's id of the newest row of `kind` whose body's text is `text`.
+    fn feed_id(&self, kind: &str, text: &str) -> i64 {
+        let ids = self.sql(&format!(
+            "SELECT max(id) FROM feed WHERE kind = '{kind}' \
+             AND json_extract(body, '$.text') = '{}'",
+            text.replace('\'', "''")
+        ));
+        ids.first()
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no {kind} row {text:?}: {ids:?}"))
+    }
+}
+
+/// `text` with each age (`5m ago`, `2h ago`) as `now`, as `peers` and `asks` print an age
+/// under a minute: a slow run whose age ticked over still reads the same.
+fn ages_as_now(text: &str) -> String {
+    let is_span = |w: &str| {
+        w.len() > 1
+            && w.ends_with(['m', 'h', 'd'])
+            && w[..w.len() - 1].bytes().all(|b| b.is_ascii_digit())
+    };
+    text.split('\n')
+        .map(|line| {
+            let words: Vec<&str> = line.split(' ').collect();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < words.len() {
+                if is_span(words[i]) && words.get(i + 1) == Some(&"ago") {
+                    out.push("now");
+                    i += 2;
+                } else {
+                    out.push(words[i]);
+                    i += 1;
+                }
+            }
+            out.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `moactl args…`, run from the session's tab ([`FakeStep::Run`]). The tab's `PATH` is the
@@ -136,10 +203,12 @@ fn open_gate(dir: &Path, file: &str) {
     std::fs::write(dir.join(file), "").expect("open the gate");
 }
 
-/// What `moactl` printed and how it exited, for each `Run` of the agent in `dir`, in order.
+/// What `moactl` printed and how it exited, for each `Run` of the agent in `dir`, in order:
+/// whole lines only, so a line still being written isn't read.
 fn runs(dir: &Path) -> Vec<Value> {
     let text = std::fs::read_to_string(dir.join(".fake-claude.run")).unwrap_or_default();
-    text.lines()
+    text.split_inclusive('\n')
+        .filter_map(|l| l.strip_suffix('\n'))
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l:?}: {e}")))
         .collect()
 }
@@ -194,7 +263,7 @@ fn two_sessions_and_moa_exchange_asks() {
 
     // Kite asks Harbor: Harbor's prompt box gets the framed ask, and Kite prints the answer.
     open_gate(&kite.dir, "ask");
-    c.shows(
+    c.printed(
         &kite.pane,
         &[
             "Renewed through May.",
@@ -232,7 +301,15 @@ fn two_sessions_and_moa_exchange_asks() {
     let at = |text: &str| screen.find(text).unwrap_or_else(|| panic!("{screen}"));
     assert!(at(&card) < at(row), "{screen}");
     assert!(at(row) < at(MOA_SAYS), "{screen}");
-    c.shows(&harbor.pane, &[MOA_SAYS, "exit 0"]);
+    // The same order in the feed: the card, the ask's prompt, then moa's answer.
+    let prompt = format!(
+        "(moa · Harbor asks you, ask #2, not typed by the user)\n{GREEN}\n\n\
+         Your reply this turn goes back to Harbor as the answer."
+    );
+    let (card_at, prompt_at) = (c.feed_id("card", &card), c.feed_id("you", &prompt));
+    assert!(card_at < prompt_at, "{card_at} {prompt_at}");
+    assert!(prompt_at < c.feed_id("moa", MOA_SAYS), "{prompt_at}");
+    c.printed(&harbor.pane, &[MOA_SAYS, "exit 0"]);
     let asked = ran(&harbor.dir, 0);
     assert_eq!(asked["code"], 0, "{asked}");
     assert_eq!(asked["stdout"], format!("{MOA_SAYS}\n"), "{asked}");
@@ -245,13 +322,7 @@ fn two_sessions_and_moa_exchange_asks() {
         .iter()
         .filter_map(|p| p["params"]["prompt"][0]["text"].as_str())
         .collect();
-    assert_eq!(
-        sent[1..],
-        [format!(
-            "(moa · Harbor asks you, ask #2, not typed by the user)\n{GREEN}\n\n\
-             Your reply this turn goes back to Harbor as the answer."
-        )]
-    );
+    assert_eq!(sent[1..], [prompt]);
 
     assert_eq!(c.launches(), before);
 }
@@ -280,7 +351,7 @@ fn peers_and_asks_read_well() {
         ],
     );
     open_gate(&kite.dir, "ask");
-    c.shows(&kite.pane, &["Renewed through May.", "exit 0"]);
+    c.printed(&kite.pane, &["Renewed through May.", "exit 0"]);
     // A handle is the first 8 of the session's conversation (`State::handle_of`).
     let handles = c.sql(&format!(
         "SELECT substr(conversation_id, 1, 8) FROM conversations WHERE session_id = '{}'",
@@ -291,12 +362,19 @@ fn peers_and_asks_read_well() {
     };
 
     open_gate(&kite.dir, "list");
-    c.shows(&kite.pane, &["~/work/harbor", "Kite → Harbor"]);
+    c.printed(
+        &kite.pane,
+        &[
+            &format!("{harbor_handle:<8}  Harbor"),
+            "#1  Kite → Harbor  answered",
+            "\"label\":\"Harbor\"",
+        ],
+    );
     // moa's agent hasn't started: nothing asked it anything yet, so it is `off`.
     let peers = ran(&kite.dir, 1);
     assert_eq!(peers["code"], 0, "{peers}");
     assert_eq!(
-        peers["stdout"],
+        ages_as_now(peers["stdout"].as_str().unwrap_or_default()),
         format!(
             "{:<8}  {:<20} {:<9} {:<24} -\n{harbor_handle:<8}  {:<20} {:<9} {:<24} asked now\n",
             "moa", "moa", "off", "-", "Harbor", "idle", "~/work/harbor"
@@ -307,7 +385,7 @@ fn peers_and_asks_read_well() {
     let asks = ran(&kite.dir, 2);
     assert_eq!(asks["code"], 0, "{asks}");
     assert_eq!(
-        asks["stdout"],
+        ages_as_now(asks["stdout"].as_str().unwrap_or_default()),
         format!("#1  Kite → Harbor  answered  now  {DOMAIN}\n"),
         "{asks}"
     );
@@ -323,8 +401,13 @@ fn peers_and_asks_read_well() {
     assert_eq!(harbor_row["state"], "idle", "{json}");
     assert_eq!(harbor_row["folder"], "~/work/harbor", "{json}");
     assert!(harbor_row["last_asked"].is_i64(), "{json}");
-    let keys: Vec<&String> = harbor_row.as_object().unwrap().keys().collect();
-    let mut want = [
+    let keys: BTreeSet<&str> = harbor_row
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let want = BTreeSet::from([
         "id",
         "handle",
         "label",
@@ -335,9 +418,6 @@ fn peers_and_asks_read_well() {
         "project",
         "cwd",
         "doing",
-    ];
-    want.sort_unstable();
-    let mut keys = keys;
-    keys.sort();
+    ]);
     assert_eq!(keys, want, "{json}");
 }

@@ -264,9 +264,10 @@ impl Fake {
     }
 
     /// [`FakeStep::Run`]: `argv` in the agent's folder, with its environment and no input,
-    /// as Claude's Bash tool runs a command. What it printed goes to the pane, then
-    /// `exit <code>` (line breaks as `\r\n`, so a raw prompt box shows them too), and a line
-    /// of `.fake-claude.run` says the same.
+    /// as Claude's Bash tool runs a command. A line of `.fake-claude.run` says what it printed
+    /// and how it exited, written whole before the pane shows any of it, so a test that saw
+    /// the pane can read the line. Then the pane shows what it printed and `exit <code>`
+    /// (line breaks as `\r\n`, so a raw prompt box shows them too).
     fn run_command(&self, argv: &[String]) {
         let (exe, args) = argv.split_first().expect("run needs a command");
         let out = Command::new(exe)
@@ -274,10 +275,17 @@ impl Fake {
             .current_dir(&self.cwd)
             .stdin(Stdio::null())
             .output()
-            .unwrap_or_else(|e| panic!("run {exe}: {e}"));
+            .unwrap_or_else(|e| panic!("run {argv:?}: {e}"));
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
         let code = out.status.code();
+        let line = json!({"argv": argv, "code": code, "stdout": stdout, "stderr": stderr});
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.cwd.join(".fake-claude.run"))
+            .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()))
+            .expect("write the run");
         let shown = format!(
             "{stdout}{stderr}exit {}\n",
             code.map_or_else(|| "-".into(), |c| c.to_string())
@@ -286,13 +294,6 @@ impl Fake {
         pane.write_all(shown.replace('\n', "\r\n").as_bytes())
             .expect("show the run");
         pane.flush().expect("flush");
-        let line = json!({"argv": argv, "code": code, "stdout": stdout, "stderr": stderr});
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.cwd.join(".fake-claude.run"))
-            .expect("run file");
-        writeln!(file, "{line}").expect("write run");
     }
 
     /// `<store>/projects/<project_slot(cwd)>/<id>.jsonl`, where Claude keeps the current
