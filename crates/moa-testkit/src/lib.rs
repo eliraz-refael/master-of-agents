@@ -47,6 +47,13 @@ pub enum FakeStep {
     Answer {
         reply: String,
     },
+    /// Run `argv` in the agent's folder with its environment, and wait for it to exit: as
+    /// Claude runs `moactl` from a Bash tool call. Its stdout and stderr are shown in the
+    /// pane, then `exit <code>`, and its `{argv, code, stdout, stderr}` is a line of
+    /// `.fake-claude.run`.
+    Run {
+        argv: Vec<String>,
+    },
     /// `/clear`: end the session, take a new id, start again.
     Clear,
     /// Quit cleanly.

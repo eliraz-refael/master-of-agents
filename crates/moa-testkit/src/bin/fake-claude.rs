@@ -2,7 +2,8 @@
 //! Code does (exec form, payload on stdin), driven by a script of `FakeStep`s. Like Claude, it
 //! has a transcript for a conversation by its first hook: one line, written only inside the
 //! temp dir (R34). A script that answers asks ([`FakeStep::Answer`]) reads its pane's input
-//! as Claude's prompt box does: raw, with bracketed paste on.
+//! as Claude's prompt box does: raw, with bracketed paste on. A `Run` runs a command from the
+//! pane, as Claude's Bash tool runs `moactl`.
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -82,6 +83,7 @@ fn main() {
                 fake.fire("UserPromptSubmit", one("prompt", &prompt));
                 fake.fire("Stop", one("last_assistant_message", &reply));
             }
+            FakeStep::Run { argv } => fake.run_command(&argv),
             FakeStep::Clear => {
                 fake.fire("SessionEnd", one("reason", "clear"));
                 fake.rotations += 1;
@@ -259,6 +261,38 @@ impl Fake {
                 Err(e) => panic!("reading the pane: {e}"),
             }
         }
+    }
+
+    /// [`FakeStep::Run`]: `argv` in the agent's folder, with its environment and no input,
+    /// as Claude's Bash tool runs a command. What it printed goes to the pane, then
+    /// `exit <code>` (line breaks as `\r\n`, so a raw prompt box shows them too), and a line
+    /// of `.fake-claude.run` says the same.
+    fn run_command(&self, argv: &[String]) {
+        let (exe, args) = argv.split_first().expect("run needs a command");
+        let out = Command::new(exe)
+            .args(args)
+            .current_dir(&self.cwd)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|e| panic!("run {exe}: {e}"));
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        let code = out.status.code();
+        let shown = format!(
+            "{stdout}{stderr}exit {}\n",
+            code.map_or_else(|| "-".into(), |c| c.to_string())
+        );
+        let mut pane = std::io::stdout();
+        pane.write_all(shown.replace('\n', "\r\n").as_bytes())
+            .expect("show the run");
+        pane.flush().expect("flush");
+        let line = json!({"argv": argv, "code": code, "stdout": stdout, "stderr": stderr});
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.cwd.join(".fake-claude.run"))
+            .expect("run file");
+        writeln!(file, "{line}").expect("write run");
     }
 
     /// `<store>/projects/<project_slot(cwd)>/<id>.jsonl`, where Claude keeps the current
