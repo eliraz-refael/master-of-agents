@@ -126,7 +126,7 @@ pub(crate) fn exec_sent(state: &State) -> bool {
 }
 
 /// At the end of every input, once this start's tabs are reconciled (or no reconcile is
-/// coming: the link is down) and writes are accepted, the start's notice is settled, once:
+/// coming: the link is down, or its reconciles were given up on) and writes are accepted, the start's notice is settled, once:
 /// - the build the last start saved is this one: nothing is said or written;
 /// - no build is saved (a new root, or the first start of a build that saves it): it is
 ///   saved, and nothing is said, as a first start isn't an upgrade;
@@ -144,7 +144,10 @@ pub(crate) fn notice(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
         return;
     };
     let tmux = state.tmux();
-    let settled = tmux.drained && (tmux.reconciled() || tmux.link == Link::Down);
+    // A reconcile given up on won't come on this connection either: the notice isn't held
+    // until the next one.
+    let settled =
+        tmux.drained && (tmux.reconciled() || tmux.reconcile_given_up || tmux.link == Link::Down);
     if !settled || state.writes_refused(now.wall) {
         return;
     }
