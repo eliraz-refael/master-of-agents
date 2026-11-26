@@ -262,6 +262,7 @@ pub fn send(
         Source::You if text.chars().count() > PROMPT_MAX => {
             Some(format!("a prompt is at most {PROMPT_MAX} characters"))
         }
+        _ if crate::upgrade::exec_sent(state) => Some(crate::upgrade::UPGRADING.to_string()),
         _ if state.central.restarting.is_some() => Some(RESTARTING.to_string()),
         _ if state.central.busy() => Some(BUSY.to_string()),
         _ => None,

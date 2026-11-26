@@ -102,6 +102,14 @@ fn upgrade_decodes_old_and_new() {
     let bad = decode(json!({"jsonrpc":"2.0","id":1,"method":"upgrade","params":{"if_stale":"x"}}));
     assert_eq!(bad.unwrap_err().1.code, code::INVALID_PARAMS);
 
+    // `false` goes as `{}`, which a daemon from before live updates still takes.
+    let bare = serde_json::to_value(UpgradeParams { if_stale: false }).unwrap();
+    assert_eq!(bare, json!({}));
+    assert!(serde_json::from_value::<NoParams>(bare).is_ok());
+    let stale = serde_json::to_value(UpgradeParams { if_stale: true }).unwrap();
+    assert_eq!(stale, json!({"if_stale": true}));
+    assert!(serde_json::from_value::<NoParams>(stale).is_err());
+
     assert!(serde_json::from_value::<UpgradeOk>(json!({})).is_err());
     let ok: UpgradeOk = serde_json::from_value(json!({"upgrading": true})).unwrap();
     assert!(ok.upgrading && !ok.waiting_for_moa && ok.exe.is_none());

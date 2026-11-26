@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Args;
-use moa_client::{Client, ClientError, ClientOptions, OnMismatch, UPGRADE_WAIT, own_exe};
+use moa_client::{Client, ClientError, ClientOptions, OnMismatch, UPGRADE_WAIT, Upgraded, own_exe};
 use moa_core::config::{BrainName, Config, caller_store};
 use moa_core::live::DisplayState;
 use moa_core::op::{Done, Op};
@@ -283,28 +283,33 @@ pub fn shutdown(args: &BrainArgs) -> ExitCode {
 }
 
 /// `moa upgrade`: the daemon upgrades in place into the build its program now has, once moa
-/// is between turns, keeping its pid.
+/// is between turns, keeping its pid. A daemon from before live updates stops instead, and
+/// the next command starts the new build.
 pub fn upgrade(args: &BrainArgs) -> ExitCode {
     finish(running(args, false, false, |brain, client| async move {
         let mut client = client;
         let old = client.hello().build.clone();
         let asked = client.ask_upgrade(false).await.map_err(|e| e.to_string())?;
-        match asked {
-            Some(ok) if ok.upgrading => {
-                let new = client
-                    .await_upgrade(UPGRADE_WAIT)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                println!("moa upgraded ({old} → {})", new.hello().build);
-                Ok(())
-            }
-            Some(_) => Err(format!("moa {brain} didn't upgrade")),
-            // A daemon from before live updates stops instead.
-            None => {
-                println!("moa {brain}: stopped; the next moa command starts the new build");
-                Ok(())
-            }
+        let Some(ok) = asked else {
+            client.shutdown().await.map_err(|e| e.to_string())?;
+            println!("moa {brain}: stopped; the next moa command starts the new build");
+            return Ok(());
+        };
+        if !ok.upgrading {
+            return Err(format!("moa {brain} didn't upgrade"));
         }
+        let back = client
+            .await_upgrade(ok.waiting_for_moa, UPGRADE_WAIT)
+            .await
+            .map_err(|e| e.to_string())?;
+        match back {
+            Upgraded::InPlace(new) => println!("moa upgraded ({old} → {})", new.hello().build),
+            Upgraded::Restarted(new) => println!(
+                "moa {brain} restarted instead of upgrading in place ({old} → {})",
+                new.hello().build
+            ),
+        }
+        Ok(())
     }))
 }
 

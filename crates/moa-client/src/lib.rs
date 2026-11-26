@@ -47,8 +47,6 @@ const BIND_WAIT: Duration = Duration::from_secs(2);
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 /// How long a client waits for a daemon to upgrade in place: moa may be finishing a turn.
 pub const UPGRADE_WAIT: Duration = Duration::from_secs(30);
-/// How often it tries to reach the upgraded daemon.
-const UPGRADE_STEP: Duration = Duration::from_millis(100);
 
 /// What to do when the daemon is a different build from this client.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,6 +100,20 @@ pub enum ClientError {
     /// The daemon's upgrade still waits for moa's turn to end (L4).
     #[error("moa is finishing a turn; it upgrades right after. Try again in a moment.")]
     StillInTurn,
+    /// The daemon's upgrade didn't finish in the time given, though moa wasn't in a turn.
+    #[error("moa didn't finish upgrading within {} s", .0.as_secs())]
+    UpgradeUnfinished(Duration),
+    /// The daemon stopped during its upgrade: its next build didn't start (L7).
+    #[error("moa stopped while upgrading; the next moa command starts it again")]
+    UpgradeStopped,
+}
+
+/// How a daemon came back from an upgrade ([`Client::await_upgrade`]), connected.
+pub enum Upgraded {
+    /// The same process, on the build its program has now.
+    InPlace(Client),
+    /// Another process answered: the daemon restarted rather than upgraded in place.
+    Restarted(Client),
 }
 
 fn stopped_line(wrote: bool) -> &'static str {
@@ -301,11 +313,11 @@ impl Wire {
         }
     }
 
-    /// Sends `method` (`shutdown`) and reads to the end of the connection: the daemon
-    /// closes it after replying, so an end of stream is the expected answer. An error line
-    /// is the daemon refusing; a connection that stays open is an error too.
-    async fn stop(&mut self, method: &str) -> Result<(), ClientError> {
-        match self.send(method, json!({})).await {
+    /// Sends `shutdown` and reads to the end of the connection: the daemon closes it after
+    /// replying, so an end of stream is the expected answer. An error line is the daemon
+    /// refusing; a connection that stays open is an error too.
+    async fn stop(&mut self) -> Result<(), ClientError> {
+        match self.send("shutdown", json!({})).await {
             Ok(_) | Err(ClientError::Stopped { .. }) => {}
             Err(e) => return Err(e),
         }
@@ -397,7 +409,7 @@ impl Client {
     /// `shutdown`, so that a daemon that upgrades in place still stops here.
     async fn stop_for_restart(mut self, opts: &ClientOptions) -> Result<(), ClientError> {
         let pid = self.hello.pid;
-        self.wire.stop("shutdown").await?;
+        self.wire.stop().await?;
         drop(self);
         if !wait_for_exit(pid, EXIT_WAIT).await {
             return Err(start_error(
@@ -415,51 +427,64 @@ impl Client {
 
     /// Asks the daemon to upgrade in place (L1): always, or, with `if_stale`, only when its
     /// program is no longer the build it runs. `None` from a daemon from before live
-    /// updates, which stops instead.
+    /// updates: a bare `upgrade` (`if_stale` false, sent as `{}`) is a stop to it, and it is
+    /// stopping; one with `if_stale` it refuses (`INVALID_PARAMS`), and it still runs.
     pub async fn ask_upgrade(&mut self, if_stale: bool) -> Result<Option<UpgradeOk>, ClientError> {
         let params = serde_json::to_value(UpgradeParams { if_stale }).map_err(io::Error::other)?;
-        let reply = self.wire.request("upgrade", params).await?;
-        Ok(serde_json::from_value(reply).ok())
+        match self.wire.request("upgrade", params).await {
+            Ok(reply) => Ok(serde_json::from_value(reply).ok()),
+            Err(ClientError::Rpc(e)) if e.code == code::INVALID_PARAMS => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
-    /// After the daemon said it is upgrading: waits, up to `limit` ([`UPGRADE_WAIT`]), for
-    /// its next image, and says hello to it. The old image ends this connection once it has
-    /// wound down, between moa's turns; the connections made after that wait in the socket's
-    /// backlog for the next image, which keeps the pid. The caller reads the build it now
-    /// runs from [`Client::hello`]. [`ClientError::StillInTurn`] when moa's turn outlasts
-    /// `limit`; `NotRunning` when no next image came (its start failed).
-    pub async fn await_upgrade(self, limit: Duration) -> Result<Client, ClientError> {
+    /// After the daemon said it is upgrading (`waiting_for_moa` as it said): waits, up to
+    /// `limit` ([`UPGRADE_WAIT`]), for its next image, and says hello to it. The old image
+    /// ends this connection once it has wound down, between moa's turns; the socket stays
+    /// open across the upgrade, and a connection made after that waits in its backlog for
+    /// the next image. Errors: [`ClientError::StillInTurn`] when moa's turn outlasts `limit`,
+    /// [`ClientError::UpgradeUnfinished`] when the upgrade does without one, and
+    /// [`ClientError::UpgradeStopped`] when no next image came.
+    pub async fn await_upgrade(
+        self,
+        waiting_for_moa: bool,
+        limit: Duration,
+    ) -> Result<Upgraded, ClientError> {
         let deadline = Instant::now() + limit;
+        let pid = self.hello.pid;
         let Client { mut wire, opts, .. } = self;
         let ended = timeout_at(deadline, async {
             while let Ok(Some(_)) = wire.read().await {}
         })
         .await;
         if ended.is_err() {
-            return Err(ClientError::StillInTurn);
+            return Err(match waiting_for_moa {
+                true => ClientError::StillInTurn,
+                false => ClientError::UpgradeUnfinished(limit),
+            });
         }
         drop(wire);
         let sock = opts.paths.socket(opts.brain.as_str())?;
-        loop {
-            let tried = timeout_at(deadline, async {
-                let stream = UnixStream::connect(&sock).await?;
-                Client::greet(stream, &opts).await
-            })
-            .await;
-            match tried {
-                Ok(Ok(client)) => return Ok(client),
-                // Nothing listens, or the connection went: the next image may still be
-                // starting.
-                Ok(Err(ClientError::Io(e))) if is_absent(&e) || is_gone(&e) => {}
-                Ok(Err(ClientError::Stopped { .. })) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(ClientError::StillInTurn),
-            }
-            if Instant::now() + UPGRADE_STEP >= deadline {
-                return Err(ClientError::NotRunning(opts.brain.clone()));
-            }
-            sleep(UPGRADE_STEP).await;
-        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        // Nothing listening (for a moment, in case another starter raced in) is a daemon
+        // that stopped.
+        let stream = match connect_soon(&sock, left.min(BIND_WAIT)).await {
+            Ok(stream) => stream,
+            Err(e) if is_absent(&e) => return Err(ClientError::UpgradeStopped),
+            Err(e) => return Err(e.into()),
+        };
+        let client = match timeout_at(deadline, Client::greet(stream, &opts)).await {
+            Ok(Ok(client)) => client,
+            // The process went with the connection waiting for it.
+            Ok(Err(ClientError::Stopped { .. })) => return Err(ClientError::UpgradeStopped),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(ClientError::UpgradeUnfinished(limit)),
+        };
+        Ok(if client.hello.pid == pid {
+            Upgraded::InPlace(client)
+        } else {
+            Upgraded::Restarted(client)
+        })
     }
 
     pub async fn call(&mut self, op: Op) -> Result<Done, ClientError> {
@@ -487,7 +512,7 @@ impl Client {
 
     async fn shutdown_within(&mut self, limit: Duration) -> Result<(), ClientError> {
         let pid = self.hello.pid;
-        self.wire.stop("shutdown").await?;
+        self.wire.stop().await?;
         if wait_for_exit(pid, limit).await {
             Ok(())
         } else {
@@ -663,6 +688,7 @@ mod tests {
     use moa_platform::Paths;
     use moa_proto::{Incoming, encode_result};
     use tokio::net::UnixListener;
+    use tokio::sync::mpsc;
 
     use super::*;
 
@@ -932,6 +958,185 @@ mod tests {
         let err = client.shutdown().await.unwrap_err();
         assert!(matches!(err, ClientError::Rpc(_)), "{err}");
         assert_eq!(err.to_string(), "no, not now");
+    }
+
+    /// A root with a socket listening for the default brain, and options for it.
+    fn listening() -> (tempfile::TempDir, ClientOptions, UnixListener) {
+        let dir = tempfile::Builder::new()
+            .prefix("moa")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let paths = Paths::with_root(dir.path());
+        ensure_private_dir(&paths.run_dir()).unwrap();
+        let listener = UnixListener::bind(paths.socket("default").unwrap()).unwrap();
+        let opts = ClientOptions {
+            paths,
+            brain: BrainName::default_brain(),
+            client: "test",
+            caller: CallerInfo::default(),
+            autostart: None,
+            on_mismatch: OnMismatch::Accept,
+            build: "b".into(),
+        };
+        (dir, opts, listener)
+    }
+
+    type Conn = Framed<tokio::net::UnixStream, LinesCodec>;
+
+    /// The next connection, its `hello` answered as process `pid` on build `build`.
+    async fn greeted(listener: &UnixListener, pid: u32, build: &str) -> Conn {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut conn = Framed::new(stream, LinesCodec::new());
+        let (id, method, _) = request(&mut conn).await.expect("a hello");
+        assert_eq!(method, "hello");
+        let ok = HelloOk {
+            brain: "default".into(),
+            build: build.into(),
+            rev: 0,
+            matched: true,
+            pid,
+            exe: None,
+        };
+        conn.send(encode_result(&id, &ok)).await.unwrap();
+        conn
+    }
+
+    /// The next request's id, method and params, read as a daemon of any build would.
+    async fn request(conn: &mut Conn) -> Option<(Id, String, Value)> {
+        let line = conn.next().await?.unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let id = serde_json::from_value(v["id"].clone()).unwrap();
+        let method = v["method"].as_str().unwrap().to_string();
+        Some((id, method, v.get("params").cloned().unwrap_or(Value::Null)))
+    }
+
+    /// A daemon from before live updates: `upgrade`'s params are `NoParams`, which refuses a
+    /// field it doesn't know (`INVALID_PARAMS`) and takes `{}` as a stop. Each upgrade's
+    /// params and how they were taken go to `seen`.
+    async fn old_daemon(listener: UnixListener, seen: mpsc::UnboundedSender<(Value, bool)>) {
+        let mut conn = greeted(&listener, std::process::id(), "old").await;
+        while let Some((id, method, params)) = request(&mut conn).await {
+            assert_eq!(method, "upgrade");
+            let taken = serde_json::from_value::<moa_core::op::NoParams>(params.clone()).is_ok();
+            seen.send((params, taken)).unwrap();
+            if !taken {
+                let e = RpcError {
+                    code: code::INVALID_PARAMS,
+                    message: "the parameters for upgrade don't fit".into(),
+                };
+                conn.send(moa_proto::encode_error(Some(&id), &e))
+                    .await
+                    .unwrap();
+                continue;
+            }
+            conn.send(encode_result(&id, &json!({}))).await.unwrap();
+            return;
+        }
+    }
+
+    /// Important 1: an old daemon refuses `if_stale` and still runs; it takes the bare
+    /// `upgrade` (`{}`) as a stop. Both read as `None`.
+    #[tokio::test]
+    async fn an_old_daemon_reads_as_none_both_ways() {
+        let (_dir, opts, listener) = listening();
+        let (seen_tx, mut seen) = mpsc::unbounded_channel();
+        tokio::spawn(old_daemon(listener, seen_tx));
+        let mut client = Client::connect(opts).await.unwrap();
+
+        assert!(client.ask_upgrade(true).await.unwrap().is_none());
+        assert_eq!(
+            seen.recv().await.unwrap(),
+            (json!({"if_stale": true}), false),
+            "refused: it still runs"
+        );
+        assert!(client.ask_upgrade(false).await.unwrap().is_none());
+        assert_eq!(
+            seen.recv().await.unwrap(),
+            (json!({}), true),
+            "a bare upgrade: it stops"
+        );
+    }
+
+    /// A daemon that answers `upgrade` with `reply`, then keeps the connection open: its
+    /// upgrade never finishes.
+    async fn stuck_daemon(listener: UnixListener, reply: Value) {
+        let mut conn = greeted(&listener, std::process::id(), "b").await;
+        let (id, _, _) = request(&mut conn).await.unwrap();
+        conn.send(encode_result(&id, &reply)).await.unwrap();
+        while request(&mut conn).await.is_some() {}
+    }
+
+    /// Only an upgrade that waits for moa's turn says moa is finishing a turn; one that
+    /// doesn't finish otherwise says so plainly.
+    #[tokio::test]
+    async fn still_in_turn_only_while_moa_is_in_a_turn() {
+        for waiting in [true, false] {
+            let (_dir, opts, listener) = listening();
+            let reply = json!({"upgrading": true, "waiting_for_moa": waiting});
+            tokio::spawn(stuck_daemon(listener, reply));
+            let mut client = Client::connect(opts).await.unwrap();
+            let ok = client.ask_upgrade(false).await.unwrap().unwrap();
+            assert_eq!(ok.waiting_for_moa, waiting);
+            let limit = Duration::from_millis(200);
+            let err = match client.await_upgrade(waiting, limit).await {
+                Err(e) => e,
+                Ok(_) => panic!("it never finished"),
+            };
+            match waiting {
+                true => assert!(matches!(err, ClientError::StillInTurn), "{err}"),
+                false => assert!(matches!(err, ClientError::UpgradeUnfinished(_)), "{err}"),
+            }
+        }
+    }
+
+    /// A daemon that answers `upgrade` as upgrading, hangs up, and then: with `next`, comes
+    /// back as process `next` on build `new`; without, is gone (its next build didn't start).
+    async fn upgrading_daemon(listener: UnixListener, pid: u32, next: Option<u32>) {
+        let mut conn = greeted(&listener, pid, "old").await;
+        let (id, _, _) = request(&mut conn).await.unwrap();
+        let reply = json!({"upgrading": true, "waiting_for_moa": false});
+        conn.send(encode_result(&id, &reply)).await.unwrap();
+        drop(conn);
+        match next {
+            Some(next) => {
+                let mut conn = greeted(&listener, next, "new").await;
+                while request(&mut conn).await.is_some() {}
+            }
+            None => drop(listener),
+        }
+    }
+
+    async fn upgraded(pid: u32, next: Option<u32>) -> Result<Upgraded, ClientError> {
+        let (_dir, opts, listener) = listening();
+        tokio::spawn(upgrading_daemon(listener, pid, next));
+        let mut client = Client::connect(opts).await.unwrap();
+        assert!(client.ask_upgrade(false).await.unwrap().unwrap().upgrading);
+        client.await_upgrade(false, Duration::from_secs(1)).await
+    }
+
+    /// M2: the same pid on the new build is an upgrade in place; another pid is a restart;
+    /// nobody answering is a daemon that stopped while upgrading.
+    #[tokio::test]
+    async fn the_next_image_is_told_apart() {
+        let me = std::process::id();
+        match upgraded(me, Some(me)).await {
+            Ok(Upgraded::InPlace(c)) => assert_eq!(c.hello().build, "new"),
+            Ok(Upgraded::Restarted(_)) => panic!("the same pid restarted"),
+            Err(e) => panic!("{e}"),
+        }
+        match upgraded(me, Some(dead_pid())).await {
+            Ok(Upgraded::Restarted(c)) => assert_eq!(c.hello().build, "new"),
+            Ok(Upgraded::InPlace(_)) => panic!("another pid upgraded in place"),
+            Err(e) => panic!("{e}"),
+        }
+        match upgraded(me, None).await {
+            Err(e @ ClientError::UpgradeStopped) => assert_eq!(
+                e.to_string(),
+                "moa stopped while upgrading; the next moa command starts it again"
+            ),
+            Err(e) => panic!("{e}"),
+            Ok(_) => panic!("nobody answered"),
+        }
     }
 
     #[tokio::test]

@@ -41,17 +41,20 @@ pub struct HelloOk {
     pub exe: Option<String>,
 }
 
-/// `upgrade`'s params. An old client's bare `upgrade` is `if_stale: false`.
+/// `upgrade`'s params. An old client's bare `upgrade` is `if_stale: false`, and `false` is
+/// sent as `{}`: a daemon from before live updates refuses any field it doesn't know
+/// (`INVALID_PARAMS`), but takes `{}` (as a stop).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct UpgradeParams {
     /// Upgrade only when the daemon's program is no longer the build it runs; otherwise the
     /// reply names that program.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub if_stale: bool,
 }
 
-/// `upgrade`'s reply. A daemon from before live updates answers `{}` and stops instead: a
-/// reply this can't be read from (no `upgrading`) is that.
+/// `upgrade`'s reply. A daemon from before live updates answers a bare `upgrade` with `{}`
+/// and stops instead (a reply this can't be read from, with no `upgrading`, is that), and
+/// refuses one with `if_stale` (`INVALID_PARAMS`).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UpgradeOk {
     /// The daemon upgrades in place, once moa is between turns; its pid stays.

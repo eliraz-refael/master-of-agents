@@ -6,7 +6,8 @@
 //! ([`run`]), once moa isn't starting, thinking, restarting or holding a permission request,
 //! every request still waiting on an ask hears A13's "no reply yet" (its `moactl reply`
 //! waits again on the next image), and the exec goes out, once. While an upgrade is wanted,
-//! moa's channel starts no automatic prompt, so the wait ends with the turn under way.
+//! moa's channel starts no automatic prompt, so the wait ends with the turn under way; once
+//! the exec has gone out, a prompt of yours is refused ([`UPGRADING`]).
 
 use crate::asks;
 use crate::core::fold_in;
@@ -16,6 +17,8 @@ use crate::{Now, UtcMs};
 
 /// What `status` says while an upgrade waits.
 pub const WAITING: &str = "waiting for moa's turn";
+/// What a prompt hears once the upgrade has gone out: the wind-down would cut its turn off.
+pub const UPGRADING: &str = "moa is upgrading; try again in a moment";
 
 /// Why the daemon upgrades.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,6 +55,12 @@ pub(crate) fn want(state: &mut State, why: Why, now: &Now) -> Vec<Effect> {
 /// Whether an upgrade is wanted (and moa's channel holds its automatic prompts).
 pub(crate) fn wanted(state: &State) -> bool {
     state.upgrade.is_some()
+}
+
+/// Whether the exec has gone out: no new turn of moa's may start, as the wind-down would cut
+/// it off.
+pub(crate) fn exec_sent(state: &State) -> bool {
+    state.upgrade.is_some_and(|w| w.sent)
 }
 
 /// What `status` says about an upgrade: [`WAITING`] while it waits for moa's turn.

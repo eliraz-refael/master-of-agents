@@ -37,6 +37,9 @@ pub(crate) struct Follow {
     watch: Option<PathWatch>,
     /// The last build asked for its build, whatever it said: each is asked once.
     probed: Option<String>,
+    /// The watch failed on the last change too: a second failure in a row turns it off,
+    /// rather than arming it again and again.
+    failed: bool,
 }
 
 impl Follow {
@@ -49,6 +52,7 @@ impl Follow {
             build,
             watch,
             probed: None,
+            failed: false,
         }
     }
 
@@ -67,13 +71,27 @@ impl Follow {
     }
 
     /// Resolves after the next change, with the watch armed again from the chain as it now
-    /// is. A failed watch counts as a change: a directory in the chain may have gone.
+    /// is. A failed watch counts as a change (a directory in the chain may have gone) and is
+    /// armed again once; failing again straight after, it is turned off until the next start.
     async fn changed(&mut self) {
         let Some(watch) = &mut self.watch else {
             return std::future::pending().await;
         };
-        if let Err(e) = watch.changed().await {
-            tracing::warn!("the program's watch failed ({}); watching again", e.kind());
+        match watch.changed().await {
+            Ok(()) => self.failed = false,
+            Err(e) if self.failed => {
+                tracing::warn!(
+                    "moa's watch on its program keeps failing ({}); it upgrades only when \
+                     asked until it starts again",
+                    e.kind()
+                );
+                self.watch = None;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("the program's watch failed ({}); watching again", e.kind());
+                self.failed = true;
+            }
         }
         self.watch = arm(&self.exe);
     }
