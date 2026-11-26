@@ -437,6 +437,12 @@ pub fn click(tb: &TempBrain, term: &Terminal, pane: &str, line_text: &str) {
 
 /// The rows of the `panels` topic, as a client subscribed to it sees them now.
 pub fn panels(tb: &TempBrain) -> Vec<Value> {
+    panels_on(tb, &moa_platform::build_id_of(Path::new(MOA)).unwrap())
+}
+
+/// [`panels`], asked by a client on `build`: none unless the daemon runs that build. A row
+/// is a panel linked to the daemon (it said which panel it is after a matching hello).
+pub fn panels_on(tb: &TempBrain, build: &str) -> Vec<Value> {
     use moa_client::{Client, ClientOptions, OnMismatch};
     use moa_core::config::BrainName;
     use moa_core::publish::Topic;
@@ -448,7 +454,7 @@ pub fn panels(tb: &TempBrain) -> Vec<Value> {
         caller: CallerInfo::default(),
         autostart: None,
         on_mismatch: OnMismatch::Accept,
-        build: moa_platform::build_id_of(Path::new(MOA)).unwrap(),
+        build: build.to_string(),
         upgrade_wait: moa_client::UPGRADE_WAIT,
     };
     let rt = tokio::runtime::Builder::new_current_thread()

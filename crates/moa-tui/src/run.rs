@@ -377,10 +377,15 @@ struct Linked {
 /// A connect that didn't.
 enum Failed {
     /// The daemon is another build, which runs `exe`: the panel follows it. Nothing was
-    /// sent.
-    Follow { exe: PathBuf, build: String },
-    /// The daemon is another build it can't follow: nothing was sent.
-    Mismatch,
+    /// sent; the connection is kept, for when the program can't start.
+    Follow {
+        exe: PathBuf,
+        build: String,
+        client: Box<Client>,
+    },
+    /// The daemon is another build it can't follow: nothing was sent. The connection is
+    /// kept, so its end says the daemon stopped or upgraded.
+    Mismatch(Box<Client>),
     /// Its line.
     Down(String),
 }
@@ -402,12 +407,11 @@ async fn connect(
     match follow(&build, client.hello(), followed.as_deref()) {
         Follow::Stay => {}
         Follow::Exec(exe) => {
-            return Err(Failed::Follow {
-                exe,
-                build: client.hello().build.clone(),
-            });
+            let build = client.hello().build.clone();
+            let client = Box::new(client);
+            return Err(Failed::Follow { exe, build, client });
         }
-        Follow::Mismatch => return Err(Failed::Mismatch),
+        Follow::Mismatch => return Err(Failed::Mismatch(Box::new(client))),
     }
     let (live, replies, snapshot) = client.live(topics, first).await.map_err(down)?;
     let mut linked = Linked {
@@ -457,8 +461,17 @@ enum Link {
     /// Waiting for a key to try again: why the first connect failed, or `None` once
     /// reconnecting gave up.
     Down(Option<String>),
-    /// Another build: the panel says so and sends nothing.
-    Mismatch,
+    /// Another build the panel starts in its place once this turn is done: the daemon's
+    /// program and build, and the connection that said so.
+    Following {
+        exe: PathBuf,
+        build: String,
+        client: Box<Client>,
+    },
+    /// Another build: the panel says so and sends nothing. While the connection that said
+    /// so is open; its end (the daemon stopped, or upgraded: it hangs up on every
+    /// connection) tries again.
+    Mismatch(Option<Box<Client>>),
 }
 
 /// What woke the loop.
@@ -467,6 +480,8 @@ enum Wake {
     Msg(LiveMsg),
     Linked(Result<Linked, Failed>),
     Retry,
+    /// The connection of another build's daemon closed.
+    MismatchEnded,
     Tick,
     Deadline,
     /// A signal that stops the panel, by name.
@@ -482,7 +497,12 @@ async fn link_wake(link: &mut Link) -> Wake {
             sleep.as_mut().await;
             Wake::Retry
         }
-        Link::Down(_) | Link::Mismatch => pending().await,
+        // A connection that isn't subscribed gets no notices: one only ends it.
+        Link::Mismatch(Some(client)) => {
+            while client.next_notice().await.is_ok() {}
+            Wake::MismatchEnded
+        }
+        Link::Down(_) | Link::Mismatch(None) | Link::Following { .. } => pending().await,
     }
 }
 
@@ -566,8 +586,6 @@ struct Loop {
     tick: Option<Interval>,
     /// The next moment a visible text changes.
     deadline: Option<Pin<Box<Sleep>>>,
-    /// The daemon's program and build, once a connect asked the panel to follow them.
-    following: Option<(PathBuf, String)>,
     /// Starts a program in the panel's place ([`follow::start_in_place`]); returns only why
     /// it couldn't.
     exec: fn(&Path, &Followed) -> io::Error,
@@ -607,7 +625,6 @@ impl Loop {
             started: std::time::Instant::now(),
             tick: None,
             deadline: None,
-            following: None,
             exec: follow::start_in_place,
         };
         // moa tags a panel it places as it starts it (L7), so a placed panel is moa's
@@ -709,7 +726,8 @@ impl Loop {
             Link::Up { .. } | Link::Connecting { .. } => None,
             Link::Waiting { .. } => Some(TRYING.to_string()),
             Link::Down(why) => Some(self.down_note(why.as_deref())),
-            Link::Mismatch => Some(self.mismatch_note().to_string()),
+            Link::Following { .. } => None,
+            Link::Mismatch(_) => Some(self.mismatch_note().to_string()),
         }
     }
 
@@ -781,6 +799,13 @@ impl Loop {
                 }
                 false
             }
+            Wake::MismatchEnded => {
+                // A hello was answered: like any reconnect, this one starts no daemon.
+                self.linked_once = true;
+                self.hush();
+                self.connect(0);
+                true
+            }
             Wake::Tick => true,
             Wake::Deadline => {
                 self.deadline = None;
@@ -816,7 +841,7 @@ impl Loop {
                     return Turn::Go(true);
                 }
                 // A popup tries moa no more once it is down: any key closes it.
-                if self.opts.once && matches!(self.link, Link::Down(_) | Link::Mismatch) {
+                if self.opts.once && matches!(self.link, Link::Down(_) | Link::Mismatch(_)) {
                     return Turn::Quit;
                 }
                 if matches!(self.link, Link::Down(_)) {
@@ -986,8 +1011,10 @@ impl Loop {
                 self.follow_row();
             }
             // The panel starts the daemon's program in its place once this turn is done.
-            Err(Failed::Follow { exe, build }) => self.following = Some((exe, build)),
-            Err(Failed::Mismatch) => self.mismatched(),
+            Err(Failed::Follow { exe, build, client }) => {
+                self.link = Link::Following { exe, build, client };
+            }
+            Err(Failed::Mismatch(client)) => self.mismatched(client),
             Err(Failed::Down(line))
                 if !self.linked_once && self.opts.client.autostart.is_some() =>
             {
@@ -1002,9 +1029,10 @@ impl Loop {
         true
     }
 
-    /// Another build the panel can't follow: it says so, and sends nothing.
-    fn mismatched(&mut self) {
-        self.link = Link::Mismatch;
+    /// Another build the panel can't follow: it says so, and sends nothing, until
+    /// `client`'s connection ends.
+    fn mismatched(&mut self, client: Box<Client>) {
+        self.link = Link::Mismatch(Some(client));
         self.panel.note(self.mismatch_note());
     }
 
@@ -1017,6 +1045,7 @@ impl Loop {
         &mut self,
         exe: &Path,
         build: String,
+        client: Box<Client>,
         term: &mut Terminal<B>,
     ) -> Result<(), Fault>
     where
@@ -1039,7 +1068,7 @@ impl Loop {
         let area = term.get_frame().area();
         term.resize(area)
             .map_err(|e| drawing("can't draw the panel", &e))?;
-        self.mismatched();
+        self.mismatched(client);
         Ok(())
     }
 
@@ -1134,8 +1163,11 @@ impl Loop {
             Turn::Quit => return Ok(true),
             Turn::Go(redraw) => redraw,
         };
-        if let Some((exe, build)) = self.following.take() {
-            self.follow_build(&exe, build, term)?;
+        match std::mem::replace(&mut self.link, Link::Down(None)) {
+            Link::Following { exe, build, client } => {
+                self.follow_build(&exe, build, client, term)?;
+            }
+            link => self.link = link,
         }
         redraw |= self.drain();
         if self.closing {
@@ -1613,7 +1645,7 @@ mod tests {
                 },
                 TRYING,
             ),
-            (Link::Mismatch, MISMATCH),
+            (Link::Mismatch(None), MISMATCH),
         ];
         for (link, line) in links {
             let mut lp = looped(Some(View::Picker), false);
@@ -1748,7 +1780,7 @@ mod tests {
         assert!(matches!(input(&mut lp, key()), Turn::Quit));
 
         let mut lp = popup(true);
-        lp.link = Link::Mismatch;
+        lp.link = Link::Mismatch(None);
         assert_eq!(lp.link_line().as_deref(), Some(ONCE_MISMATCH));
         assert!(matches!(input(&mut lp, key()), Turn::Quit));
         assert_eq!(lp.here(), None);
@@ -1774,6 +1806,28 @@ mod tests {
         build: &'static str,
         exe: Option<&'static str>,
     ) -> (tempfile::TempDir, ClientOptions, Heard) {
+        let conn = Conn {
+            build,
+            exe,
+            hang_up: false,
+        };
+        scripted_daemon_with(hold, vec![conn])
+    }
+
+    /// One connection a scripted daemon answers, in turn: its hello's build and program,
+    /// and whether it hangs up right after the hello, as a daemon that upgrades does.
+    struct Conn {
+        build: &'static str,
+        exe: Option<&'static str>,
+        hang_up: bool,
+    }
+
+    /// [`scripted_daemon`] answering `conns`, one connection each, in order. It says when
+    /// the last one closes.
+    fn scripted_daemon_with(
+        hold: bool,
+        conns: Vec<Conn>,
+    ) -> (tempfile::TempDir, ClientOptions, Heard) {
         use moa_proto::{Call, HelloOk, Incoming, SnapshotMsg, decode_incoming, encode_result};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -1788,52 +1842,63 @@ mod tests {
         let (subscribed_tx, subscribed) = tokio::sync::oneshot::channel();
         let mut subscribed_tx = Some(subscribed_tx);
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (read, mut write) = stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(Incoming::Request { id, call }) = decode_incoming(&line) else {
-                    continue;
-                };
-                let answer = match call {
-                    Call::Hello(_) => encode_result(
-                        &id,
-                        &HelloOk {
-                            brain: "default".into(),
-                            build: build.into(),
-                            rev: 0,
-                            matched: build == "b",
-                            pid: std::process::id(),
-                            exe: exe.map(Into::into),
-                        },
-                    ),
-                    Call::Subscribe(_) => {
-                        if let Some(tx) = subscribed_tx.take() {
-                            let _ = tx.send(());
-                        }
-                        if hold {
-                            continue;
-                        }
-                        encode_result(
+            for Conn {
+                build,
+                exe,
+                hang_up,
+            } in conns
+            {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let Ok(Incoming::Request { id, call }) = decode_incoming(&line) else {
+                        continue;
+                    };
+                    let hello = matches!(call, Call::Hello(_));
+                    let answer = match call {
+                        Call::Hello(_) => encode_result(
                             &id,
-                            &SnapshotMsg {
+                            &HelloOk {
+                                brain: "default".into(),
+                                build: build.into(),
                                 rev: 0,
-                                topics: Default::default(),
+                                matched: build == "b",
+                                pid: std::process::id(),
+                                exe: exe.map(Into::into),
                             },
-                        )
+                        ),
+                        Call::Subscribe(_) => {
+                            if let Some(tx) = subscribed_tx.take() {
+                                let _ = tx.send(());
+                            }
+                            if hold {
+                                continue;
+                            }
+                            encode_result(
+                                &id,
+                                &SnapshotMsg {
+                                    rev: 0,
+                                    topics: Default::default(),
+                                },
+                            )
+                        }
+                        _ => encode_result(
+                            &id,
+                            &Done {
+                                text: String::new(),
+                                data: Default::default(),
+                            },
+                        ),
+                    };
+                    write
+                        .write_all(format!("{answer}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    if hello && hang_up {
+                        break;
                     }
-                    _ => encode_result(
-                        &id,
-                        &Done {
-                            text: String::new(),
-                            data: Default::default(),
-                        },
-                    ),
-                };
-                write
-                    .write_all(format!("{answer}\n").as_bytes())
-                    .await
-                    .unwrap();
+                }
             }
             let _ = closed_tx.send(());
         });
@@ -2059,15 +2124,15 @@ mod tests {
             let first = super::first_ops(None, Some(View::Tree), None, false);
             let ended = super::connect(client, first, topics, followed.map(Into::into)).await;
             match (ended, &want) {
-                (Err(Failed::Follow { exe, build }), Some(want)) => {
+                (Err(Failed::Follow { exe, build, .. }), Some(want)) => {
                     assert_eq!(&exe, want);
                     assert_eq!(build, "new");
                 }
-                (Err(Failed::Mismatch), None) => {}
+                (Err(Failed::Mismatch(_)), None) => {}
                 (Err(Failed::Follow { exe, .. }), None) => panic!("followed {}", exe.display()),
                 (Err(Failed::Down(line)), _) => panic!("down: {line}"),
                 (Ok(_), _) => panic!("linked to another build"),
-                (Err(Failed::Mismatch), Some(_)) => panic!("not followed: {exe:?} {followed:?}"),
+                (Err(Failed::Mismatch(_)), Some(_)) => panic!("not followed: {exe:?} {followed:?}"),
             }
             assert!(
                 heard.subscribed.try_recv().is_err(),
@@ -2106,11 +2171,14 @@ mod tests {
             });
             lp.exec = fails;
             let mut term = terminal();
-            let wake = Wake::Linked(Err(Failed::Follow {
-                exe: "/tmp/i/moa".into(),
-                build: "new".into(),
-            }));
-            assert!(!lp.step(wake, &mut term).unwrap(), "once: {once}");
+            let (_daemon, client, _) = scripted_daemon_on(false, "new", Some("/tmp/i/moa"));
+            let topics = super::topics(lp.panel.view(), once);
+            let ended = super::connect(client, super::once_ops(View::Picker), topics, None).await;
+            assert!(matches!(ended, Err(Failed::Follow { .. })), "once: {once}");
+            assert!(
+                !lp.step(Wake::Linked(ended), &mut term).unwrap(),
+                "once: {once}"
+            );
             let want = Followed {
                 from: "test".into(),
                 to: "new".into(),
@@ -2119,7 +2187,8 @@ mod tests {
                 STARTED.lock().unwrap().pop(),
                 Some((PathBuf::from("/tmp/i/moa"), want))
             );
-            assert!(matches!(lp.link, Link::Mismatch), "once: {once}");
+            // The connection that said so is kept: its end tries again.
+            assert!(matches!(lp.link, Link::Mismatch(Some(_))), "once: {once}");
             assert_eq!(lp.link_line().as_deref(), Some(line));
             assert!(
                 shown(&term).contains("from another build"),
@@ -2149,5 +2218,46 @@ mod tests {
             super::followed_line(&lp.opts).as_deref(),
             Some("followed old → test")
         );
+    }
+
+    /// §6.15: a panel on another build than its daemon's, which it can't follow, keeps the
+    /// connection that said so; when the daemon hangs up on it (it upgraded, or stopped),
+    /// the panel connects again, and a daemon now on its build links it. Never stuck on
+    /// "another build" after the daemon upgrades.
+    #[tokio::test]
+    async fn a_mismatched_panel_connects_again_when_the_daemon_hangs_up() {
+        let conns = vec![
+            // Another build that names no program: it can't be followed.
+            Conn {
+                build: "old",
+                exe: None,
+                hang_up: true,
+            },
+            Conn {
+                build: "b",
+                exe: Some("/tmp/i/moa"),
+                hang_up: false,
+            },
+        ];
+        let (_dir, client, _heard) = scripted_daemon_with(false, conns);
+        let mut lp = looped(Some(View::Tree), true);
+        lp.opts.client = client;
+        let mut term = terminal();
+        lp.connect(0);
+        let mut mismatched = false;
+        let linked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let wake = super::link_wake(&mut lp.link).await;
+                assert!(!lp.step(wake, &mut term).unwrap());
+                mismatched |= matches!(lp.link, Link::Mismatch(_));
+                if matches!(lp.link, Link::Up { .. }) {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(mismatched, "it was never another build");
+        assert!(linked.is_ok(), "never linked: {:?}", lp.link_line());
+        assert_eq!(lp.link_line(), None);
     }
 }
