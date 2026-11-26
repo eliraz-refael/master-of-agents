@@ -431,6 +431,9 @@ async fn a_slow_first_launch_is_asked_once_more() {
     let up = rig.start().await;
     rig.slow_next_build_id(2_000);
     rig.rebuild(1);
+    wait_for(WAIT, || (builds(&up, true) == 1).then_some(()))
+        .expect("the second, longer ask found the build");
+    assert_eq!(builds(&up, false), 0, "the slow first ask isn't a skip");
     let inherited = up.handoff().await;
     assert!(
         !rig.exe().with_extension("slow").exists(),
