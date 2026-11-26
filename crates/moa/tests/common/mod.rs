@@ -38,6 +38,18 @@ pub fn open_sized(
     args: &[&str],
     extra: &[(&str, &str)],
 ) -> Terminal {
+    open_exe(tb, Path::new(MOA), size, args, extra)
+}
+
+/// `exe args…` on a terminal of `size` (columns, rows), with the root's environment plus
+/// `extra`.
+pub fn open_exe(
+    tb: &TempBrain,
+    exe: &Path,
+    size: (u16, u16),
+    args: &[&str],
+    extra: &[(&str, &str)],
+) -> Terminal {
     let mut env = tb.env();
     env.extend(
         extra
@@ -46,7 +58,40 @@ pub fn open_sized(
     );
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     let (cols, rows) = size;
-    Terminal::spawn(Path::new(MOA), &args, &env, cols, rows).unwrap()
+    Terminal::spawn(exe, &args, &env, cols, rows).unwrap()
+}
+
+/// A copy of `moa` at `<root>/install/moa`: an install of its own, as a user's is, which
+/// [`rebuild`] can replace.
+pub fn install_copy(tb: &TempBrain) -> PathBuf {
+    let dir = tb.root().join("install");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("moa");
+    std::fs::copy(MOA, &exe).unwrap();
+    exe
+}
+
+/// A new build at `exe`: a copy of `moa` written beside it, given a later time (a build id
+/// hashes it), and renamed over it, never written into a running program (macOS kills a
+/// process whose signed program changes in place).
+pub fn rebuild(exe: &Path) {
+    let next = exe.with_extension("next");
+    std::fs::copy(MOA, &next).unwrap();
+    let later = std::fs::metadata(exe).unwrap().modified().unwrap() + Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&next)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    std::fs::rename(&next, exe).unwrap();
+}
+
+/// `exe build-id`: the build `exe` is.
+pub fn build_of(tb: &TempBrain, exe: &Path) -> String {
+    let o = run_exe(tb, exe, &["build-id"], &[]);
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    out(&o).trim().to_string()
 }
 
 /// `exe args…` to the end, with the root's environment plus `extra`.
@@ -319,7 +364,12 @@ pub fn ctrl_a(tb: &TempBrain, term: &Terminal) {
 
 /// A tab running `moa panel <view>` in the root's terminal server, out of sight; its pane.
 pub fn panel_tab(tb: &TempBrain, view: &str) -> String {
-    let cmd = format!("'{MOA}' panel {view}");
+    panel_tab_from(tb, Path::new(MOA), view)
+}
+
+/// [`panel_tab`], run from `exe`.
+pub fn panel_tab_from(tb: &TempBrain, exe: &Path, view: &str) -> String {
+    let cmd = format!("'{}' panel {view}", exe.display());
     tmux(
         tb,
         &[
@@ -492,6 +542,13 @@ pub fn cockpit_up(tb: &TempBrain) -> Terminal {
 /// [`cockpit_up`] on a terminal of `size` (columns, rows).
 #[track_caller]
 pub fn cockpit_up_sized(tb: &TempBrain, size: (u16, u16)) -> Terminal {
+    cockpit_up_from(tb, Path::new(MOA), size)
+}
+
+/// [`cockpit_up_sized`], with `moa` run from `exe`: its daemon, and the panels it places,
+/// run from there too.
+#[track_caller]
+pub fn cockpit_up_from(tb: &TempBrain, exe: &Path, size: (u16, u16)) -> Terminal {
     let mut conf = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -502,7 +559,7 @@ pub fn cockpit_up_sized(tb: &TempBrain, size: (u16, u16)) -> Terminal {
         b"set -as terminal-features 'xterm-256color:RGB'\n",
     )
     .unwrap();
-    let term = open_sized(tb, size, &[], &[]);
+    let term = open_exe(tb, exe, size, &[], &[]);
     came_up(tb, &term);
     let built = wait_for(SHOWS, || {
         let tags: Vec<String> = cockpit_panes(tb).into_iter().map(|p| p.tag).collect();

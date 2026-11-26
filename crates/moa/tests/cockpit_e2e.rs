@@ -552,3 +552,61 @@ fn goto_keys_select_their_panels() {
     r.active_becomes(&spot.id);
     assert_eq!(r.counts(), counts, "Ctrl-a g started something");
 }
+
+/// What a panel says while moa is another build it can't follow.
+const MISMATCH: &str = "from another build of moa";
+
+/// §6.15: a new build of moa takes over its panels where they are. The cockpit runs from an
+/// install of its own; the install is rebuilt and the daemon upgrades into it in place.
+/// Every panel, the projects panel in a tab of its own and those moa placed, follows into
+/// the new build in its own pane: the same pane and the same process, its `panel.log` line
+/// saying from which build to which, and none says it is from another build.
+#[test]
+fn a_panel_follows_the_daemon_in_its_pane() {
+    let tb = TempBrain::new(None);
+    moa_toml_with_fake_account(&tb);
+    let exe = install_copy(&tb);
+    let term = cockpit_up_from(&tb, &exe, TERM_SIZE);
+    let old = build_of(&tb, &exe);
+    let before = status_json(&tb);
+    assert_eq!(before["build"], old.as_str(), "{before}");
+    let projects = panel_tab_from(&tb, &exe, "projects");
+    shows(&tb, &projects, &["▦ projects"]);
+    let pid_of = |pane: &str| tmux(&tb, &["display-message", "-p", "-t", pane, "#{pane_pid}"]);
+    let mut panes: Vec<String> = cockpit_panes(&tb).into_iter().map(|p| p.id).collect();
+    panes.push(projects.clone());
+    let pids: Vec<String> = panes.iter().map(|p| pid_of(p)).collect();
+
+    rebuild(&exe);
+    let new = build_of(&tb, &exe);
+    assert_ne!(new, old, "the rebuild is a new build");
+    let log = tb.paths().log_dir().join("panel.log");
+    let followed = |pane: &str| format!(" in {pane}: followed {old} → {new}");
+    let all_followed = wait_for(SHOWS, || {
+        let written = fs::read_to_string(&log).unwrap_or_default();
+        let upgraded = status_json(&tb)["build"] == new.as_str();
+        (upgraded && panes.iter().all(|p| written.contains(&followed(p)))).then_some(())
+    });
+    assert!(
+        all_followed.is_some(),
+        "not every panel followed {old} → {new}: {panes:?}\n{}\n{}",
+        fs::read_to_string(&log).unwrap_or_default(),
+        what_happened(&tb, &term)
+    );
+    let after = status_json(&tb);
+    assert_eq!(after["pid"], before["pid"], "the daemon upgraded in place");
+
+    // Each pane still runs its panel's process, now on the new build, drawn whole again.
+    let now: Vec<String> = panes.iter().map(|p| pid_of(p)).collect();
+    assert_eq!(now, pids, "a panel's process changed: {panes:?}");
+    shows(&tb, &projects, &["▦ projects"]);
+    for pane in &panes {
+        let screen = screen_of(&tb, pane);
+        assert!(!screen.contains(MISMATCH), "{pane}:\n{screen}");
+    }
+    assert!(
+        cockpit_panes(&tb).iter().all(|p| !p.dead),
+        "{:#?}",
+        cockpit_panes(&tb)
+    );
+}

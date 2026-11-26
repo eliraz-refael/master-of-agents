@@ -41,10 +41,12 @@ use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep, interval_at, sle
 use crate::draw::draw;
 use crate::theme::{self, Theme};
 
+mod follow;
 mod input;
 mod logbook;
 mod signals;
 
+pub use follow::{FOLLOWED, FOLLOWED_FROM, Follow, Followed, follow};
 use input::Input;
 pub use logbook::log_line;
 use logbook::{Logbook, panic_message};
@@ -68,6 +70,8 @@ pub struct PanelOptions {
     /// A popup's panel (`--once`, S8): it claims no pane, is never moa's, draws no frame,
     /// reads only what its view needs, and ends when it closes or when moa is down.
     pub once: bool,
+    /// How this panel was started to follow moa's build, if it was ([`Followed::from_env`]).
+    pub followed: Option<Followed>,
 }
 
 /// Taking the terminal: the alternate screen, the cursor hidden, every mouse event (motion
@@ -304,14 +308,27 @@ pub fn cursor(screen: &Screen, prompting: bool) -> Option<(u16, u16)> {
 static TAKEN: AtomicBool = AtomicBool::new(false);
 
 /// Gives the terminal back: [`RESTORE`] and raw mode off. Only the first call after taking
-/// it does anything, so the panic hook and the guard's drop can both call it.
-fn restore() {
-    if TAKEN.swap(false, Ordering::SeqCst) {
+/// it does anything, so the panic hook and the guard's drop can both call it. True when it
+/// gave it back.
+fn restore() -> bool {
+    let taken = TAKEN.swap(false, Ordering::SeqCst);
+    if taken {
         let mut out = io::stdout();
         let _ = out.write_all(RESTORE.as_bytes());
         let _ = out.flush();
         let _ = crossterm::terminal::disable_raw_mode();
     }
+    taken
+}
+
+/// Raw mode on, marked as taken, then [`INIT`]: the terminal taken, as [`Taken::take`] and
+/// a panel that gave it back to follow moa, and couldn't, take it.
+fn take_terminal() -> io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    TAKEN.store(true, Ordering::SeqCst);
+    let mut out = io::stdout();
+    out.write_all(INIT.as_bytes())?;
+    out.flush()
 }
 
 /// The terminal, taken for as long as this lives: given back when it drops (a quit, Ctrl-c,
@@ -322,9 +339,8 @@ struct Taken;
 
 impl Taken {
     fn take(log: Option<Logbook>) -> io::Result<Taken> {
-        crossterm::terminal::enable_raw_mode()?;
-        TAKEN.store(true, Ordering::SeqCst);
-        // From here every way out gives the terminal back.
+        // From the moment raw mode is on, every way out gives the terminal back: a failed
+        // write drops this guard.
         let taken = Taken;
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -335,9 +351,7 @@ impl Taken {
             previous(info);
             std::process::exit(101);
         }));
-        let mut out = io::stdout();
-        out.write_all(INIT.as_bytes())?;
-        out.flush()?;
+        take_terminal()?;
         Ok(taken)
     }
 }
@@ -362,7 +376,10 @@ struct Linked {
 
 /// A connect that didn't.
 enum Failed {
-    /// The daemon is another build: nothing was sent.
+    /// The daemon is another build, which runs `exe`: the panel follows it. Nothing was
+    /// sent.
+    Follow { exe: PathBuf, build: String },
+    /// The daemon is another build it can't follow: nothing was sent.
     Mismatch,
     /// Its line.
     Down(String),
@@ -371,16 +388,26 @@ enum Failed {
 type Connecting = Pin<Box<dyn Future<Output = Result<Linked, Failed>>>>;
 
 /// Connects (V13): hello, then on a matching build the first ops, the topics and their
-/// snapshot.
+/// snapshot. Another build is followed unless the panel was started to follow `followed`
+/// already ([`follow`]).
 async fn connect(
     opts: ClientOptions,
     first: Vec<Op>,
     topics: &'static [Topic],
+    followed: Option<String>,
 ) -> Result<Linked, Failed> {
     let down = |e: moa_client::ClientError| Failed::Down(e.to_string());
+    let build = opts.build.clone();
     let client = Client::connect(opts).await.map_err(down)?;
-    if !client.hello().matched {
-        return Err(Failed::Mismatch);
+    match follow(&build, client.hello(), followed.as_deref()) {
+        Follow::Stay => {}
+        Follow::Exec(exe) => {
+            return Err(Failed::Follow {
+                exe,
+                build: client.hello().build.clone(),
+            });
+        }
+        Follow::Mismatch => return Err(Failed::Mismatch),
     }
     let (live, replies, snapshot) = client.live(topics, first).await.map_err(down)?;
     let mut linked = Linked {
@@ -539,6 +566,11 @@ struct Loop {
     tick: Option<Interval>,
     /// The next moment a visible text changes.
     deadline: Option<Pin<Box<Sleep>>>,
+    /// The daemon's program and build, once a connect asked the panel to follow them.
+    following: Option<(PathBuf, String)>,
+    /// Starts a program in the panel's place ([`follow::start_in_place`]); returns only why
+    /// it couldn't.
+    exec: fn(&Path, &Followed) -> io::Error,
 }
 
 impl Drop for Loop {
@@ -575,6 +607,8 @@ impl Loop {
             started: std::time::Instant::now(),
             tick: None,
             deadline: None,
+            following: None,
+            exec: follow::start_in_place,
         };
         // moa tags a panel it places as it starts it (L7), so a placed panel is moa's
         // before its row says so; a panel started by hand isn't, and a popup never is,
@@ -613,8 +647,9 @@ impl Loop {
             client.autostart = None;
         }
         let topics = topics(self.panel.view(), self.opts.once);
+        let followed = self.opts.followed.as_ref().map(|f| f.to.clone());
         self.link = Link::Connecting {
-            connect: Box::pin(connect(client, first, topics)),
+            connect: Box::pin(connect(client, first, topics, followed)),
             waited,
             here,
         };
@@ -950,10 +985,9 @@ impl Loop {
                 }
                 self.follow_row();
             }
-            Err(Failed::Mismatch) => {
-                self.link = Link::Mismatch;
-                self.panel.note(self.mismatch_note());
-            }
+            // The panel starts the daemon's program in its place once this turn is done.
+            Err(Failed::Follow { exe, build }) => self.following = Some((exe, build)),
+            Err(Failed::Mismatch) => self.mismatched(),
             Err(Failed::Down(line))
                 if !self.linked_once && self.opts.client.autostart.is_some() =>
             {
@@ -966,6 +1000,47 @@ impl Loop {
             Err(Failed::Down(_)) => self.wait(waited),
         }
         true
+    }
+
+    /// Another build the panel can't follow: it says so, and sends nothing.
+    fn mismatched(&mut self) {
+        self.link = Link::Mismatch;
+        self.panel.note(self.mismatch_note());
+    }
+
+    /// Follows moa's build (§6.15): gives the terminal back as at any end, then starts the
+    /// daemon's `exe` in this panel's place, with its own arguments, to follow `build`.
+    /// That returns only when the program couldn't start: then the panel takes the terminal
+    /// again, to be drawn whole, and says it is from another build, as it did before
+    /// panels followed moa.
+    fn follow_build<B: Backend>(
+        &mut self,
+        exe: &Path,
+        build: String,
+        term: &mut Terminal<B>,
+    ) -> Result<(), Fault>
+    where
+        B::Error: 'static,
+    {
+        let followed = Followed {
+            from: self.opts.client.build.clone(),
+            to: build,
+        };
+        let gave_back = restore();
+        let e = (self.exec)(exe, &followed);
+        self.log(&format!(
+            "couldn't start moa's new build {}: {e}",
+            exe.display()
+        ));
+        if gave_back {
+            take_terminal().map_err(|e| Fault::terminal("can't use this terminal", &e))?;
+        }
+        // The next draw is a whole one.
+        let area = term.get_frame().area();
+        term.resize(area)
+            .map_err(|e| drawing("can't draw the panel", &e))?;
+        self.mismatched();
+        Ok(())
     }
 
     /// Takes everything the connection already holds. True when the screen may have
@@ -1024,13 +1099,7 @@ impl Loop {
             }
             shown = Some((size, screen.animate, screen.wake_at));
         })
-        .map_err(|e| {
-            let io = (&e as &(dyn std::error::Error + 'static)).downcast_ref::<io::Error>();
-            match io {
-                Some(io) => Fault::terminal("can't draw the panel", io),
-                None => Fault::Line(format!("can't draw the panel: {e}")),
-            }
-        })?;
+        .map_err(|e| drawing("can't draw the panel", &e))?;
         let Some((size, animate, wake_at)) = shown else {
             return Ok(());
         };
@@ -1065,6 +1134,9 @@ impl Loop {
             Turn::Quit => return Ok(true),
             Turn::Go(redraw) => redraw,
         };
+        if let Some((exe, build)) = self.following.take() {
+            self.follow_build(&exe, build, term)?;
+        }
         redraw |= self.drain();
         if self.closing {
             self.log("stopped: closed");
@@ -1091,12 +1163,25 @@ pub async fn run(opts: PanelOptions) -> Result<(), String> {
     let log = Logbook::new(&opts);
     if let Some(log) = &log {
         log.write("started");
+        if let Some(line) = followed_line(&opts) {
+            log.write(&line);
+        }
     }
     let ended = run_logged(opts, log.clone(), stdout).await;
     if let (Err(e), Some(log)) = (&ended, &log) {
         log.write(&format!("stopped: {e}"));
     }
     ended
+}
+
+/// `panel.log`'s line at the start of a panel started to follow moa: from the build it
+/// left to its own.
+fn followed_line(opts: &PanelOptions) -> Option<String> {
+    let followed = opts.followed.as_ref()?;
+    Some(format!(
+        "followed {} → {}",
+        followed.from, opts.client.build
+    ))
 }
 
 /// Why a run stopped before the panel quit.
@@ -1117,6 +1202,15 @@ impl Fault {
         } else {
             Fault::Line(format!("{what}: {e}"))
         }
+    }
+}
+
+/// `e`, a backend's failure while doing `what`: an IO error is read as [`Fault::terminal`]
+/// reads it.
+fn drawing<E: std::error::Error + 'static>(what: &str, e: &E) -> Fault {
+    match (e as &(dyn std::error::Error + 'static)).downcast_ref::<io::Error>() {
+        Some(io) => Fault::terminal(what, io),
+        None => Fault::Line(format!("{what}: {e}")),
     }
 }
 
@@ -1266,8 +1360,8 @@ mod tests {
     use moa_view::panel::Out;
 
     use super::{
-        Failed, Fault, Link, Logbook, Loop, MISMATCH, ONCE_DOWN, ONCE_MISMATCH, PanelOptions,
-        TRYING, Turn, Wake, now,
+        Failed, Fault, Followed, Link, Logbook, Loop, MISMATCH, ONCE_DOWN, ONCE_MISMATCH,
+        PanelOptions, TRYING, Turn, Wake, now,
     };
     use crate::theme::{ColorMode, Theme};
 
@@ -1296,6 +1390,7 @@ mod tests {
             tz: jiff::tz::TimeZone::UTC,
             log: None,
             once: false,
+            followed: None,
         };
         let theme = Theme {
             mode: ColorMode::True,
@@ -1669,6 +1764,16 @@ mod tests {
     /// answers every request, the `subscribe` too unless `hold`, which leaves a connect
     /// waiting on it; it says when the `subscribe` comes and when the connection closes.
     fn scripted_daemon(hold: bool) -> (tempfile::TempDir, ClientOptions, Heard) {
+        scripted_daemon_on(hold, "b", None)
+    }
+
+    /// [`scripted_daemon`] on daemon build `build`, naming its program `exe`; the client is
+    /// on build `b`.
+    fn scripted_daemon_on(
+        hold: bool,
+        build: &'static str,
+        exe: Option<&'static str>,
+    ) -> (tempfile::TempDir, ClientOptions, Heard) {
         use moa_proto::{Call, HelloOk, Incoming, SnapshotMsg, decode_incoming, encode_result};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -1695,11 +1800,11 @@ mod tests {
                         &id,
                         &HelloOk {
                             brain: "default".into(),
-                            build: "b".into(),
+                            build: build.into(),
                             rev: 0,
-                            matched: true,
+                            matched: build == "b",
                             pid: std::process::id(),
-                            exe: None,
+                            exe: exe.map(Into::into),
                         },
                     ),
                     Call::Subscribe(_) => {
@@ -1768,7 +1873,8 @@ mod tests {
             let mut lp = looped(Some(View::Picker), true);
             lp.opts.once = once;
             let topics = super::topics(View::Picker, once);
-            let Ok(linked) = super::connect(client, super::once_ops(View::Picker), topics).await
+            let Ok(linked) =
+                super::connect(client, super::once_ops(View::Picker), topics, None).await
             else {
                 panic!("the connect failed");
             };
@@ -1794,6 +1900,7 @@ mod tests {
                 client,
                 super::once_ops(View::Picker),
                 topics,
+                None,
             ));
             // `ui.panel` is answered, and the connect waits on its `subscribe`.
             tokio::select! {
@@ -1930,6 +2037,117 @@ mod tests {
             text.matches("moa's agent couldn't start").count(),
             2,
             "{text}"
+        );
+    }
+
+    /// §6.15: a daemon on another build that names its program is followed: the connect
+    /// ends asking the panel to start that program, and sends nothing more. One the panel
+    /// was already started to follow, still another build, isn't followed again (no loop),
+    /// and one from before live updates names no program.
+    #[tokio::test]
+    async fn a_connect_to_another_build_asks_to_follow_it() {
+        use std::path::PathBuf;
+
+        let cases: [(Option<&'static str>, Option<&str>, Option<PathBuf>); 3] = [
+            (Some("/tmp/i/moa"), None, Some("/tmp/i/moa".into())),
+            (Some("/tmp/i/moa"), Some("new"), None),
+            (None, None, None),
+        ];
+        for (exe, followed, want) in cases {
+            let (_dir, client, mut heard) = scripted_daemon_on(false, "new", exe);
+            let topics = super::topics(View::Tree, false);
+            let first = super::first_ops(None, Some(View::Tree), None, false);
+            let ended = super::connect(client, first, topics, followed.map(Into::into)).await;
+            match (ended, &want) {
+                (Err(Failed::Follow { exe, build }), Some(want)) => {
+                    assert_eq!(&exe, want);
+                    assert_eq!(build, "new");
+                }
+                (Err(Failed::Mismatch), None) => {}
+                (Err(Failed::Follow { exe, .. }), None) => panic!("followed {}", exe.display()),
+                (Err(Failed::Down(line)), _) => panic!("down: {line}"),
+                (Ok(_), _) => panic!("linked to another build"),
+                (Err(Failed::Mismatch), Some(_)) => panic!("not followed: {exe:?} {followed:?}"),
+            }
+            assert!(
+                heard.subscribed.try_recv().is_err(),
+                "nothing was subscribed"
+            );
+        }
+    }
+
+    /// §6.15: a panel asked to follow another build gives the terminal back and starts the
+    /// daemon's program in its own place, saying from which build to which. When that
+    /// can't start, the panel stays, says it is from another build as before, and
+    /// `panel.log` says why. A popup the same.
+    #[tokio::test]
+    async fn a_panel_that_cant_follow_says_it_is_another_build() {
+        use std::path::{Path, PathBuf};
+        use std::sync::Mutex;
+
+        static STARTED: Mutex<Vec<(PathBuf, Followed)>> = Mutex::new(Vec::new());
+        fn fails(exe: &Path, followed: &Followed) -> std::io::Error {
+            STARTED
+                .lock()
+                .unwrap()
+                .push((exe.to_path_buf(), followed.clone()));
+            std::io::Error::other("no such file")
+        }
+        for (once, line) in [(false, MISMATCH), (true, ONCE_MISMATCH)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut lp = if once {
+                popup(true)
+            } else {
+                looped(Some(View::Tree), true)
+            };
+            lp.log = Logbook::new(&PanelOptions {
+                log: Some(dir.path().join("panel.log")),
+                ..lp.opts.clone()
+            });
+            lp.exec = fails;
+            let mut term = terminal();
+            let wake = Wake::Linked(Err(Failed::Follow {
+                exe: "/tmp/i/moa".into(),
+                build: "new".into(),
+            }));
+            assert!(!lp.step(wake, &mut term).unwrap(), "once: {once}");
+            let want = Followed {
+                from: "test".into(),
+                to: "new".into(),
+            };
+            assert_eq!(
+                STARTED.lock().unwrap().pop(),
+                Some((PathBuf::from("/tmp/i/moa"), want))
+            );
+            assert!(matches!(lp.link, Link::Mismatch), "once: {once}");
+            assert_eq!(lp.link_line().as_deref(), Some(line));
+            assert!(
+                shown(&term).contains("from another build"),
+                "{}",
+                shown(&term)
+            );
+            let written = std::fs::read_to_string(dir.path().join("panel.log")).unwrap();
+            assert!(
+                written
+                    .trim_end()
+                    .ends_with("couldn't start moa's new build /tmp/i/moa: no such file"),
+                "{written}"
+            );
+        }
+    }
+
+    /// `panel.log`'s line at a followed panel's start: from the build it left to its own.
+    #[test]
+    fn a_followed_panel_says_so_as_it_starts() {
+        let mut lp = looped(Some(View::Tree), true);
+        assert_eq!(super::followed_line(&lp.opts), None);
+        lp.opts.followed = Some(Followed {
+            from: "old".into(),
+            to: "test".into(),
+        });
+        assert_eq!(
+            super::followed_line(&lp.opts).as_deref(),
+            Some("followed old → test")
         );
     }
 }
