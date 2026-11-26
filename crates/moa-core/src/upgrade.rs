@@ -8,12 +8,68 @@
 //! waits again on the next image), and the exec goes out, once. While an upgrade is wanted,
 //! moa's channel starts no automatic prompt, so the wait ends with the turn under way; once
 //! the exec has gone out, a prompt of yours is refused ([`UPGRADING`]).
+//!
+//! The next image says what the upgrade needs of you, once ([`notice`], L7): when its build
+//! isn't the one the last start saved (`meta` [`BUILD_KEY`]), the most demanding of the four
+//! `NOTICE_*` texts goes in moa's thread and the activity feed, in the commit that saves the
+//! new build.
 
 use crate::asks;
-use crate::core::fold_in;
+use crate::central::{self, feed};
+use crate::change::Change;
+use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine};
+use crate::model::{ActivityWho, Lifecycle};
 use crate::state::State;
+use crate::tmux::link::Link;
 use crate::{Now, UtcMs};
+
+/// The `meta` key holding the build of the daemon's last start (L7).
+pub const BUILD_KEY: &str = "daemon.build";
+
+/// What the start after an upgrade says, the most demanding first (§6.15.5): an option tmux
+/// reads only when a terminal attaches changed.
+pub const NOTICE_REATTACH: &str = "moa upgraded: re-attach your terminal";
+/// The daemon's pid changed: the old one stopped, crashed, or predates upgrades in place.
+pub const NOTICE_RESTARTED: &str = "moa upgraded: the daemon restarted itself";
+/// An upgrade in place that needs nothing of you.
+pub const NOTICE_NOTHING: &str = "moa upgraded: nothing to do";
+
+/// The session plugin changed, and `n` sessions were live at the start's reconcile: they
+/// keep the hooks they started with.
+pub fn notice_hooks(n: usize) -> String {
+    format!(
+        "moa upgraded: {n} running sessions use the old hooks; they get the new ones when resumed"
+    )
+}
+
+/// What the daemon's shell knows of its start, for the notice (L7). The core reads no file:
+/// the shell finds these out as it comes up and hands them in.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct UpgradeFacts {
+    /// This image's build, saved as `meta` [`BUILD_KEY`].
+    pub build: String,
+    /// This image took over from the previous one in place (same pid).
+    pub reexec: bool,
+    /// This start rewrote the plugin sessions start with.
+    pub plugin_changed: bool,
+    /// This start changed an option of the tmux config that tmux reads only when a terminal
+    /// attaches.
+    pub reattach: bool,
+}
+
+/// The start's notice: its facts, and whether it is settled (said, saved, or not owed).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Notice {
+    facts: UpgradeFacts,
+    done: bool,
+}
+
+impl Notice {
+    pub(crate) fn new(facts: UpgradeFacts) -> Notice {
+        Notice { facts, done: false }
+    }
+}
 
 /// What `status` says while an upgrade waits.
 pub const WAITING: &str = "waiting for moa's turn";
@@ -63,12 +119,108 @@ pub(crate) fn exec_sent(state: &State) -> bool {
     state.upgrade.is_some_and(|w| w.sent)
 }
 
+/// At the end of every input, once this start's tabs are reconciled (or no reconcile is
+/// coming: the link is down) and writes are accepted, the start's notice is settled, once:
+/// - the build the last start saved is this one: nothing is said or written;
+/// - no build is saved (a new root, or the first start of a build that saves it): it is
+///   saved, and nothing is said, as a first start isn't an upgrade;
+/// - another build: the notice ([`text`]) is a `system` line in moa's current thread, when
+///   there is one, and an activity row always, in the commit that saves this build.
+///
+/// A refused commit leaves it owed, to be said by the next input that can save it.
+pub(crate) fn notice(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    let Some(facts) = state
+        .notice
+        .as_ref()
+        .filter(|n| !n.done)
+        .map(|n| n.facts.clone())
+    else {
+        return;
+    };
+    let tmux = state.tmux();
+    let settled = tmux.drained && (tmux.reconciled() || tmux.link == Link::Down);
+    if !settled || state.writes_refused(now.wall) {
+        return;
+    }
+    let saved = state.meta(BUILD_KEY).map(str::to_string);
+    if saved.as_deref() == Some(facts.build.as_str()) {
+        settle(state);
+        return;
+    }
+    let mut tx = Tx::new(now);
+    let mut changes = vec![Change::Meta {
+        key: BUILD_KEY.to_string(),
+        value: Some(facts.build.clone()),
+    }];
+    let said = saved.map(|old| (old, text(state, &facts)));
+    if let Some((_, text)) = &said {
+        if let Some(thread) = central::card_thread(state) {
+            let body = feed::text_body(text);
+            let row = feed::row(
+                state,
+                &mut tx,
+                now.wall,
+                &thread,
+                feed::kind::SYSTEM,
+                None,
+                body,
+                None,
+            );
+            changes.push(Change::Feed(row));
+        }
+        changes.push(tx.activity_row(state, ActivityWho::Brain, text.clone(), None));
+    }
+    if tx.commit(state, changes).is_err() {
+        fx.push(log(
+            "the upgrade's notice wasn't saved; moa says it at the next input".to_string(),
+        ));
+        return;
+    }
+    settle(state);
+    let line = match &said {
+        Some((old, _)) => format!("upgraded from build {old} to {}", facts.build),
+        None => format!("build {} saved", facts.build),
+    };
+    fx.push(log(line));
+    fold_in(fx, post_commit(state, tx));
+}
+
+/// The notice the start after an upgrade says, the most demanding first: an attach-time tmux
+/// option changed; the session plugin changed while sessions run; the pid changed; nothing.
+fn text(state: &State, facts: &UpgradeFacts) -> String {
+    let live = state
+        .sessions()
+        .filter(|s| s.lifecycle == Lifecycle::Live)
+        .count();
+    if facts.reattach {
+        NOTICE_REATTACH.to_string()
+    } else if facts.plugin_changed && live > 0 {
+        notice_hooks(live)
+    } else if !facts.reexec {
+        NOTICE_RESTARTED.to_string()
+    } else {
+        NOTICE_NOTHING.to_string()
+    }
+}
+
+fn settle(state: &mut State) {
+    if let Some(n) = &mut state.notice {
+        n.done = true;
+    }
+}
+
 /// At a reload: an exec that went out may have been lost with the input that sent it (a
 /// panic after it), so it goes out again at this input's end ([`run`]); a second one is
 /// harmless, while a lost one would leave every prompt refused with no exec coming.
+///
+/// The notice too: the commit that said it may not have been saved. Settled again, it reads
+/// the build the reload loaded, so a notice that was saved isn't said twice.
 pub(crate) fn reload(state: &mut State) {
     if let Some(want) = &mut state.upgrade {
         want.sent = false;
+    }
+    if let Some(n) = &mut state.notice {
+        n.done = false;
     }
 }
 

@@ -1,14 +1,22 @@
 //! The daemon's upgrade in the core (L4): it waits for moa's turn to end, goes out once, and
-//! after that no new turn of moa's starts.
+//! after that no new turn of moa's starts. The next start says what the upgrade needs (L7).
 
 mod common;
 
-use common::central::{ended, first_turn, moa, prompt};
-use common::replies;
-use moa_core::effect::{Effect, Input, handle_checked};
+use common::central::{ended, first_turn, moa, prompt, thread, toml};
+use common::{at, link_up, listed, replies};
+use moa_core::UtcMs;
+use moa_core::central::feed::kind;
+use moa_core::change::Change;
+use moa_core::config::{BrainName, Config};
+use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked};
+use moa_core::model::{Lifecycle, Location};
 use moa_core::op::OpError;
-use moa_core::state::State;
-use moa_core::upgrade::{UPGRADING, WAITING, Why, status};
+use moa_core::state::{Deps, Snapshot, State};
+use moa_core::upgrade::{
+    BUILD_KEY, NOTICE_NOTHING, NOTICE_REATTACH, NOTICE_RESTARTED, UPGRADING, UpgradeFacts, WAITING,
+    Why, notice_hooks, status,
+};
 use moa_testkit::brain::TypicalBrain;
 
 fn upgrade(b: &TypicalBrain, st: &mut State, why: Why) -> Vec<Effect> {
@@ -54,4 +62,300 @@ fn a_prompt_after_the_exec_is_refused() {
         !fx.iter().any(|e| matches!(e, Effect::Acp(_))),
         "moa's agent isn't started: {fx:?}"
     );
+}
+
+// --- Restart notices (L7, §6.15.5) ---------------------------------------------------------
+
+/// The build saved by the last start, and this image's.
+const OLD: &str = "build-old";
+const NEW: &str = "build-new";
+
+fn facts(reexec: bool, plugin_changed: bool, reattach: bool) -> UpgradeFacts {
+    UpgradeFacts {
+        build: NEW.into(),
+        reexec,
+        plugin_changed,
+        reattach,
+    }
+}
+
+/// What a start loads: the typical brain with `live` of its sessions running elsewhere (so
+/// reconcile leaves them live) and the rest ended, `saved` as the last start's build, and
+/// moa's one thread `th-1` when `thread_too` (none otherwise).
+fn snapshot(b: &TypicalBrain, saved: Option<&str>, thread_too: bool, live: usize) -> Snapshot {
+    let mut snap = b.snapshot();
+    assert!(
+        snap.sessions.len() >= live,
+        "{} sessions",
+        snap.sessions.len()
+    );
+    for (i, s) in snap.sessions.iter_mut().enumerate() {
+        if i < live {
+            s.lifecycle = Lifecycle::Live;
+            s.location = Location::Elsewhere;
+            s.archived_at = None;
+        } else {
+            s.lifecycle = Lifecycle::Ended;
+        }
+    }
+    snap.meta
+        .extend(saved.map(|v| (BUILD_KEY.to_string(), v.to_string())));
+    snap.threads.clear();
+    snap.feed_tail.clear();
+    snap.feed_keys.clear();
+    if thread_too {
+        let started = b.now().wall.0 - 60_000;
+        snap.threads
+            .push(thread("th-1", "acct-a", b.now().local_day, started));
+    }
+    snap
+}
+
+/// The daemon starts on `snap` with `facts`, links and drains its start: its reconcile's
+/// listing waits.
+fn drained(b: &TypicalBrain, snap: Snapshot, facts: UpgradeFacts) -> (State, Vec<Effect>) {
+    let config = Config::parse(&toml("acct-a"), &b.home).unwrap();
+    let deps = Deps {
+        home: b.home.clone(),
+        ..Deps::default()
+    };
+    let mut st = State::new(BrainName::default_brain(), config)
+        .with_deps(deps)
+        .with_upgrade(facts);
+    let mut fx = handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
+    link_up(b, &mut st);
+    fx.extend(handle_checked(&mut st, Input::StartDrained, b.now()));
+    (st, fx)
+}
+
+/// [`drained`], then the listing answered with no tabs: what the whole start said.
+fn started(b: &TypicalBrain, snap: Snapshot, facts: UpgradeFacts) -> (State, Vec<Effect>) {
+    let (mut st, mut fx) = drained(b, snap, facts);
+    fx.extend(listed(&mut st, b, &[], &[]));
+    assert!(st.tmux().reconciled());
+    (st, fx)
+}
+
+/// The activity rows `fx` saves: their texts.
+fn activity(fx: &[Effect]) -> Vec<String> {
+    common::changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Activity(a) => Some(a.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `system` lines `fx` saves: `(thread, text)`.
+fn system(fx: &[Effect]) -> Vec<(String, String)> {
+    common::changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Feed(r) if r.kind == kind::SYSTEM => {
+                let body: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+                Some((
+                    r.thread_id.clone(),
+                    body["text"].as_str().unwrap().to_string(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The builds `fx` saves as `meta.daemon.build`.
+fn builds(fx: &[Effect]) -> Vec<Option<String>> {
+    common::changes(fx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Meta { key, value } if key == BUILD_KEY => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one commit that saves the build: the notice is in it.
+fn build_commit(fx: &[Effect]) -> &Vec<Change> {
+    let commits: Vec<&Vec<Change>> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Persist(c) => Some(c),
+            _ => None,
+        })
+        .filter(|c| {
+            c.iter()
+                .any(|c| matches!(c, Change::Meta { key, .. } if key == BUILD_KEY))
+        })
+        .collect();
+    assert_eq!(commits.len(), 1, "{fx:?}");
+    commits[0]
+}
+
+/// `text` said once: a `system` line in moa's thread and an activity row, in the commit
+/// that saves the new build.
+fn said_once(fx: &[Effect], text: &str) {
+    assert_eq!(activity(fx), [text], "{fx:?}");
+    assert_eq!(system(fx), [("th-1".to_string(), text.to_string())]);
+    assert_eq!(builds(fx), [Some(NEW.to_string())]);
+    let commit = build_commit(fx);
+    assert!(commit.iter().any(|c| matches!(c, Change::Activity(_))));
+    assert!(
+        commit
+            .iter()
+            .any(|c| matches!(c, Change::Feed(r) if r.kind == kind::SYSTEM))
+    );
+}
+
+/// An input at `ms`: the status clock's.
+fn clock(st: &mut State, ms: i64) -> Vec<Effect> {
+    handle_checked(st, Input::Timer(TimerKey::Clock), at(UtcMs(ms)))
+}
+
+/// tmux answers the reconcile's listing waiting, at `ms`, with no tabs.
+fn no_tabs(st: &mut State, ms: i64) -> Vec<Effect> {
+    let asked: Vec<u64> = st.tmux().queries().collect();
+    let [n] = asked[..] else {
+        panic!("one pane query waiting, not {asked:?}");
+    };
+    let t = TmuxIn::Replies {
+        conn: 1,
+        token: TmuxToken::Query(n),
+        results: vec![Ok(vec![]), Ok(vec![])],
+    };
+    handle_checked(st, Input::Tmux(t), at(UtcMs(ms)))
+}
+
+/// An input a second after `ms`: nothing more is said.
+fn nothing_more(st: &mut State, ms: i64) {
+    let fx = clock(st, ms + 1_000);
+    assert!(activity(&fx).is_empty() && builds(&fx).is_empty(), "{fx:?}");
+}
+
+/// An upgrade in place: the same pid, nothing else to do.
+#[test]
+fn a_reexec_says_nothing_to_do() {
+    let b = TypicalBrain::new();
+    let (mut st, fx) = drained(
+        &b,
+        snapshot(&b, Some(OLD), true, 0),
+        facts(true, false, false),
+    );
+    assert!(
+        builds(&fx).is_empty(),
+        "nothing before the reconcile: {fx:?}"
+    );
+    let fx = listed(&mut st, &b, &[], &[]);
+    said_once(&fx, NOTICE_NOTHING);
+    assert_eq!(st.meta(BUILD_KEY), Some(NEW));
+    nothing_more(&mut st, b.now().wall.0);
+}
+
+/// A new pid on a new build: the old daemon stopped, crashed, or predates upgrades in place.
+#[test]
+fn a_new_pid_says_restarted_itself() {
+    let b = TypicalBrain::new();
+    let (_, fx) = started(
+        &b,
+        snapshot(&b, Some(OLD), true, 0),
+        facts(false, false, false),
+    );
+    said_once(&fx, NOTICE_RESTARTED);
+}
+
+/// The session plugin changed: the sessions live at the reconcile keep the old hooks.
+#[test]
+fn a_changed_plugin_counts_running_sessions() {
+    let b = TypicalBrain::new();
+    let (_, fx) = started(
+        &b,
+        snapshot(&b, Some(OLD), true, 3),
+        facts(true, true, false),
+    );
+    let text =
+        "moa upgraded: 3 running sessions use the old hooks; they get the new ones when resumed";
+    assert_eq!(notice_hooks(3), text);
+    said_once(&fx, text);
+}
+
+/// An option tmux reads only when a terminal attaches changed: that beats the rest.
+#[test]
+fn an_attach_option_says_reattach() {
+    let b = TypicalBrain::new();
+    let (_, fx) = started(
+        &b,
+        snapshot(&b, Some(OLD), true, 3),
+        facts(false, true, true),
+    );
+    said_once(&fx, NOTICE_REATTACH);
+}
+
+/// The build that started last time: no line, no row, no write.
+#[test]
+fn the_same_build_says_nothing_at_all() {
+    let b = TypicalBrain::new();
+    let facts = UpgradeFacts {
+        build: OLD.into(),
+        ..facts(false, true, true)
+    };
+    let (mut st, fx) = started(&b, snapshot(&b, Some(OLD), true, 3), facts);
+    assert!(activity(&fx).is_empty(), "{fx:?}");
+    assert!(system(&fx).is_empty(), "{fx:?}");
+    assert!(builds(&fx).is_empty(), "{fx:?}");
+    nothing_more(&mut st, b.now().wall.0);
+}
+
+/// Ruling D: no build saved yet (a new root, or the first start of a build that saves it) is
+/// saved, and nothing is said: a first start isn't an upgrade.
+#[test]
+fn a_first_start_saves_its_build_quietly() {
+    let b = TypicalBrain::new();
+    let (mut st, fx) = started(&b, snapshot(&b, None, true, 3), facts(false, true, true));
+    assert_eq!(builds(&fx), [Some(NEW.to_string())]);
+    assert!(activity(&fx).is_empty(), "{fx:?}");
+    assert!(system(&fx).is_empty(), "{fx:?}");
+    nothing_more(&mut st, b.now().wall.0);
+}
+
+/// With no thread of moa's, the activity row says it all the same.
+#[test]
+fn no_thread_still_leaves_the_activity_row() {
+    let b = TypicalBrain::new();
+    let (_, fx) = started(
+        &b,
+        snapshot(&b, Some(OLD), false, 0),
+        facts(true, false, false),
+    );
+    assert_eq!(activity(&fx), [NOTICE_NOTHING], "{fx:?}");
+    assert!(system(&fx).is_empty(), "{fx:?}");
+    assert_eq!(builds(&fx), [Some(NEW.to_string())]);
+}
+
+/// The store refused the commit that said it: the core reloads what was saved, and the
+/// first input once writes are accepted again says it, once.
+#[test]
+fn a_refused_commit_says_it_next_time() {
+    let b = TypicalBrain::new();
+    let snap = snapshot(&b, Some(OLD), true, 0);
+    let (mut st, fx) = started(&b, snap.clone(), facts(true, false, false));
+    said_once(&fx, NOTICE_NOTHING);
+
+    let until = b.now().wall.0 + 60_000;
+    let reload = Input::Reload {
+        snapshot: Box::new(snap),
+        refuse_writes: Some(RefuseWrites {
+            until: UtcMs(until),
+            reason: "the disk is full".into(),
+        }),
+    };
+    let fx = handle_checked(&mut st, reload, b.now());
+    assert!(builds(&fx).is_empty(), "{fx:?}");
+    let fx = clock(&mut st, until - 1);
+    assert!(builds(&fx).is_empty(), "writes are refused: {fx:?}");
+
+    // Writes are accepted again: the tabs are reconciled again, and the notice is said.
+    let mut fx = clock(&mut st, until + 1);
+    fx.extend(no_tabs(&mut st, until + 2));
+    said_once(&fx, NOTICE_NOTHING);
+    nothing_more(&mut st, until + 2);
 }

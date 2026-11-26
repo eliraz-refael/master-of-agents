@@ -607,6 +607,7 @@ mod tests {
             events_capacity: 4,
             tmux: None,
             spool: None,
+            facts: None,
         })
         .await
         .unwrap();

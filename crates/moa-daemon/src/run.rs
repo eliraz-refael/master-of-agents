@@ -14,6 +14,7 @@ use jiff::tz::TimeZone;
 use moa_core::config::{BrainName, CONSTITUTION_NAME, Config, UiConfig};
 use moa_core::model::AgentKind;
 use moa_core::state::{Deps, PanelLaunch};
+use moa_core::upgrade::UpgradeFacts;
 use moa_platform::fs::write_if_changed;
 use moa_platform::{Inherited, Paths, WallTimer, ZoneWatch, ensure_private_dir, which};
 use moa_tmux::conf;
@@ -139,23 +140,32 @@ fn remove_socket(sock: &Path) {
 }
 
 /// Writes the brain's two tmux config files when their text changed (T6), and says where
-/// its server is. The brain's folder is checked like the other private folders. Its popups
-/// start panels as the core does, from `launch`, at home.
+/// its server is, and whether a terminal attached under the old `moa.tmux` must attach again
+/// ([`conf::needs_reattach`], L7; never when there was none). The brain's folder is checked
+/// like the other private folders. Its popups start panels as the core does, from `launch`,
+/// at home.
 fn tmux_link(
     paths: &Paths,
     b: &str,
     ui: &UiConfig,
     launch: &PanelLaunch,
-) -> Result<TmuxLink, DaemonError> {
+) -> Result<(TmuxLink, bool), DaemonError> {
     ensure_private_dir(&paths.brain_dir(b))?;
     let moa_tmux = paths.moa_tmux(b);
-    write_if_changed(&moa_tmux, &conf::moa_tmux(b, ui, launch, paths.home()))?;
+    let text = conf::moa_tmux(b, ui, launch, paths.home());
+    // An old file that can't be read is rewritten as before, and asks for no re-attach.
+    let reattach = read_text(&moa_tmux)
+        .ok()
+        .flatten()
+        .is_some_and(|old| conf::needs_reattach(&old, &text));
+    write_if_changed(&moa_tmux, &text)?;
     write_if_changed(&paths.tmux_conf(b), &conf::tmux_conf(&moa_tmux))?;
-    Ok(TmuxLink {
+    let link = TmuxLink {
         socket: paths.tmux_socket(b)?,
         moa_tmux,
         env: tmux_env(std::env::vars_os()),
-    })
+    };
+    Ok((link, reattach))
 }
 
 /// The daemon's own program, read once and handed to everything that runs it (the session
@@ -208,12 +218,14 @@ fn session_plugin_dir(paths: &Paths) -> io::Result<PathBuf> {
 }
 
 /// Writes the Claude Code plugin that sessions are started with, when its text changed, and
-/// says where it is. Its `hooks.json` names a command Claude runs, and its skill is read by
-/// the agent, so every folder in it is checked like the other private folders: ours, real,
-/// and closed to other users.
-fn write_session_plugin(paths: &Paths, exe: &Path) -> Result<PathBuf, DaemonError> {
+/// says where it is and whether this changed it (L7: the sessions running keep the old one).
+/// Its `hooks.json` names a command Claude runs, and its skill is read by the agent, so
+/// every folder in it is checked like the other private folders: ours, real, and closed to
+/// other users.
+fn write_session_plugin(paths: &Paths, exe: &Path) -> Result<(PathBuf, bool), DaemonError> {
     let dir = session_plugin_dir(paths)?;
     ensure_private_dir(&dir)?;
+    let mut changed = false;
     for (rel, text) in moa_agents::claude::session_plugin(exe) {
         let rel = Path::new(rel);
         // Outermost first: `skills`, then `skills/moa-peers`.
@@ -226,9 +238,9 @@ fn write_session_plugin(paths: &Paths, exe: &Path) -> Result<PathBuf, DaemonErro
         for folder in folders {
             ensure_private_dir(&dir.join(folder))?;
         }
-        write_if_changed(&dir.join(rel), text.as_str())?;
+        changed |= write_if_changed(&dir.join(rel), text.as_str())?;
     }
-    Ok(dir)
+    Ok((dir, changed))
 }
 
 /// The brain's lock, taken: the one the previous image handed over (the same open file, so
@@ -281,6 +293,7 @@ async fn bring_up(
     alarm: Box<dyn WallTimer>,
     events_capacity: usize,
     exe: &Path,
+    build: &str,
     inherited: Option<Inherited>,
 ) -> Result<Up, DaemonError> {
     let b = brain.as_str();
@@ -319,13 +332,22 @@ async fn bring_up(
         }
         let launch = panel_launch(paths, exe);
         // T21: until the switch-over, only a sandbox's own server is ever touched.
-        let tmux = if paths.is_sandboxed() {
-            Some(tmux_link(paths, b, &config.ui, &launch)?)
+        let (tmux, reattach) = if paths.is_sandboxed() {
+            let (link, reattach) = tmux_link(paths, b, &config.ui, &launch)?;
+            (Some(link), reattach)
         } else {
             tracing::info!("the terminal link waits for the switch-over");
-            None
+            (None, false)
         };
-        let session_plugin = write_session_plugin(paths, exe)?;
+        let (session_plugin, plugin_changed) = write_session_plugin(paths, exe)?;
+        // What the core's notice says after an upgrade (L7): the build it compares with the
+        // last start's is this image's, as `RunOptions` says it.
+        let facts = UpgradeFacts {
+            build: build.to_string(),
+            reexec: from.is_some(),
+            plugin_changed,
+            reattach,
+        };
         // The client passes the real home on only from a sandbox, for moa's agent's login.
         let agent_home = std::env::var_os("MOA_AGENT_HOME")
             .map(PathBuf::from)
@@ -364,6 +386,7 @@ async fn bring_up(
             events_capacity,
             tmux,
             spool: Some(paths.spool(b)),
+            facts: Some(facts),
         })
         .await?;
         Ok::<_, DaemonError>((core, Signals { term, int, hup }))
@@ -462,6 +485,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         alarm,
         events_capacity,
         &exe,
+        &build,
         inherited,
     )
     .await;

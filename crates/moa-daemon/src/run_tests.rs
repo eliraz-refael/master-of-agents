@@ -40,6 +40,7 @@ async fn up_with(
         events_capacity: 16,
         tmux: None,
         spool,
+        facts: None,
     })
     .await
     .expect("the core starts");

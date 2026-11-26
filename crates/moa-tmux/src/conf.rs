@@ -247,6 +247,38 @@ pub fn moa_tmux(brain: &str, ui: &UiConfig, launch: &PanelLaunch, home: &Path) -
         .replace("{{SPLIT_WHY}}", SPLIT_WHY)
 }
 
+/// The server options tmux reads about a terminal only when it attaches: sourcing the file
+/// again changes them for the terminals that attach next, never for one already attached.
+const ATTACH_OPTIONS: [&str; 3] = [
+    "default-terminal",
+    "terminal-overrides",
+    "terminal-features",
+];
+
+/// Whether a terminal attached while `old` was moa's tmux file must attach again to get
+/// what `new` sets (L7): a line setting one of [`ATTACH_OPTIONS`] differs. Key bindings and
+/// the other options apply when the file is sourced again.
+pub fn needs_reattach(old: &str, new: &str) -> bool {
+    attach_lines(old) != attach_lines(new)
+}
+
+/// The lines of `text` that set one of [`ATTACH_OPTIONS`] (`set`/`set-option`, any flags,
+/// an array index or not), trimmed, in order.
+fn attach_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            let mut words = line.split_whitespace();
+            if !matches!(words.next(), Some("set" | "set-option")) {
+                return false;
+            }
+            let option = words.find(|w| !w.starts_with('-')).unwrap_or("");
+            let name = option.split('[').next().unwrap_or("");
+            ATTACH_OPTIONS.contains(&name)
+        })
+        .collect()
+}
+
 /// The `-f` file: the user's own config first, then moa's. `-f` replaces tmux's own search,
 /// so this loads what tmux would, in its order and each file quietly: `/etc/tmux.conf`,
 /// `~/.tmux.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf` and `~/.config/tmux/tmux.conf`. tmux
@@ -307,4 +339,38 @@ pub fn unhooks() -> Vec<Cmd> {
         .iter()
         .map(|(name, _)| Cmd::new("set-hook").args(["-gu".to_string(), hook_name(name)]))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_reattach;
+
+    const OLD: &str = "set -s  default-terminal \"tmux-256color\"\n\
+                       set -s  terminal-features[20] \"xterm-ghostty:RGB:extkeys\"\n\
+                       set-option -sa terminal-overrides \",xterm*:Tc\"\n\
+                       set -g  mouse on\n\
+                       bind -T moa c run-shell 'moa console'\n";
+
+    /// A terminal option changed: tmux reads it only when a terminal attaches.
+    #[test]
+    fn a_changed_terminal_line_needs_a_reattach() {
+        let features = OLD.replace("RGB:extkeys", "RGB:extkeys:focus");
+        assert!(needs_reattach(OLD, &features));
+        let terminal = OLD.replace("tmux-256color", "screen-256color");
+        assert!(needs_reattach(OLD, &terminal));
+        let overrides = OLD.replace(",xterm*:Tc", ",xterm*:RGB");
+        assert!(needs_reattach(OLD, &overrides));
+        let one_more = format!("{OLD}set -s  terminal-features[21] \"xterm-kitty:RGB\"\n");
+        assert!(needs_reattach(OLD, &one_more));
+    }
+
+    /// Key bindings and other options apply when the file is sourced again.
+    #[test]
+    fn a_changed_key_binding_does_not() {
+        let keys = OLD.replace("bind -T moa c", "bind -T moa C");
+        assert!(!needs_reattach(OLD, &keys));
+        let mouse = OLD.replace("mouse on", "mouse off");
+        assert!(!needs_reattach(OLD, &mouse));
+        assert!(!needs_reattach(OLD, OLD));
+    }
 }

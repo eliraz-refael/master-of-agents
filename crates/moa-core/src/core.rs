@@ -67,6 +67,8 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     // A wanted upgrade goes once moa is between turns (L4); before the wake's check, which
     // it shuts, so no automatic prompt starts a turn it would have to wait for.
     upgrade::run(state, &now, &mut fx);
+    // The start after an upgrade says what it needs, once its tabs are reconciled (L7).
+    upgrade::notice(state, &now, &mut fx);
     // And moa's agent is woken with the session reports once they settle (K4).
     channel::run(state, &now, wake_fired, &mut fx);
     // The terminals are the topology's: a listing's, a terminal's own tag, a session's tag

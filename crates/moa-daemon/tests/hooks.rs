@@ -385,6 +385,7 @@ fn options_at(brain: &TypicalBrain, spool: &Path, time: &Arc<FakeTime>) -> CoreO
         events_capacity: 256,
         tmux: None,
         spool: Some(spool.to_path_buf()),
+        facts: None,
     }
 }
 

@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 use common::Client;
 use common::hooks::{ago, hook_notice};
 use common::rig::{Rig, Up, WAIT, answer, end, gate, prompt, say, session_stop};
+use moa_core::upgrade::{BUILD_KEY, NOTICE_NOTHING};
 use moa_platform::pid_alive;
 use moa_testkit::wait_for;
 use serde_json::{Value, json};
@@ -298,5 +299,63 @@ async fn moas_thread_resumes_after_the_handoff() {
     assert_eq!(resumed.len(), 1, "{resumed:?}");
     assert_eq!(resumed[0]["params"]["sessionId"], thread[0].as_str());
     assert_eq!(rig.threads(), thread);
+    up.stop().await;
+}
+
+/// The rows of activity whose text starts `moa upgraded`.
+fn activity_notices(rig: &Rig) -> Vec<String> {
+    let store = rig.store();
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT text FROM activity WHERE text LIKE 'moa upgraded%' ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// Waits until `meta.daemon.build` is `build`.
+fn wait_build_saved(rig: &Rig, build: &str) {
+    wait_for(WAIT, || {
+        (rig.meta(BUILD_KEY).as_deref() == Some(build)).then_some(())
+    })
+    .unwrap_or_else(|| panic!("{build} was never saved: {:?}", rig.meta(BUILD_KEY)));
+}
+
+/// L7: the first start saves its build and says nothing. An upgrade in place into a new
+/// build says so once: a `system` line in moa's thread and an activity row, in the commit
+/// that saves the new build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upgrade_in_place_says_nothing_to_do() {
+    let rig = Rig::new(&[say("first", "m1"), end()]).with_exe();
+    let up = rig.start().await;
+    let old = rig.build();
+    wait_build_saved(&rig, &old);
+    let mut c = up.client();
+    assert_eq!(answer(&prompt(&mut c, "hello")), "first");
+    assert!(
+        activity_notices(&rig).is_empty(),
+        "a first start isn't an upgrade"
+    );
+
+    rig.rebuild(1);
+    let inherited = up.handoff().await;
+    let new = rig.build();
+    assert_ne!(new, old);
+    let up = rig.restart(inherited).await;
+    wait_build_saved(&rig, &new);
+    let notices: Vec<(String, String)> = rig
+        .feed()
+        .into_iter()
+        .filter(|(_, text)| text.starts_with("moa upgraded"))
+        .collect();
+    assert_eq!(
+        notices,
+        [("system".to_string(), NOTICE_NOTHING.to_string())],
+        "{:?}",
+        rig.feed()
+    );
+    assert_eq!(activity_notices(&rig), [NOTICE_NOTHING]);
     up.stop().await;
 }

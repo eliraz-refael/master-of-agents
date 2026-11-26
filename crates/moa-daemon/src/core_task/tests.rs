@@ -31,6 +31,7 @@ fn options(brain: &TypicalBrain, time: &Arc<FakeTime>, spool: Option<PathBuf>) -
         events_capacity: 16,
         tmux: None,
         spool,
+        facts: None,
     }
 }
 

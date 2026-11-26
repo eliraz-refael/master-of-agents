@@ -61,6 +61,7 @@ async fn core_reading(brain: &TypicalBrain, file: &Path, read_text: ReadText) ->
         events_capacity: 16,
         tmux: None,
         spool: None,
+        facts: None,
     }))
     .await
     .expect("the core starts")
