@@ -41,40 +41,56 @@ pub struct Inherited {
 /// variables are incomplete or don't name open descriptors. Both descriptors are
 /// close-on-exec again.
 ///
-/// Call it first thing in `main`, before any thread starts (the tokio runtime included):
-/// it changes the environment, and it takes ownership of descriptors by number.
+/// # Safety
+///
+/// A safe function with one rule: call it first thing in `main`, before any thread starts
+/// (the tokio runtime included). It changes the environment, which no other thread may
+/// read meanwhile, and it takes ownership of descriptors by number, which nothing else may
+/// own yet.
 pub fn take_inherited() -> io::Result<Option<Inherited>> {
-    let (listener, lock, from) = (
+    adopt(
         sys::take_env(LISTEN_FDS),
         sys::take_env(LOCK_FD),
         sys::take_env(REEXEC_FROM),
-    );
+    )
+}
+
+/// `take_inherited` with the three variables' values passed in.
+fn adopt(
+    listener: Option<OsString>,
+    lock: Option<OsString>,
+    from: Option<OsString>,
+) -> io::Result<Option<Inherited>> {
     if listener.is_none() && lock.is_none() && from.is_none() {
         return Ok(None);
     }
-    let listener = sys::adopt_inherited(number(LISTEN_FDS, listener)?)?;
-    let lock = sys::adopt_inherited(number(LOCK_FD, lock)?)?;
+    let listener = number(listener, "socket")?;
+    let lock = number(lock, "lock")?;
     let from_build = from
         .and_then(|f| f.into_string().ok())
-        .ok_or_else(|| handoff_error(REEXEC_FROM))?;
+        .ok_or_else(|| handoff_error("no usable build"))?;
+    // Two owners of one number would close it twice.
+    if listener == lock {
+        return Err(handoff_error("one thing as both its socket and its lock"));
+    }
     Ok(Some(Inherited {
-        listener: listener.into(),
-        lock: lock.into(),
+        listener: sys::adopt_inherited(listener)?.into(),
+        lock: sys::adopt_inherited(lock)?.into(),
         from_build,
     }))
 }
 
-/// The descriptor number `var` held.
-fn number(var: &str, value: Option<OsString>) -> io::Result<RawFd> {
+/// The descriptor number a variable held, for the `what` it names.
+fn number(value: Option<OsString>, what: &str) -> io::Result<RawFd> {
     value
         .and_then(|v| v.to_str()?.parse().ok())
-        .ok_or_else(|| handoff_error(var))
+        .ok_or_else(|| handoff_error(&format!("no usable {what}")))
 }
 
-fn handoff_error(var: &str) -> io::Error {
+fn handoff_error(what: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("the restart handed over no usable {var}"),
+        format!("the restart handed over {what}"),
     )
 }
 
@@ -85,7 +101,7 @@ pub fn keep_open(fd: BorrowedFd<'_>) -> io::Result<()> {
 
 /// Replaces this process with `exe args`, handing it `listener` and `lock` (kept open and
 /// named in the environment) and `from_build`, for [`take_inherited`] to take back. Returns
-/// only if it failed.
+/// only if it failed, with both descriptors close-on-exec again.
 pub fn reexec(
     exe: &Path,
     args: &[&str],
@@ -93,15 +109,20 @@ pub fn reexec(
     lock: BorrowedFd<'_>,
     from_build: &str,
 ) -> io::Error {
-    if let Err(e) = keep_open(listener).and_then(|()| keep_open(lock)) {
-        return e;
-    }
-    Command::new(exe)
-        .args(args)
-        .env(LISTEN_FDS, listener.as_raw_fd().to_string())
-        .env(LOCK_FD, lock.as_raw_fd().to_string())
-        .env(REEXEC_FROM, from_build)
-        .exec()
+    let e = match keep_open(listener).and_then(|()| keep_open(lock)) {
+        Err(e) => e,
+        Ok(()) => Command::new(exe)
+            .args(args)
+            .env(LISTEN_FDS, listener.as_raw_fd().to_string())
+            .env(LOCK_FD, lock.as_raw_fd().to_string())
+            .env(REEXEC_FROM, from_build)
+            .exec(),
+    };
+    // Still this image: nothing it starts from here may inherit them. The exec's error is
+    // the one to report.
+    let _ = sys::set_cloexec(&listener, true);
+    let _ = sys::set_cloexec(&lock, true);
+    e
 }
 
 #[cfg(test)]
@@ -112,8 +133,12 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// How long the round trip's child may take.
+    const LIMIT: Duration = Duration::from_secs(10);
 
     /// Set only in the round trip's child, to the directory it works in.
     const CHILD_DIR: &str = "MOA_TEST_HANDOFF_DIR";
@@ -125,6 +150,20 @@ mod tests {
         assert!(take_inherited().unwrap().is_none());
     }
 
+    #[test]
+    fn incomplete_or_clashing_variables_are_refused() {
+        let v = |s: &str| Some(OsString::from(s));
+        let err = adopt(v("7"), None, v("b")).unwrap_err().to_string();
+        assert_eq!(err, "the restart handed over no usable lock");
+        let err = adopt(v("x"), v("8"), v("b")).unwrap_err().to_string();
+        assert_eq!(err, "the restart handed over no usable socket");
+        let err = adopt(v("7"), v("8"), None).unwrap_err().to_string();
+        assert_eq!(err, "the restart handed over no usable build");
+        // Refused before either is taken: nothing here owns 7.
+        let err = adopt(v("7"), v("7"), v("b")).unwrap_err().to_string();
+        assert!(err.contains("both its socket and its lock"), "{err}");
+    }
+
     /// Runs `handoff_child` as a child process (never this one), which re-execs itself
     /// holding a listener and a lock.
     #[test]
@@ -133,25 +172,56 @@ mod tests {
             .prefix("moa")
             .tempdir_in("/tmp")
             .unwrap();
-        let out = Command::new(std::env::current_exe().unwrap())
+        // Files, not pipes: a child that never exits can't also fill a pipe nobody reads.
+        let (out, err) = (tmp.path().join("out"), tmp.path().join("err"));
+        let mut child = Command::new(std::env::current_exe().unwrap())
             .args(CHILD_ARGS)
             .env(CHILD_DIR, tmp.path())
             .env_remove(LISTEN_FDS)
             .env_remove(LOCK_FD)
             .env_remove(REEXEC_FROM)
             .stdin(Stdio::null())
-            .output()
+            .stdout(File::create(&out).unwrap())
+            .stderr(File::create(&err).unwrap())
+            .spawn()
             .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "{text}\n{err}");
+        let deadline = Instant::now() + LIMIT;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let text = std::fs::read_to_string(&out).unwrap();
+        let err = std::fs::read_to_string(&err).unwrap();
+        let status = status.unwrap_or_else(|| panic!("the child hung:\n{text}\n{err}"));
+        assert!(status.success(), "{text}\n{err}");
         let pids: Vec<&str> = text
             .lines()
             .filter_map(|l| Some(l.split_once("handoff pid ")?.1))
             .collect();
         assert_eq!(pids.len(), 2, "both images ran: {text}");
         assert_eq!(pids[0], pids[1], "one process: {text}");
+        assert!(
+            text.contains("closed again after a failed exec"),
+            "{text}\n{err}"
+        );
         assert!(text.contains("handoff ok"), "{text}\n{err}");
+    }
+
+    /// Whether a process this one starts now inherits descriptor `fd`.
+    fn a_child_inherits(fd: BorrowedFd<'_>) -> bool {
+        Command::new("/bin/sh")
+            .args(["-c", &format!("[ -e /dev/fd/{} ]", fd.as_raw_fd())])
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
     }
 
     /// The round trip's child, in two images around a re-exec. Without `CHILD_DIR` (any
@@ -171,6 +241,25 @@ mod tests {
                 // Connected before the handoff; accepted only after it.
                 let mut early = UnixStream::connect(dir.join("sock")).unwrap();
                 early.write_all(b"before").unwrap();
+
+                // A failed exec leaves both close-on-exec again.
+                keep_open(listener.as_fd()).unwrap();
+                assert!(
+                    a_child_inherits(listener.as_fd()),
+                    "the probe sees a kept one"
+                );
+                let e = reexec(
+                    &dir.join("no-such-moa"),
+                    &[],
+                    listener.as_fd(),
+                    lock.as_fd(),
+                    "the-old-build",
+                );
+                assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+                assert!(!a_child_inherits(listener.as_fd()));
+                assert!(!a_child_inherits(lock.as_fd()));
+                println!("closed again after a failed exec");
+
                 let exe = std::env::current_exe().unwrap();
                 let e = reexec(
                     &exe,
@@ -183,7 +272,11 @@ mod tests {
             }
             Some(got) => {
                 assert_eq!(got.from_build, "the-old-build");
+                // Never waits: the connection and its bytes are already there, so a lost
+                // one fails here (WouldBlock) rather than hanging.
+                got.listener.set_nonblocking(true).unwrap();
                 let (mut conn, _) = got.listener.accept().unwrap();
+                conn.set_nonblocking(true).unwrap();
                 let mut said = String::new();
                 conn.read_to_string(&mut said).unwrap();
                 assert_eq!(said, "before");

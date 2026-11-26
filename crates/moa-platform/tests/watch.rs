@@ -61,11 +61,9 @@ async fn a_rename_over_fires() {
 #[tokio::test]
 async fn a_symlink_retarget_fires() {
     let t = tmp();
-    let (d1, d2, d3) = (
-        t.path().join("d1"),
-        t.path().join("d2"),
-        t.path().join("d3"),
-    );
+    // Resolved, so the chain is only these links (`/tmp` is itself one on macOS).
+    let root = moa_platform::canonical(t.path());
+    let (d1, d2, d3) = (root.join("d1"), root.join("d2"), root.join("d3"));
     for d in [&d1, &d2, &d3] {
         std::fs::create_dir(d).unwrap();
     }
@@ -82,6 +80,23 @@ async fn a_symlink_retarget_fires() {
     fires(&mut w).await;
     // And the watched link itself, still watched after the first change.
     retarget(&d1, "moa", &d3.join("moa-1"));
+    fires(&mut w).await;
+}
+
+#[tokio::test]
+async fn a_directory_link_retarget_fires() {
+    let t = tmp();
+    for g in ["gen1", "gen2"] {
+        std::fs::create_dir_all(t.path().join(g).join("bin")).unwrap();
+        std::fs::write(t.path().join(g).join("bin/moa"), g).unwrap();
+    }
+    let d1 = t.path().join("d1");
+    std::fs::create_dir(&d1).unwrap();
+    symlink(t.path().join("gen1"), d1.join("profile")).unwrap();
+    let mut w = PathWatch::new(&exe_chain(&d1.join("profile/bin/moa"))).unwrap();
+
+    // A profile switch: the directory link moves to the next generation.
+    retarget(&d1, "profile", &t.path().join("gen2"));
     fires(&mut w).await;
 }
 

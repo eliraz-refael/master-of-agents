@@ -31,6 +31,8 @@ pub struct PathWatch {
     seen: Vec<Option<Stamp>>,
     #[cfg(target_os = "linux")]
     fd: AsyncFd<std::os::fd::OwnedFd>,
+    #[cfg(target_os = "linux")]
+    entries: Vec<(PathBuf, OsString)>,
     /// Each entry's directory as its watch descriptor, and its name.
     #[cfg(target_os = "linux")]
     names: Vec<(i32, OsString)>,
@@ -54,12 +56,10 @@ impl PathWatch {
         #[cfg(target_os = "linux")]
         {
             let fd = sys::inotify_new()?;
-            let names = entries
-                .iter()
-                .map(|(dir, name)| Ok((sys::inotify_watch(&fd, dir)?, name.clone())))
-                .collect::<io::Result<_>>()?;
+            let names = watch_dirs(&fd, entries)?;
             Ok(PathWatch {
                 fd: sys::register_readable(fd)?,
+                entries: entries.to_vec(),
                 names,
             })
         }
@@ -91,17 +91,36 @@ impl PathWatch {
             {
                 let mut guard = self.fd.readable().await?;
                 let names = &self.names;
-                let hit = sys::inotify_drain(self.fd.get_ref(), |wd, name| {
-                    names.iter().any(|(w, n)| *w == wd && n == name)
+                // A watched directory itself removed or moved counts for all its entries.
+                let hit = sys::inotify_drain(self.fd.get_ref(), |wd, dir_gone, name| {
+                    names
+                        .iter()
+                        .any(|(w, n)| *w == wd && (dir_gone || n == name))
                 });
                 // Drained to WouldBlock, so the readiness is spent either way.
                 guard.clear_ready();
                 if hit? {
+                    // As on macOS, watch each directory by its path from here, so one
+                    // replaced or recreated is watched again (an existing watch keeps its
+                    // descriptor).
+                    self.names = watch_dirs(self.fd.get_ref(), &self.entries)?;
                     return Ok(());
                 }
             }
         }
     }
+}
+
+/// Watches each entry's directory on `fd`: each entry's watch descriptor and name.
+#[cfg(target_os = "linux")]
+fn watch_dirs(
+    fd: &std::os::fd::OwnedFd,
+    entries: &[(PathBuf, OsString)],
+) -> io::Result<Vec<(i32, OsString)>> {
+    entries
+        .iter()
+        .map(|(dir, name)| Ok((sys::inotify_watch(fd, dir)?, name.clone())))
+        .collect()
 }
 
 /// Registers each distinct directory, and each entry that exists, on `kq`.
@@ -112,12 +131,14 @@ fn arm(kq: &OwnedFd, entries: &[(PathBuf, OsString)]) -> io::Result<Vec<OwnedFd>
         .into_iter()
         .map(|dir| sys::vnode_watch_dir(kq, dir))
         .collect::<io::Result<Vec<_>>>()?;
-    // A missing entry is heard through its directory when it appears.
-    armed.extend(
-        entries
-            .iter()
-            .filter_map(|(dir, name)| sys::vnode_watch_entry(kq, &dir.join(name)).ok()),
-    );
+    for (dir, name) in entries {
+        match sys::vnode_watch_entry(kq, &dir.join(name)) {
+            Ok(fd) => armed.push(fd),
+            // A missing entry is heard through its directory when it appears.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
     Ok(armed)
 }
 
