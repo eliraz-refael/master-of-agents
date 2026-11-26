@@ -17,11 +17,17 @@
 //! message that ends that turn its answer ([`answer`]); a turn that ends any other way fails
 //! it ([`hooked`], all in the hook's own commit). A typed ask with no receipt in 20 s fails;
 //! a peer that stops running ends its asks ([`peer_ended`], [`end_unreachable`]).
+//!
+//! An ask to moa goes through moa's channel instead (A9): the oldest `pending` one is a hidden
+//! prompt of its own ([`for_moa`]), and that turn's end is its answer ([`moa_ended`]); one moa
+//! took whose turn is gone fails ([`MOA_RESTARTED`]). While moa waits on an ask of its own, its
+//! watchdog holds ([`moa_waits`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
+use crate::central::channel::Source;
 use crate::change::Change;
 use crate::core::{Tx, finish_op, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, TimerKey, rearm};
@@ -66,6 +72,11 @@ pub const STALE: &str = "stale";
 pub const STALE_AFTER_MS: i64 = 2 * ASK_WAIT_DEFAULT_MS;
 /// The answer of a turn that ended with an empty message.
 pub const NO_TEXT: &str = "(no text)";
+/// The reason in a `failed` ask moa took whose turn is gone: moa's agent went, or was
+/// restarted, or the daemon was (A9 e).
+pub const MOA_RESTARTED: &str = "moa restarted before answering";
+/// The `what` of the card an ask to moa writes (A9 c).
+pub const CARD: &str = "ask";
 
 /// How an ask's marker starts, and what comes before its number (A13). A label holds no `]`,
 /// which ends the marker.
@@ -412,7 +423,8 @@ fn to_label(state: &State, a: &Ask) -> String {
 /// - a request waiting on an ask that has ended is answered (its row ended by a hook or a
 ///   tab's exit in this input, or changed by a reload);
 /// - every open ask to a session that isn't live ends, while the link is up
-///   ([`end_unreachable`]);
+///   ([`end_unreachable`]), and every ask moa took whose turn is gone fails
+///   ([`fail_orphans`]);
 /// - an Enter that is due goes to its tab, while its ask is still `sent` there;
 /// - a `sent` ask with no receipt [`ASK_RECEIPT_MS`] after its claim fails ([`NO_RECEIPT`]),
 ///   and holds its peer back until moa hears from it again ([`heard_from`]);
@@ -425,7 +437,7 @@ fn to_label(state: &State, a: &Ask) -> String {
 /// - the `Asks` timer is armed at the next deadline ([`deadline`]), or cancelled, when that
 ///   changed or when this input is the timer firing (`fired`).
 ///
-/// Asks to moa are its channel's to deliver. While writes are refused nothing fails, nothing
+/// Asks to moa are its channel's to deliver ([`for_moa`]). While writes are refused nothing fails, nothing
 /// is dropped and nothing is claimed; what fell due meanwhile acts once writes are back
 /// ([`deadline`]).
 pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect>) {
@@ -446,6 +458,7 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     let writes = !state.writes_refused(now.wall);
     if writes {
         end_unreachable(state, now, fx);
+        fail_orphans(state, now, fx);
     }
     press_enters(state, now.wall, fx);
     if writes {
@@ -858,6 +871,126 @@ fn end_unreachable(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
 /// go on, and their answers are saved.
 pub(crate) fn client_gone(state: &mut State, conn: ConnId) {
     state.asks_mem.parked.retain(|p| p.conn != conn);
+}
+
+// ---------- to moa ----------
+
+/// The oldest `pending` ask to moa: the next its channel sends, before any other automatic
+/// prompt (A9 a).
+pub(crate) fn next_for_moa(state: &State) -> Option<AskId> {
+    state
+        .asks()
+        .filter(|a| a.status == AskStatus::Pending && a.to_session == Some(AskTarget::Moa))
+        .min_by_key(|a| (a.at, a.id))
+        .map(|a| a.id)
+}
+
+/// What moa's channel sends for ask `id` at `at` (A9 b, c), while it is a `pending` ask to
+/// moa.
+pub(crate) struct ForMoa {
+    /// Who asked, by label.
+    pub from: String,
+    /// The hidden prompt (A13): the ask, and whose the answer is.
+    pub prompt: String,
+    /// The card's text: `Kite · #12: Is the domain renewed?`.
+    pub card: String,
+    /// The ask received at `at`, for the prompt's commit.
+    pub received: Ask,
+}
+
+/// What moa is sent for ask `id` at `at` ([`ForMoa`]); `None` when it is no `pending` ask to
+/// moa any more (its wait ran out while moa's thread opened).
+pub(crate) fn for_moa(state: &State, id: AskId, at: UtcMs) -> Option<ForMoa> {
+    let a = state
+        .ask(id)
+        .filter(|a| a.status == AskStatus::Pending && a.to_session == Some(AskTarget::Moa))?;
+    let from = from_label(state, a);
+    let prompt = format!(
+        "(moa · {from} asks you, ask #{id}, not typed by the user)\n{}\n\n\
+         Your reply this turn goes back to {from} as the answer.",
+        a.text
+    );
+    let card = format!("{from} · #{id}: {}", a.text);
+    let received = Ask {
+        status: AskStatus::Received,
+        claimed_at: Some(at),
+        ..a.clone()
+    };
+    Some(ForMoa {
+        from,
+        prompt,
+        card,
+        received,
+    })
+}
+
+/// moa's turn for ask `id` ended (A9 d): `Ok` with the turn's words answers it ([`NO_TEXT`]
+/// for none), `Err` with why the turn ended early or failed fails it. In a commit of its own,
+/// then whoever waits for it hears ([`end`]).
+pub(crate) fn moa_ended(
+    state: &mut State,
+    now: &Now,
+    id: AskId,
+    result: Result<&str, &str>,
+) -> Vec<Effect> {
+    let (status, reply) = match result {
+        Ok(words) if words.trim().is_empty() => (AskStatus::Answered, NO_TEXT.to_string()),
+        Ok(words) => (AskStatus::Answered, words.to_string()),
+        Err(why) => (AskStatus::Failed, why.to_string()),
+    };
+    let mut tx = Tx::new(now);
+    let replies = end(state, &mut tx, id, status, reply);
+    let mut fx = post_commit(state, tx);
+    fold_in(&mut fx, replies);
+    fx
+}
+
+/// Every ask moa took (`sent` or `received`) with no live turn of moa's for it fails
+/// ([`MOA_RESTARTED`], A9 e), in one commit of its own: moa's agent went in the middle of its
+/// turn, the watchdog restarted it, or the daemon started again. Nothing else would end it.
+fn fail_orphans(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    let answering = state
+        .central()
+        .turn
+        .as_ref()
+        .filter(|t| t.exited.is_none())
+        .and_then(|t| match t.source {
+            Source::Ask(id) => Some(id),
+            _ => None,
+        });
+    let orphans: Vec<AskId> = state
+        .asks()
+        .filter(|a| a.to_session == Some(AskTarget::Moa))
+        .filter(|a| matches!(a.status, AskStatus::Sent | AskStatus::Received))
+        .filter(|a| Some(a.id) != answering)
+        .map(|a| a.id)
+        .collect();
+    if orphans.is_empty() {
+        return;
+    }
+    let mut tx = Tx::new(now);
+    let mut replies = Vec::new();
+    for id in orphans {
+        replies.extend(end(
+            state,
+            &mut tx,
+            id,
+            AskStatus::Failed,
+            MOA_RESTARTED.into(),
+        ));
+    }
+    fold_in(fx, post_commit(state, tx));
+    fold_in(fx, replies);
+}
+
+/// Whether moa waits on an ask of its own (A10): a request waits for an open ask from moa
+/// (its `moactl ask`, or a `reply` that waits again). Its watchdog holds meanwhile.
+pub(crate) fn moa_waits(state: &State) -> bool {
+    state.asks_mem.parked.iter().any(|p| {
+        state
+            .ask(p.ask)
+            .is_some_and(|a| a.from_session == Some(AskTarget::Moa) && is_open(a.status))
+    })
 }
 
 // ---------- peers and asks ----------

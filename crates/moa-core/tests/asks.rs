@@ -664,13 +664,6 @@ fn pane(p: &str) -> PaneId {
     p.parse().unwrap()
 }
 
-/// What an ask from `from` is typed into a pane as (A13).
-fn framed(id: i64, from: &str, text: &str) -> String {
-    format!(
-        "[moa · message from {from} · ask #{id}] {text}\n\n(Your reply this turn goes back to {from} as the answer.)"
-    )
-}
-
 /// [`snapshot`], Harbor idle and in tab `%5`.
 fn harbor_idle() -> Snapshot {
     let mut snap = snapshot();

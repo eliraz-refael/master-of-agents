@@ -492,12 +492,16 @@ fn sleep_eligibility_table() {
         let me = Some(AskTarget::Session(s_id()));
         w.asks.push(Ask {
             id: AskId(900),
-            at: UtcMs(1),
+            at: if from { WAITS_ON_MOA } else { UtcMs(1) },
             from_session: if from { me } else { Some(AskTarget::Moa) },
             from_name: None,
             to_session: if to { me } else { Some(AskTarget::Moa) },
             text: "which boards?".into(),
-            status: AskStatus::Received,
+            status: if from {
+                AskStatus::Pending
+            } else {
+                AskStatus::Received
+            },
             reply: None,
             claimed_at: None,
             answered_at: None,
@@ -1468,6 +1472,11 @@ fn a_tag_moa_sent_outlives_an_older_listing() {
     assert_eq!(r.st.tmux().topology.moa_session(PaneId(7)), None);
 }
 
+/// When a session's ask to moa was saved, so that it stays `pending` through every test
+/// here: moa has no account to answer it, and it is dropped only at its wait after this (a
+/// taken ask to moa with no turn of moa's answering it fails at once, A9 e).
+const WAITS_ON_MOA: UtcMs = UtcMs(4_000_000_000_000);
+
 // --- the property ---
 
 /// One session of the property's world, over R18's conditions.
@@ -1675,15 +1684,15 @@ fn property_state(sess: &[Sess]) -> State {
             let me = Some(AskTarget::Session(id));
             snap.asks.push(Ask {
                 id: AskId(k as i64 + 1),
-                at: UtcMs(1),
+                at: if p.ask == 2 { WAITS_ON_MOA } else { UtcMs(1) },
                 from_session: if p.ask == 2 { me } else { Some(AskTarget::Moa) },
                 from_name: None,
                 to_session: if p.ask == 2 { Some(AskTarget::Moa) } else { me },
                 text: "?".into(),
-                status: if p.ask == 3 {
-                    AskStatus::Answered
-                } else {
-                    AskStatus::Sent
+                status: match p.ask {
+                    2 => AskStatus::Pending,
+                    3 => AskStatus::Answered,
+                    _ => AskStatus::Sent,
                 },
                 reply: None,
                 claimed_at: None,

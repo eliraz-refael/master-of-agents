@@ -1,0 +1,11 @@
+---
+source: crates/moa-view/tests/console.rs
+expression: debug_lines(&view.lines)
+---
+[brain*]◆ moa  19:00
+[dim]│ [warn]▸ [warn]an ask for moa
+[dim]│ [dim]┊ [text]Kite · #12: Is the domain renewed?
+
+[brain*]◆ moa  19:00[dim] · on its own
+[dim]│ [dim]· [dim]moa answers Kite's ask #12
+[dim]│ [text]Renewed in May.

@@ -140,6 +140,13 @@ pub fn ask_row(
     }
 }
 
+/// What an ask from `from` is typed into a pane as (A13).
+pub fn framed(id: i64, from: &str, text: &str) -> String {
+    format!(
+        "[moa · message from {from} · ask #{id}] {text}\n\n(Your reply this turn goes back to {from} as the answer.)"
+    )
+}
+
 pub fn to(id: &str) -> AskTarget {
     AskTarget::Session(sid(id))
 }
@@ -184,8 +191,13 @@ impl Rig {
     /// The daemon starts at `ms` from `snapshot`, its link not yet up; what its start said
     /// too.
     pub fn started_at(snapshot: Snapshot, ms: i64) -> (Rig, Vec<Effect>) {
+        Rig::started_with(snapshot, TOML, ms)
+    }
+
+    /// [`Rig::started_at`] under `toml`, such as one that gives moa an account.
+    pub fn started_with(snapshot: Snapshot, toml: &str, ms: i64) -> (Rig, Vec<Effect>) {
         let home = PathBuf::from(HOME);
-        let config = Config::parse(TOML, &home).unwrap();
+        let config = Config::parse(toml, &home).unwrap();
         let deps = Deps {
             home,
             ..Deps::default()

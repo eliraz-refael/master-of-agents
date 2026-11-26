@@ -6,7 +6,8 @@
 //! for the commit. One prompt at a time. What moa says in its turn lands in the feed as it
 //! comes, and the turn's end answers whoever waits ([`turn`]). The session reports and your
 //! yeses ride on the prompts ([`carry`]), or reach moa on their own ([`channel`]), as the
-//! day's opening does ([`opening`]). A turn
+//! day's opening does ([`opening`]). An agent's ask to moa is a prompt of its own, whose
+//! turn's end is the answer ([`crate::asks`]). A turn
 //! that hangs is cancelled, then cut short and moa's agent restarted ([`watchdog`]). One that
 //! fails for its account's sake says so in a card ([`account`]).
 
@@ -35,11 +36,14 @@ use self::feed::{kind, text_body};
 use self::threads::{How, choose, new_thread};
 use self::watchdog::{Restart, Restarted, Watchdog};
 use self::wire::{AcpCmd, AcpIn, AdapterSpec, Caps, Opened, PermOption, ThreadHow};
+use crate::asks;
 use crate::change::Change;
 use crate::config::AccountName;
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, Publish};
-use crate::model::{FeedEntry, MoaThread, Suggestion, SuggestionId, Task, Terminal, ThreadKind};
+use crate::model::{
+    AskId, FeedEntry, MoaThread, Suggestion, SuggestionId, Task, Terminal, ThreadKind,
+};
 use crate::op::{ConnId, Done, OpError, PermAnswer, ReqId};
 use crate::panel::View;
 use crate::publish::{CoreEvent, MoaRow};
@@ -819,20 +823,33 @@ fn thread_row(
     }
 }
 
-/// Saves prompt `p`'s `you` row in the open thread, then sends it. The thread's first prompt
-/// (the one that saves its row) also saves the line a failed reopen leaves, and carries the
-/// brief. What waits goes with it (D1), in this order: the day's opening, on the brief's
-/// prompt or yours while it is due ([`opening`]); your yeses ([`State::yeses`],
-/// [`carry::yes_text`]); the session reports queued now ([`reports::batch`]); then, on a
-/// wake-up or a prompt that opens the day, what's due ([`due`]) and the idle terminals
-/// ([`idle`]: a wake-up's since the last told, the opening's all of them); and your text after
-/// them. An automatic prompt's text is those blocks, and it reads the reports only while
-/// `/auto` is on. The same commit marks each delivered: a report deleted, a yes told, a due
-/// task told today, the day opened. While writes are refused the prompt is refused too:
-/// nothing is sent, and all of it stays. An automatic prompt other than the opening that finds
-/// no report or yes left to carry saves and sends nothing: what's due and the idle terminals
-/// never go alone (U18).
-fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
+/// What a prompt carries, chosen at its commit ([`waiting`], [`asked`]): the blocks that go
+/// before your text (an automatic prompt is only them), its `you` row's body, what the same
+/// commit marks delivered, and the card it writes before its row (an ask's).
+struct Carried {
+    blocks: Vec<String>,
+    body: serde_json::Map<String, serde_json::Value>,
+    changes: Vec<Change>,
+    card: Option<String>,
+    /// How many session reports it carries.
+    reports: usize,
+    /// Where the idle terminals it tells end ([`Moa::idle_told`]).
+    idle_told: Option<idle::IdleMark>,
+    /// It opens the day.
+    opens: bool,
+}
+
+/// What prompt `p` carries, other than an ask's ([`Carried`]). What waits goes with it (D1), in
+/// this order: the day's opening, on the brief's prompt or yours while it is due
+/// ([`opening`]); your yeses ([`State::yeses`], [`carry::yes_text`]); the session reports
+/// queued now ([`reports::batch`]); then, on a wake-up or a prompt that opens the day, what's
+/// due ([`due`]) and the idle terminals ([`idle`]: a wake-up's since the last told, the
+/// opening's all of them); and your text after them. An automatic prompt's text is those
+/// blocks, and it reads the reports only while `/auto` is on. The same commit marks each
+/// delivered: a report deleted, a yes told, a due task told today, the day opened. `None` for
+/// an automatic prompt other than the opening that finds no report or yes left to carry:
+/// what's due and the idle terminals never go alone (U18).
+fn waiting(state: &State, now: &Now, p: &Pending) -> Option<Carried> {
     let automatic = p.source != Source::You;
     let opens = opening::due_today(state, now) && matches!(p.source, Source::Brief | Source::You);
     let wake = p.source == Source::Wake;
@@ -864,14 +881,14 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         false => reports::batch(state, now, state.config().moa.wake_batch, used),
     };
     if automatic && !opens && reports.is_empty() && yeses.is_empty() {
-        return Vec::new();
+        return None;
     }
     let n = reports.len();
-    let ids: Vec<i64> = reports.iter().map(|r| r.id).collect();
     let yes_ids: Vec<i64> = yeses.iter().map(|s| s.id.0).collect();
-    let mut told = carry::told(&yeses);
-    told.extend(due::told(now, &due));
-    told.extend(opens.then(|| opening::told(now)));
+    let mut changes: Vec<Change> = reports.iter().map(|r| Change::DeleteReport(r.id)).collect();
+    changes.extend(carry::told(&yeses));
+    changes.extend(due::told(now, &due));
+    changes.extend(opens.then(|| opening::told(now)));
     let nags = due.len();
     // The blocks before your text, in D1's order; an automatic prompt is only them.
     let mut blocks: Vec<String> = opening_block.into_iter().chain(yes_block).collect();
@@ -894,7 +911,7 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
         body.insert("carried".into(), carried.as_str().into());
     }
     if !yes_ids.is_empty() {
-        body.insert("yeses".into(), yes_ids.clone().into());
+        body.insert("yeses".into(), yes_ids.into());
     }
     if nags > 0 {
         body.insert("nags".into(), nags.into());
@@ -902,7 +919,53 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     if opens {
         body.insert("opening".into(), true.into());
     }
-    let body = serde_json::Value::Object(body).to_string();
+    Some(Carried {
+        blocks,
+        body,
+        changes,
+        card: None,
+        reports: n,
+        idle_told,
+        opens,
+    })
+}
+
+/// What the prompt for ask `id` carries (A9 b, c): the hidden ask alone, nothing else that
+/// waits, so moa's reply to the asker isn't mixed with it. Its row's body says whose ask it
+/// answers (`ask: {id, from}`); its commit takes the ask (`received`) and writes its card
+/// first. `None` when it is no `pending` ask to moa any more.
+fn asked(state: &State, now: &Now, id: AskId) -> Option<Carried> {
+    let ask = asks::for_moa(state, id, now.wall)?;
+    let mut body = serde_json::Map::new();
+    body.insert("text".into(), ask.prompt.as_str().into());
+    body.insert("ask".into(), json!({ "id": id, "from": ask.from }));
+    Some(Carried {
+        blocks: vec![ask.prompt],
+        body,
+        changes: vec![Change::Ask(ask.received)],
+        card: Some(ask.card),
+        reports: 0,
+        idle_told: None,
+        opens: false,
+    })
+}
+
+/// Saves prompt `p`'s `you` row in the open thread, then sends it, with what it carries
+/// ([`waiting`], or [`asked`] for an ask's). The thread's first prompt (the one that saves its
+/// row) also saves the line a failed reopen leaves, and carries the brief. An ask's card goes
+/// before the row, in the prompt's thread, which this commit saves when it is new. While
+/// writes are refused the prompt is refused too: nothing is sent, and all of it stays. An
+/// automatic prompt with nothing to carry saves and sends nothing.
+fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
+    let automatic = p.source != Source::You;
+    let carried = match p.source {
+        Source::Ask(id) => asked(state, now, id),
+        _ => waiting(state, now, &p),
+    };
+    let Some(carried) = carried else {
+        return Vec::new();
+    };
+    let body = serde_json::Value::Object(carried.body).to_string();
     let thread = open.row.thread_id.clone();
     let first = state.thread(&thread).is_none();
     let mut tx = Tx::new(now);
@@ -924,12 +987,20 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
             changes.push(Change::Feed(line));
         }
     }
+    if let Some(text) = &carried.card {
+        changes.push(Change::Feed(card(
+            state,
+            &mut tx,
+            &thread,
+            asks::CARD,
+            text,
+        )));
+    }
     let id = Some(p.message_id.clone());
     let mut you = feed::row(state, &mut tx, now.wall, &thread, kind::YOU, id, body, None);
     you.automatic = automatic;
     changes.push(Change::Feed(you));
-    changes.extend(ids.into_iter().map(Change::DeleteReport));
-    changes.extend(told);
+    changes.extend(carried.changes);
     if let Err(e) = tx.commit(state, changes) {
         // Refused writes hold the next wake until they end; any other refusal would come
         // again at once.
@@ -940,17 +1011,21 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     }
     let brief = open.brief.filter(|b| first && !b.is_empty());
     let yours = (!automatic).then(|| p.text.clone());
-    let parts: Vec<String> = brief.into_iter().chain(blocks).chain(yours).collect();
+    let parts: Vec<String> = brief
+        .into_iter()
+        .chain(carried.blocks)
+        .chain(yours)
+        .collect();
     let text = parts.join(PART_GAP);
     let moa = &mut state.central;
-    if automatic && n > 0 {
+    if automatic && carried.reports > 0 {
         moa.last_wake = Some(now.wall);
     }
     // The opening tells every idle terminal: the mark never moves back for it.
-    if idle_told.is_some() {
-        moa.idle_told = moa.idle_told.max(idle_told);
+    if carried.idle_told.is_some() {
+        moa.idle_told = moa.idle_told.max(carried.idle_told);
     }
-    if opens {
+    if carried.opens {
         moa.brief_due = None;
     }
     moa.failed_at = None;
@@ -1039,8 +1114,9 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     fx
 }
 
-/// Pending prompt `p` never reached moa's agent. An automatic prompt's failed try holds back
-/// every automatic source for a gap ([`Moa::failed_at`]).
+/// Pending prompt `p` never reached moa's agent. An automatic prompt's failed try (an ask's
+/// too: it stays `pending`, and is dropped at its wait as any is) holds back every automatic
+/// source for a gap ([`Moa::failed_at`]).
 fn failed_wake(moa: &mut Moa, p: &Pending, now: &Now) {
     if p.source != Source::You {
         moa.failed_at = Some(now.wall);

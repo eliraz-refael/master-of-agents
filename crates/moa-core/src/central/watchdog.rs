@@ -4,9 +4,11 @@
 //! opened, or a new one for today when today has none yet). A `card` row in the turn's thread
 //! says what happened, and is updated in place at each step (K7, K11).
 //!
-//! Until the cancel it watches only while no request of moa's agent waits for you: you may
-//! take as long as you like, and the turn gets a fresh span once nothing waits. After the
-//! cancel the turn should stop, so a request then doesn't hold the restart off.
+//! Until the cancel it watches only while no request of moa's agent waits for you, and moa
+//! waits on no ask of its own (A10: its `moactl ask` blocks its turn for up to the ask's
+//! wait): you, or the peer, may take as long as you like, and the turn gets a fresh span once
+//! nothing waits. After the cancel the turn should stop, so a request or an ask then doesn't
+//! hold the restart off.
 //!
 //! The deadlines are wall-clock, as every deadline of the core is (there is no monotonic
 //! clock): a timer that fires more than a minute late (the Mac slept) gives the turn a fresh
@@ -15,6 +17,7 @@
 use super::feed::{card_body, kind};
 use super::wire::AcpCmd;
 use super::{Open, Phase, answer, card, launch, new_run, said, turn, warn};
+use crate::asks;
 use crate::core::{Tx, fold_in};
 use crate::effect::{Effect, TimerKey, rearm};
 use crate::model::FeedEntry;
@@ -76,7 +79,7 @@ pub struct Watchdog {
     /// When the stage's span began: the turn's newest news while it is watched, its cancel
     /// once cancelled.
     pub since: UtcMs,
-    /// A request waits for your answer: the watch waits too.
+    /// A request waits for your answer, or moa for an ask's: the watch waits too.
     pub paused: bool,
     /// The deadline the `Watchdog` timer is armed at, if any, as `State::sleep_at` is.
     pub armed: Option<UtcMs>,
@@ -112,9 +115,10 @@ impl Watchdog {
 /// cut short when it was cancelled already, and the timer is armed at the next deadline, or
 /// cancelled when no turn is watched.
 pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect>) {
+    let asked = asks::moa_waits(state);
     let moa = &mut state.central;
     let dog = &mut moa.watchdog;
-    let waits = dog.stage == Stage::Watching && !moa.asking.is_empty();
+    let waits = dog.stage == Stage::Watching && (!moa.asking.is_empty() || asked);
     if waits {
         dog.paused = true;
     } else if std::mem::take(&mut dog.paused) {
@@ -142,7 +146,8 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
 
 /// When the turn under way is next due: `watchdog_ms` after its newest news, or
 /// `watchdog_kill_ms` after its cancel. `None` when no turn is under way, or while a request
-/// waits for your answer before the cancel (after it, the turn should have stopped).
+/// waits for your answer, or moa for an ask's, before the cancel (after it, the turn should
+/// have stopped).
 fn due(state: &State) -> Option<UtcMs> {
     let moa = &state.central;
     let live =

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 3eadd9fc88244bce5bcecbf6faafde4e1baf4b91ff752bcf9d8ce5b2ab56c88d # shrinks to sess = [Sess { activity: Idle, question: false, done: false, tracked: true, heard: true, cockpit: false, ask: 0, idle_hours: 0, archived: false }], inputs = [(false, 3, 226), (false, 0, 134)]
+cc 752b377252c04ee0527026c8530b626e6de87234926bc34d2453b8d0534d454f # shrinks to sess = [Sess { activity: Idle, question: false, done: false, tracked: true, heard: true, cockpit: false, ask: 2, idle_hours: 0, archived: false }], inputs = [(false, 0, 144), (false, 0, 81), (false, 0, 52), (false, 3, 83)]
