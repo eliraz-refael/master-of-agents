@@ -909,9 +909,14 @@ pub(crate) fn client_gone(state: &mut State, conn: ConnId) {
 pub(crate) fn next_for_moa(state: &State) -> Option<AskId> {
     state
         .asks()
-        .filter(|a| a.status == AskStatus::Pending && a.to_session == Some(AskTarget::Moa))
+        .filter(|a| pending_for_moa(a))
         .min_by_key(|a| (a.at, a.id))
         .map(|a| a.id)
+}
+
+/// Whether `a` is a `pending` ask to moa.
+fn pending_for_moa(a: &Ask) -> bool {
+    a.status == AskStatus::Pending && a.to_session == Some(AskTarget::Moa)
 }
 
 /// What moa's channel sends for ask `id` at `at` (A9 b, c), while it is a `pending` ask to
@@ -930,9 +935,7 @@ pub(crate) struct ForMoa {
 /// What moa is sent for ask `id` at `at` ([`ForMoa`]); `None` when it is no `pending` ask to
 /// moa any more (its wait ran out while moa's thread opened).
 pub(crate) fn for_moa(state: &State, id: AskId, at: UtcMs) -> Option<ForMoa> {
-    let a = state
-        .ask(id)
-        .filter(|a| a.status == AskStatus::Pending && a.to_session == Some(AskTarget::Moa))?;
+    let a = state.ask(id).filter(|a| pending_for_moa(a))?;
     let from = from_label(state, a);
     let prompt = format!(
         "(moa · {from} asks you, ask #{id}, not typed by the user)\n{}\n\n\

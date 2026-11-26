@@ -22,6 +22,7 @@ use moa_core::op::{Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Topic};
 use moa_core::sleep::{SLEEP_AFTER_USAGE, SLEEP_KEY, why_not};
 use moa_core::state::{Deps, EventWhat, LoadNote, Snapshot, State};
+use moa_core::time::MINUTE;
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::{ClientName, Generation, PaneId, TmuxSessionId, WindowId};
 use moa_core::tmux::notify::Notification;
@@ -1479,8 +1480,6 @@ fn a_tag_moa_sent_outlives_an_older_listing() {
     );
     assert_eq!(r.st.tmux().topology.moa_session(PaneId(7)), None);
 }
-
-const MINUTE: i64 = 60_000;
 
 /// `toml` (whose last table is the account `acct-a`) with moa running on `acct-a`, its
 /// watchdog never firing within these tests: a session's ask to moa stays open while moa's

@@ -6,9 +6,9 @@
 //!
 //! Until the cancel it watches only while no request of moa's agent waits for you, and moa
 //! itself waits on no ask (A10: its `moactl ask` or `reply` blocks its turn for up to its
-//! wait; anyone else's wait on moa's ask holds nothing): you, or the peer, may take as long as you like, and the turn gets a fresh span once
-//! nothing waits. After the cancel the turn should stop, so a request or an ask then doesn't
-//! hold the restart off.
+//! wait; anyone else's wait on moa's ask holds nothing): you, or the peer, may take as long
+//! as you like, and the turn gets a fresh span once nothing waits. After the cancel the turn
+//! should stop, so a request or an ask then doesn't hold the restart off.
 //!
 //! The deadlines are wall-clock, as every deadline of the core is (there is no monotonic
 //! clock): a timer that fires more than a minute late (the Mac slept) gives the turn a fresh
