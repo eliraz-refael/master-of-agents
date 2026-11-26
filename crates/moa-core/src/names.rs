@@ -138,8 +138,9 @@ impl State {
 
     /// Who an ask to `q` is for (A2): `moa` is moa. Otherwise names prefer live sessions
     /// ([`State::is_live`]) over ended ones: of the sessions `q` can mean, the one live one;
-    /// with none live, the only one there is (an ask to it is refused as not running). More
-    /// than one is listed, as [`State::resolve`] lists them.
+    /// with none live, the only one there is (an ask to it is refused as not running), and
+    /// with more than one, `no live session matches`. More than one live is listed, as
+    /// [`State::resolve`] lists them.
     pub fn peer(&self, q: &str) -> Result<AskTarget, OpError> {
         if q.trim().eq_ignore_ascii_case("moa") {
             return Ok(AskTarget::Moa);
@@ -152,7 +153,8 @@ impl State {
         match (live.as_slice(), all.as_slice()) {
             ([one], _) | ([], [one]) => Ok(AskTarget::Session(*one)),
             ([], []) => Err(no_match(q)),
-            ([], many) | (many, _) => Err(self.ambiguous(q, many)),
+            ([], _) => Err(OpError(format!("no live session matches '{q}'"))),
+            (many, _) => Err(self.ambiguous(q, many)),
         }
     }
 
@@ -185,18 +187,21 @@ impl State {
     }
 
     /// Whether live session `id` can take an ask now (A3): it is idle (or its turn failed),
-    /// and no ask to it is in flight (`sent` or `received`).
+    /// no ask to it is in flight (`sent` or `received`), and its last ask didn't go
+    /// unreceived since moa last heard from it.
     pub fn is_free(&self, id: SessionId) -> bool {
-        self.waits_for_input(id) && self.in_flight_to(id).next().is_none()
+        self.is_free_once(id, |_| false)
     }
 
-    /// Whether session `id` is live and idle, or its turn failed: free once nothing is in
-    /// flight to it ([`State::is_free`]).
-    pub(crate) fn waits_for_input(&self, id: SessionId) -> bool {
+    /// [`State::is_free`], once the asks in flight to `id` that `going` picks are gone (a
+    /// claim fails its stale ones first). The one definition of free.
+    pub(crate) fn is_free_once(&self, id: SessionId, going: impl Fn(&Ask) -> bool) -> bool {
         self.is_live(id)
             && self
                 .session(id)
                 .is_some_and(|s| matches!(s.activity, Activity::Idle | Activity::Failed))
+            && !self.asks_mem.unheard.contains(&id)
+            && self.in_flight_to(id).all(going)
     }
 
     /// The asks in flight to session `id`: `sent` or `received`.

@@ -151,6 +151,7 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     if state.recent_hook_set.contains(&key) {
         return Applied::Duplicate;
     }
+    asks::heard_from(state, id);
     let before = state
         .session(id)
         .expect("resolved to a known session")

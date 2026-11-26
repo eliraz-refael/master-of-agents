@@ -195,6 +195,17 @@ fn an_ask_at_its_limits_is_saved() {
 
 #[test]
 fn names_prefer_live_sessions() {
+    // Two ended Lanterns: none live, and more than one.
+    let mut snap = snapshot();
+    let mut beacon = session(BEACON, "Lantern", "beacon", Activity::Idle);
+    beacon.lifecycle = Lifecycle::Ended;
+    snap.sessions.retain(|s| s.id != sid(BEACON));
+    snap.sessions.push(beacon);
+    let r = Rig::new(snap);
+    assert_eq!(
+        r.st.peer("Lantern"),
+        Err(OpError("no live session matches 'Lantern'".into()))
+    );
     // An ended Kite, and the live one.
     let mut snap = snapshot();
     let mut old = session(LANTERN, "Kite", "kite", Activity::Idle);
@@ -423,23 +434,51 @@ fn reply_needs_an_ask() {
 }
 
 #[test]
+/// A connection that goes drops its requests and nothing else: each pending ask keeps its own
+/// wait, and is dropped at it with nobody to hear (R3, amended: an asker whose call was
+/// killed mustn't have its question typed hours later).
 fn a_gone_client_leaves_the_ask() {
     let mut r = Rig::new(snapshot());
     r.ask(7, from(KITE), "Harbor", "Is the domain renewed?", 540);
     r.ask(8, from(BEACON), "Harbor", "Which branch?", 60);
-    // Connection 8 goes: 7 still waits, and the timer moves to its wait.
+    // Connection 8 goes: nothing is heard, and ask 2 keeps its 60 s.
     let fx = handle_checked(&mut r.st, Input::ClientGone(ConnId(8)), now(T0 + SEC));
     assert!(replies(&fx).is_empty() && !persisted(&fx), "{fx:?}");
+    assert_eq!(r.row(2).status, AskStatus::Pending);
+    let fx = r.fire(T0 + 60 * SEC);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.row(2).status, AskStatus::Dropped);
+    assert_eq!(r.row(2).reply.as_deref(), Some("stayed busy"));
     assert_eq!(set_at(&fx), Some(UtcMs(T0 + 540 * SEC)));
-    assert_eq!(r.row(2).status, AskStatus::Pending);
-    // Then 7: nothing waits.
-    let fx = handle_checked(&mut r.st, Input::ClientGone(ConnId(7)), now(T0 + 2 * SEC));
+    // Then 7: its ask is dropped at its own wait too.
+    let fx = handle_checked(&mut r.st, Input::ClientGone(ConnId(7)), now(T0 + 61 * SEC));
     assert!(replies(&fx).is_empty() && !persisted(&fx), "{fx:?}");
-    assert!(cancelled(&fx), "{fx:?}");
     let fx = r.fire(T0 + 540 * SEC);
-    assert!(replies(&fx).is_empty() && !persisted(&fx), "{fx:?}");
-    assert_eq!(r.row(1).status, AskStatus::Pending);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.row(1).status, AskStatus::Dropped);
+    assert!(cancelled(&fx), "{fx:?}");
+}
+
+/// After a restart an ask's own wait is forgotten: a pending one waits the default from when
+/// it was saved.
+#[test]
+fn a_pending_ask_from_before_a_restart_waits_the_default() {
+    let mut snap = snapshot();
+    let old = ask_row(
+        1,
+        to(KITE),
+        "Kite",
+        to(HARBOR),
+        "Is it?",
+        T0 - ASK_WAIT_DEFAULT_MS,
+    );
+    let young = ask_row(2, to(BEACON), "Beacon", to(HARBOR), "Which?", T0 - MIN);
+    snap.asks = vec![old, young];
+    snap.next_ids.ask = 3;
+    let (r, fx) = Rig::started_at(snap, T0);
+    assert_eq!(r.row(1).status, AskStatus::Dropped);
     assert_eq!(r.row(2).status, AskStatus::Pending);
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 - MIN + ASK_WAIT_DEFAULT_MS)));
 }
 
 // ---------- peers and asks ----------
@@ -505,7 +544,7 @@ fn asks_lists_mine() {
         "Beacon",
         to(HARBOR),
         "Which branch?",
-        T0 - 30 * MIN,
+        T0 - 8 * MIN,
     );
     let long = "Which of the three lamps did you rewire on Friday, and was the dimmer one of them?\nThanks";
     let to_kite = ask_row(3, AskTarget::Moa, "moa", to(KITE), long, T0 - 5 * MIN);
@@ -1206,15 +1245,25 @@ fn a_new_prompt_fails_an_unanswered_ask() {
 }
 
 #[test]
-fn a_clear_fails_an_unanswered_ask() {
-    let mut r = harbor_answering();
-    let source = StartSource::Clear;
-    let fx = r.hook(T0 + 5 * SEC, HARBOR, HookKind::SessionStarted { source });
-    assert_eq!(r.row(1).status, AskStatus::Failed);
-    assert_eq!(
-        the_failure(&fx),
-        "ask #1 failed: Harbor moved on before answering"
-    );
+/// Every new conversation in the tab (`/clear`, a resume, a new agent, a fork) leaves the ask
+/// unanswered.
+fn a_new_conversation_fails_an_unanswered_ask() {
+    let sources = [
+        StartSource::Clear,
+        StartSource::Resume,
+        StartSource::Startup,
+        StartSource::Fork,
+    ];
+    for source in sources {
+        let mut r = harbor_answering();
+        let fx = r.hook(T0 + 5 * SEC, HARBOR, HookKind::SessionStarted { source });
+        assert_eq!(r.row(1).status, AskStatus::Failed, "{source:?}");
+        assert_eq!(
+            the_failure(&fx),
+            "ask #1 failed: Harbor moved on before answering",
+            "{source:?}"
+        );
+    }
 }
 
 /// A compaction can come mid-turn, and the turn carries on: the ask stays received, and the
@@ -1347,4 +1396,66 @@ fn asks_to_a_gone_peer_end_once_the_link_is_up() {
     let fx = r.link_up(T0 + SEC);
     assert_eq!(r.row(1).status, AskStatus::Failed, "{fx:?}");
     assert_eq!(r.row(1).reply.as_deref(), Some("Harbor ended"));
+}
+
+// ---------- code review: held back, and deadlines while writes are refused ----------
+
+/// A pane that took no receipt holds its peer back: the asks behind wait, untyped, until moa
+/// hears from the peer again.
+#[test]
+fn no_receipt_holds_the_peer_back() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.ask(2, from(BEACON), "Harbor", "Which branch?", 540);
+    r.ask(3, moa(), "Harbor", "Which account?", 540);
+    r.fire(T0 + 500);
+    let fx = r.fire(T0 + 20 * SEC);
+    assert_eq!(
+        statuses(&r, &[1, 2, 3]),
+        [AskStatus::Failed, AskStatus::Pending, AskStatus::Pending]
+    );
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+    assert!(!r.st.is_free(sid(HARBOR)));
+    let fx = r.fire(T0 + 60 * SEC);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+    // Harbor is heard from: the next one goes.
+    let fx = r.stopped(T0 + 90 * SEC, HARBOR, "Done with the dialog.");
+    assert_eq!(
+        statuses(&r, &[1, 2, 3]),
+        [AskStatus::Failed, AskStatus::Sent, AskStatus::Pending]
+    );
+    assert_eq!(typed(&fx).len(), 2, "{fx:?}");
+}
+
+/// A receipt's 20 s that passes while writes are refused fails the ask once writes come back,
+/// with no other input: the timer is armed for then.
+#[test]
+fn a_deadline_passed_while_writes_were_refused_still_acts() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.fire(T0 + 500);
+    let row = r.row(1);
+    assert_eq!(row.status, AskStatus::Sent);
+    r.reload_refusing(T0 + SEC, vec![row], Some(T0 + 30 * SEC));
+    let fx = r.fire(T0 + 20 * SEC);
+    assert!(!persisted(&fx), "{fx:?}");
+    assert_eq!(r.row(1).status, AskStatus::Sent);
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 + 30 * SEC)));
+    let fx = r.fire(T0 + 30 * SEC);
+    assert_eq!(r.row(1).status, AskStatus::Failed, "{fx:?}");
+    assert_eq!(r.row(1).reply.as_deref(), Some(NO_RECEIPT));
+}
+
+/// So does a pending ask's own wait.
+#[test]
+fn a_drop_passed_while_writes_were_refused_still_acts() {
+    let mut r = Rig::new(snapshot());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 60);
+    let row = r.row(1);
+    r.reload_refusing(T0 + SEC, vec![row], Some(T0 + 90 * SEC));
+    let fx = r.fire(T0 + 60 * SEC);
+    assert_eq!(r.row(1).status, AskStatus::Pending);
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 + 90 * SEC)));
+    r.fire(T0 + 90 * SEC);
+    assert_eq!(r.row(1).status, AskStatus::Dropped);
 }

@@ -51,30 +51,9 @@ fn replies(fx: &[Effect]) -> Vec<(ConnId, ReqId, Result<Done, OpError>)> {
 #[test]
 fn end_answers_every_request_waiting_once() {
     let mut st = state_with(vec![sent(12), sent(13)]);
-    park(
-        &mut st,
-        ConnId(1),
-        ReqId(1),
-        AskId(12),
-        UtcMs(T + 1_000),
-        Waits::Ask,
-    );
-    park(
-        &mut st,
-        ConnId(2),
-        ReqId(5),
-        AskId(12),
-        UtcMs(T + 9_000),
-        Waits::Reply,
-    );
-    park(
-        &mut st,
-        ConnId(3),
-        ReqId(1),
-        AskId(13),
-        UtcMs(T + 1_000),
-        Waits::Ask,
-    );
+    park(&mut st, ConnId(1), ReqId(1), AskId(12), UtcMs(T + 1_000));
+    park(&mut st, ConnId(2), ReqId(5), AskId(12), UtcMs(T + 9_000));
+    park(&mut st, ConnId(3), ReqId(1), AskId(13), UtcMs(T + 1_000));
     let mut tx = Tx::new(&now(T));
     let fx = end(
         &mut st,
@@ -123,14 +102,7 @@ fn a_refused_end_replies_nothing() {
         until: UtcMs(T + 1),
         reason: "the disk is full".into(),
     });
-    park(
-        &mut st,
-        ConnId(1),
-        ReqId(1),
-        AskId(12),
-        UtcMs(T + 1_000),
-        Waits::Ask,
-    );
+    park(&mut st, ConnId(1), ReqId(1), AskId(12), UtcMs(T + 1_000));
     let mut tx = Tx::new(&now(T));
     let fx = end(
         &mut st,

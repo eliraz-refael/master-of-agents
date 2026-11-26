@@ -3,5 +3,5 @@ source: crates/moa-core/tests/asks.rs
 expression: done.text
 ---
 #3  moa → Kite  pending  5m ago  Which of the three lamps did you rewire on Friday, and was t
-#2  Beacon → Harbor  pending  30m ago  Which branch?
+#2  Beacon → Harbor  pending  8m ago  Which branch?
 #1  Kite → Harbor  answered  1h ago  Is the domain renewed?
