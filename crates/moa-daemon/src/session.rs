@@ -498,19 +498,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
     /// When the daemon closes the session: writes the replies already waiting (the core
     /// answers everything it held before it ends), with a short bound on a stuck client.
     async fn flush_replies(&mut self) {
-        while let Ok((req, result)) = self.replies.try_recv() {
-            match self.pending.take() {
-                Some((want, id)) if want == req => {
-                    let line = reply_line(&id, result, self.hook.take() == Some(req));
-                    let _ = tokio::time::timeout(FLUSH_TIME, self.framed.send(line)).await;
-                }
-                other => self.pending = other,
+        let ended = loop {
+            match self.replies.try_recv() {
+                Ok((req, result)) => match self.pending.take() {
+                    Some((want, id)) if want == req => {
+                        let line = reply_line(&id, result, self.hook.take() == Some(req));
+                        let _ = tokio::time::timeout(FLUSH_TIME, self.framed.send(line)).await;
+                    }
+                    other => self.pending = other,
+                },
+                Err(e) => break e == tokio::sync::mpsc::error::TryRecvError::Disconnected,
             }
-        }
-        // Still owed a line (the request reached a core that had already ended, or the core
-        // hung): every request gets exactly one.
+        };
+        // Still owed a line: every request gets exactly one. A core that ended cleared its
+        // connections after answering all it ran, so the request never ran (`STOPPING`, and
+        // an upgraded daemon takes it again); a core that hung may be running it still.
         if let Some((_, id)) = self.pending.take() {
-            let line = encode_error(Some(&id), &rpc(code::STOPPING, STOPPING));
+            let code = if ended { code::STOPPING } else { code::FAILED };
+            let line = encode_error(Some(&id), &rpc(code, STOPPING));
             let _ = tokio::time::timeout(FLUSH_TIME, self.framed.send(line)).await;
         }
     }

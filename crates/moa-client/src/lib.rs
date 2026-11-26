@@ -556,11 +556,19 @@ impl Client {
 
     /// Sends `op` and waits for its reply. When the daemon stops under it (refusing it as
     /// stopping, or ending the connection) and comes back as the same process, it upgraded
-    /// in place: its wind-down answered everything its core had run, so `op` never ran, and
-    /// it is sent once more, to the new image ([`Client::rejoin`]).
+    /// in place, and `op` is sent once more, to the new image ([`Client::rejoin`]). A refusal
+    /// as stopping means its core never ran `op`; a connection that ended before the reply
+    /// does not (a reply cut off mid-write was run), so a write is sent again only after a
+    /// refusal.
     pub async fn call(&mut self, op: Op) -> Result<Done, ClientError> {
         match self.call_once(&op).await {
-            Err(e) if stopped_under(&e) && self.rejoin().await => self.call_once(&op).await,
+            Err(e)
+                if stopped_under(&e)
+                    && !matches!(e, ClientError::Stopped { wrote: true })
+                    && self.rejoin().await =>
+            {
+                self.call_once(&op).await
+            }
             done => done,
         }
     }
@@ -601,11 +609,17 @@ impl Client {
         let Ok(sock) = self.opts.paths.socket(self.opts.brain.as_str()) else {
             return false;
         };
-        let Ok(stream) = connect_soon(&sock, BIND_WAIT).await else {
+        // Once: the socket stays open across an upgrade, so nothing listening is a daemon
+        // that stopped.
+        let Ok(stream) = UnixStream::connect(&sock).await else {
             return false;
         };
+        let accept = |new: &Client| {
+            new.hello.pid == self.hello.pid
+                && (new.hello.matched || self.opts.on_mismatch == OnMismatch::Accept)
+        };
         match timeout(self.opts.upgrade_wait, Client::greet(stream, &self.opts)).await {
-            Ok(Ok(new)) if new.hello.pid == self.hello.pid => {
+            Ok(Ok(new)) if accept(&new) => {
                 *self = new;
                 true
             }
