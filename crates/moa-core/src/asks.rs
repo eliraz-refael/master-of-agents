@@ -734,7 +734,8 @@ fn answer(state: &State, id: SessionId, message: &str, at: UtcMs) -> Option<Chan
 ///   then a prompt of the user's);
 /// - a turn's end: the ask received is answered ([`answer`]);
 /// - a turn that fails: the ask received fails, `<label>'s turn failed`;
-/// - `/clear` or a compaction: the ask received fails, `<label> moved on before answering`;
+/// - `/clear`: the ask received fails, `<label> moved on before answering`. A compaction
+///   leaves it: one can come mid-turn, and the turn carries on;
 /// - the session's end: every open ask to it ends ([`peer_ended`]).
 pub(crate) fn hooked(state: &State, id: SessionId, kind: &HookKind, at: UtcMs) -> Vec<Change> {
     let label = || state.label_of(AskTarget::Session(id));
@@ -752,7 +753,7 @@ pub(crate) fn hooked(state: &State, id: SessionId, kind: &HookKind, at: UtcMs) -
         HookKind::TurnEnded { last_message } => answer(state, id, last_message, at),
         HookKind::TurnFailed { .. } => unanswered(format!("{}'s turn failed", label())),
         HookKind::SessionStarted {
-            source: StartSource::Clear | StartSource::Compact,
+            source: StartSource::Clear,
         } => moved_on(),
         HookKind::SessionEnded { .. } => return peer_ended(state, id, at),
         _ => None,

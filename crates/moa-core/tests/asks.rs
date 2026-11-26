@@ -1206,16 +1206,32 @@ fn a_new_prompt_fails_an_unanswered_ask() {
 }
 
 #[test]
-fn a_clear_or_compact_fails_an_unanswered_ask() {
-    for source in [StartSource::Clear, StartSource::Compact] {
-        let mut r = harbor_answering();
-        let fx = r.hook(T0 + 5 * SEC, HARBOR, HookKind::SessionStarted { source });
-        assert_eq!(r.row(1).status, AskStatus::Failed, "{source:?}");
-        assert_eq!(
-            the_failure(&fx),
-            "ask #1 failed: Harbor moved on before answering",
-            "{source:?}"
-        );
+fn a_clear_fails_an_unanswered_ask() {
+    let mut r = harbor_answering();
+    let source = StartSource::Clear;
+    let fx = r.hook(T0 + 5 * SEC, HARBOR, HookKind::SessionStarted { source });
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+    assert_eq!(
+        the_failure(&fx),
+        "ask #1 failed: Harbor moved on before answering"
+    );
+}
+
+/// A compaction can come mid-turn, and the turn carries on: the ask stays received, and the
+/// turn's Stop answers it.
+#[test]
+fn a_compaction_mid_ask_keeps_it() {
+    let mut r = harbor_answering();
+    let source = StartSource::Compact;
+    let fx = r.hook(T0 + 5 * SEC, HARBOR, HookKind::SessionStarted { source });
+    assert!(saved_asks(&fx).is_empty(), "{fx:?}");
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.row(1).status, AskStatus::Received);
+    let fx = r.stopped(T0 + 9 * SEC, HARBOR, "Yes, until 2028.");
+    assert_eq!(r.row(1).status, AskStatus::Answered);
+    match &replies(&fx)[..] {
+        [(ConnId(1), _, Ok(done))] => assert_eq!(done.text, "Yes, until 2028."),
+        other => panic!("{other:?}"),
     }
 }
 
