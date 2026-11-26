@@ -66,11 +66,12 @@ pub(crate) fn run(
         fx.extend(crate::wake::look(state, id, env));
     }
     if let Some((conn, req)) = reply {
-        // Only a start has anything to say: the peers note, to a session moa launched.
+        // Only a start has anything to say: the peers note, to an agent moa launched, which
+        // names its session in `MOA_SESSION`.
         let note = match env.kind {
-            HookKind::SessionStarted { .. } => {
-                resolve(state, env).ok().and_then(|id| peers_note(env, id))
-            }
+            HookKind::SessionStarted { .. } => resolve(state, env)
+                .ok()
+                .and_then(|id| peers_note(slot_of(env) == Some(id))),
             _ => None,
         };
         fx.push(Effect::Reply {
@@ -112,7 +113,7 @@ fn resolve(state: &State, env: &HookEnvelope) -> Result<SessionId, &'static str>
 }
 
 /// The session an event's `MOA_SESSION` names, if it is one.
-pub(crate) fn slot_of(env: &HookEnvelope) -> Option<SessionId> {
+fn slot_of(env: &HookEnvelope) -> Option<SessionId> {
     env.slot.as_deref().and_then(|s| s.parse().ok())
 }
 

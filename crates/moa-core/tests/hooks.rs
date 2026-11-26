@@ -1173,14 +1173,16 @@ fn session_start_gets_the_peers_note() {
     assert_eq!(moa_core::peers::PEERS_NOTE, PEERS_NOTE);
     // Before tmux says which pane its tab has (a fast agent's start): still moa's launch.
     assert_eq!(start_context(Some(S), Vec::new()), json!(PEERS_NOTE));
-    // Adopted: moa didn't start it, so it has no plugin and no skill to go with the note.
-    // Its hooks (an account's own) carry no `MOA_SESSION`; it is known by its conversation.
-    let adopted = PaneBinding {
+    let adopted = || PaneBinding {
         tracked: false,
         ..pane_binding(10)
     };
-    assert_eq!(start_context(None, vec![adopted]), json!(null));
-    assert_eq!(start_context(None, Vec::new()), json!(null));
+    // moa's own agent, adopted back into an untracked tab: it still carries `MOA_SESSION`,
+    // and moa's plugin with it.
+    assert_eq!(start_context(Some(S), vec![adopted()]), json!(PEERS_NOTE));
+    // Adopted, and moa didn't start it: it has no plugin and no skill to go with the note.
+    // Its hooks (an account's own) carry no `MOA_SESSION`; it is known by its conversation.
+    assert_eq!(start_context(None, vec![adopted()]), json!(null));
 }
 
 #[test]
