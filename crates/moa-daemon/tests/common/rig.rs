@@ -1,7 +1,7 @@
 //! An in-process daemon on a `/tmp` root whose moa account runs `stub-acp` (and names
 //! `fake-claude` as its Claude), and what a test reads back from it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -196,6 +196,25 @@ impl Rig {
     /// and the tab is bound to it and tagged. Returns the tab, and the rows to save before the
     /// daemon starts ([`Rig::write`]).
     pub fn agent_tab(&self, i: u32, title: &str, steps: &[FakeStep]) -> (Tab, Vec<Change>) {
+        let id = session_id(i);
+        let dir = self.tb.root().join("work").join(title);
+        std::fs::create_dir_all(&dir).expect("the agent's folder");
+        write_script(&dir, steps);
+        let conversation = conversation_id(i);
+        let (pane, pid) = self.open_agent(id, &dir, &conversation);
+        let mut rows = session_rows(id, &conversation);
+        if let Some(Change::Session(s)) = rows.first_mut() {
+            s.title = Some(title.into());
+            s.cwd = Some(dir.to_string_lossy().into_owned());
+            s.start_cwd = s.cwd.clone();
+        }
+        rows.push(self.bind(id, &pane, &pid));
+        (Tab { id, pane, dir }, rows)
+    }
+
+    /// Starts `fake-claude` on conversation `conversation` in a new tab in `dir`, as session
+    /// `id`'s agent with moa's session plugin, and tags the tab with `id`. Its pane and pid.
+    fn open_agent(&self, id: SessionId, dir: &Path, conversation: &str) -> (String, String) {
         let root = self.tb.root();
         let plugin = root.join("plugin");
         for (rel, text) in moa_agents::claude::session_plugin(&test_bin("moa")) {
@@ -203,44 +222,37 @@ impl Rig {
             std::fs::create_dir_all(path.parent().unwrap()).expect("the plugin's folders");
             std::fs::write(path, text).expect("the plugin's files");
         }
-        let id = session_id(i);
-        let dir = root.join("work").join(title);
-        std::fs::create_dir_all(&dir).expect("the agent's folder");
-        write_script(&dir, steps);
-        let env = |k: &str, v: &dyn std::fmt::Display| format!("{k}={v}");
-        let (moa_root, moa_session) = (env("MOA_ROOT", &root.display()), env("MOA_SESSION", &id));
-        let plugin = env("CLAUDE_CODE_PLUGIN_DIRS", &plugin.display());
-        let (dir_arg, claude) = (dir.to_string_lossy(), fake_claude());
-        let conversation = conversation_id(i);
-        #[rustfmt::skip]
-        let opened = self.tmux(&[
-            "new-window", "-d", "-t", "=moa:", "-c", &dir_arg,
-            "-e", &moa_root, "-e", &moa_session, "-e", "MOA_BRAIN=default", "-e", &plugin,
-            "-P", "-F", "#{pane_id} #{pane_pid}",
-            &claude.to_string_lossy(), "--session-id", &conversation,
-        ]);
+        let env = [
+            format!("MOA_ROOT={}", root.display()),
+            format!("MOA_SESSION={id}"),
+            "MOA_BRAIN=default".to_string(),
+            format!("CLAUDE_CODE_PLUGIN_DIRS={}", plugin.display()),
+        ];
+        let (dir, claude) = (dir.to_string_lossy(), fake_claude());
+        let mut args = vec!["new-window", "-d", "-t", "=moa:", "-c", &dir];
+        for var in &env {
+            args.extend(["-e", var]);
+        }
+        let claude = claude.to_string_lossy();
+        args.extend(["-P", "-F", "#{pane_id} #{pane_pid}"]);
+        args.extend([&*claude, "--session-id", conversation]);
+        let opened = self.tmux(&args);
         let (pane, pid) = opened.split_once(' ').expect("a pane and its pid");
-        self.tmux(&[
-            "set-option",
-            "-p",
-            "-t",
-            pane,
-            "@moa_session",
-            &id.to_string(),
-        ]);
+        let tag = id.to_string();
+        self.tmux(&["set-option", "-p", "-t", pane, "@moa_session", &tag]);
+        (pane.to_string(), pid.to_string())
+    }
+
+    /// Session `id`'s binding to `pane` (pid `pid`) on the terminal server, tracked: moa
+    /// started its agent.
+    fn bind(&self, id: SessionId, pane: &str, pid: &str) -> Change {
         let server = self.tmux(&[
             "display-message",
             "-p",
             "#{pid} #{start_time} #{socket_path}",
         ]);
         let server: Vec<&str> = server.splitn(3, ' ').collect();
-        let mut rows = session_rows(id, &conversation);
-        if let Some(Change::Session(s)) = rows.first_mut() {
-            s.title = Some(title.into());
-            s.cwd = Some(dir.to_string_lossy().into_owned());
-            s.start_cwd = s.cwd.clone();
-        }
-        rows.push(Change::PaneBinding(PaneBinding {
+        Change::PaneBinding(PaneBinding {
             session_id: id,
             server_pid: server[0].parse().unwrap(),
             server_start: server[1].parse().unwrap(),
@@ -249,13 +261,7 @@ impl Rig {
             pane_pid: pid.parse().unwrap(),
             bound_at: UtcMs(1),
             tracked: true,
-        }));
-        let tab = Tab {
-            id,
-            pane: pane.into(),
-            dir,
-        };
-        (tab, rows)
+        })
     }
 
     /// The `meta` row `key`'s value, if it is saved.

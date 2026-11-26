@@ -1,6 +1,10 @@
 //! Slice 7's scenarios, end to end through the real daemon: asks between sessions whose agents
 //! (`fake-claude`) run in tabs of a real terminal server and read what moa types there as
 //! Claude does, and asks to and from moa (`stub-acp`). Time moves only by `FakeTime::advance`.
+//!
+//! Each daemon runs inside its test's process, and some of what a test reads is the process's
+//! own (`launches`, counted by `moa_platform::spawn`): run them as nextest does, one test per
+//! process. Several in one libtest process see each other's launches and daemons.
 
 mod common;
 
@@ -171,6 +175,41 @@ impl Cockpit {
             .unwrap_or_else(|| panic!("ask #{id} never became {status}: {:?}", self.ask(id)));
     }
 
+    /// Waits until ask `id` is typed (`sent`), lets the core finish that input (the Enter's
+    /// timer is armed after the claim's commit), then moves time on to the Enter.
+    async fn typed_then_enter(&self, id: i64) {
+        self.wait_ask(id, "sent");
+        self.up.core.barrier().await;
+        self.rig.time.advance(enter());
+    }
+
+    /// When ask `id` was claimed, as saved: `None` until it is typed.
+    fn claimed_at(&self, id: i64) -> Option<i64> {
+        self.rig
+            .store()
+            .conn()
+            .query_row("SELECT claimed_at FROM asks WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// The `you` rows' bodies and whether each was automatic, oldest first.
+    fn you_rows(&self) -> Vec<(Value, bool)> {
+        let store = self.rig.store();
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT body, automatic FROM feed WHERE kind = 'you' ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))
+            .unwrap()
+            .map(|row| {
+                let (body, automatic) = row.unwrap();
+                (serde_json::from_str(&body).expect("a JSON body"), automatic)
+            })
+            .collect()
+    }
+
     /// How many asks are saved.
     fn asks(&self) -> i64 {
         self.rig
@@ -226,8 +265,7 @@ async fn kite_asks_harbor_and_gets_the_answer() {
     let c = Cockpit::new(&[], &[FakeStep::Hang], &answers(RENEWED)).await;
     let mut kite = c.up.session_client(c.kite.id);
     let req = kite.send("ask", ask("Harbor", DOMAIN));
-    c.wait_ask(1, "sent");
-    c.rig.time.advance(enter());
+    c.typed_then_enter(1).await;
 
     let reply = kite.reply(req);
     assert_eq!(answer(&reply), RENEWED);
@@ -257,11 +295,14 @@ async fn an_ask_waits_for_a_busy_peer() {
     c.wait_ask(1, "pending");
     c.rig.time.advance(enter());
     c.up.core.barrier().await;
+    // Never claimed, so never typed: moa types an ask only once its claim is saved (A5).
     assert_eq!(c.ask(1).unwrap().0, "pending", "typed into a busy tab");
+    assert_eq!(c.claimed_at(1), None);
+    let prompt = c.session(&c.harbor).1;
+    assert_eq!(prompt.as_deref(), Some("light the Lantern"));
 
     c.harbor.open("done");
-    c.wait_ask(1, "sent");
-    c.rig.time.advance(enter());
+    c.typed_then_enter(1).await;
     assert_eq!(answer(&kite.reply(req)), RENEWED);
     c.up.wait_queued(1);
     c.up.stop().await;
@@ -275,8 +316,7 @@ async fn no_receipt_fails_the_ask() {
     c.rig.tmux(&["copy-mode", "-t", &c.harbor.pane]);
     let mut kite = c.up.session_client(c.kite.id);
     let req = kite.send("ask", ask("Harbor", DOMAIN));
-    c.wait_ask(1, "sent");
-    c.rig.time.advance(enter());
+    c.typed_then_enter(1).await;
     c.up.core.barrier().await;
     assert_eq!(c.ask(1).unwrap().0, "sent");
 
@@ -319,6 +359,7 @@ async fn a_pending_ask_is_dropped_and_a_sent_one_waits_again() {
         json!({"to": "Harbor", "text": DOMAIN, "timeout_s": 1}),
     );
     c.wait_ask(2, "sent");
+    c.up.core.barrier().await;
     // The Enter goes, and the wait runs out, before Harbor answers.
     c.rig.time.advance(Duration::from_secs(1));
     let reply = kite.reply(req);
@@ -432,6 +473,14 @@ async fn kite_asks_moa_between_its_turns() {
         card,
         Some(json!({"what": "ask", "text": format!("Kite · #1: {DOMAIN}")}))
     );
+    // The ask's prompt is automatic, and its row says whose ask it answers: the console shows
+    // `· moa answers Kite's ask #1` from it (moa-view's `ask_for_moa`).
+    let you = c.you_rows();
+    assert_eq!(you.len(), 2, "{you:?}");
+    assert!(!you[0].1, "the user's prompt is the user's");
+    assert!(you[1].1, "the ask's prompt is automatic");
+    assert_eq!(you[1].0["ask"], json!({"id": 1, "from": "Kite"}), "{you:?}");
+    assert_eq!(you[1].0["text"], prompts[1], "{you:?}");
     c.up.stop().await;
 }
 
@@ -464,8 +513,7 @@ async fn moa_asks_kite() {
         "console.prompt",
         json!({"text": "is Kite's build green?", "wait": true}),
     );
-    c.wait_ask(1, "sent");
-    c.rig.time.advance(enter());
+    c.typed_then_enter(1).await;
 
     assert_eq!(answer(&you.reply(turn)), "Kite says it's green");
     let ran = c.rig.wait_logged("run.done");
@@ -508,8 +556,7 @@ async fn asks_survive_a_restart() {
     assert_eq!(c.ask(2).unwrap().1.as_deref(), Some(NO_RECEIPT));
 
     c.harbor.open("done");
-    c.wait_ask(1, "sent");
-    c.rig.time.advance(enter());
+    c.typed_then_enter(1).await;
     let mut moa = c.up.moa_client();
     assert_eq!(answer(&moa.call("reply", json!({"id": 1}))), RENEWED);
     assert_eq!(
@@ -527,8 +574,7 @@ async fn an_ask_launches_nothing() {
     let before = c.launches();
     let mut kite = c.up.session_client(c.kite.id);
     let req = kite.send("ask", ask("Harbor", DOMAIN));
-    c.wait_ask(1, "sent");
-    c.rig.time.advance(enter());
+    c.typed_then_enter(1).await;
     assert_eq!(answer(&kite.reply(req)), RENEWED);
     assert_eq!(c.launches(), before);
     c.up.stop().await;
