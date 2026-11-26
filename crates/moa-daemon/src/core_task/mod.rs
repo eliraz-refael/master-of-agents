@@ -106,6 +106,10 @@ pub struct Stats {
     pub refused_hooks: AtomicU64,
     /// Drains of the hook spool that have run, at start and after.
     pub spool_drains: AtomicU64,
+    /// New builds of the daemon's program that said their build, and so are upgraded into
+    /// (`follow`); and those that couldn't, skipped as half-written.
+    pub builds_found: AtomicU64,
+    pub builds_skipped: AtomicU64,
     /// The kind of every input stepped, in order.
     #[cfg(test)]
     pub(crate) stepped: Mutex<Vec<&'static str>>,

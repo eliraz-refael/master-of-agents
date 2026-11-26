@@ -139,11 +139,6 @@ impl Rig {
         }
     }
 
-    /// The daemon's log so far.
-    pub fn log(&self) -> String {
-        std::fs::read_to_string(self.paths.log("default")).unwrap_or_default()
-    }
-
     /// Starts the daemon and waits until it is ready.
     pub async fn start(&self) -> Up {
         self.start_from(None).await

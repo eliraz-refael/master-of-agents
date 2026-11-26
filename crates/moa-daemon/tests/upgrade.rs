@@ -9,6 +9,7 @@ mod common;
 
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use common::Client;
 use common::hooks::{ago, hook_notice};
@@ -47,9 +48,16 @@ fn wait_waiting(up: &Up) {
     .unwrap_or_else(|| panic!("the upgrade never waited: {}", status_upgrade(up)));
 }
 
-/// How many times the log says a new build was found.
-fn new_builds(rig: &Rig) -> usize {
-    rig.log().matches("is a new build").count()
+/// How many new builds of its program the daemon found (`found`) or skipped as
+/// half-written. Read from its counters, not its log: the log is the process's first
+/// daemon's, and a test may share its process with others.
+fn builds(up: &Up, found: bool) -> u64 {
+    let stats = up.core.stats();
+    let n = match found {
+        true => &stats.builds_found,
+        false => &stats.builds_skipped,
+    };
+    n.load(Ordering::SeqCst)
 }
 
 /// `moa upgrade`: the daemon hands its listening socket to its next image. A connection from
@@ -182,12 +190,9 @@ async fn a_half_written_binary_is_skipped() {
     let rig = Rig::new(&[]).with_exe();
     let up = rig.start().await;
     rig.half_rebuild();
-    let skipped = format!(
-        "upgrade skipped: {} isn't a whole moa yet",
-        rig.exe().display()
-    );
-    wait_for(WAIT, || rig.log().contains(&skipped).then_some(()))
-        .unwrap_or_else(|| panic!("no skipped line in the log:\n{}", rig.log()));
+    wait_for(WAIT, || (builds(&up, false) == 1).then_some(()))
+        .expect("the half-written program is skipped");
+    assert_eq!(builds(&up, true), 0);
     assert!(!up.handed_over());
     assert_eq!(status_upgrade(&up), Value::Null);
 
@@ -213,8 +218,7 @@ async fn rebuilds_while_moa_thinks_exec_once() {
     rig.rebuild(1);
     wait_waiting(&up);
     rig.rebuild(2);
-    wait_for(WAIT, || (new_builds(&rig) == 2).then_some(()))
-        .unwrap_or_else(|| panic!("the second build was never found:\n{}", rig.log()));
+    wait_for(WAIT, || (builds(&up, true) == 2).then_some(())).expect("the second build is found");
     assert!(!up.handed_over());
 
     rig.open("g1");

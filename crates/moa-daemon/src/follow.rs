@@ -11,6 +11,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use moa_core::upgrade::Why;
@@ -115,9 +116,11 @@ impl Follow {
         if probe(&self.exe, &build).await {
             self.probed = Some(build.clone());
             tracing::info!("{exe} is a new build ({build}); it takes over between moa's turns");
+            core.stats().builds_found.fetch_add(1, Ordering::SeqCst);
             core.want_upgrade(Why::Rebuilt);
         } else {
             tracing::warn!("upgrade skipped: {exe} isn't a whole moa yet");
+            core.stats().builds_skipped.fetch_add(1, Ordering::SeqCst);
         }
     }
 }
