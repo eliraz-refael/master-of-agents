@@ -1141,18 +1141,40 @@ fn a_pane_exit_from_an_old_generation_changes_nothing() {
     assert_eq!(persists(&fx), 0);
 }
 
-#[test]
-fn session_start_reply_carries_the_peers_note() {
-    let mut st = seeded();
+/// A13's note, exactly as a moa-launched session gets it.
+const PEERS_NOTE: &str = "\
+moa: you can message the other agents in this cockpit, and moa itself.
+- `moactl peers` lists them. `moactl ask NAME \"TEXT\"` asks one and waits for the reply,
+  up to 9 minutes: run it with a Bash timeout of 600000 ms.
+- \"no reply yet\" means it's still open: `moactl reply ID` waits again. `moactl asks`
+  lists recent asks.
+- A message starting `[moa · message from NAME · ask #N]` is an ask to you: your reply
+  that turn goes back to NAME as the answer.";
+
+/// The `context` a `SessionStart` of the session bound by `bindings` is answered with.
+fn start_context(bindings: Vec<PaneBinding>) -> serde_json::Value {
+    let mut st = seeded_with(bindings);
     let fx = feed_replying(
         &mut st,
         started(1, 1000, StartSource::Startup),
         Some((ConnId(3), ReqId(9))),
     );
-    assert_eq!(
-        reply_of(&fx).unwrap().as_ref().unwrap().data,
-        json!({"context": null})
-    );
+    reply_of(&fx).unwrap().as_ref().unwrap().data["context"].clone()
+}
+
+#[test]
+fn session_start_gets_the_peers_note() {
+    // moa launched it: its tab's binding is tracked, and its agent has moa's plugin.
+    assert_eq!(start_context(vec![pane_binding(10)]), json!(PEERS_NOTE));
+    assert_eq!(moa_core::peers::PEERS_NOTE, PEERS_NOTE);
+    // Adopted: moa didn't start it, so it has no plugin and no skill to go with the note.
+    let adopted = PaneBinding {
+        tracked: false,
+        ..pane_binding(10)
+    };
+    assert_eq!(start_context(vec![adopted]), json!(null));
+    // Not bound to a tab at all: nothing says moa launched it.
+    assert_eq!(start_context(Vec::new()), json!(null));
 }
 
 #[test]

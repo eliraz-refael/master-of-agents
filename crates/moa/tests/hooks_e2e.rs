@@ -445,14 +445,25 @@ fn out_of_order_hooks_never_regress() {
     assert_eq!(ls_display(&r.tb, &s.id).as_deref(), Some("done"));
 }
 
-/// The peers note is `None` until slice 7, so the agent gets nothing; slice 7 changes this.
+/// A session `moactl open` started gets the peers note as its SessionStart context.
 #[test]
 fn session_start_context_reaches_the_agent() {
     let r = rig();
     let s = r.open("e", &[hook("SessionStart", json!({})), FakeStep::Hang]);
     let file = s.dir.join(".fake-claude.context");
-    let context = wait_for(LIMIT, || fs::read_to_string(&file).ok());
-    assert_eq!(context.as_deref(), Some(""));
+    // The hook's output is one JSON line; it is whole once its line ends.
+    let context = wait_for(LIMIT, || {
+        fs::read_to_string(&file).ok().filter(|t| t.ends_with('\n'))
+    })
+    .expect("the start's output");
+    let out: Value = serde_json::from_str(context.trim_end()).unwrap();
+    assert_eq!(
+        out["hookSpecificOutput"],
+        json!({
+            "hookEventName": "SessionStart",
+            "additionalContext": moa_core::peers::PEERS_NOTE,
+        })
+    );
 }
 
 #[test]

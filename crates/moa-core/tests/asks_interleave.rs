@@ -103,6 +103,9 @@ struct World {
     holding: [Option<AskId>; 3],
     /// The session whose turn this step ends, and the answer its message gives.
     stop: Option<(usize, String)>,
+    /// The answers whose Stop's commit was refused, by ask: held, and saved once writes are
+    /// back (a restart forgets them).
+    held: BTreeMap<AskId, String>,
 }
 
 impl World {
@@ -146,6 +149,7 @@ impl World {
             refused: false,
             holding: [None; 3],
             stop: None,
+            held: BTreeMap::new(),
         };
         w.now += 1;
         let fx = w.r.link_up(w.now);
@@ -252,6 +256,16 @@ impl World {
                 } else {
                     message.clone()
                 };
+                // Only the ask this Stop answers: the one its turn holds, received by it.
+                let me = Some(AskTarget::Session(sid(SESSIONS[who])));
+                let answers = self.holding[who].filter(|id| {
+                    self.last
+                        .get(id)
+                        .is_some_and(|a| a.status == AskStatus::Received && a.to_session == me)
+                });
+                if let (true, Some(id)) = (self.refused, answers) {
+                    self.held.insert(id, answer.clone());
+                }
                 self.stop = Some((who, answer));
                 self.r.stopped(at, SESSIONS[who], &message)
             }
@@ -290,6 +304,7 @@ impl World {
             Step::Restart => {
                 self.waiting.clear();
                 self.armed = None;
+                self.held.clear();
                 let (seq, req) = (self.r.seq, self.r.req);
                 let (r, fx) = Rig::started_at(self.store.load_snapshot().unwrap(), at);
                 self.r = r;
@@ -371,7 +386,8 @@ impl World {
     }
 
     /// A1's moves only; asks to a peer claimed oldest first; an answer only from the Stop of
-    /// the turn that held its marker, with that Stop's message; one ask in flight per peer; no
+    /// the turn that held its marker, with that Stop's message (then, or once writes are back
+    /// when its commit was refused); one ask in flight per peer; no
     /// two agents waiting on each other; a typed ask taken or failed by its 20 s.
     fn check(&mut self) -> Result<(), TestCaseError> {
         use AskStatus::*;
@@ -387,7 +403,15 @@ impl World {
                 });
                 prop_assert!(older.is_none(), "ask #{} went before {:?}", a.id, older);
             }
-            if a.status == Answered && was != Some(Answered) {
+            // An answer whose Stop's commit was refused, saved once writes are back; or, when
+            // a later Stop of the same turn came first, that Stop's.
+            let answered = a.status == Answered && was != Some(Answered);
+            let held = match answered {
+                true => self.held.remove(&a.id),
+                false => None,
+            };
+            let from_held = held.is_some() && a.reply == held;
+            if answered && !from_held {
                 // By the end of the turn that held its marker, with that turn's message.
                 let Some((who, answer)) = &self.stop else {
                     return Err(TestCaseError::fail(format!(

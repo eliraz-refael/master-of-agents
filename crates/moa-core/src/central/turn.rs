@@ -8,12 +8,14 @@
 
 use serde_json::{Value, json};
 
+use super::channel::Source;
 use super::feed::{
     self, body_text, kind, permission_body, plan_body, text_body, tool_body, tool_input,
 };
 use super::wire::{AcpCmd, PermKind, PermOption, StopReason, Update};
 use super::{Asking, Moa, Phase, account, answer, chosen, warn};
 use crate::Now;
+use crate::asks;
 use crate::change::Change;
 use crate::core::{Tx, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel};
@@ -227,10 +229,11 @@ fn asked_row(moa: &Moa, id: i64) -> Option<&FeedEntry> {
 }
 
 /// Turn `prompt` ended, as `result` says: whoever waits hears moa's words, or why it ended
-/// early (a `system` line, and an `error` line when it failed). A turn that didn't end
-/// normally (cancelled, stopped early, failed) cancels its running tool calls. An end that
-/// comes after moa's agent went away says nothing more, the agent's going said it, but
-/// cancels the tool calls late updates started.
+/// early (a `system` line, and an `error` line when it failed). An ask's turn answers the ask
+/// the same way: `end_turn` with moa's words, any other end failing it with why (A9 d). A
+/// turn that didn't end normally (cancelled, stopped early, failed) cancels its running tool
+/// calls. An end that comes after moa's agent went away says nothing more, the agent's going
+/// said it (and failed its ask), but cancels the tool calls late updates started.
 pub(super) fn ended(
     state: &mut State,
     now: &Now,
@@ -306,6 +309,13 @@ pub(super) fn ended(
         Err(why) => fold_in(&mut fx, account::failed(state, now, why)),
     }
     fx.extend(cmds.into_iter().map(Effect::Acp));
+    if let Source::Ask(id) = turn.source {
+        let said = match (&result, &reply) {
+            (Ok(StopReason::EndTurn), Ok(done)) => Ok(done.text.as_str()),
+            (_, Ok(Done { text, .. }) | Err(OpError(text))) => Err(text.as_str()),
+        };
+        fold_in(&mut fx, asks::moa_ended(state, now, id, said));
+    }
     fx.extend(answer(turn.waiter, reply));
     fx
 }

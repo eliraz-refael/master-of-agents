@@ -1,7 +1,7 @@
 //! The one channel (K3, K4): what goes to moa's agent, from whom ([`Source`]), and when. Your
-//! prompts go through it, and so do moa's automatic ones: the day's opening once you are here
-//! (D3), the wake-up, which carries the session reports once they settle, and your yes to a
-//! suggestion with nothing to run (D5).
+//! prompts go through it, and so do moa's automatic ones: an agent's ask to moa, first (A9),
+//! the day's opening once you are here (D3), the wake-up, which carries the session reports
+//! once they settle, and your yes to a suggestion with nothing to run (D5).
 //! Each automatic source goes only while [`may_send`] says so. What a prompt carries is
 //! chosen at its commit ([`super::reports::batch`], [`State::yeses`]), and that commit marks
 //! it delivered: each report and each yes reaches moa once.
@@ -11,9 +11,11 @@ use serde_json::json;
 use super::{Phase, launch, opening, send};
 use crate::Now;
 use crate::UtcMs;
+use crate::asks;
 use crate::change::Change;
 use crate::core::{Tx, fold_in};
 use crate::effect::{Effect, TimerKey, rearm};
+use crate::model::AskId;
 use crate::op::{Done, OpError};
 use crate::state::State;
 
@@ -31,6 +33,9 @@ pub enum Source {
     Wake,
     /// Your yes to a suggestion with nothing to run, which waits for moa (D5).
     Yes,
+    /// An agent's ask to moa (A9): a prompt of its own, carrying only the ask, whose turn's
+    /// end is the answer.
+    Ask(AskId),
 }
 
 /// Whether moa reads session reports on its own: `meta` `moa.auto` isn't `off`.
@@ -125,21 +130,26 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     ));
 }
 
-/// The next automatic prompt, and when it is due: the day's opening (while due today) and a
-/// waiting yes at once, the opening first, a wake-up when [`wake_due`] says, and none sooner
-/// than a gap after an automatic prompt failed ([`super::Moa::failed_at`]). The sooner goes;
-/// whichever it is carries what the others would. `None` while none waits, or moa's agent
-/// isn't [`free`].
+/// The next automatic prompt, and when it is due: the oldest ask to moa at once, first, held
+/// by neither `/auto` nor the gap after a failed prompt (someone waits for it, and an ask
+/// whose own prompt fails ends, so nothing loops); then the day's opening (while due today)
+/// and a waiting yes at once, in that order, and a wake-up when [`wake_due`] says, none of
+/// them sooner than a gap after an automatic prompt failed ([`super::Moa::failed_at`]). The
+/// sooner goes; an ask carries only itself (A9), and whichever else it is carries what the
+/// others would. `None` while none waits, or moa's agent isn't [`free`].
 fn due(state: &State, now: &Now) -> Option<(Source, UtcMs)> {
     if !free(state) {
         return None;
+    }
+    let at_once = UtcMs(i64::MIN);
+    if let Some(id) = asks::next_for_moa(state) {
+        return Some((Source::Ask(id), at_once));
     }
     let gap = state.config().moa.wake_gap_ms;
     let held = state
         .central
         .failed_at
         .map_or(i64::MIN, |f| f.0.saturating_add(gap));
-    let at_once = UtcMs(i64::MIN);
     let brief = opening::due_today(state, now).then_some((Source::Brief, at_once));
     let yes = state.yeses().next().map(|_| (Source::Yes, at_once));
     let wake = wake_due(state).map(|at| (Source::Wake, at));

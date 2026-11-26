@@ -1019,6 +1019,9 @@ impl<'a> Draw<'a> {
                     // An automatic prompt: its text is what it carried (D1), and it says so
                     // under the header as soon as it is sent.
                     let mut said = Vec::new();
+                    if let Some((id, from)) = ask(row) {
+                        said.push(format!("moa answers {from}'s ask #{id}"));
+                    }
                     if opening(row) {
                         said.push("moa opens the day".to_string());
                     }
@@ -1381,13 +1384,14 @@ impl<'a> Draw<'a> {
     }
 
     /// A card moa's core wrote (K7), drawn as a command's card is: `▸ moa's turn was stuck`,
-    /// `▸ moa's account failed`, or `▸ moa` for a card this build doesn't know (Warn), then
-    /// its text. `None` without a text.
+    /// `▸ moa's account failed`, `▸ an ask for moa` (A9), or `▸ moa` for a card this build
+    /// doesn't know (Warn), then its text. `None` without a text.
     fn core_card(&mut self, row: &FeedRow, room: usize) -> Option<Vec<Line>> {
         let text = row.body.get("text")?.as_str()?;
         let head = match row.body.get("what").and_then(Value::as_str) {
             Some("watchdog") => "moa's turn was stuck",
             Some("account") => "moa's account failed",
+            Some("ask") => "an ask for moa",
             _ => "moa",
         };
         let warn = |s: &str| Span::new(s, Tone::Warn);
@@ -1573,6 +1577,14 @@ fn carried(row: &FeedRow) -> Option<u64> {
         .get("reports")
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
+}
+
+/// The ask an automatic `you` row answers (A9), by id, and who asked.
+fn ask(row: &FeedRow) -> Option<(i64, String)> {
+    let ask = row.body.get("ask")?;
+    let id = ask.get("id")?.as_i64()?;
+    let from = ask.get("from")?.as_str()?;
+    Some((id, clean(from)))
 }
 
 /// Whether a `you` row opened the day (D1, D3).

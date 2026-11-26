@@ -1,0 +1,60 @@
+---
+name: moa-peers
+description: "Ask another agent in this moa cockpit (or moa itself) something only it knows, and answer an ask that comes to you as a message starting `[moa · message from`."
+---
+
+# Asking your peers
+
+moa: you can message the other agents in this cockpit, and moa itself.
+- `moactl peers` lists them. `moactl ask NAME "TEXT"` asks one and waits for the reply,
+  up to 9 minutes: run it with a Bash timeout of 600000 ms.
+- "no reply yet" means it's still open: `moactl reply ID` waits again. `moactl asks`
+  lists recent asks.
+- A message starting `[moa · message from NAME · ask #N]` is an ask to you: your reply
+  that turn goes back to NAME as the answer.
+
+## When to ask
+
+- Ask only for what only that agent knows: what it's doing, what it decided, what it found
+  in its own work. What you can read yourself (files, git, the web), read yourself.
+- Ask moa for the big picture: the user's tasks, priorities, and what the other sessions
+  are doing.
+- Don't ask to hand work over or to chat. An ask takes the other agent's whole turn.
+
+## How to ask
+
+- `moactl peers` shows each peer's handle, label, state, folder and when it was last
+  asked. NAME is a handle, a session's title, or `moa`.
+- Keep the question short and self-contained: the other agent hasn't seen your
+  conversation. Say what you need and why in a sentence or two, with full paths. An ask is
+  at most 8000 characters; for more, write it to a file and point to the file.
+- Claude Code's Bash tool stops a command after 2 minutes unless you give it a longer
+  timeout, so always give the Bash call that runs `moactl ask` or `moactl reply` a timeout
+  of 600000 ms. For example:
+
+  ```
+  moactl ask Kite "Is the domain for the landing page renewed? I'm about to deploy it."
+  ```
+
+- The answer is printed when it comes. An ask waits 540 seconds by default; `--timeout S`
+  changes that (1 to 3600 seconds). Keep it under 600, so the Bash call outlives it.
+- A peer takes one ask at a time, when it's idle, oldest first. A busy peer may take a
+  while to answer.
+- An answer of `no reply yet from NAME; …` means the ask is still open: run
+  `moactl reply ID` (it takes `--timeout` too) to wait again.
+- An error means no answer will come: the ask was dropped (the peer stayed busy), it
+  failed (the reason follows `failed:`), or it was refused (the peer isn't running, or
+  it's waiting on your answer to one of its asks: answer that first). Don't retry in a
+  loop: carry on without it, or tell the user.
+- `moactl asks` lists your recent asks, to you and from you. `--json` on `peers`, `ask`,
+  `reply` and `asks` gives JSON.
+
+## Answering an ask
+
+- A message starting `[moa · message from NAME · ask #N]` is an ask from NAME. Answer it
+  in one reply, that turn: your final message of the turn goes back to NAME as the
+  answer, so put the whole answer in it.
+- Answer what you know now. Don't start long work for it; if the user should decide or
+  know, say so in the answer.
+- Don't ask NAME anything back while you answer: moa refuses an ask to an agent waiting on
+  yours.

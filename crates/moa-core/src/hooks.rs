@@ -66,7 +66,7 @@ pub(crate) fn run(
         fx.extend(crate::wake::look(state, id, env));
     }
     if let Some((conn, req)) = reply {
-        // Only a start has anything to say; slice 7 fills the note.
+        // Only a start has anything to say: the peers note, to a session moa launched.
         let note = match env.kind {
             HookKind::SessionStarted { .. } => resolve(state, env)
                 .ok()
@@ -373,11 +373,12 @@ pub(crate) fn apply_held(
     };
     let mut changes = applied_changes(state, tx, id, &after, env);
     changes.insert(0, Change::Session(*after));
-    tx.commit(state, changes)
+    asks::commit_holding(state, tx, changes)
 }
 
 /// Commits, and only then remembers the key. A refused write drops the event here; the
-/// daemon spools hooks while writes are refused, so the core is not asked for them then.
+/// daemon spools hooks while writes are refused, so the core is not asked for them then. The
+/// asks it ended are held to be saved once writes allow ([`asks::commit_holding`]).
 fn commit(
     state: &mut State,
     tx: &mut Tx,
@@ -386,7 +387,7 @@ fn commit(
     applied: Applied,
 ) -> Applied {
     // Nothing to write is nothing that can be refused.
-    if !changes.is_empty() && tx.commit(state, changes).is_err() {
+    if !changes.is_empty() && asks::commit_holding(state, tx, changes).is_err() {
         return Applied::Dropped("a hook event was not saved");
     }
     state.remember_hook(key);
@@ -533,7 +534,7 @@ pub(crate) fn lost_agent(state: &mut State, tx: &mut Tx, id: SessionId, also: Ve
         changes.insert(0, Change::Session(asleep(session, tx.wall)));
     }
     changes.extend(asks::peer_ended(state, id, tx.wall));
-    changes.is_empty() || tx.commit(state, changes).is_ok()
+    changes.is_empty() || asks::commit_holding(state, tx, changes).is_ok()
 }
 
 fn source_word(source: StartSource) -> &'static str {

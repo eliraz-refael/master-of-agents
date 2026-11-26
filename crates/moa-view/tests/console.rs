@@ -750,6 +750,66 @@ fn cards_draw_as_cards() {
     );
 }
 
+/// A9: an ask to moa is a card, `▸ an ask for moa` with who asked and what, then moa's turn
+/// on its own, saying whose ask it answers (Dim): `· moa answers Kite's ask #12`; the hidden
+/// prompt itself is never drawn. At 40 and 100.
+#[test]
+fn an_ask_for_moa_draws() {
+    let (_, ctx) = lantern();
+    let card = row(
+        1,
+        "card",
+        json!({"what": "ask", "text": "Kite · #12: Is the domain renewed?"}),
+        None,
+    );
+    let mut asked = row(
+        2,
+        "you",
+        json!({
+            "text": "(moa · Kite asks you, ask #12, not typed by the user)\nIs the domain \
+                     renewed?\n\nYour reply this turn goes back to Kite as the answer.",
+            "ask": {"id": 12, "from": "Kite"},
+        }),
+        None,
+    );
+    asked.automatic = true;
+    let answer = row(3, "moa", json!({"text": "Renewed in May."}), None);
+    let rows = vec![card, asked.clone(), answer];
+    for w in [40, 100] {
+        let view = only(rows.clone(), &ctx, w);
+        assert_fits(&view.lines, w);
+        insta::assert_snapshot!(format!("ask_for_moa@{w}"), debug_lines(&view.lines));
+    }
+    let lines: Vec<String> = only(rows, &ctx, 100).lines.iter().map(Line::text).collect();
+    assert!(lines.contains(&s("│ ▸ an ask for moa")), "{lines:#?}");
+    assert!(
+        lines.contains(&s("│ · moa answers Kite's ask #12")),
+        "{lines:#?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("not typed")), "{lines:#?}");
+    // A body this build can't read says nothing of an ask.
+    asked.body["ask"] = json!({"id": "twelve"});
+    let lines: Vec<String> = only(vec![asked], &ctx, 100)
+        .lines
+        .iter()
+        .map(Line::text)
+        .collect();
+    assert!(!lines.iter().any(|l| l.contains("answers")), "{lines:#?}");
+    for w in 1..=40 {
+        let view = only(
+            vec![row(
+                1,
+                "card",
+                json!({"what": "ask", "text": "Kite · #12: Is the domain renewed?"}),
+                None,
+            )],
+            &ctx,
+            w,
+        );
+        assert_fits(&view.lines, w);
+    }
+}
+
 /// moa's state row: `phase`, today's thread, `queued` reports waiting, `auto`.
 fn moa(phase: &str, queued: u32, auto: bool) -> moa_core::publish::MoaRow {
     moa_core::publish::MoaRow {

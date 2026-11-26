@@ -66,3 +66,41 @@ fn only_session_start_waits() {
         }
     }
 }
+
+/// The `moa-peers` skill's file, as the plugin writes it.
+fn skill() -> String {
+    let files = session_plugin(Path::new("/opt/moa/bin/moa"));
+    let (_, text) = files
+        .iter()
+        .find(|(p, _)| *p == "skills/moa-peers/SKILL.md")
+        .expect("the skill is in the plugin");
+    text.clone()
+}
+
+#[test]
+fn the_plugin_ships_the_skill() {
+    let text = skill();
+    let rest = text.strip_prefix("---\n").expect("frontmatter first");
+    let (front, body) = rest.split_once("\n---\n").expect("frontmatter closed");
+    let lines: Vec<&str> = front.lines().collect();
+    assert_eq!(lines.len(), 2, "{front}");
+    assert_eq!(lines[0], "name: moa-peers");
+    let description = lines[1]
+        .strip_prefix("description: ")
+        .expect("a description");
+    // A double-quoted YAML scalar, so its backticks and `[` read as text: nothing inside
+    // that would end or escape it.
+    let inner = description
+        .strip_prefix('"')
+        .and_then(|d| d.strip_suffix('"'))
+        .expect("a quoted description");
+    assert!(!inner.contains(['"', '\\']), "{inner}");
+    assert!(!inner.trim().is_empty());
+    assert!(!body.trim().is_empty());
+}
+
+/// The skill says what the SessionStart note says, word for word, and more.
+#[test]
+fn the_skill_repeats_the_note() {
+    assert!(skill().contains(moa_core::peers::PEERS_NOTE));
+}

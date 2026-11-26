@@ -11,6 +11,7 @@ use std::time::Duration;
 use moa_core::cockpit::{spawn_cmds, spawn_tags};
 use moa_core::config::{BrainName, Config};
 use moa_core::panel::View;
+use moa_core::publish::Topic;
 use moa_core::state::{Deps, PanelLaunch, State};
 use moa_core::tmux::cmd::literal_format;
 use moa_core::tmux::ids::{PaneId, WindowId};
@@ -145,6 +146,18 @@ fn ensure(c: &mut Client) -> Value {
 fn within_2s(what: &str, mut ok: impl FnMut() -> bool) {
     let done = wait_for(Duration::from_secs(2), || ok().then_some(()));
     assert!(done.is_some(), "{what} within 2 s");
+}
+
+/// Waits (up to 10 s) for every terminal tmux lists to be recorded, and at least one: each
+/// record is a commit, sent to the store before the model shows it.
+fn terminals_recorded(rig: &Rig) {
+    let model = rig.core.model();
+    let done = wait_for(Duration::from_secs(10), || {
+        let rows = model.borrow().topics.get(&Topic::Terms).cloned()?;
+        let recorded = |r: &Value| r["id"].as_i64().is_some_and(|id| id > 0);
+        (!rows.is_empty() && rows.values().all(recorded)).then_some(())
+    });
+    assert!(done.is_some(), "the terminals are recorded within 10 s");
 }
 
 /// Waits (up to 10 s) for `@moa_status` to be `want`: the counts may wait for the
@@ -307,6 +320,9 @@ async fn a_failed_commit_keeps_the_link_working() {
     let (rig, mut c) = adopted().await;
     let want = rig.counts_text();
     status_shows(&rig, "@moa_status shows the counts", &want);
+    // The server's first shell is recorded in a commit of its own after the reconcile's,
+    // which the counts don't show: the fault must fall on the archive, not on it.
+    terminals_recorded(&rig);
     rig.tmux(&["set-option", "-g", "@moa_status", "junk"]);
     rig.core.store_fault(Fault::FailNextCommit);
     let r = c.call("session.archive", json!({"qs": [ids::S2_IDLE]}));

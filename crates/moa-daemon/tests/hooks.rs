@@ -794,11 +794,13 @@ async fn the_daemon_writes_the_plugin_once() {
     let files = [
         dir.join(".claude-plugin/plugin.json"),
         dir.join("hooks/hooks.json"),
+        dir.join("skills/moa-peers/SKILL.md"),
     ];
     for f in &files {
         assert_eq!(mode(f), 0o600, "{f:?}");
         assert_eq!(mode(f.parent().unwrap()), 0o700, "{f:?}");
     }
+    assert_eq!(mode(&dir.join("skills")), 0o700);
     assert_eq!(mode(&dir), 0o700);
     // `write_if_changed` writes a new file and renames it into place: the same inode is the
     // same file, never rewritten.
@@ -835,14 +837,20 @@ async fn a_plugin_folder_others_can_reach_is_closed_to_them() {
     let d = boot_with(
         |paths| {
             let hooks = paths.session_plugin().join("hooks");
+            let skills = paths.session_plugin().join("skills");
             fs::create_dir_all(&hooks).unwrap();
+            fs::create_dir_all(&skills).unwrap();
             fs::set_permissions(paths.session_plugin(), fs::Permissions::from_mode(0o700)).unwrap();
             fs::set_permissions(&hooks, fs::Permissions::from_mode(0o755)).unwrap();
+            // A folder between the plugin's and a file's is checked too.
+            fs::set_permissions(&skills, fs::Permissions::from_mode(0o755)).unwrap();
         },
         |_| {},
     )
     .await;
-    let hooks = d.paths.session_plugin().join("hooks");
-    let mode = fs::metadata(&hooks).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o700);
+    for folder in ["hooks", "skills"] {
+        let path = d.paths.session_plugin().join(folder);
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{folder}");
+    }
 }

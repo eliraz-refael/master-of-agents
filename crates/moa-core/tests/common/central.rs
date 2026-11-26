@@ -350,7 +350,12 @@ pub fn fire(st: &mut State, ms: i64) -> Vec<Effect> {
 
 /// moa's agent answers at `ms` what `fx` asks of it: it starts, and opens a new thread, as
 /// each is asked for. Every effect, `fx`'s first.
-pub fn play(st: &mut State, ms: i64, mut fx: Vec<Effect>) -> Vec<Effect> {
+pub fn play(st: &mut State, ms: i64, fx: Vec<Effect>) -> Vec<Effect> {
+    play_at(st, super::at(UtcMs(ms)), fx)
+}
+
+/// [`play`] at `now`.
+pub fn play_at(st: &mut State, now: Now, mut fx: Vec<Effect>) -> Vec<Effect> {
     let mut i = 0;
     while i < fx.len() {
         let heard = match &fx[i] {
@@ -365,7 +370,7 @@ pub fn play(st: &mut State, ms: i64, mut fx: Vec<Effect>) -> Vec<Effect> {
             _ => None,
         };
         if let Some(input) = heard {
-            let more = hear_at(st, super::at(UtcMs(ms)), input);
+            let more = hear_at(st, now.clone(), input);
             fx.extend(more);
         }
         i += 1;
