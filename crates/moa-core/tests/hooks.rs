@@ -469,7 +469,7 @@ fn a_session_start_request_is_answered_after_the_commit() {
         Some((ConnId(3), ReqId(9))),
     );
     let done = reply_of(&fx).unwrap().as_ref().unwrap();
-    assert_eq!(done.data, json!({"context": null}));
+    assert_eq!(done.data, json!({"context": PEERS_NOTE}));
     let at = |f: fn(&Effect) -> bool| fx.iter().position(f).unwrap();
     assert!(at(|e| matches!(e, Effect::Persist(_))) < at(|e| matches!(e, Effect::Reply { .. })));
 }
@@ -1151,30 +1151,36 @@ moa: you can message the other agents in this cockpit, and moa itself.
 - A message starting `[moa · message from NAME · ask #N]` is an ask to you: your reply
   that turn goes back to NAME as the answer.";
 
-/// The `context` a `SessionStart` of the session bound by `bindings` is answered with.
-fn start_context(bindings: Vec<PaneBinding>) -> serde_json::Value {
+/// The `context` a `SessionStart` of the session bound by `bindings` is answered with, from
+/// an agent whose `MOA_SESSION` is `slot`.
+fn start_context(slot: Option<&str>, bindings: Vec<PaneBinding>) -> serde_json::Value {
     let mut st = seeded_with(bindings);
-    let fx = feed_replying(
-        &mut st,
-        started(1, 1000, StartSource::Startup),
-        Some((ConnId(3), ReqId(9))),
-    );
+    let env = HookEnvelope {
+        slot: slot.map(str::to_string),
+        ..started(1, 1000, StartSource::Startup)
+    };
+    let fx = feed_replying(&mut st, env, Some((ConnId(3), ReqId(9))));
     reply_of(&fx).unwrap().as_ref().unwrap().data["context"].clone()
 }
 
 #[test]
 fn session_start_gets_the_peers_note() {
-    // moa launched it: its tab's binding is tracked, and its agent has moa's plugin.
-    assert_eq!(start_context(vec![pane_binding(10)]), json!(PEERS_NOTE));
+    // moa launched it: its agent carries `MOA_SESSION`, and moa's plugin with it.
+    assert_eq!(
+        start_context(Some(S), vec![pane_binding(10)]),
+        json!(PEERS_NOTE)
+    );
     assert_eq!(moa_core::peers::PEERS_NOTE, PEERS_NOTE);
+    // Before tmux says which pane its tab has (a fast agent's start): still moa's launch.
+    assert_eq!(start_context(Some(S), Vec::new()), json!(PEERS_NOTE));
     // Adopted: moa didn't start it, so it has no plugin and no skill to go with the note.
+    // Its hooks (an account's own) carry no `MOA_SESSION`; it is known by its conversation.
     let adopted = PaneBinding {
         tracked: false,
         ..pane_binding(10)
     };
-    assert_eq!(start_context(vec![adopted]), json!(null));
-    // Not bound to a tab at all: nothing says moa launched it.
-    assert_eq!(start_context(Vec::new()), json!(null));
+    assert_eq!(start_context(None, vec![adopted]), json!(null));
+    assert_eq!(start_context(None, Vec::new()), json!(null));
 }
 
 #[test]

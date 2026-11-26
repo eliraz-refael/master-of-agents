@@ -3,8 +3,9 @@
 //! `moa-peers` skill says the same, and more.
 
 use crate::asks::ASK_WAIT_DEFAULT_MS;
+use crate::hook::HookEnvelope;
+use crate::hooks::slot_of;
 use crate::model::SessionId;
-use crate::state::State;
 use crate::time::MINUTE;
 
 /// The note a session moa launched is given as its `SessionStart` context (A13). Its "9
@@ -26,12 +27,12 @@ const BASH_TIMEOUT_MAX_MS: i64 = 600_000;
 const _: () = assert!(ASK_WAIT_DEFAULT_MS == 9 * MINUTE);
 const _: () = assert!(ASK_WAIT_DEFAULT_MS < BASH_TIMEOUT_MAX_MS);
 
-/// The note a `SessionStart` request of `session` is answered with: [`PEERS_NOTE`] when moa
-/// launched the agent in its tab (its binding is tracked), so the agent has moa's plugin and
-/// its skill. An adopted agent, or one in no tab moa knows of, gets nothing.
-pub(crate) fn peers_note(state: &State, session: SessionId) -> Option<String> {
-    state
-        .binding(session)
-        .is_some_and(|b| b.tracked)
-        .then(|| PEERS_NOTE.to_string())
+/// The note a `SessionStart` of `session` is answered with: [`PEERS_NOTE`] when moa launched
+/// its agent, so the agent has moa's plugin and its skill. That is told by the start's
+/// `MOA_SESSION` naming the session: moa's launch sets it, with the plugin, in the tab's
+/// environment before the agent runs. The tab's binding can't tell it: tmux's answer
+/// commits that, and a fast agent's start can come first. An adopted agent moa didn't start
+/// carries no `MOA_SESSION`, and gets nothing.
+pub(crate) fn peers_note(env: &HookEnvelope, session: SessionId) -> Option<String> {
+    (slot_of(env) == Some(session)).then(|| PEERS_NOTE.to_string())
 }

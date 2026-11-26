@@ -68,9 +68,9 @@ pub(crate) fn run(
     if let Some((conn, req)) = reply {
         // Only a start has anything to say: the peers note, to a session moa launched.
         let note = match env.kind {
-            HookKind::SessionStarted { .. } => resolve(state, env)
-                .ok()
-                .and_then(|id| peers_note(state, id)),
+            HookKind::SessionStarted { .. } => {
+                resolve(state, env).ok().and_then(|id| peers_note(env, id))
+            }
             _ => None,
         };
         fx.push(Effect::Reply {
@@ -112,7 +112,7 @@ fn resolve(state: &State, env: &HookEnvelope) -> Result<SessionId, &'static str>
 }
 
 /// The session an event's `MOA_SESSION` names, if it is one.
-fn slot_of(env: &HookEnvelope) -> Option<SessionId> {
+pub(crate) fn slot_of(env: &HookEnvelope) -> Option<SessionId> {
     env.slot.as_deref().and_then(|s| s.parse().ok())
 }
 

@@ -1126,3 +1126,34 @@ fn a_refused_open_leaves_only_its_reply() {
         "{fx:?}"
     );
 }
+
+/// A fast agent's first start can reach moa before tmux says which pane its tab has: the
+/// session isn't bound yet, but moa launched it, so its start still gets the peers note.
+#[test]
+fn the_peers_note_doesnt_wait_for_the_tabs_binding() {
+    let (b, mut st) = typical();
+    let fx = send(&b, &mut st, 1, open_op(&lantern(&b)));
+    let (id, _) = the_open(&fx);
+    assert!(st.binding(id).is_none());
+    let start = HookKind::SessionStarted {
+        source: moa_core::hook::StartSource::Startup,
+    };
+    let Input::Hook { envelope, .. } = opened_hook(&b, id, &nth(&b, 2).to_string(), 1, 500, start)
+    else {
+        unreachable!()
+    };
+    let fx = handle_checked(
+        &mut st,
+        Input::Hook {
+            reply: Some((ConnId(9), ReqId(3))),
+            envelope,
+        },
+        b.now(),
+    );
+    let context = &moa_core::effect::reply_of(&fx)
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .data["context"];
+    assert_eq!(context, &json!(moa_core::peers::PEERS_NOTE));
+}
