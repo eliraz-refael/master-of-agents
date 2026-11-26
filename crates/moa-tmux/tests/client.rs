@@ -422,3 +422,118 @@ async fn a_source_file_command_that_fails_at_run_time_is_an_error() {
     assert_eq!(client.run(&display("next")).await, Ok(vec!["next".into()]));
     client.close().await;
 }
+
+/// A buffer's bytes exactly as tmux holds them, through a plain client of the sandbox
+/// server (`show-buffer` isn't a command moa sends), or `None` when there's no such buffer.
+fn buffer(sb: &Sandbox, name: &str) -> Option<Vec<u8>> {
+    sb.tmux_bytes(&["show-buffer", "-b", name]).ok()
+}
+
+/// What an ask may hold once it is cleaned (A2: no control character but `\n` and `\t`):
+/// tmux's command parser, its formats and a pasted shell must take each as plain text.
+fn risky_asks() -> Vec<String> {
+    let mut asks: Vec<String> = [
+        // `ESC[201~` with its ESC cleaned away: the paste's end marker, as text.
+        "[201~ and after the paste",
+        "a; kill-server ; b",
+        r"a \; b",
+        "#{pane_id} #(touch x) #S ##",
+        r#"say "hi" and 'bye' and '\''"#,
+        "$(touch x) and `id` and ${x}",
+        // tmux 3.4 writes a `$` before a letter, `_` or `{` as `\$` in an option (T17), not
+        // in a buffer.
+        "$HOME $_x $é",
+        "ends in a backslash\\",
+        "two\nlines\tand a tab\n\n\tthird\n",
+        "-a starts like a flag",
+        "--",
+        "%begin 1 2 0\n%end 1 2 0",
+        "~ * ? [a] {b}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    asks.push("💤".repeat(8000));
+    asks.push(asks.join("\n"));
+    asks
+}
+
+/// An ask's text through `Cmd::set_buffer` comes back byte for byte (Review Focus 1): no
+/// part of it is a command, a format or an escape to tmux, on 3.4 (`\n` escapes, spec 13)
+/// as on later ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_text_round_trips() {
+    let sb = Sandbox::start().unwrap();
+    let (client, _events, _info) = connect(&sb).await;
+    for (n, text) in (1u64..).zip(risky_asks()) {
+        let name = format!("moa-ask-{n}");
+        client
+            .run(&Cmd::set_buffer(&name, &text))
+            .await
+            .unwrap_or_else(|e| panic!("{text:?}: {e}"));
+        let got = buffer(&sb, &name).unwrap_or_else(|| panic!("no buffer for {text:?}"));
+        assert_eq!(String::from_utf8_lossy(&got), text);
+        assert_eq!(got, text.as_bytes());
+    }
+    client.close().await;
+}
+
+/// The three commands as delivery sends them, into a pane that asked for bracketed paste:
+/// the text arrives inside one paste (each `\n` as tmux's `\r`), the buffer is gone, and
+/// Enter follows.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ask_is_pasted_bracketed_then_entered() {
+    let sb = Sandbox::start().unwrap();
+    let (client, _events, _info) = connect(&sb).await;
+    let typed = sb.home().join("typed");
+    let script = sb.home().join("record.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "stty raw -echo\nprintf '\\033[?2004hready'\nexec cat > '{}'\n",
+            typed.display()
+        ),
+    )
+    .unwrap();
+    let pane = sb
+        .tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &format!("sh '{}'", script.display()),
+        ])
+        .unwrap();
+    // tmux reads the pane's output in order: once `ready` shows, the mode is on (3.4 has
+    // no `bracket_paste_flag` to ask).
+    let on = wait_for(Duration::from_secs(10), || {
+        let shown = sb.tmux(&["capture-pane", "-p", "-t", &pane]).ok()?;
+        (shown.contains("ready") && typed.exists()).then_some(())
+    });
+    assert!(on.is_some(), "the pane never asked for bracketed paste");
+    let pane_id = moa_core::tmux::ids::PaneId(pane.trim_start_matches('%').parse().unwrap());
+
+    let text = risky_asks().pop().unwrap();
+    for cmd in [
+        Cmd::set_buffer("moa-ask-9", &text),
+        Cmd::paste_buffer("moa-ask-9", pane_id),
+        Cmd::enter(pane_id),
+    ] {
+        client
+            .run(&cmd)
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e}", cmd.name()));
+    }
+    let want = format!("\x1b[200~{}\x1b[201~\r", text.replace('\n', "\r"));
+    let got = wait_for(Duration::from_secs(10), || {
+        let got = std::fs::read(&typed).ok()?;
+        (got.len() >= want.len()).then_some(got)
+    });
+    assert_eq!(
+        String::from_utf8_lossy(&got.expect("the paste never arrived")),
+        want
+    );
+    assert_eq!(buffer(&sb, "moa-ask-9"), None, "-d deletes the buffer");
+    client.close().await;
+}

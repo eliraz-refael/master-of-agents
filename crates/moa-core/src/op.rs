@@ -314,6 +314,29 @@ pub enum Op {
         #[serde(default)]
         user: bool,
     },
+    /// The agents the caller can ask: moa, then every live session but the caller's own.
+    #[serde(rename = "peers")]
+    Peers(NoParams),
+    /// Asks agent `to` (a session's name, or `moa`) `text`, and waits up to `timeout_s`
+    /// seconds for the answer. Only a session or moa can ask.
+    #[serde(rename = "ask")]
+    Ask {
+        to: String,
+        text: String,
+        #[serde(default = "ask_wait_s")]
+        timeout_s: i64,
+    },
+    /// Waits again, up to `timeout_s` seconds, for the answer to ask `id`.
+    #[serde(rename = "reply")]
+    Reply {
+        id: i64,
+        #[serde(default = "ask_wait_s")]
+        timeout_s: i64,
+    },
+    /// The caller's recent asks, from it or to it (every ask for a caller that is neither a
+    /// session nor moa).
+    #[serde(rename = "asks")]
+    Asks(NoParams),
     /// Panics when run, so tests can see the core survive it. Not on the wire: it is not in
     /// [`Op::METHODS`] or the schema, and a client can't send it.
     #[doc(hidden)]
@@ -325,6 +348,11 @@ pub enum Op {
 /// How many rows `console.page` returns when it isn't told.
 fn page_n() -> u16 {
     100
+}
+
+/// How long `ask` and `reply` wait when they aren't told, in seconds.
+fn ask_wait_s() -> i64 {
+    crate::asks::ASK_WAIT_DEFAULT_MS / 1_000
 }
 
 /// The most rows `console.page` returns.
@@ -534,6 +562,10 @@ impl Op {
         "console.sleep_after",
         "console.account",
         "bar.set",
+        "peers",
+        "ask",
+        "reply",
+        "asks",
     ];
 
     /// Whether this op changes the brain. Exhaustive on purpose: a new op has to be
@@ -577,7 +609,9 @@ impl Op {
             // It may run a write (`/archive`, `/open`), so it is counted as one. A read-only
             // command still answers while writes are refused: the core refuses only at a
             // commit, and a read never commits.
-            | Op::ConsoleCommand { .. } => true,
+            | Op::ConsoleCommand { .. }
+            // It saves the ask's row.
+            | Op::Ask { .. } => true,
             Op::SessionLs { .. }
             | Op::SessionFind { .. }
             | Op::TaskLs { .. }
@@ -597,6 +631,9 @@ impl Op {
             | Op::LayoutShow { .. }
             | Op::Goto { .. }
             | Op::ConsolePage { .. }
+            | Op::Peers(_)
+            | Op::Reply { .. }
+            | Op::Asks(_)
             | Op::DebugPanic => false,
         }
     }
@@ -657,6 +694,10 @@ impl Op {
             Op::ConsoleAuto { .. } => "console.auto",
             Op::ConsoleSleepAfter { .. } => "console.sleep_after",
             Op::ConsoleAccount { .. } => "console.account",
+            Op::Peers(_) => "peers",
+            Op::Ask { .. } => "ask",
+            Op::Reply { .. } => "reply",
+            Op::Asks(_) => "asks",
             Op::DebugPanic => "debug.panic",
         }
     }

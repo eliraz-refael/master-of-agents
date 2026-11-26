@@ -103,6 +103,8 @@ fn the_allow_list_refuses_waiting_and_unknown_commands() {
             "link-window",
             "unlink-window",
             "send-keys",
+            "set-buffer",
+            "paste-buffer",
         ];
         if !ruled.contains(name) {
             assert!(Cmd::new(name).check().is_ok(), "{name}");

@@ -1,5 +1,7 @@
 //! Claude's hook payloads, normalized into the agent-independent `HookEnvelope` (the C10
 //! table). Anything moa doesn't subscribe to, or can't attribute to a conversation, is `None`.
+//! A prompt and a last message come whole: an ask's marker may be anywhere in a prompt, and
+//! its answer is the full message. The core cuts what it keeps of them.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -7,7 +9,6 @@ use std::path::Path;
 
 use moa_core::UtcMs;
 use moa_core::hook::{HOOK_LINE_V, HookEnvelope, HookKind, HookLine, StartSource};
-use moa_core::live::cut_middle;
 use serde_json::Value;
 
 /// How much of a transcript's end `last_assistant_text` reads.
@@ -29,7 +30,7 @@ fn kind_of(
             source: StartSource::from_word(text(payload, "source").unwrap_or("")),
         },
         "UserPromptSubmit" => HookKind::TurnStarted {
-            prompt: cut_middle(text(payload, "prompt").unwrap_or("")),
+            prompt: text(payload, "prompt").unwrap_or("").to_string(),
         },
         "Stop" => {
             // A blank message is no message.
@@ -38,9 +39,7 @@ fn kind_of(
                 .map(str::to_string)
                 .or_else(|| tail(Path::new(text(payload, "transcript_path")?)))
                 .unwrap_or_default();
-            HookKind::TurnEnded {
-                last_message: cut_middle(&last),
-            }
+            HookKind::TurnEnded { last_message: last }
         }
         "StopFailure" => HookKind::TurnFailed {
             error: text(payload, "error")

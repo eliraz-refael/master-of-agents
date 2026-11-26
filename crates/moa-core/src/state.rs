@@ -12,6 +12,7 @@ use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
 use crate::UtcMs;
+use crate::asks::AsksMem;
 use crate::central::Moa;
 use crate::change::Change;
 use crate::cockpit::run::CockpitRun;
@@ -445,6 +446,9 @@ pub struct State {
     pub(crate) session_events: VecDeque<SessionEvent>,
     /// The last session event's `seq`.
     last_event: u64,
+    /// The requests waiting for asks' answers, and the asks' timer. Kept in memory: a
+    /// reload keeps the requests, which are its connections'.
+    pub(crate) asks_mem: AsksMem,
 }
 
 impl State {
@@ -500,6 +504,7 @@ impl State {
             last_sheet: 0,
             session_events: VecDeque::new(),
             last_event: 0,
+            asks_mem: AsksMem::default(),
         }
     }
 
@@ -651,6 +656,15 @@ impl State {
         self.reports
             .values()
             .find(|r| r.session_id == id && r.kind == kind)
+    }
+
+    /// The asks between agents, by id.
+    pub fn asks(&self) -> impl Iterator<Item = &Ask> {
+        self.asks.values()
+    }
+
+    pub fn ask(&self, id: AskId) -> Option<&Ask> {
+        self.asks.get(&id)
     }
 
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {

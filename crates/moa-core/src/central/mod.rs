@@ -231,7 +231,7 @@ impl Moa {
 
     /// A prompt now would be one too many: moa is starting, opening its thread, or
     /// answering.
-    fn busy(&self) -> bool {
+    pub(crate) fn busy(&self) -> bool {
         matches!(self.phase, Phase::Starting | Phase::Thinking) || self.pending.is_some()
     }
 

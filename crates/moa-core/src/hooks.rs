@@ -6,12 +6,13 @@
 
 use serde_json::json;
 
+use crate::asks;
 use crate::central::reports;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine};
 use crate::hook::{HookEnvelope, HookKind, StartSource};
-use crate::live::{asks, cut_middle};
+use crate::live::{asks as ends_asking, cut_middle};
 use crate::model::{
     Activity, ActivityWho, Conversation, Event, EventId, EventKind, Lifecycle, Location, Session,
     SessionId,
@@ -150,6 +151,7 @@ pub(crate) fn apply(state: &mut State, tx: &mut Tx, env: &HookEnvelope) -> Appli
     if state.recent_hook_set.contains(&key) {
         return Applied::Duplicate;
     }
+    asks::heard_from(state, id);
     let before = state
         .session(id)
         .expect("resolved to a known session")
@@ -316,8 +318,10 @@ fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) 
 }
 
 /// The changes an applied event brings besides the session itself, `after`: the project's
-/// day, the activity row, a start's conversation, the need it resolved and the session report
-/// it queues.
+/// day, the activity row, a start's conversation, the need it resolved, the session report
+/// it queues, and the asks to the session it moves ([`asks::hooked`]: a prompt's receipt, a
+/// turn's answer, a received ask its turn left unanswered, or every open one when the session
+/// ends). Their requests hear at the end of the input ([`asks::run`]).
 fn applied_changes(
     state: &State,
     tx: &mut Tx,
@@ -348,6 +352,7 @@ fn applied_changes(
     }
     changes.extend(reports::resolved(state, after));
     changes.extend(reports::queued(state, tx, after, env));
+    changes.extend(asks::hooked(state, id, &env.kind, tx.wall));
     changes
 }
 
@@ -518,7 +523,7 @@ pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
 /// `also`, and when the session is still live, its agent gone with no clean quit: the
 /// session goes to sleep, with no activity row (R14). The `SessionEnd` the agent sent on its
 /// way out, which often arrives after the exit, then decides: a clean quit ends the session,
-/// anything else is history only.
+/// anything else is history only. Its open asks end with it (A8).
 /// `false` when the write was refused. Then nothing changes: a bound pane stays bound, and
 /// a session whose pane exited before its `open` was answered stays live with no binding.
 /// Reconcile puts both to sleep.
@@ -527,6 +532,7 @@ pub(crate) fn lost_agent(state: &mut State, tx: &mut Tx, id: SessionId, also: Ve
     if let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) {
         changes.insert(0, Change::Session(asleep(session, tx.wall)));
     }
+    changes.extend(asks::peer_ended(state, id, tx.wall));
     changes.is_empty() || tx.commit(state, changes).is_ok()
 }
 
@@ -555,7 +561,7 @@ pub(crate) fn event_of(before: Option<&Session>, after: &Session) -> Option<Even
         live(s)
             && match s.activity {
                 Activity::NeedsPermission | Activity::NeedsAnswer => true,
-                Activity::Idle => asks(s.activity_why.as_deref().unwrap_or("")),
+                Activity::Idle => ends_asking(s.activity_why.as_deref().unwrap_or("")),
                 Activity::Working | Activity::Failed => false,
             }
     };
@@ -657,7 +663,12 @@ fn transition(before: &Session, env: &HookEnvelope) -> Session {
 fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
     let what = match kind {
         HookKind::TurnStarted { prompt } => {
-            let line: String = prompt.replace('\n', " ").chars().take(90).collect();
+            // The prompt comes whole now: read only the 90 characters kept.
+            let line: String = prompt
+                .chars()
+                .take(90)
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
             format!("› {line}")
         }
         HookKind::SessionEnded { .. } if session.asleep_at.is_some() => return None,

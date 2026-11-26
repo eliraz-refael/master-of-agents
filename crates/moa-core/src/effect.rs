@@ -41,12 +41,15 @@ pub enum TimerKey {
     /// When moa's turn under way has gone too long without news, or without stopping once
     /// cancelled (`central::watchdog`).
     Watchdog,
+    /// The earliest moment something about the asks between agents is due: a wait for an
+    /// answer running out (`asks`). Armed only while something waits.
+    Asks,
 }
 
 /// Timer `key`, armed at `armed`, at its next deadline `next`: set, or cancelled when there
 /// is none, but only when that changed or when this input is the timer firing (`fired`: the
 /// scheduler has forgotten it). `armed` becomes `next`. Sleep's, the terminals', the
-/// wake-up's and the watchdog's timers are kept this way.
+/// wake-up's, the watchdog's and the asks' timers are kept this way.
 pub(crate) fn rearm(
     armed: &mut Option<UtcMs>,
     key: TimerKey,

@@ -562,6 +562,8 @@ pub struct Ask {
     pub status: AskStatus,
     pub reply: Option<String>,
     pub claimed_at: Option<UtcMs>,
+    /// When the ask ended: answered, failed or dropped (not only answered; the name is the
+    /// column's).
     pub answered_at: Option<UtcMs>,
 }
 
