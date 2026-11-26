@@ -303,7 +303,13 @@ pub fn upgrade(args: &BrainArgs) -> ExitCode {
         let back = client
             .await_upgrade(ok.waiting_for_moa, UPGRADE_WAIT)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| match e {
+                // `moa upgrade` starts nothing: running it again would find nothing to upgrade.
+                ClientError::UpgradeStopped => {
+                    format!("moa {brain} stopped while upgrading; run moa to start it again")
+                }
+                e => e.to_string(),
+            })?;
         match back {
             Upgraded::InPlace(new) => println!("moa upgraded ({old} → {})", new.hello().build),
             Upgraded::Restarted(new) => println!(

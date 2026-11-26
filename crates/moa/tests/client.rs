@@ -59,16 +59,26 @@ fn rebuild(exe: &Path) {
 }
 
 /// A daemon played in this process on `tb`'s socket, as process `pid` (a stand-in that
-/// lives until the fake is told to stop) on build `old`. It answers `upgrade` with
-/// `upgrade` (a JSON-RPC `result` or `error` member), and `shutdown` by ending the stand-in,
-/// removing its socket and hanging up. `seen` is every request's method and params, once
-/// the client has hung up.
+/// lives until the fake ends) on build `old`. It answers `upgrade` with `upgrade` (a
+/// JSON-RPC `result` or `error` member). With `then`, it is a live-update daemon (its hello
+/// names [`FAKE_EXE`]) that hangs up after answering `upgrade` and comes back, the same
+/// pid, on build `then`. It answers `shutdown` by ending, and ends when the client hangs
+/// up. `seen` is every request's method and params; awaiting it also surfaces the fake's
+/// own failures.
 struct FakeDaemon {
     pid: u32,
     seen: tokio::task::JoinHandle<Vec<(String, Value)>>,
 }
 
+/// The program a live-update [`FakeDaemon`] says it runs.
+const FAKE_EXE: &str = "/tmp/elsewhere/moa";
+
+/// A daemon from before live updates: a [`FakeDaemon`] that never comes back on a new build.
 fn old_daemon(tb: &TempBrain, upgrade: Value) -> FakeDaemon {
+    fake_daemon(tb, upgrade, None)
+}
+
+fn fake_daemon(tb: &TempBrain, upgrade: Value, then: Option<&'static str>) -> FakeDaemon {
     let paths = tb.paths();
     moa_platform::ensure_private_dir(&paths.run_dir()).unwrap();
     let sock = paths.socket("default").unwrap();
@@ -80,30 +90,48 @@ fn old_daemon(tb: &TempBrain, upgrade: Value) -> FakeDaemon {
     let pid = stand_in.id();
     let seen = tokio::spawn(async move {
         let mut seen = Vec::new();
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read, mut write) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let request: Value = serde_json::from_str(&line).unwrap();
-            let method = request["method"].as_str().unwrap().to_string();
-            seen.push((method.clone(), request["params"].clone()));
-            let mut answer = match method.as_str() {
-                "hello" => json!({"result": {
-                    "brain": "default", "build": "old", "rev": 0, "matched": false, "pid": pid
-                }}),
-                "upgrade" => upgrade.clone(),
-                "shutdown" => json!({"result": {}}),
-                other => panic!("an old daemon was asked {other}"),
-            };
-            answer["jsonrpc"] = "2.0".into();
-            answer["id"] = request["id"].clone();
-            write
-                .write_all(format!("{answer}\n").as_bytes())
-                .await
-                .unwrap();
-            if method == "shutdown" {
-                break;
+        let mut build = "old";
+        'conns: loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let method = request["method"].as_str().unwrap().to_string();
+                seen.push((method.clone(), request["params"].clone()));
+                let mut answer = match method.as_str() {
+                    "hello" => {
+                        let mut ok = json!({
+                            "brain": "default", "build": build, "rev": 0, "pid": pid,
+                            "matched": request["params"]["build"] == build,
+                        });
+                        if then.is_some() {
+                            ok["exe"] = FAKE_EXE.into();
+                        }
+                        json!({ "result": ok })
+                    }
+                    "upgrade" => upgrade.clone(),
+                    "shutdown" => json!({"result": {}}),
+                    other => panic!("the fake daemon was asked {other}"),
+                };
+                answer["jsonrpc"] = "2.0".into();
+                answer["id"] = request["id"].clone();
+                write
+                    .write_all(format!("{answer}\n").as_bytes())
+                    .await
+                    .unwrap();
+                if method == "shutdown" {
+                    break 'conns;
+                }
+                if method == "upgrade"
+                    && let Some(next) = then
+                {
+                    // Hangs up, and the next connection meets the new build.
+                    build = next;
+                    continue 'conns;
+                }
             }
+            break;
         }
         let _ = stand_in.kill();
         let _ = stand_in.wait();
@@ -111,6 +139,12 @@ fn old_daemon(tb: &TempBrain, upgrade: Value) -> FakeDaemon {
         seen
     });
     FakeDaemon { pid, seen }
+}
+
+/// The methods a fake daemon was asked, in order.
+async fn methods(fake: FakeDaemon) -> Vec<String> {
+    let seen = fake.seen.await.expect("the fake daemon ran to its end");
+    seen.into_iter().map(|s| s.0).collect()
 }
 
 fn opts(tb: &TempBrain, autostart: bool) -> ClientOptions {
@@ -322,6 +356,52 @@ async fn a_stale_daemon_upgrades_in_place() {
     assert_eq!(new.hello().pid, pid, "upgraded in place");
 }
 
+/// L1, the path pinned: a stale daemon says it is upgrading, hangs up, and comes back as
+/// the same process on the client's build; the client takes it, starting and stopping
+/// nothing.
+#[tokio::test]
+async fn a_daemon_that_upgrades_in_place_is_waited_for() {
+    let tb = TempBrain::new(None);
+    let o = opts(&tb, true);
+    let next: &'static str = o.build.clone().leak();
+    let fake = fake_daemon(&tb, json!({"result": {"upgrading": true}}), Some(next));
+    let before = spawn::launches();
+    let client = Client::connect(o).await.expect("upgraded");
+    assert!(client.hello().matched);
+    assert_eq!(client.hello().pid, fake.pid);
+    assert_eq!(client.hello().build, next);
+    assert_eq!(spawn::launches(), before);
+    drop(client);
+    assert_eq!(methods(fake).await, ["hello", "upgrade", "hello"]);
+}
+
+/// L1: a daemon that upgrades but comes back on yet another build runs another install's
+/// program: the client is refused, naming it, and stops nothing.
+#[tokio::test]
+async fn a_daemon_back_on_another_build_is_refused() {
+    let tb = TempBrain::new(None);
+    let fake = fake_daemon(&tb, json!({"result": {"upgrading": true}}), Some("third"));
+    let before = spawn::launches();
+    let err = Client::connect(opts(&tb, true))
+        .await
+        .err()
+        .expect("refused");
+    match &err {
+        ClientError::Rpc(e) => assert_eq!(e.code, code::BUILD_MISMATCH),
+        other => panic!("{other}"),
+    }
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "moa: brain 'default' is run by {FAKE_EXE}; this moa is {}. Use that one, or stop \
+             the daemon first: moa shutdown",
+            moa_exe().display()
+        )
+    );
+    assert_eq!(spawn::launches(), before);
+    assert_eq!(methods(fake).await, ["hello", "upgrade", "hello"]);
+}
+
 /// L1: a daemon from before live updates refuses `upgrade {if_stale}` (or answers without
 /// `upgrading`): the client stops it, waits for it to exit and starts its own, once. That
 /// is the only upgrade that changes the pid.
@@ -337,7 +417,7 @@ async fn an_old_daemon_is_restarted_once() {
         assert_ne!(client.hello().pid, fake.pid);
         assert_eq!(client.status().await.unwrap().pid, client.hello().pid);
         assert_eq!(spawn::launches() - before, 1, "one start: {answer}");
-        let seen = fake.seen.await.unwrap();
+        let seen = fake.seen.await.expect("the fake daemon ran to its end");
         let methods: Vec<&str> = seen.iter().map(|s| s.0.as_str()).collect();
         assert_eq!(methods, ["hello", "upgrade", "shutdown"], "{answer}");
         assert_eq!(seen[1].1, json!({"if_stale": true}));
@@ -363,16 +443,13 @@ async fn a_busy_moa_makes_the_client_wait_then_say_so() {
         "moa is finishing a turn; it upgrades right after. Try again in a moment."
     );
     assert_eq!(spawn::launches(), before);
-    let methods: Vec<String> = fake.seen.await.unwrap().into_iter().map(|s| s.0).collect();
-    assert_eq!(methods, ["hello", "upgrade"], "never stopped");
+    assert_eq!(methods(fake).await, ["hello", "upgrade"], "never stopped");
 }
 
 #[tokio::test]
 async fn a_different_build_is_kept_when_accepted() {
     let tb = TempBrain::new(None);
-    let other = tb.root().join("moa-other");
-    std::fs::copy(moa_exe(), &other).unwrap();
-    let other = std::fs::canonicalize(other).unwrap();
+    let other = install(&tb, "other");
     let old = Client::connect(opts_for(&tb, &other, true)).await.unwrap();
     let mut o = opts(&tb, true);
     o.on_mismatch = OnMismatch::Accept;
@@ -388,7 +465,7 @@ async fn a_different_build_is_kept_when_accepted() {
 async fn a_restart_happens_at_most_once() {
     let tb = TempBrain::new(None);
     let refused = json!({"error": {"code": code::INVALID_PARAMS, "message": "no if_stale"}});
-    let _fake = old_daemon(&tb, refused);
+    let fake = old_daemon(&tb, refused);
     let mut o = opts(&tb, true);
     o.build = "not-the-daemons-build".into();
     let before = spawn::launches();
@@ -403,6 +480,7 @@ async fn a_restart_happens_at_most_once() {
     );
     // The one restart.
     assert_eq!(spawn::launches() - before, 1);
+    assert_eq!(methods(fake).await, ["hello", "upgrade", "shutdown"]);
 }
 
 /// No client stops a daemon it can't restart: with no `autostart` a mismatch is reported
@@ -410,9 +488,7 @@ async fn a_restart_happens_at_most_once() {
 #[tokio::test]
 async fn a_mismatch_without_autostart_does_not_stop_the_daemon() {
     let tb = TempBrain::new(None);
-    let other = tb.root().join("moa-other");
-    std::fs::copy(moa_exe(), &other).unwrap();
-    let other = std::fs::canonicalize(other).unwrap();
+    let other = install(&tb, "other");
     let old = Client::connect(opts_for(&tb, &other, true)).await.unwrap();
     let pid = old.hello().pid;
     // `opts` is another build, and `Restart` is its mode, but there is no exe to start.

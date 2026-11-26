@@ -109,7 +109,7 @@ pub enum ClientError {
     #[error("moa didn't finish upgrading within {} s", .0.as_secs())]
     UpgradeUnfinished(Duration),
     /// The daemon stopped during its upgrade: its next build didn't start (L7).
-    #[error("moa stopped while upgrading; the next moa command starts it again")]
+    #[error("moa stopped while upgrading; run the command again to start it")]
     UpgradeStopped,
 }
 
@@ -392,6 +392,7 @@ impl Client {
             if client.hello.matched || opts.on_mismatch == OnMismatch::Accept {
                 return Ok(client);
             }
+            // Only tests reach this: every caller that restarts passes `autostart`.
             if opts.autostart.is_none() {
                 // Stopping a daemon this client can't start again would just take moa down.
                 return Err(ClientError::Rpc(RpcError {
@@ -1200,7 +1201,7 @@ mod tests {
         match upgraded(me, None).await {
             Err(e @ ClientError::UpgradeStopped) => assert_eq!(
                 e.to_string(),
-                "moa stopped while upgrading; the next moa command starts it again"
+                "moa stopped while upgrading; run the command again to start it"
             ),
             Err(e) => panic!("{e}"),
             Ok(_) => panic!("nobody answered"),
