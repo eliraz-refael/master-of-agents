@@ -256,7 +256,14 @@ impl World {
                 } else {
                     message.clone()
                 };
-                if let (true, Some(id)) = (self.refused, self.holding[who]) {
+                // Only the ask this Stop answers: the one its turn holds, received by it.
+                let me = Some(AskTarget::Session(sid(SESSIONS[who])));
+                let answers = self.holding[who].filter(|id| {
+                    self.last
+                        .get(id)
+                        .is_some_and(|a| a.status == AskStatus::Received && a.to_session == me)
+                });
+                if let (true, Some(id)) = (self.refused, answers) {
                     self.held.insert(id, answer.clone());
                 }
                 self.stop = Some((who, answer));
@@ -396,14 +403,15 @@ impl World {
                 });
                 prop_assert!(older.is_none(), "ask #{} went before {:?}", a.id, older);
             }
-            // An answer whose Stop's commit was refused, saved once writes are back.
-            let held = match a.status == Answered && was != Some(Answered) && !self.refused {
+            // An answer whose Stop's commit was refused, saved once writes are back; or, when
+            // a later Stop of the same turn came first, that Stop's.
+            let answered = a.status == Answered && was != Some(Answered);
+            let held = match answered {
                 true => self.held.remove(&a.id),
                 false => None,
             };
-            if let Some(answer) = &held {
-                prop_assert_eq!(a.reply.as_deref(), Some(answer.as_str()));
-            } else if a.status == Answered && was != Some(Answered) {
+            let from_held = held.is_some() && a.reply == held;
+            if answered && !from_held {
                 // By the end of the turn that held its marker, with that turn's message.
                 let Some((who, answer)) = &self.stop else {
                     return Err(TestCaseError::fail(format!(

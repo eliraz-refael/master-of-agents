@@ -8,3 +8,4 @@ cc b25f8e4a59a5681ebdfe7e71ae77114e18a4b2e1c98d9507c7392a1de525b862 # shrinks to
 cc 15aa77752079df7a69a7f09ba15f3d4d00b38a928232a150bfe51642bd4c3a9b # shrinks to steps = [Ask { from: 2, to: 1, wait_s: 1 }, Reload, Stop { who: 1, empty: false }, Advance(20000), Ask { from: 1, to: 2, wait_s: 1 }, Prompt { who: 1, marker: Some(1) }]
 cc 074d21520cfdca603e0596006c45a5defd476e3bd49a58dd30a1a17261e2b7f6 # shrinks to steps = [Ask { from: 1, to: 0, wait_s: 30 }, Timer, Timer, Exit(0), Clear(0), Take(0)]
 cc 62cf1a80373f689f169804f193c356d4ffe08eaffc5895be103a3a044267e9f5 # shrinks to steps = [Ask { from: 0, to: 2, wait_s: 1 }, Take(2), RefuseNext, Stop { who: 2, empty: false }, Take(0)]
+cc 19153fdf41cbf4eb39595798794a1f1c3aa5ee14cf6a59783e0e6b7d83e13c9e # shrinks to steps = [Prompt { who: 1, marker: Some(1) }, Ask { from: 1, to: 0, wait_s: 1 }, RefuseNext, Stop { who: 1, empty: false }, Take(0), Stop { who: 0, empty: false }]

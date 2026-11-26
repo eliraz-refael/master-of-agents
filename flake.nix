@@ -40,6 +40,8 @@
                 (pkgs.lib.fileset.fileFilter (f: f.hasExt "sql" || f.hasExt "snap" || f.hasExt "tpl" || f.hasExt "json" || f.hasExt "jsonl" || f.hasExt "proptest-regressions") ./crates)
                 # moa's embedded constitution (`include_str!`)
                 ./crates/moa-core/src/central/constitution.md
+                # the moa-peers skill the session plugin ships (`include_str!`)
+                ./crates/moa-agents/src/claude/skills/moa-peers.md
                 # read by a DDL check test; removed with the spike
                 # nextest's overrides (the hook budget test runs alone)
                 ./.config/nextest.toml
