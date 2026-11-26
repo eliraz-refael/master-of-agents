@@ -4,13 +4,15 @@
 mod common;
 
 use common::central::{ended, first_turn, moa, prompt, thread, toml};
-use common::{at, link_up, listed, replies};
+use common::{at, feed, link_up, listed, replies};
 use moa_core::UtcMs;
 use moa_core::central::feed::kind;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked};
-use moa_core::model::{Lifecycle, Location};
+use moa_core::effect::{
+    Down, Effect, Input, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked,
+};
+use moa_core::model::{AgentKind, Lifecycle, Location};
 use moa_core::op::OpError;
 use moa_core::state::{Deps, Snapshot, State};
 use moa_core::upgrade::{
@@ -79,18 +81,15 @@ fn facts(reexec: bool, plugin_changed: bool, reattach: bool) -> UpgradeFacts {
     }
 }
 
-/// What a start loads: the typical brain with `live` of its sessions running elsewhere (so
-/// reconcile leaves them live) and the rest ended, `saved` as the last start's build, and
-/// moa's one thread `th-1` when `thread_too` (none otherwise).
+/// What a start loads: the typical brain with `live` of its Claude sessions running
+/// elsewhere (so reconcile leaves them live) and the rest ended, `saved` as the last start's
+/// build, and moa's one thread `th-1` when `thread_too` (none otherwise).
 fn snapshot(b: &TypicalBrain, saved: Option<&str>, thread_too: bool, live: usize) -> Snapshot {
     let mut snap = b.snapshot();
-    assert!(
-        snap.sessions.len() >= live,
-        "{} sessions",
-        snap.sessions.len()
-    );
-    for (i, s) in snap.sessions.iter_mut().enumerate() {
-        if i < live {
+    let mut left = live;
+    for s in &mut snap.sessions {
+        if left > 0 && s.agent_kind == AgentKind::Claude {
+            left -= 1;
             s.lifecycle = Lifecycle::Live;
             s.location = Location::Elsewhere;
             s.archived_at = None;
@@ -98,6 +97,7 @@ fn snapshot(b: &TypicalBrain, saved: Option<&str>, thread_too: bool, live: usize
             s.lifecycle = Lifecycle::Ended;
         }
     }
+    assert_eq!(left, 0, "{live} Claude sessions to make live");
     snap.meta
         .extend(saved.map(|v| (BUILD_KEY.to_string(), v.to_string())));
     snap.threads.clear();
@@ -358,4 +358,122 @@ fn a_refused_commit_says_it_next_time() {
     fx.extend(no_tabs(&mut st, until + 2));
     said_once(&fx, NOTICE_NOTHING);
     nothing_more(&mut st, until + 2);
+}
+
+/// The session plugin changed with sessions running: that beats a new pid.
+#[test]
+fn old_hooks_beat_restarted_itself() {
+    let b = TypicalBrain::new();
+    let (_, fx) = started(
+        &b,
+        snapshot(&b, Some(OLD), true, 2),
+        facts(false, true, false),
+    );
+    let text =
+        "moa upgraded: 2 running sessions use the old hooks; they get the new ones when resumed";
+    assert_eq!(notice_hooks(2), text);
+    said_once(&fx, text);
+}
+
+/// One session running: the line says it in the singular.
+#[test]
+fn one_running_session_is_said_in_the_singular() {
+    let b = TypicalBrain::new();
+    let (_, fx) = started(
+        &b,
+        snapshot(&b, Some(OLD), true, 1),
+        facts(true, true, false),
+    );
+    let text =
+        "moa upgraded: 1 running session uses the old hooks; it gets the new ones when resumed";
+    assert_eq!(notice_hooks(1), text);
+    said_once(&fx, text);
+}
+
+/// The plugin changed with no session running: nobody has the old hooks, so the next line
+/// says it.
+#[test]
+fn a_changed_plugin_with_no_sessions_falls_through() {
+    let b = TypicalBrain::new();
+    let (_, fx) = started(
+        &b,
+        snapshot(&b, Some(OLD), true, 0),
+        facts(false, true, false),
+    );
+    said_once(&fx, NOTICE_RESTARTED);
+}
+
+/// The plugin is Claude Code's: Codex sessions running don't count as on the old hooks.
+#[test]
+fn live_codex_sessions_use_no_old_hooks() {
+    let b = TypicalBrain::new();
+    let mut snap = snapshot(&b, Some(OLD), true, 0);
+    let mut codex = 0;
+    for s in snap
+        .sessions
+        .iter_mut()
+        .filter(|s| s.agent_kind == AgentKind::Codex)
+    {
+        codex += 1;
+        s.lifecycle = Lifecycle::Live;
+        s.location = Location::Elsewhere;
+        s.archived_at = None;
+    }
+    assert!(codex > 0, "the typical brain has a Codex session");
+    let (st, fx) = started(&b, snap, facts(true, true, false));
+    let live = st.sessions().filter(|s| s.lifecycle == Lifecycle::Live);
+    assert_eq!(live.count(), codex, "they are live at the reconcile");
+    said_once(&fx, NOTICE_NOTHING);
+}
+
+/// No tmux server was running: no terminal is attached under the old options, and the next
+/// attach reads the new ones, so the next line says it.
+#[test]
+fn no_server_needs_no_reattach() {
+    let b = TypicalBrain::new();
+    let config = Config::parse(&toml("acct-a"), &b.home).unwrap();
+    let deps = Deps {
+        home: b.home.clone(),
+        ..Deps::default()
+    };
+    let mut st = State::new(BrainName::default_brain(), config)
+        .with_deps(deps)
+        .with_upgrade(facts(true, false, true));
+    let snap = snapshot(&b, Some(OLD), true, 0);
+    handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
+    feed(&b, &mut st, TmuxIn::Down(Down::NoServer));
+    let fx = handle_checked(&mut st, Input::StartDrained, b.now());
+    said_once(&fx, NOTICE_NOTHING);
+}
+
+/// A link still connecting when the start drain ends: nothing is said until the tabs are
+/// reconciled.
+#[test]
+fn a_link_still_connecting_says_nothing_yet() {
+    let b = TypicalBrain::new();
+    let config = Config::parse(&toml("acct-a"), &b.home).unwrap();
+    let deps = Deps {
+        home: b.home.clone(),
+        ..Deps::default()
+    };
+    let mut st = State::new(BrainName::default_brain(), config)
+        .with_deps(deps)
+        .with_upgrade(facts(true, false, false));
+    let snap = snapshot(&b, Some(OLD), true, 0);
+    let fx = handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
+    assert!(builds(&fx).is_empty(), "{fx:?}");
+    let fx = handle_checked(&mut st, Input::StartDrained, b.now());
+    assert!(
+        builds(&fx).is_empty(),
+        "the link is still connecting: {fx:?}"
+    );
+    let fx = clock(&mut st, b.now().wall.0 + 1_000);
+    assert!(builds(&fx).is_empty(), "{fx:?}");
+
+    // Up, its listing not yet answered: still nothing.
+    link_up(&b, &mut st);
+    let fx = clock(&mut st, b.now().wall.0 + 2_000);
+    assert!(builds(&fx).is_empty(), "{fx:?}");
+    let fx = listed(&mut st, &b, &[], &[]);
+    said_once(&fx, NOTICE_NOTHING);
 }

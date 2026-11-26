@@ -18,8 +18,8 @@ use crate::asks;
 use crate::central::{self, feed};
 use crate::change::Change;
 use crate::core::{Tx, fold_in, post_commit};
-use crate::effect::{Effect, LogLevel, LogLine};
-use crate::model::{ActivityWho, Lifecycle};
+use crate::effect::{Down, Effect, LogLevel, LogLine};
+use crate::model::{ActivityWho, AgentKind, Lifecycle};
 use crate::state::State;
 use crate::tmux::link::Link;
 use crate::{Now, UtcMs};
@@ -35,12 +35,18 @@ pub const NOTICE_RESTARTED: &str = "moa upgraded: the daemon restarted itself";
 /// An upgrade in place that needs nothing of you.
 pub const NOTICE_NOTHING: &str = "moa upgraded: nothing to do";
 
-/// The session plugin changed, and `n` sessions were live at the start's reconcile: they
-/// keep the hooks they started with.
+/// The session plugin changed, and `n` Claude sessions were live at the start's reconcile:
+/// they keep the hooks they started with. One is said in the singular.
 pub fn notice_hooks(n: usize) -> String {
-    format!(
-        "moa upgraded: {n} running sessions use the old hooks; they get the new ones when resumed"
-    )
+    match n {
+        1 => {
+            "moa upgraded: 1 running session uses the old hooks; it gets the new ones when resumed"
+                .to_string()
+        }
+        n => format!(
+            "moa upgraded: {n} running sessions use the old hooks; they get the new ones when resumed"
+        ),
+    }
 }
 
 /// What the daemon's shell knows of its start, for the notice (L7). The core reads no file:
@@ -185,14 +191,20 @@ pub(crate) fn notice(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
     fold_in(fx, post_commit(state, tx));
 }
 
-/// The notice the start after an upgrade says, the most demanding first: an attach-time tmux
-/// option changed; the session plugin changed while sessions run; the pid changed; nothing.
+/// The notice the start after an upgrade says, the most demanding first:
+/// - an attach-time tmux option changed, unless no tmux server was running (no terminal is
+///   attached under the old options, and the next attach reads the new ones);
+/// - the session plugin changed while Claude sessions run (the plugin is Claude Code's);
+/// - the pid changed;
+/// - nothing.
 fn text(state: &State, facts: &UpgradeFacts) -> String {
+    let tmux = state.tmux();
+    let no_server = tmux.link == Link::Down && tmux.last_down == Some(Down::NoServer);
     let live = state
         .sessions()
-        .filter(|s| s.lifecycle == Lifecycle::Live)
+        .filter(|s| s.lifecycle == Lifecycle::Live && s.agent_kind == AgentKind::Claude)
         .count();
-    if facts.reattach {
+    if facts.reattach && !no_server {
         NOTICE_REATTACH.to_string()
     } else if facts.plugin_changed && live > 0 {
         notice_hooks(live)
