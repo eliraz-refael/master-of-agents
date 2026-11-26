@@ -12,9 +12,9 @@ use moa_core::config::{BrainName, Config};
 use moa_core::effect::{
     Down, Effect, Input, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked,
 };
-use moa_core::model::{AgentKind, Lifecycle, Location};
+use moa_core::model::{AgentKind, Inspected, Lifecycle, Location};
 use moa_core::op::OpError;
-use moa_core::state::{Deps, Snapshot, State};
+use moa_core::state::{Deps, LoadNote, Snapshot, State};
 use moa_core::upgrade::{
     BUILD_KEY, NOTICE_NOTHING, NOTICE_REATTACH, NOTICE_RESTARTED, UPGRADING, UpgradeFacts, WAITING,
     Why, notice_hooks, status,
@@ -111,17 +111,22 @@ fn snapshot(b: &TypicalBrain, saved: Option<&str>, thread_too: bool, live: usize
     snap
 }
 
-/// The daemon starts on `snap` with `facts`, links and drains its start: its reconcile's
-/// listing waits.
-fn drained(b: &TypicalBrain, snap: Snapshot, facts: UpgradeFacts) -> (State, Vec<Effect>) {
+/// The daemon's core with `facts` (and `deps`, at the brain's home), not yet started.
+fn fresh(b: &TypicalBrain, deps: Deps, facts: UpgradeFacts) -> State {
     let config = Config::parse(&toml("acct-a"), &b.home).unwrap();
     let deps = Deps {
         home: b.home.clone(),
-        ..Deps::default()
+        ..deps
     };
-    let mut st = State::new(BrainName::default_brain(), config)
+    State::new(BrainName::default_brain(), config)
         .with_deps(deps)
-        .with_upgrade(facts);
+        .with_upgrade(facts)
+}
+
+/// The daemon starts on `snap` with `facts`, links and drains its start: its reconcile's
+/// listing waits.
+fn drained(b: &TypicalBrain, snap: Snapshot, facts: UpgradeFacts) -> (State, Vec<Effect>) {
+    let mut st = fresh(b, Deps::default(), facts);
     let mut fx = handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
     link_up(b, &mut st);
     fx.extend(handle_checked(&mut st, Input::StartDrained, b.now()));
@@ -431,14 +436,7 @@ fn live_codex_sessions_use_no_old_hooks() {
 #[test]
 fn no_server_needs_no_reattach() {
     let b = TypicalBrain::new();
-    let config = Config::parse(&toml("acct-a"), &b.home).unwrap();
-    let deps = Deps {
-        home: b.home.clone(),
-        ..Deps::default()
-    };
-    let mut st = State::new(BrainName::default_brain(), config)
-        .with_deps(deps)
-        .with_upgrade(facts(true, false, true));
+    let mut st = fresh(&b, Deps::default(), facts(true, false, true));
     let snap = snapshot(&b, Some(OLD), true, 0);
     handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
     feed(&b, &mut st, TmuxIn::Down(Down::NoServer));
@@ -451,14 +449,7 @@ fn no_server_needs_no_reattach() {
 #[test]
 fn a_link_still_connecting_says_nothing_yet() {
     let b = TypicalBrain::new();
-    let config = Config::parse(&toml("acct-a"), &b.home).unwrap();
-    let deps = Deps {
-        home: b.home.clone(),
-        ..Deps::default()
-    };
-    let mut st = State::new(BrainName::default_brain(), config)
-        .with_deps(deps)
-        .with_upgrade(facts(true, false, false));
+    let mut st = fresh(&b, Deps::default(), facts(true, false, false));
     let snap = snapshot(&b, Some(OLD), true, 0);
     let fx = handle_checked(&mut st, Input::Startup(Box::new(snap)), b.now());
     assert!(builds(&fx).is_empty(), "{fx:?}");
@@ -476,4 +467,90 @@ fn a_link_still_connecting_says_nothing_yet() {
     assert!(builds(&fx).is_empty(), "{fx:?}");
     let fx = listed(&mut st, &b, &[], &[]);
     said_once(&fx, NOTICE_NOTHING);
+}
+
+/// The log lines `fx` says.
+fn logs(fx: &[Effect]) -> Vec<&str> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(l.message.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A process read that always panics, so every reconcile that reads a tab does.
+fn panicking(_: i64, _: &[String]) -> Inspected {
+    panic!("a process read that always panics")
+}
+
+/// The reconcile is given up on after it panicked three times: none comes on
+/// this connection, so the notice isn't held for one. It is said once, and the build saved.
+#[test]
+fn a_given_up_reconcile_still_says_it() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let b = TypicalBrain::new();
+    let deps = Deps {
+        inspect: panicking,
+        ..Deps::default()
+    };
+    let mut st = fresh(&b, deps, facts(true, false, false));
+    let snap = snapshot(&b, Some(OLD), true, 0);
+    handle_checked(&mut st, Input::Startup(Box::new(snap.clone())), b.now());
+    link_up(&b, &mut st);
+    handle_checked(&mut st, Input::StartDrained, b.now());
+    let mut said = Vec::new();
+    for attempt in 1..=3 {
+        // One untagged tab: reconcile reads its process, and panics.
+        let info = ["I\t%9\t909\t0\t\t\t\t/tmp"];
+        let run = catch_unwind(AssertUnwindSafe(|| listed(&mut st, &b, &info, &[])));
+        assert!(run.is_err(), "attempt {attempt} didn't panic");
+        // As the daemon does after a panic: the core reloads.
+        let reload = Input::Reload {
+            snapshot: Box::new(snap.clone()),
+            refuse_writes: None,
+        };
+        let fx = handle_checked(&mut st, reload, b.now());
+        if attempt < 3 {
+            assert!(
+                builds(&fx).is_empty(),
+                "a reconcile is still coming: {fx:?}"
+            );
+        } else {
+            let given_up =
+                "reconciling the tabs failed 3 times; moa tries again at the next connection";
+            assert!(logs(&fx).contains(&given_up), "{fx:?}");
+        }
+        said.extend(fx);
+    }
+    assert!(!st.tmux().reconciled());
+    assert!(matches!(
+        st.tmux().link,
+        moa_core::tmux::link::Link::Up { .. }
+    ));
+    said.extend(clock(&mut st, b.now().wall.0 + 1_000));
+    said_once(&said, NOTICE_NOTHING);
+    assert_eq!(st.meta(BUILD_KEY), Some(NEW));
+}
+
+/// A notice whose commit fails for another reason than refused writes (here a row this
+/// build doesn't know where its activity row goes) stays owed and is tried at each input,
+/// but the log says so once.
+#[test]
+fn a_notice_that_cant_be_saved_is_logged_once() {
+    const UNSAVED: &str = "the upgrade's notice wasn't saved; moa says it at the next input";
+    let b = TypicalBrain::new();
+    let mut snap = snapshot(&b, Some(OLD), false, 0);
+    snap.unknown.push(LoadNote {
+        table: "activity",
+        key: format!("#{}", snap.next_ids.activity),
+        reason: "a value this build doesn't know",
+    });
+    let (mut st, mut fx) = started(&b, snap, facts(true, false, false));
+    fx.extend(clock(&mut st, b.now().wall.0 + 1_000));
+    fx.extend(clock(&mut st, b.now().wall.0 + 2_000));
+    assert!(builds(&fx).is_empty() && activity(&fx).is_empty(), "{fx:?}");
+    let unsaved = logs(&fx).into_iter().filter(|l| *l == UNSAVED).count();
+    assert_eq!(unsaved, 1, "{fx:?}");
 }

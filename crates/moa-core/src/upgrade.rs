@@ -64,16 +64,22 @@ pub struct UpgradeFacts {
     pub reattach: bool,
 }
 
-/// The start's notice: its facts, and whether it is settled (said, saved, or not owed).
+/// The start's notice: its facts, whether it is settled (said, saved, or not owed), and
+/// whether the log has said that a commit of it failed, which it says once per owed notice.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Notice {
     facts: UpgradeFacts,
     done: bool,
+    warned: bool,
 }
 
 impl Notice {
     pub(crate) fn new(facts: UpgradeFacts) -> Notice {
-        Notice { facts, done: false }
+        Notice {
+            facts,
+            done: false,
+            warned: false,
+        }
     }
 }
 
@@ -126,14 +132,16 @@ pub(crate) fn exec_sent(state: &State) -> bool {
 }
 
 /// At the end of every input, once this start's tabs are reconciled (or no reconcile is
-/// coming: the link is down, or its reconciles were given up on) and writes are accepted, the start's notice is settled, once:
+/// coming: the link is down, or its reconciles were given up on) and writes are accepted,
+/// the start's notice is settled, once:
 /// - the build the last start saved is this one: nothing is said or written;
 /// - no build is saved (a new root, or the first start of a build that saves it): it is
 ///   saved, and nothing is said, as a first start isn't an upgrade;
 /// - another build: the notice ([`text`]) is a `system` line in moa's current thread, when
 ///   there is one, and an activity row always, in the commit that saves this build.
 ///
-/// A refused commit leaves it owed, to be said by the next input that can save it.
+/// A refused commit leaves it owed, to be said by the next input that can save it; a commit
+/// that fails otherwise is logged once.
 pub(crate) fn notice(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
     let Some(facts) = state
         .notice
@@ -180,9 +188,17 @@ pub(crate) fn notice(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
         changes.push(tx.activity_row(state, ActivityWho::Brain, text.clone(), None));
     }
     if tx.commit(state, changes).is_err() {
-        fx.push(log(
-            "the upgrade's notice wasn't saved; moa says it at the next input".to_string(),
-        ));
+        // Tried again at every input; said once.
+        if let Some(n) = &mut state.notice
+            && !n.warned
+        {
+            n.warned = true;
+            fx.push(Effect::Log(LogLine {
+                level: LogLevel::Warn,
+                message: "the upgrade's notice wasn't saved; moa says it at the next input"
+                    .to_string(),
+            }));
+        }
         return;
     }
     settle(state);
@@ -221,6 +237,7 @@ fn text(state: &State, facts: &UpgradeFacts) -> String {
 fn settle(state: &mut State) {
     if let Some(n) = &mut state.notice {
         n.done = true;
+        n.warned = false;
     }
 }
 
@@ -236,6 +253,7 @@ pub(crate) fn reload(state: &mut State) {
     }
     if let Some(n) = &mut state.notice {
         n.done = false;
+        n.warned = false;
     }
 }
 
