@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use crate::Now;
+use crate::asks;
 use crate::central::PROMPT_MAX;
 use crate::change::Change;
 use crate::core::Tx;
@@ -42,7 +43,8 @@ pub const EARLIER_MAX: usize = 500;
 
 /// The report `env` adds for `session` (the session as the event leaves it), or `None` when
 /// it adds none: the event says nothing to moa (an empty message, a start, a failure, a
-/// need cleared), or the session is moa's own agent's, whose folder is `Deps.agent_dir`.
+/// need cleared), the turn it ends answers an ask (A7: the asker hears it), or the session is
+/// moa's own agent's, whose folder is `Deps.agent_dir`.
 ///
 /// A session has one row of each kind. A turn's message joins the row's turns, the newest
 /// [`TURNS_KEPT`] kept; what a session needs replaces the last. The row keeps its `queued_at`,
@@ -54,6 +56,9 @@ pub(crate) fn queued(
     env: &HookEnvelope,
 ) -> Option<Change> {
     let (kind, text) = match &env.kind {
+        HookKind::TurnEnded { .. } if asks::answering(state, session.id).is_some() => {
+            return None;
+        }
         // Whole from the hook: its head and tail, as the history row keeps it.
         HookKind::TurnEnded { last_message } => (ReportKind::TurnEnded, cut_middle(last_message)),
         HookKind::NeedsPermission { tool } => (ReportKind::NeedsYou, format!("permission: {tool}")),

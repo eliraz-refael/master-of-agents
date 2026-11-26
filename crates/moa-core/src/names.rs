@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 
 use crate::live::spike_state;
-use crate::model::{Activity, AskStatus, AskTarget, Lifecycle, Location, Session, SessionId};
+use crate::model::{Activity, Ask, AskStatus, AskTarget, Lifecycle, Location, Session, SessionId};
 use crate::op::OpError;
 use crate::state::State;
 use crate::text::{cut, one_line};
@@ -187,14 +187,24 @@ impl State {
     /// Whether live session `id` can take an ask now (A3): it is idle (or its turn failed),
     /// and no ask to it is in flight (`sent` or `received`).
     pub fn is_free(&self, id: SessionId) -> bool {
-        let to = Some(AskTarget::Session(id));
+        self.waits_for_input(id) && self.in_flight_to(id).next().is_none()
+    }
+
+    /// Whether session `id` is live and idle, or its turn failed: free once nothing is in
+    /// flight to it ([`State::is_free`]).
+    pub(crate) fn waits_for_input(&self, id: SessionId) -> bool {
         self.is_live(id)
             && self
                 .session(id)
                 .is_some_and(|s| matches!(s.activity, Activity::Idle | Activity::Failed))
-            && !self.asks().any(|a| {
-                a.to_session == to && matches!(a.status, AskStatus::Sent | AskStatus::Received)
-            })
+    }
+
+    /// The asks in flight to session `id`: `sent` or `received`.
+    pub(crate) fn in_flight_to(&self, id: SessionId) -> impl Iterator<Item = &Ask> {
+        let to = Some(AskTarget::Session(id));
+        self.asks().filter(move |a| {
+            a.to_session == to && matches!(a.status, AskStatus::Sent | AskStatus::Received)
+        })
     }
 }
 

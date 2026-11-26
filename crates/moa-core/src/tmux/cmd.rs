@@ -563,7 +563,7 @@ fn is_ask_buffer(s: &str) -> bool {
 }
 
 /// One or more ASCII digits, and nothing else.
-fn is_digits(d: &str) -> bool {
+pub(crate) fn is_digits(d: &str) -> bool {
     !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())
 }
 

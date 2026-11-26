@@ -1,310 +1,25 @@
 //! Asks between agents (slice 7, A1–A4, A11, A13): `ask` saves a `pending` row and waits for
 //! the answer, `reply` waits again, `peers` lists who can be asked, and `asks` lists the
-//! caller's asks. Delivery into a pane is not here: an ask stays `pending` unless a test sets
-//! its row by hand.
+//! caller's asks; A5–A8: an ask to a session is typed into its pane when it is free, taken by
+//! the marker in its next prompt, and answered by the full message that ends that turn. The
+//! tests before the link is up see an ask stay `pending`.
 
 mod common;
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use jiff::tz::TimeZone;
+use moa_core::UtcMs;
 use moa_core::asks::{ASK_TEXT_MAX, ASK_WAIT_DEFAULT_MS};
 use moa_core::change::Change;
-use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, handle_checked};
-use moa_core::model::{
-    Activity, AgentKind, Ask, AskId, AskStatus, AskTarget, Conversation, ConversationReason,
-    Lifecycle, Location, PaneBinding, Session, SessionId,
-};
-use moa_core::op::{ConnId, Done, NoParams, Op, OpError, ReqId};
-use moa_core::state::{CallerInfo, Deps, Snapshot, State};
-use moa_core::{Now, UtcMs};
+use moa_core::effect::{Effect, Input, TmuxIn, handle_checked};
+use moa_core::hook::HookKind;
+use moa_core::model::{Activity, Ask, AskId, AskStatus, AskTarget, Lifecycle, Location, Session};
+use moa_core::op::{ConnId, NoParams, Op, OpError, ReqId};
+use moa_core::state::{CallerInfo, Snapshot};
+use moa_core::tmux::cmd::Cmd;
+use moa_core::tmux::ids::PaneId;
+use moa_core::tmux::notify::Notification;
 use serde_json::Value;
 
-use common::timers;
-
-const HOME: &str = "/tmp/moa-asks-test/home";
-
-const TOML: &str = r#"
-[brains.default]
-folders = ["~/private"]
-"#;
-
-/// The moment every test starts at.
-const T0: i64 = 1_790_000_000_000;
-const SEC: i64 = 1_000;
-const MIN: i64 = 60 * SEC;
-
-const KITE: &str = "00000000-0000-4000-8000-0000000000a1";
-const HARBOR: &str = "00000000-0000-4000-8000-0000000000a2";
-const BEACON: &str = "00000000-0000-4000-8000-0000000000a3";
-/// Ended, and bound to no tab.
-const LANTERN: &str = "00000000-0000-4000-8000-0000000000a4";
-
-/// Each session's conversation: its handle is the first 8 characters.
-fn conversation_of(id: &str) -> &'static str {
-    match id {
-        KITE => "7c41d0e2-0000-4000-8000-0000000000a1",
-        HARBOR => "3f2a91c4-0000-4000-8000-0000000000a2",
-        BEACON => "b9e0c3d5-0000-4000-8000-0000000000a3",
-        LANTERN => "5d8e2f10-0000-4000-8000-0000000000a4",
-        _ => "e0e0e0e0-0000-4000-8000-0000000000ff",
-    }
-}
-
-fn sid(id: &str) -> SessionId {
-    id.parse().unwrap()
-}
-
-fn now(ms: i64) -> Now {
-    Now::at(UtcMs(ms), Duration::ZERO, TimeZone::UTC)
-}
-
-/// A live session titled `title` in `~/private/<folder>`, `activity` since a minute before
-/// T0.
-fn session(id: &str, title: &str, folder: &str, activity: Activity) -> Session {
-    let cwd = format!("{HOME}/private/{folder}");
-    Session {
-        id: sid(id),
-        agent_kind: AgentKind::Claude,
-        account: Some("acct-a".into()),
-        cwd: Some(cwd.clone()),
-        start_cwd: Some(cwd),
-        project_id: None,
-        title: Some(title.into()),
-        title_locked: false,
-        group_path: None,
-        lifecycle: Lifecycle::Live,
-        activity,
-        activity_at: Some(UtcMs(T0 - MIN)),
-        activity_why: Some("Looking at the tide tables".into()),
-        last_prompt: None,
-        last_turn_end_at: None,
-        seen_at: None,
-        asleep_at: None,
-        archived_at: None,
-        location: Location::Here,
-        resume_failed: false,
-        created_at: UtcMs(1),
-        last_seen_at: Some(UtcMs(T0 - MIN)),
-    }
-}
-
-fn conversation(id: &str) -> Conversation {
-    Conversation {
-        agent_kind: AgentKind::Claude,
-        conversation_id: conversation_of(id).into(),
-        session_id: sid(id),
-        store_dir: None,
-        spike_account: None,
-        reason: ConversationReason::Start,
-        first_seen_at: UtcMs(1),
-        last_seen_at: UtcMs(1),
-        transcript_path: None,
-        transcript_present: None,
-        transcript_checked_at: None,
-    }
-}
-
-fn binding(id: &str, pane: &str) -> PaneBinding {
-    PaneBinding {
-        session_id: sid(id),
-        server_pid: 10,
-        server_start: 1000,
-        socket: "moa".into(),
-        pane_id: pane.into(),
-        pane_pid: 100,
-        bound_at: UtcMs(1),
-        tracked: true,
-    }
-}
-
-/// Ask `id` from `from` to `to`, saved at `at`, `status`.
-fn ask_row(id: i64, from: AskTarget, from_name: &str, to: AskTarget, text: &str, at: i64) -> Ask {
-    Ask {
-        id: AskId(id),
-        at: UtcMs(at),
-        from_session: Some(from),
-        from_name: Some(from_name.into()),
-        to_session: Some(to),
-        text: text.into(),
-        status: AskStatus::Pending,
-        reply: None,
-        claimed_at: None,
-        answered_at: None,
-    }
-}
-
-fn to(id: &str) -> AskTarget {
-    AskTarget::Session(sid(id))
-}
-
-/// Kite (idle, `%1`), Harbor (working, `%2`) and Beacon (idle, `%3`), live; Lantern ended
-/// with no tab.
-fn snapshot() -> Snapshot {
-    let mut lantern = session(LANTERN, "Lantern", "lantern", Activity::Idle);
-    lantern.lifecycle = Lifecycle::Ended;
-    let ids = [KITE, HARBOR, BEACON, LANTERN];
-    Snapshot {
-        sessions: vec![
-            session(KITE, "Kite", "kite", Activity::Idle),
-            session(HARBOR, "Harbor", "harbor", Activity::Working),
-            session(BEACON, "Beacon", "beacon", Activity::Idle),
-            lantern,
-        ],
-        conversations: ids.iter().map(|id| conversation(id)).collect(),
-        pane_bindings: vec![
-            binding(KITE, "%1"),
-            binding(HARBOR, "%2"),
-            binding(BEACON, "%3"),
-        ],
-        ..Snapshot::default()
-    }
-}
-
-struct Rig {
-    st: State,
-    req: u64,
-}
-
-impl Rig {
-    fn new(snapshot: Snapshot) -> Rig {
-        let home = PathBuf::from(HOME);
-        let config = Config::parse(TOML, &home).unwrap();
-        let deps = Deps {
-            home,
-            ..Deps::default()
-        };
-        let mut st = State::new(BrainName::default_brain(), config).with_deps(deps);
-        handle_checked(&mut st, Input::Startup(Box::new(snapshot)), now(T0));
-        Rig { st, req: 0 }
-    }
-
-    /// `op` from `caller` on connection `conn`, at `ms`.
-    fn op(&mut self, conn: u64, caller: CallerInfo, op: Op, ms: i64) -> Vec<Effect> {
-        self.req += 1;
-        let input = Input::Client {
-            conn: ConnId(conn),
-            req: ReqId(self.req),
-            caller,
-            op,
-        };
-        handle_checked(&mut self.st, input, now(ms))
-    }
-
-    /// `caller` asks `to` `text` on connection `conn` at T0, waiting `timeout_s`.
-    fn ask(
-        &mut self,
-        conn: u64,
-        caller: CallerInfo,
-        to: &str,
-        text: &str,
-        timeout_s: i64,
-    ) -> Vec<Effect> {
-        let op = Op::Ask {
-            to: to.into(),
-            text: text.into(),
-            timeout_s,
-        };
-        self.op(conn, caller, op, T0)
-    }
-
-    /// The asks timer fires at `ms`.
-    fn fire(&mut self, ms: i64) -> Vec<Effect> {
-        handle_checked(&mut self.st, Input::Timer(TimerKey::Asks), now(ms))
-    }
-
-    /// The core reloads at `ms` with the rows it has, these asks put in by hand.
-    fn reload(&mut self, ms: i64, asks: Vec<Ask>) -> Vec<Effect> {
-        self.reload_refusing(ms, asks, None)
-    }
-
-    /// [`Rig::reload`], the store refusing writes until `until` when given.
-    fn reload_refusing(&mut self, ms: i64, asks: Vec<Ask>, until: Option<i64>) -> Vec<Effect> {
-        let mut snap = snapshot();
-        snap.asks = asks;
-        snap.next_ids.ask = snap.asks.iter().map(|a| a.id.0 + 1).max().unwrap_or(1);
-        let input = Input::Reload {
-            snapshot: Box::new(snap),
-            refuse_writes: until.map(|until| RefuseWrites {
-                until: UtcMs(until),
-                reason: "the disk is full".into(),
-            }),
-        };
-        handle_checked(&mut self.st, input, now(ms))
-    }
-
-    fn row(&self, id: i64) -> Ask {
-        let topic = &self.st.model().topics[&moa_core::publish::Topic::Asks];
-        serde_json::from_value(topic[&id.to_string()].clone()).unwrap()
-    }
-}
-
-fn from(id: &str) -> CallerInfo {
-    CallerInfo {
-        moa_session: Some(id.into()),
-        ..CallerInfo::default()
-    }
-}
-
-fn moa() -> CallerInfo {
-    from("moa")
-}
-
-/// A shell in a folder: no session, not moa.
-fn shell() -> CallerInfo {
-    CallerInfo {
-        cwd: Some(PathBuf::from(format!("{HOME}/private/kite"))),
-        ..CallerInfo::default()
-    }
-}
-
-fn replies(fx: &[Effect]) -> Vec<(ConnId, ReqId, Result<Done, OpError>)> {
-    fx.iter()
-        .filter_map(|e| match e {
-            Effect::Reply { conn, req, result } => Some((*conn, *req, result.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-fn the_error(fx: &[Effect]) -> String {
-    match &replies(fx)[..] {
-        [(_, _, Err(e))] => e.0.clone(),
-        other => panic!("not one refusal: {other:?}"),
-    }
-}
-
-fn saved_asks(fx: &[Effect]) -> Vec<Ask> {
-    common::changes(fx)
-        .into_iter()
-        .filter_map(|c| match c {
-            Change::Ask(a) => Some(a.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn persisted(fx: &[Effect]) -> bool {
-    fx.iter().any(|e| matches!(e, Effect::Persist(_)))
-}
-
-fn set_at(fx: &[Effect]) -> Option<UtcMs> {
-    timers(fx, TimerKey::Asks)
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            Effect::SetTimer { at, .. } => Some(*at),
-            _ => None,
-        })
-}
-
-fn cancelled(fx: &[Effect]) -> bool {
-    timers(fx, TimerKey::Asks)
-        .iter()
-        .any(|e| matches!(e, Effect::CancelTimer(TimerKey::Asks)))
-}
+use common::asks::*;
 
 // ---------- ask ----------
 
@@ -628,12 +343,12 @@ fn a_pending_ask_is_dropped_at_its_wait() {
 }
 
 #[test]
-fn a_sent_ask_says_no_reply_yet() {
+fn an_open_ask_says_no_reply_yet() {
     let mut r = Rig::new(snapshot());
     r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
-    // Delivered, by hand.
+    // Delivered and taken, by hand (a `sent` one would fail at 20 s for want of a receipt).
     let mut sent = r.row(1);
-    sent.status = AskStatus::Sent;
+    sent.status = AskStatus::Received;
     sent.claimed_at = Some(UtcMs(T0 + SEC));
     r.reload(T0 + SEC, vec![sent.clone()]);
     let until = T0 + ASK_WAIT_DEFAULT_MS;
@@ -900,4 +615,513 @@ fn a_refused_drop_says_no_reply_yet() {
         other => panic!("{other:?}"),
     }
     assert_eq!(r.row(1).status, AskStatus::Pending);
+}
+
+// ---------- delivery, receipt and answer ----------
+
+const NO_RECEIPT: &str = "no receipt (a dialog or copy mode had the pane)";
+
+fn pane(p: &str) -> PaneId {
+    p.parse().unwrap()
+}
+
+/// What an ask from `from` is typed into a pane as (A13).
+fn framed(id: i64, from: &str, text: &str) -> String {
+    format!(
+        "[moa · message from {from} · ask #{id}] {text}\n\n(Your reply this turn goes back to {from} as the answer.)"
+    )
+}
+
+/// [`snapshot`], Harbor idle and in tab `%5`.
+fn harbor_idle() -> Snapshot {
+    let mut snap = snapshot();
+    let harbor = snap
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == sid(HARBOR))
+        .unwrap();
+    harbor.activity = Activity::Idle;
+    let b = snap
+        .pane_bindings
+        .iter_mut()
+        .find(|b| b.session_id == sid(HARBOR))
+        .unwrap();
+    b.pane_id = "%5".into();
+    snap
+}
+
+/// The asks each of `fx`'s commits saves, one list per commit.
+fn ask_commits(fx: &[Effect]) -> Vec<Vec<Ask>> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Persist(c) => Some(
+                c.iter()
+                    .filter_map(|c| match c {
+                        Change::Ask(a) => Some(a.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<Ask>>(),
+            ),
+            _ => None,
+        })
+        .filter(|asks| !asks.is_empty())
+        .collect()
+}
+
+/// The commit in `fx` that saves session `id`, all of it.
+fn session_commit(fx: &[Effect], id: &str) -> Vec<Change> {
+    fx.iter()
+        .find_map(|e| match e {
+            Effect::Persist(c)
+                if c.iter()
+                    .any(|c| matches!(c, Change::Session(s) if s.id == sid(id))) =>
+            {
+                Some(c.clone())
+            }
+            _ => None,
+        })
+        .expect("a commit saves the session")
+}
+
+fn statuses(r: &Rig, ids: &[i64]) -> Vec<AskStatus> {
+    ids.iter().map(|id| r.row(*id).status).collect()
+}
+
+#[test]
+fn a_free_peer_gets_the_ask_typed() {
+    let mut r = Rig::linked(harbor_idle());
+    let fx = r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let commits = ask_commits(&fx);
+    assert_eq!(commits.len(), 2, "the ask, then its claim: {commits:?}");
+    let claimed = &commits[1];
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].status, AskStatus::Sent);
+    assert_eq!(claimed[0].claimed_at, Some(UtcMs(T0)));
+    let text = framed(1, "Kite", "Is the domain renewed?");
+    assert_eq!(
+        typed(&fx),
+        [
+            Cmd::set_buffer("moa-ask-1", &text),
+            Cmd::paste_buffer("moa-ask-1", pane("%5")),
+        ]
+    );
+    // The typing goes after the claim is saved.
+    let saved_at = fx
+        .iter()
+        .rposition(|e| matches!(e, Effect::Persist(_)))
+        .unwrap();
+    let typed_at = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Tmux { token: None, .. }))
+        .unwrap();
+    assert!(saved_at < typed_at, "{fx:?}");
+    assert!(!launches(&fx), "{fx:?}");
+    // Its Enter is the next deadline.
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 + 500)));
+    let fx = r.fire(T0 + 499);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+    let fx = r.fire(T0 + 500);
+    assert_eq!(typed(&fx), [Cmd::enter(pane("%5"))]);
+    assert!(!persisted(&fx) && !launches(&fx), "{fx:?}");
+    // Then its receipt's.
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 + 20 * SEC)));
+    // Only once.
+    let fx = r.fire(T0 + 600);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+}
+
+#[test]
+fn an_ask_waits_for_the_link() {
+    let mut r = Rig::new(harbor_idle());
+    let fx = r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.row(1).status, AskStatus::Pending);
+    let fx = r.link_up(T0 + SEC);
+    assert_eq!(r.row(1).status, AskStatus::Sent);
+    assert_eq!(typed(&fx).len(), 2, "{fx:?}");
+}
+
+#[test]
+fn a_busy_peer_gets_it_on_its_stop() {
+    let mut r = Rig::linked(snapshot());
+    let fx = r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.row(1).status, AskStatus::Pending);
+    let fx = r.stopped(T0 + 5 * SEC, HARBOR, "The tide tables are checked.");
+    assert_eq!(r.row(1).status, AskStatus::Sent);
+    assert_eq!(r.row(1).claimed_at, Some(UtcMs(T0 + 5 * SEC)));
+    assert_eq!(
+        typed(&fx),
+        [
+            Cmd::set_buffer("moa-ask-1", &framed(1, "Kite", "Is the domain renewed?")),
+            Cmd::paste_buffer("moa-ask-1", pane("%2")),
+        ]
+    );
+}
+
+#[test]
+fn one_ask_at_a_time() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    let fx = r.ask(2, from(BEACON), "Harbor", "Which branch?", 540);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+    assert_eq!(statuses(&r, &[1, 2]), [AskStatus::Sent, AskStatus::Pending]);
+    r.fire(T0 + 500);
+    r.started(
+        T0 + SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    assert_eq!(
+        statuses(&r, &[1, 2]),
+        [AskStatus::Received, AskStatus::Pending]
+    );
+    // Its answer frees Harbor: the next ask is typed in the same input.
+    let fx = r.stopped(T0 + 9 * SEC, HARBOR, "Yes, until 2028.");
+    assert_eq!(
+        statuses(&r, &[1, 2]),
+        [AskStatus::Answered, AskStatus::Sent]
+    );
+    match &replies(&fx)[..] {
+        [(ConnId(1), _, Ok(done))] => assert_eq!(done.text, "Yes, until 2028."),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        typed(&fx),
+        [
+            Cmd::set_buffer("moa-ask-2", &framed(2, "Beacon", "Which branch?")),
+            Cmd::paste_buffer("moa-ask-2", pane("%5")),
+        ]
+    );
+}
+
+#[test]
+fn only_its_own_marker_is_a_receipt() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.ask(2, from(KITE), "Beacon", "Which branch?", 540);
+    assert_eq!(statuses(&r, &[1, 2]), [AskStatus::Sent, AskStatus::Sent]);
+    r.fire(T0 + 500);
+    let not_receipts = [
+        // Another ask's marker, quoted: an ask to Beacon.
+        framed(2, "Kite", "Which branch?"),
+        // An ask that doesn't exist.
+        framed(9, "Kite", "Is the domain renewed?"),
+        // Almost a marker.
+        "[moa · message from Kite · ask #1 Is the domain renewed?".to_string(),
+        "[moa · message from Kite · ask #x1] Is the domain renewed?".to_string(),
+        // The user's own prompt.
+        "Look at the tide tables again".to_string(),
+    ];
+    let mut at = T0 + SEC;
+    for prompt in not_receipts {
+        let fx = r.started(at, HARBOR, &prompt);
+        assert_eq!(
+            statuses(&r, &[1, 2]),
+            [AskStatus::Sent, AskStatus::Sent],
+            "{prompt}"
+        );
+        assert!(saved_asks(&fx).is_empty(), "{prompt}: {fx:?}");
+        // Its turn's end answers nothing.
+        let fx = r.stopped(at + 100, HARBOR, "Done.");
+        assert!(saved_asks(&fx).is_empty(), "{prompt}: {fx:?}");
+        assert!(replies(&fx).is_empty(), "{prompt}: {fx:?}");
+        at += SEC;
+    }
+    // A wrapped paste, the marker not first: a receipt.
+    let wrapped = format!(
+        "Pasted from the other tab:\n> {}",
+        framed(1, "Kite", "Is the domain renewed?")
+    );
+    r.started(at, HARBOR, &wrapped);
+    assert_eq!(
+        statuses(&r, &[1, 2]),
+        [AskStatus::Received, AskStatus::Sent]
+    );
+}
+
+#[test]
+fn the_answer_is_the_full_message() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.fire(T0 + 500);
+    r.started(
+        T0 + SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    let huge: String = (0..20_000).map(|i| format!("line {i:05}\n")).collect();
+    assert!(huge.len() >= 200_000);
+    let fx = r.stopped(T0 + 9 * SEC, HARBOR, &huge);
+    match &replies(&fx)[..] {
+        [(ConnId(1), _, Ok(done))] => {
+            assert_eq!(done.text, huge);
+            assert_eq!(done.data["status"], "answered");
+            assert_eq!(done.data["from"], "Kite");
+            assert_eq!(done.data["to"], "Harbor");
+        }
+        other => panic!("{other:?}"),
+    }
+    let row = r.row(1);
+    assert_eq!(row.status, AskStatus::Answered);
+    assert_eq!(row.reply.as_deref(), Some(huge.as_str()));
+    assert_eq!(row.answered_at, Some(UtcMs(T0 + 9 * SEC)));
+    // The answer is saved with the hook's own commit; its history row stays cut.
+    let commit = session_commit(&fx, HARBOR);
+    assert!(
+        commit
+            .iter()
+            .any(|c| matches!(c, Change::Ask(a) if a.status == AskStatus::Answered)),
+        "{commit:?}"
+    );
+    let event = commit
+        .iter()
+        .find_map(|c| match c {
+            Change::Event(e) => e.text.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(event.chars().count() < 3_000, "{}", event.len());
+    // An empty answer says so.
+    r.ask(2, from(BEACON), "Harbor", "Which branch?", 540);
+    r.fire(T0 + 10 * SEC);
+    r.started(T0 + 11 * SEC, HARBOR, &framed(2, "Beacon", "Which branch?"));
+    let fx = r.stopped(T0 + 12 * SEC, HARBOR, "");
+    match &replies(&fx)[..] {
+        [(ConnId(2), _, Ok(done))] => assert_eq!(done.text, "(no text)"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(r.row(2).reply.as_deref(), Some("(no text)"));
+}
+
+#[test]
+fn no_receipt_fails_at_20_s() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.fire(T0 + 500);
+    let fx = r.fire(T0 + 20 * SEC - 1);
+    assert!(!persisted(&fx) && replies(&fx).is_empty(), "{fx:?}");
+    let fx = r.fire(T0 + 20 * SEC);
+    let saved = saved_asks(&fx);
+    assert_eq!(saved.len(), 1, "{fx:?}");
+    assert_eq!(saved[0].status, AskStatus::Failed);
+    assert_eq!(saved[0].reply.as_deref(), Some(NO_RECEIPT));
+    assert_eq!(
+        replies(&fx),
+        [(
+            ConnId(1),
+            ReqId(1),
+            Err(OpError(format!("ask #1 failed: {NO_RECEIPT}")))
+        )]
+    );
+    // Nothing else waits.
+    assert!(cancelled(&fx), "{fx:?}");
+}
+
+#[test]
+fn a_late_receipt_revives_it() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.fire(T0 + 500);
+    r.fire(T0 + 20 * SEC);
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+    // The dialog closes, and the ask goes in.
+    let fx = r.started(
+        T0 + 25 * SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    let row = r.row(1);
+    assert_eq!(row.status, AskStatus::Received, "{fx:?}");
+    assert_eq!(row.reply, None);
+    assert_eq!(row.answered_at, None);
+    assert_eq!(row.claimed_at, Some(UtcMs(T0)));
+    assert!(!r.st.is_free(sid(HARBOR)));
+    // Kite waits again, and hears the answer.
+    let fx = r.op(
+        1,
+        from(KITE),
+        Op::Reply {
+            id: 1,
+            timeout_s: 540,
+        },
+        T0 + 26 * SEC,
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    let fx = r.stopped(T0 + 30 * SEC, HARBOR, "Yes.");
+    match &replies(&fx)[..] {
+        [(ConnId(1), _, Ok(done))] => assert_eq!(done.text, "Yes."),
+        other => panic!("{other:?}"),
+    }
+    // Another failure isn't revived.
+    let mut snap = harbor_idle();
+    let mut stale = ask_row(1, to(KITE), "Kite", to(HARBOR), "Is it?", T0 - MIN);
+    stale.status = AskStatus::Failed;
+    stale.reply = Some("stale".into());
+    stale.claimed_at = Some(UtcMs(T0 - MIN));
+    snap.asks = vec![stale];
+    snap.next_ids.ask = 2;
+    let mut r = Rig::linked(snap);
+    r.started(T0 + SEC, HARBOR, &framed(1, "Kite", "Is it?"));
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+}
+
+/// A late receipt never makes two agents wait on each other: once Harbor asks Kite, Kite's
+/// failed ask to Harbor stays failed.
+#[test]
+fn a_late_receipt_never_deadlocks() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.fire(T0 + 500);
+    r.fire(T0 + 20 * SEC);
+    let fx = r.op(
+        2,
+        from(HARBOR),
+        Op::Ask {
+            to: "Kite".into(),
+            text: "Which branch?".into(),
+            timeout_s: 540,
+        },
+        T0 + 21 * SEC,
+    );
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.row(2).status, AskStatus::Sent);
+    r.started(
+        T0 + 25 * SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+}
+
+#[test]
+fn stale_asks_fail_before_a_new_claim() {
+    let stale_after = 2 * ASK_WAIT_DEFAULT_MS;
+    let mut snap = harbor_idle();
+    let mut old = ask_row(1, to(KITE), "Kite", to(HARBOR), "Is it?", T0 - 30 * MIN);
+    old.status = AskStatus::Received;
+    old.claimed_at = Some(UtcMs(T0 - stale_after + MIN));
+    let waiting = ask_row(
+        2,
+        to(BEACON),
+        "Beacon",
+        to(HARBOR),
+        "Which branch?",
+        T0 - MIN,
+    );
+    snap.asks = vec![old, waiting];
+    snap.next_ids.ask = 3;
+    // Not stale yet: Harbor isn't free, and the timer waits for it to be.
+    let (mut r, fx) = Rig::started_at(snap, T0);
+    assert_eq!(set_at(&fx), Some(UtcMs(T0 + MIN)));
+    let fx = r.link_up(T0);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+    assert_eq!(
+        statuses(&r, &[1, 2]),
+        [AskStatus::Received, AskStatus::Pending]
+    );
+    // Stale: it fails in the claim's own commit.
+    let fx = r.fire(T0 + MIN);
+    let commits = ask_commits(&fx);
+    assert_eq!(commits.len(), 1, "{commits:?}");
+    let by_id: Vec<(i64, AskStatus)> = commits[0].iter().map(|a| (a.id.0, a.status)).collect();
+    assert_eq!(by_id, [(1, AskStatus::Failed), (2, AskStatus::Sent)]);
+    assert_eq!(r.row(1).reply.as_deref(), Some("stale"));
+    assert_eq!(typed(&fx).len(), 2, "{fx:?}");
+}
+
+/// Harbor (in `%5`) has Kite's ask in flight, Beacon's waiting, and its own to moa.
+fn harbor_in_asks() -> Rig {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.ask(2, from(BEACON), "Harbor", "Which branch?", 540);
+    r.ask(3, from(HARBOR), "moa", "Which account am I on?", 540);
+    assert_eq!(
+        statuses(&r, &[1, 2, 3]),
+        [AskStatus::Sent, AskStatus::Pending, AskStatus::Pending]
+    );
+    r
+}
+
+fn assert_ended_for_harbor(r: &Rig, fx: &[Effect]) {
+    assert_eq!(
+        statuses(r, &[1, 2, 3]),
+        [AskStatus::Failed, AskStatus::Dropped, AskStatus::Pending]
+    );
+    assert_eq!(r.row(1).reply.as_deref(), Some("Harbor ended"));
+    assert_eq!(r.row(2).reply.as_deref(), Some("Harbor ended"));
+    let mut heard = replies(fx);
+    heard.sort_by_key(|(c, _, _)| *c);
+    assert_eq!(
+        heard,
+        [
+            (
+                ConnId(1),
+                ReqId(1),
+                Err(OpError("ask #1 failed: Harbor ended".into()))
+            ),
+            (
+                ConnId(2),
+                ReqId(2),
+                Err(OpError("Harbor ended; ask #2 was dropped".into()))
+            ),
+        ]
+    );
+    // In the commit that ends Harbor.
+    let commit = session_commit(fx, HARBOR);
+    let ended: Vec<i64> = commit
+        .iter()
+        .filter_map(|c| match c {
+            Change::Ask(a) => Some(a.id.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended, [1, 2]);
+}
+
+#[test]
+fn a_dead_peer_ends_its_asks() {
+    // It quits.
+    let mut r = harbor_in_asks();
+    let fx = r.hook(
+        T0 + 5 * SEC,
+        HARBOR,
+        HookKind::SessionEnded {
+            reason: "prompt_input_exit".into(),
+        },
+    );
+    assert_ended_for_harbor(&r, &fx);
+    // Its tab goes: nothing more is typed into it.
+    let mut r = harbor_in_asks();
+    let exited = TmuxIn::Notification(Notification::Message("moa:hook pane-exited %5".into()));
+    let fx = handle_checked(&mut r.st, Input::Tmux(exited), common::asks::now(T0 + 100));
+    assert_ended_for_harbor(&r, &fx);
+    let fx = r.fire(T0 + 500);
+    assert!(typed(&fx).is_empty(), "{fx:?}");
+}
+
+#[test]
+fn an_answering_stop_queues_no_report() {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.fire(T0 + 500);
+    r.started(
+        T0 + SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    let fx = r.stopped(T0 + 9 * SEC, HARBOR, "Yes, until 2028.");
+    let reports = |fx: &[Effect]| {
+        common::changes(fx)
+            .into_iter()
+            .filter(|c| matches!(c, Change::Report(_)))
+            .count()
+    };
+    assert_eq!(r.row(1).status, AskStatus::Answered);
+    assert_eq!(reports(&fx), 0, "{fx:?}");
+    // Its next turn, the user's, reports as any does.
+    r.started(T0 + 20 * SEC, HARBOR, "Look at the tide tables again");
+    let fx = r.stopped(T0 + 30 * SEC, HARBOR, "Checked.");
+    assert_eq!(reports(&fx), 1, "{fx:?}");
 }

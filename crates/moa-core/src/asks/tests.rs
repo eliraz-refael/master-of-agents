@@ -224,3 +224,56 @@ fn moas_state_in_peers() {
         assert_eq!(moa_state(&st), word);
     }
 }
+
+#[test]
+fn a_marker_names_its_ask() {
+    let marker = |p: &str| marker_id(p);
+    assert_eq!(
+        marker("[moa · message from Kite · ask #12] Is the domain renewed?"),
+        Some(AskId(12))
+    );
+    // Anywhere in the prompt.
+    assert_eq!(
+        marker("Pasted:\n> [moa · message from Kite · ask #7] hi"),
+        Some(AskId(7))
+    );
+    // A label is cut at its last `· ask #`.
+    assert_eq!(
+        marker("[moa · message from a · ask #3 b · ask #12] hi"),
+        Some(AskId(12))
+    );
+    // The first marker that is one.
+    assert_eq!(
+        marker("[moa · message from Kite · ask #x] [moa · message from Kite · ask #4] hi"),
+        Some(AskId(4))
+    );
+    for not in [
+        "",
+        "Is the domain renewed?",
+        "[moa · message from Kite · ask #12 hi",
+        "[moa · message from Kite · ask #] hi",
+        "[moa · message from Kite · ask #-3] hi",
+        "[moa · message from Kite · ask #1 2] hi",
+        "[moa · message from Kite] hi",
+        "moa · message from Kite · ask #12] hi",
+        "[moa · message from Kite · ask #99999999999999999999] hi",
+    ] {
+        assert_eq!(marker(not), None, "{not}");
+    }
+}
+
+#[test]
+fn framed_is_the_marker_then_the_text() {
+    let st = state_with(Vec::new());
+    let a = Ask {
+        from_name: Some("Kite".into()),
+        ..sent(12)
+    };
+    let text = framed(&st, &a);
+    assert_eq!(
+        text,
+        "[moa · message from Kite · ask #12] Is the domain renewed?\n\n\
+         (Your reply this turn goes back to Kite as the answer.)"
+    );
+    assert_eq!(marker_id(&text), Some(AskId(12)));
+}

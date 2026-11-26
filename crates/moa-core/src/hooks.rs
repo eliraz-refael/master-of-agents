@@ -6,6 +6,7 @@
 
 use serde_json::json;
 
+use crate::asks;
 use crate::central::reports;
 use crate::change::Change;
 use crate::core::{Tx, post_commit};
@@ -316,8 +317,10 @@ fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) 
 }
 
 /// The changes an applied event brings besides the session itself, `after`: the project's
-/// day, the activity row, a start's conversation, the need it resolved and the session report
-/// it queues.
+/// day, the activity row, a start's conversation, the need it resolved, the session report
+/// it queues, and the asks to the session it moves (A6, A8): a prompt's receipt, a turn's
+/// answer, or the end of every open one when the session ends or goes to sleep. Their
+/// requests hear at the end of the input ([`asks::run`]).
 fn applied_changes(
     state: &State,
     tx: &mut Tx,
@@ -348,6 +351,14 @@ fn applied_changes(
     }
     changes.extend(reports::resolved(state, after));
     changes.extend(reports::queued(state, tx, after, env));
+    match &env.kind {
+        HookKind::TurnStarted { prompt } => changes.extend(asks::receipt(state, id, prompt)),
+        HookKind::TurnEnded { last_message } => {
+            changes.extend(asks::answer(state, id, last_message, tx.wall));
+        }
+        HookKind::SessionEnded { .. } => changes.extend(asks::peer_ended(state, id, tx.wall)),
+        _ => {}
+    }
     changes
 }
 
@@ -518,7 +529,7 @@ pub(crate) fn pane_gone(state: &mut State, tx: &mut Tx, pane: PaneId) -> bool {
 /// `also`, and when the session is still live, its agent gone with no clean quit: the
 /// session goes to sleep, with no activity row (R14). The `SessionEnd` the agent sent on its
 /// way out, which often arrives after the exit, then decides: a clean quit ends the session,
-/// anything else is history only.
+/// anything else is history only. Its open asks end with it (A8).
 /// `false` when the write was refused. Then nothing changes: a bound pane stays bound, and
 /// a session whose pane exited before its `open` was answered stays live with no binding.
 /// Reconcile puts both to sleep.
@@ -527,6 +538,7 @@ pub(crate) fn lost_agent(state: &mut State, tx: &mut Tx, id: SessionId, also: Ve
     if let Some(session) = state.session(id).filter(|s| s.lifecycle == Lifecycle::Live) {
         changes.insert(0, Change::Session(asleep(session, tx.wall)));
     }
+    changes.extend(asks::peer_ended(state, id, tx.wall));
     changes.is_empty() || tx.commit(state, changes).is_ok()
 }
 
