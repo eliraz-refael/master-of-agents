@@ -418,3 +418,23 @@ async fn a_call_during_the_wind_down_is_answered_by_the_next_image() {
     }
     up.stop().await;
 }
+
+/// A new program that says nothing within the first limit (a slow first launch) is asked
+/// once more, with a longer one, and the daemon upgrades into it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_first_launch_is_asked_once_more() {
+    let mut rig = Rig::new(&[]).with_exe();
+    rig.probe_wait = moa_daemon::ProbeWait {
+        first: std::time::Duration::from_millis(300),
+        again: WAIT,
+    };
+    let up = rig.start().await;
+    rig.slow_next_build_id(2_000);
+    rig.rebuild(1);
+    let inherited = up.handoff().await;
+    assert!(
+        !rig.exe().with_extension("slow").exists(),
+        "the slow launch was asked"
+    );
+    rig.restart(inherited).await.stop().await;
+}

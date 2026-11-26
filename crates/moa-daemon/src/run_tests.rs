@@ -61,7 +61,7 @@ async fn up_with(
     };
     let exe = daemon_exe().unwrap();
     let build = moa_platform::build_id().to_string();
-    let follow = Follow::new(exe.clone(), build.clone());
+    let follow = Follow::new(exe.clone(), build.clone(), ProbeWait::default());
     let program = Arc::new(Program { exe, build });
     let daemon = tokio::spawn(async move {
         let uid = moa_platform::current_uid();
@@ -385,6 +385,7 @@ async fn a_brain_dir_that_is_a_symlink_is_refused() {
         build: moa_platform::build_id().to_string(),
         exec: Exec::Test(tokio::sync::mpsc::channel(1).0),
         inherited: None,
+        probe_wait: ProbeWait::default(),
     };
     let err = tokio::time::timeout(Duration::from_secs(10), run(opts))
         .await

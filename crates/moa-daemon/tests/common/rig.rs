@@ -43,6 +43,8 @@ pub struct Rig {
     /// The daemon's program, when it is a copy of `stub-acp` ([`Rig::with_exe`]); else the
     /// test's own.
     pub exe: Option<PathBuf>,
+    /// How long a new program has to say its build.
+    pub probe_wait: moa_daemon::ProbeWait,
 }
 
 /// A session's agent tab on the rig's terminal server ([`Rig::agent_tab`]).
@@ -92,6 +94,7 @@ impl Rig {
             time,
             agent,
             exe: None,
+            probe_wait: moa_daemon::ProbeWait::default(),
         }
     }
 
@@ -119,6 +122,12 @@ impl Rig {
         std::fs::copy(stub_acp(), &new).expect("a copy of stub-acp");
         set_mtime(&new, n);
         std::fs::rename(&new, self.exe()).expect("the new build is put in place");
+    }
+
+    /// The program's next `build-id` answer comes only after `ms` milliseconds: a slow
+    /// first launch (stub-acp reads and removes `<exe>.slow`).
+    pub fn slow_next_build_id(&self, ms: u64) {
+        std::fs::write(self.exe().with_extension("slow"), ms.to_string()).expect("the slow file");
     }
 
     /// Puts a half-written program in its place: an empty file, renamed over it.
@@ -171,6 +180,7 @@ impl Rig {
             build: self.build(),
             exec: Exec::Test(handoff),
             inherited,
+            probe_wait: self.probe_wait,
         }));
         let (sock, core) = match timeout(WAIT, rx).await {
             Ok(Ok(up)) => up,

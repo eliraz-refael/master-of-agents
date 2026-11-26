@@ -10,6 +10,8 @@
 //!
 //! Or, as `stub-acp build-id`, it prints its build id as `moa build-id` does, so a copy of it
 //! can stand in for a new build of moa that a daemon under test probes before it upgrades.
+//! When `<exe>.slow` exists it first sleeps the milliseconds it holds, and removes it: a
+//! slow first launch.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -504,6 +506,15 @@ async fn main() -> Result<(), Error> {
         }
         Some(CALL) => call(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some(BUILD_ID) => {
+            // A slow first launch: `<exe>.slow` holds how long, and is used up.
+            if let Some(slow) = std::env::current_exe()
+                .ok()
+                .map(|e| e.with_extension("slow"))
+                && let Ok(ms) = fs::read_to_string(&slow)
+            {
+                let _ = fs::remove_file(&slow);
+                tokio::time::sleep(Duration::from_millis(ms.trim().parse().unwrap_or(0))).await;
+            }
             println!("{}", moa_platform::build_id());
             return Ok(());
         }

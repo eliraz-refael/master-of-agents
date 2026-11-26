@@ -27,6 +27,7 @@ use tokio_util::task::TaskTracker;
 use crate::clock::Clock;
 use crate::core_task::{CoreHandle, CoreOptions, DaemonError};
 use crate::follow::Follow;
+pub use crate::follow::ProbeWait;
 use crate::logging;
 use crate::server::accept_loop;
 use crate::session::Program;
@@ -85,6 +86,8 @@ pub struct RunOptions {
     /// What the previous image handed over, when this one is its upgrade
     /// (`moa_platform::take_inherited`): its socket and lock are taken instead of made.
     pub inherited: Option<Inherited>,
+    /// How long a new program has to say its build. Tests shorten it.
+    pub probe_wait: ProbeWait,
 }
 
 /// Reads `moa.toml` (no file is the default config), with folders in their canonical form
@@ -471,6 +474,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         build,
         exec,
         inherited,
+        probe_wait,
     } = opts;
     // Hash this binary now: a binary replaced before the first hello must not make this old
     // daemon claim the new build.
@@ -499,7 +503,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         }
     };
     // Armed before `ready`, so a new build put in place right after it is heard.
-    let follow = Follow::new(exe.clone(), build.clone());
+    let follow = Follow::new(exe.clone(), build.clone(), probe_wait);
     announce_ready(ready, &up.sock, &up.core);
     tracing::info!("ready on {}", up.sock.display());
 
