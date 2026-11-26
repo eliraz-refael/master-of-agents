@@ -214,6 +214,22 @@ impl Rig {
         .unwrap_or_else(|| panic!("no {state} permission row: {:?}", self.rows()));
     }
 
+    /// Ask `id`'s `(status, reply)` as saved.
+    pub fn ask(&self, id: i64) -> Option<(String, Option<String>)> {
+        self.store()
+            .conn()
+            .query_row("SELECT status, reply FROM asks WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .ok()
+    }
+
+    /// Waits until ask `id` is saved as `status`.
+    pub fn wait_ask(&self, id: i64, status: &str) {
+        wait_for(WAIT, || (self.ask(id)?.0 == status).then_some(()))
+            .unwrap_or_else(|| panic!("ask #{id} never became {status}: {:?}", self.ask(id)));
+    }
+
     /// Waits for a feed row of `kind` that says `text`.
     pub fn wait_saved(&self, kind: &str, text: &str) {
         wait_for(WAIT, || {

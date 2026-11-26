@@ -49,6 +49,11 @@ fn wait_waiting(up: &Up) {
     .unwrap_or_else(|| panic!("the upgrade never waited: {}", status_upgrade(up)));
 }
 
+/// How many inputs the core has stepped.
+fn inputs(up: &Up) -> u64 {
+    up.core.stats().inputs.load(Ordering::SeqCst)
+}
+
 /// How many new builds of its program the daemon found (`found`) or skipped as
 /// half-written. Read from its counters, not its log: the log is the process's first
 /// daemon's, and a test may share its process with others.
@@ -145,9 +150,16 @@ async fn parked_asks_hear_no_reply_yet_first() {
         "ask",
         json!({"to": "moa", "text": "Is the domain renewed?"}),
     );
+    // A request sent isn't yet one the core has: a barrier fences only what has reached it.
+    // The ask has once its row is saved.
+    rig.wait_ask(1, "pending");
     up.core.barrier().await;
     let mut other = up.session_client(ids[1]);
+    // A `reply` saves nothing: it has reached the core once the core has stepped one more
+    // input (nothing else moves here, with time stopped and moa's turn held at its gate).
+    let before = inputs(&up);
     let again = other.send("reply", json!({"id": 1}));
+    wait_for(WAIT, || (inputs(&up) > before).then_some(())).expect("the reply reaches the core");
     up.core.barrier().await;
 
     assert_eq!(
