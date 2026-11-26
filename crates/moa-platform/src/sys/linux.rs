@@ -1,4 +1,4 @@
-//! Linux: a CLOCK_REALTIME timerfd and an inotify watch on a directory.
+//! Linux: a CLOCK_REALTIME timerfd and inotify watches on directories.
 
 use std::ffi::{CString, OsStr};
 use std::io;
@@ -111,12 +111,18 @@ pub fn alarm_drain(fd: &OwnedFd) -> io::Result<bool> {
     }
 }
 
-/// An inotify instance watching one directory for changes to its entries.
-pub fn notify_open(dir: &Path) -> io::Result<OwnedFd> {
+/// An empty inotify instance, non-blocking and close-on-exec.
+pub fn inotify_new() -> io::Result<OwnedFd> {
     // SAFETY: `inotify_init1` takes only constants and returns a descriptor or -1.
     let raw = check(unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) })?;
     // SAFETY: `raw` is a fresh descriptor that nothing else owns.
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// Watch directory `dir` on `fd` for its entries being created, written, renamed in,
+/// removed or changed in their attributes. Answers the watch descriptor its events carry;
+/// watching one directory twice answers the same one.
+pub fn inotify_watch(fd: &OwnedFd, dir: &Path) -> io::Result<i32> {
     let path = CString::new(dir.as_os_str().as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mask = libc::IN_CLOSE_WRITE
@@ -125,13 +131,13 @@ pub fn notify_open(dir: &Path) -> io::Result<OwnedFd> {
         | libc::IN_DELETE
         | libc::IN_ATTRIB;
     // SAFETY: `path` is a valid C string and `fd` is an open inotify descriptor.
-    check(unsafe { libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), mask) })?;
-    Ok(fd)
+    check(unsafe { libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), mask) })
 }
 
-/// Read every pending event: true if any of them names `name`.
-pub fn notify_drain(fd: &OwnedFd, name: &OsStr) -> io::Result<bool> {
-    let mut hit = false;
+/// Read every pending event: true if `hit(watch descriptor, entry name)` says yes to any,
+/// or the kernel's queue overflowed (events were lost, so any of them might have been one).
+pub fn inotify_drain(fd: &OwnedFd, mut hit: impl FnMut(i32, &OsStr) -> bool) -> io::Result<bool> {
+    let mut any = false;
     let mut buf = [0u8; 4096];
     loop {
         // SAFETY: reads at most `buf.len()` bytes into `buf` from an open descriptor.
@@ -139,30 +145,33 @@ pub fn notify_drain(fd: &OwnedFd, name: &OsStr) -> io::Result<bool> {
         if r < 0 {
             let e = io::Error::last_os_error();
             return match e.kind() {
-                io::ErrorKind::WouldBlock => Ok(hit),
+                io::ErrorKind::WouldBlock => Ok(any),
                 io::ErrorKind::Interrupted => continue,
                 _ => Err(e),
             };
         }
         if r == 0 {
-            return Ok(hit);
+            return Ok(any);
         }
-        hit |= names_in(&buf[..r as usize], name);
+        any |= any_record(&buf[..r as usize], &mut hit);
     }
 }
 
-/// Whether any inotify record in `buf` carries the entry name `name`.
-fn names_in(buf: &[u8], name: &OsStr) -> bool {
+/// Whether `hit` says yes to any inotify record in `buf`, given its watch descriptor and
+/// entry name. An overflow record (watch descriptor -1) always counts.
+fn any_record(buf: &[u8], hit: &mut impl FnMut(i32, &OsStr) -> bool) -> bool {
     const HEADER: usize = std::mem::size_of::<libc::inotify_event>();
     let mut off = 0;
     while off + HEADER <= buf.len() {
-        // `len` is the 4-byte field after wd, mask and cookie.
-        let len = u32::from_ne_bytes(buf[off + 12..off + 16].try_into().expect("4 bytes")) as usize;
+        let field = |at: usize| buf[off + at..off + at + 4].try_into().expect("4 bytes");
+        // The 4-byte fields: wd, mask, cookie, then the name's length.
+        let wd = i32::from_ne_bytes(field(0));
+        let len = u32::from_ne_bytes(field(12)) as usize;
         let start = off + HEADER;
         let end = (start + len).min(buf.len());
         let raw = &buf[start..end];
         let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-        if OsStr::from_bytes(&raw[..nul]) == name {
+        if wd < 0 || hit(wd, OsStr::from_bytes(&raw[..nul])) {
             return true;
         }
         off = start + len;
@@ -277,8 +286,9 @@ pub(crate) fn start_time(pid: u32) -> Option<SystemTime> {
 mod tests {
     use super::*;
 
-    fn record(name: &str, pad: usize) -> Vec<u8> {
-        let mut v = vec![0u8; 12];
+    fn record(wd: i32, name: &str, pad: usize) -> Vec<u8> {
+        let mut v = wd.to_ne_bytes().to_vec();
+        v.extend_from_slice(&[0u8; 8]);
         let len = (name.len() + pad) as u32;
         v.extend_from_slice(&len.to_ne_bytes());
         v.extend_from_slice(name.as_bytes());
@@ -306,10 +316,16 @@ mod tests {
     }
 
     #[test]
-    fn names_in_matches_only_the_named_entry() {
-        let mut buf = record("other", 3);
-        assert!(!names_in(&buf, OsStr::new("localtime")));
-        buf.extend(record("localtime", 7));
-        assert!(names_in(&buf, OsStr::new("localtime")));
+    fn any_record_matches_only_the_named_entry_of_its_watch() {
+        let mut ours = |wd: i32, name: &OsStr| wd == 1 && name == "localtime";
+        let mut buf = record(1, "other", 3);
+        buf.extend(record(2, "localtime", 7));
+        assert!(!any_record(&buf, &mut ours));
+        buf.extend(record(1, "localtime", 7));
+        assert!(any_record(&buf, &mut ours));
+        assert!(
+            any_record(&record(-1, "", 0), &mut ours),
+            "an overflow counts"
+        );
     }
 }

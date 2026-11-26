@@ -124,9 +124,9 @@ pub use linux::*;
 #[cfg(target_os = "macos")]
 pub use macos::*;
 
+use std::ffi::OsString;
 use std::io;
-#[cfg(target_os = "macos")]
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd, RawFd};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Time since the Unix epoch, clamped to zero for instants before it.
@@ -143,27 +143,62 @@ pub(crate) fn check(ret: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
-/// Mark `fd` close-on-exec.
-#[cfg(target_os = "macos")]
-pub(crate) fn set_cloexec(fd: &impl AsRawFd) -> io::Result<()> {
+/// Set (`on`) or clear `fd`'s close-on-exec flag. A descriptor with it clear stays open
+/// across an exec.
+pub(crate) fn set_cloexec(fd: &impl AsRawFd, on: bool) -> io::Result<()> {
     let raw: RawFd = fd.as_raw_fd();
     // SAFETY: `fcntl` with F_GETFD on a descriptor the caller holds open.
     let fdflags = check(unsafe { libc::fcntl(raw, libc::F_GETFD) })?;
+    let fdflags = if on {
+        fdflags | libc::FD_CLOEXEC
+    } else {
+        fdflags & !libc::FD_CLOEXEC
+    };
     // SAFETY: `fcntl` with F_SETFD and a flag int, on the same open descriptor.
-    check(unsafe { libc::fcntl(raw, libc::F_SETFD, fdflags | libc::FD_CLOEXEC) })?;
+    check(unsafe { libc::fcntl(raw, libc::F_SETFD, fdflags) })?;
     Ok(())
 }
 
 /// Mark `fd` close-on-exec and non-blocking.
 #[cfg(target_os = "macos")]
 pub(crate) fn set_cloexec_nonblock(fd: &impl AsRawFd) -> io::Result<()> {
-    set_cloexec(fd)?;
+    set_cloexec(fd, true)?;
     let raw: RawFd = fd.as_raw_fd();
     // SAFETY: `fcntl` with F_GETFL on the same open descriptor.
     let flflags = check(unsafe { libc::fcntl(raw, libc::F_GETFL) })?;
     // SAFETY: `fcntl` with F_SETFL and a flag int, on the same open descriptor.
     check(unsafe { libc::fcntl(raw, libc::F_SETFL, flflags | libc::O_NONBLOCK) })?;
     Ok(())
+}
+
+/// Reads and removes the environment variable `name`. Call it only while this process has
+/// a single thread: nothing else may read the environment while it changes.
+pub(crate) fn take_env(name: &str) -> Option<OsString> {
+    let value = std::env::var_os(name)?;
+    // SAFETY: the caller runs this before any other thread starts (`take_inherited`'s
+    // rule), so no other thread reads or writes the environment meanwhile.
+    unsafe { std::env::remove_var(name) };
+    Some(value)
+}
+
+/// Takes ownership of descriptor `raw`, which the image before this one left open across
+/// its exec, and marks it close-on-exec again. A standard stream's number, or one that
+/// isn't open, is refused. Call it only at startup, before anything else could own `raw`.
+pub(crate) fn adopt_inherited(raw: RawFd) -> io::Result<OwnedFd> {
+    if raw <= libc::STDERR_FILENO {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{raw} is a standard stream"),
+        ));
+    }
+    // SAFETY: `fcntl` with F_GETFD only reads the flags; on a closed number it fails with
+    // EBADF, which refuses it here.
+    check(unsafe { libc::fcntl(raw, libc::F_GETFD) })?;
+    // SAFETY: `raw` is open (checked above) and, at startup, owned by nothing else in this
+    // process: the previous image handed it over by number, so the `OwnedFd` closes it once.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    set_cloexec(&fd, true)?;
+    Ok(fd)
 }
 
 /// Register `inner` with the tokio reactor for read readiness only. A kqueue has no
