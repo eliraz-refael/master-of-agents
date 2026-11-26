@@ -8,9 +8,9 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_core::UtcMs;
-use moa_core::asks::{ASK_RECEIPT_MS, framed};
+use moa_core::asks::{ASK_RECEIPT_MS, NO_TEXT, framed, marker_id};
 use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, TmuxIn, handle_checked};
-use moa_core::hook::HookKind;
+use moa_core::hook::{HookKind, StartSource};
 use moa_core::model::{Ask, AskId, AskStatus, AskTarget};
 use moa_core::op::{ConnId, Op};
 use moa_core::state::CallerInfo;
@@ -40,6 +40,8 @@ enum Step {
     Stop { who: usize, empty: bool },
     /// Session `who`'s turn fails.
     Fail(usize),
+    /// Session `who`'s conversation is cleared (`/clear`).
+    Clear(usize),
     /// The asks timer fires when it is armed (or now, when it isn't).
     Timer,
     /// Time passes.
@@ -67,6 +69,7 @@ fn step() -> impl Strategy<Value = Step> {
         3 => (0..3usize).prop_map(Step::Take),
         3 => (0..3usize, prop::bool::weighted(0.2)).prop_map(|(who, empty)| Step::Stop { who, empty }),
         1 => (0..3usize).prop_map(Step::Fail),
+        1 => (0..3usize).prop_map(Step::Clear),
         3 => Just(Step::Timer),
         2 => prop::sample::select(vec![SEC, 5 * SEC, 20 * SEC, MIN, 10 * MIN, 20 * MIN])
             .prop_map(Step::Advance),
@@ -96,6 +99,10 @@ struct World {
     refuse_next: bool,
     /// Whether the last input's writes were refused.
     refused: bool,
+    /// The ask each session's turn holds: the one its last saved prompt's marker names.
+    holding: [Option<AskId>; 3],
+    /// The session whose turn this step ends, and the answer its message gives.
+    stop: Option<(usize, String)>,
 }
 
 impl World {
@@ -137,6 +144,8 @@ impl World {
             armed: None,
             refuse_next: false,
             refused: false,
+            holding: [None; 3],
+            stop: None,
         };
         w.now += 1;
         let fx = w.r.link_up(w.now);
@@ -165,6 +174,7 @@ impl World {
 
     fn step(&mut self, s: Step) -> Result<(), TestCaseError> {
         self.next()?;
+        self.stop = None;
         let at = self.now;
         let fx = match s {
             Step::Ask { from, to, wait_s } => {
@@ -200,6 +210,7 @@ impl World {
                     }
                     None => "Look at the tide tables".into(),
                 };
+                self.turn_starts(who, &prompt);
                 self.r.started(at, SESSIONS[who], &prompt)
             }
             Step::Take(who) => {
@@ -215,11 +226,18 @@ impl World {
                     })
                     .map(|a| framed(&self.r.st, a))
                     .unwrap_or_else(|| "Look at the tide tables".into());
+                self.turn_starts(who, &typed);
                 self.r.started(at, SESSIONS[who], &typed)
             }
             Step::Fail(who) => {
                 let kind = HookKind::TurnFailed {
                     error: "rate limited".into(),
+                };
+                self.r.hook(at, SESSIONS[who], kind)
+            }
+            Step::Clear(who) => {
+                let kind = HookKind::SessionStarted {
+                    source: StartSource::Clear,
                 };
                 self.r.hook(at, SESSIONS[who], kind)
             }
@@ -229,6 +247,12 @@ impl World {
                 } else {
                     format!("answer {at}")
                 };
+                let answer = if empty {
+                    NO_TEXT.into()
+                } else {
+                    message.clone()
+                };
+                self.stop = Some((who, answer));
                 self.r.stopped(at, SESSIONS[who], &message)
             }
             Step::Timer => {
@@ -278,6 +302,14 @@ impl World {
         };
         self.execute(fx)?;
         self.check()
+    }
+
+    /// Session `who`'s turn starts with `prompt`: unless writes are refused (the hook is
+    /// then dropped), the turn holds the ask its marker names.
+    fn turn_starts(&mut self, who: usize, prompt: &str) {
+        if !self.refused {
+            self.holding[who] = marker_id(prompt);
+        }
     }
 
     /// `op` from `caller` on a new connection, at the moment.
@@ -338,12 +370,45 @@ impl World {
         Ok(())
     }
 
-    /// A1's moves only; one ask in flight per peer; no two agents waiting on each other; a
-    /// typed ask taken or failed by its 20 s.
+    /// A1's moves only; asks to a peer claimed oldest first; an answer only from the Stop of
+    /// the turn that held its marker, with that Stop's message; one ask in flight per peer; no
+    /// two agents waiting on each other; a typed ask taken or failed by its 20 s.
     fn check(&mut self) -> Result<(), TestCaseError> {
         use AskStatus::*;
         let asks: Vec<Ask> = self.r.st.asks().cloned().collect();
         for a in &asks {
+            let was = self.last.get(&a.id).map(|b| b.status);
+            if a.status == Sent && was != Some(Sent) {
+                // Oldest first: nothing older to the same peer still waits.
+                let older = asks.iter().find(|b| {
+                    b.to_session == a.to_session
+                        && b.status == Pending
+                        && (b.at, b.id) < (a.at, a.id)
+                });
+                prop_assert!(older.is_none(), "ask #{} went before {:?}", a.id, older);
+            }
+            if a.status == Answered && was != Some(Answered) {
+                // By the end of the turn that held its marker, with that turn's message.
+                let Some((who, answer)) = &self.stop else {
+                    return Err(TestCaseError::fail(format!(
+                        "ask #{} answered by no stop",
+                        a.id
+                    )));
+                };
+                prop_assert_eq!(
+                    a.to_session,
+                    Some(AskTarget::Session(sid(SESSIONS[*who]))),
+                    "ask #{} answered by another session",
+                    a.id
+                );
+                prop_assert_eq!(
+                    self.holding[*who],
+                    Some(a.id),
+                    "ask #{}'s turn didn't hold it",
+                    a.id
+                );
+                prop_assert_eq!(a.reply.as_deref(), Some(answer.as_str()));
+            }
             if let Some(before) = self.last.get(&a.id) {
                 let revived = before.status == Failed
                     && before.reply.as_deref() == Some(NO_RECEIPT)

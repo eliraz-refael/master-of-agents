@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc b25f8e4a59a5681ebdfe7e71ae77114e18a4b2e1c98d9507c7392a1de525b862 # shrinks to steps = [Ask { from: 1, to: 0, wait_s: 1 }]
 cc 15aa77752079df7a69a7f09ba15f3d4d00b38a928232a150bfe51642bd4c3a9b # shrinks to steps = [Ask { from: 2, to: 1, wait_s: 1 }, Reload, Stop { who: 1, empty: false }, Advance(20000), Ask { from: 1, to: 2, wait_s: 1 }, Prompt { who: 1, marker: Some(1) }]
+cc 074d21520cfdca603e0596006c45a5defd476e3bd49a58dd30a1a17261e2b7f6 # shrinks to steps = [Ask { from: 1, to: 0, wait_s: 30 }, Timer, Timer, Exit(0), Clear(0), Take(0)]

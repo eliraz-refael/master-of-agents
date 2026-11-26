@@ -12,7 +12,7 @@ use crate::change::Change;
 use crate::core::{Tx, post_commit};
 use crate::effect::{Effect, LogLevel, LogLine};
 use crate::hook::{HookEnvelope, HookKind, StartSource};
-use crate::live::{asks, cut_middle};
+use crate::live::{asks as ends_asking, cut_middle};
 use crate::model::{
     Activity, ActivityWho, Conversation, Event, EventId, EventKind, Lifecycle, Location, Session,
     SessionId,
@@ -318,9 +318,9 @@ fn after_of(state: &State, id: SessionId, before: &Session, env: &HookEnvelope) 
 
 /// The changes an applied event brings besides the session itself, `after`: the project's
 /// day, the activity row, a start's conversation, the need it resolved, the session report
-/// it queues, and the asks to the session it moves (A6, A8): a prompt's receipt, a turn's
-/// answer, or the end of every open one when the session ends or goes to sleep. Their
-/// requests hear at the end of the input ([`asks::run`]).
+/// it queues, and the asks to the session it moves ([`asks::hooked`]: a prompt's receipt, a
+/// turn's answer, a received ask its turn left unanswered, or every open one when the session
+/// ends). Their requests hear at the end of the input ([`asks::run`]).
 fn applied_changes(
     state: &State,
     tx: &mut Tx,
@@ -351,14 +351,7 @@ fn applied_changes(
     }
     changes.extend(reports::resolved(state, after));
     changes.extend(reports::queued(state, tx, after, env));
-    match &env.kind {
-        HookKind::TurnStarted { prompt } => changes.extend(asks::receipt(state, id, prompt)),
-        HookKind::TurnEnded { last_message } => {
-            changes.extend(asks::answer(state, id, last_message, tx.wall));
-        }
-        HookKind::SessionEnded { .. } => changes.extend(asks::peer_ended(state, id, tx.wall)),
-        _ => {}
-    }
+    changes.extend(asks::hooked(state, id, &env.kind, tx.wall));
     changes
 }
 
@@ -567,7 +560,7 @@ pub(crate) fn event_of(before: Option<&Session>, after: &Session) -> Option<Even
         live(s)
             && match s.activity {
                 Activity::NeedsPermission | Activity::NeedsAnswer => true,
-                Activity::Idle => asks(s.activity_why.as_deref().unwrap_or("")),
+                Activity::Idle => ends_asking(s.activity_why.as_deref().unwrap_or("")),
                 Activity::Working | Activity::Failed => false,
             }
     };

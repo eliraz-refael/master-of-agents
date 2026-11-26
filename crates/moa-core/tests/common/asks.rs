@@ -7,7 +7,7 @@ use std::time::Duration;
 use jiff::tz::TimeZone;
 use moa_core::change::Change;
 use moa_core::config::{BrainName, Config};
-use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, TmuxIn, handle_checked};
+use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, TmuxIn, TmuxToken, handle_checked};
 use moa_core::hook::HookKind;
 use moa_core::model::{
     Activity, AgentKind, Ask, AskId, AskStatus, AskTarget, Conversation, ConversationReason,
@@ -205,6 +205,41 @@ impl Rig {
     pub fn linked(snapshot: Snapshot) -> Rig {
         let mut r = Rig::new(snapshot);
         r.link_up(T0);
+        r
+    }
+
+    /// [`Rig::linked`], its start drained and its tabs reconciled at T0: every bound tab is
+    /// listed running its session. The ops on sessions (close, sleep) need this.
+    pub fn reconciled(snapshot: Snapshot) -> Rig {
+        let lines: Vec<String> = snapshot
+            .pane_bindings
+            .iter()
+            .map(|b| {
+                let cwd = snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == b.session_id)
+                    .and_then(|s| s.cwd.clone())
+                    .unwrap_or_default();
+                format!(
+                    "I\t{}\t{}\t0\t\t\t{}\t{cwd}",
+                    b.pane_id, b.pane_pid, b.session_id
+                )
+            })
+            .collect();
+        let mut r = Rig::linked(snapshot);
+        handle_checked(&mut r.st, Input::StartDrained, now(T0));
+        let asked: Vec<u64> = r.st.tmux().queries().collect();
+        let [n] = asked[..] else {
+            panic!("one pane query waiting, not {asked:?}");
+        };
+        let replies = TmuxIn::Replies {
+            conn: 1,
+            token: TmuxToken::Query(n),
+            results: vec![Ok(lines), Ok(Vec::new())],
+        };
+        handle_checked(&mut r.st, Input::Tmux(replies), now(T0));
+        assert!(r.st.tmux().reconciled());
         r
     }
 

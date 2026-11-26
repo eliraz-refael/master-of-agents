@@ -7,12 +7,12 @@
 mod common;
 
 use moa_core::UtcMs;
-use moa_core::asks::{ASK_TEXT_MAX, ASK_WAIT_DEFAULT_MS};
+use moa_core::asks::{ASK_TEXT_MAX, ASK_WAIT_DEFAULT_MS, STALE_AFTER_MS};
 use moa_core::change::Change;
 use moa_core::effect::{Effect, Input, TmuxIn, handle_checked};
-use moa_core::hook::HookKind;
+use moa_core::hook::{HookKind, StartSource};
 use moa_core::model::{Activity, Ask, AskId, AskStatus, AskTarget, Lifecycle, Location, Session};
-use moa_core::op::{ConnId, NoParams, Op, OpError, ReqId};
+use moa_core::op::{ConnId, Done, NoParams, Op, OpError, ReqId};
 use moa_core::state::{CallerInfo, Snapshot};
 use moa_core::tmux::cmd::Cmd;
 use moa_core::tmux::ids::PaneId;
@@ -1050,7 +1050,7 @@ fn assert_ended_for_harbor(r: &Rig, fx: &[Effect]) {
         [AskStatus::Failed, AskStatus::Dropped, AskStatus::Pending]
     );
     assert_eq!(r.row(1).reply.as_deref(), Some("Harbor ended"));
-    assert_eq!(r.row(2).reply.as_deref(), Some("Harbor ended"));
+    assert_eq!(r.row(2).reply.as_deref(), Some("Harbor isn't running"));
     let mut heard = replies(fx);
     heard.sort_by_key(|(c, _, _)| *c);
     assert_eq!(
@@ -1064,7 +1064,7 @@ fn assert_ended_for_harbor(r: &Rig, fx: &[Effect]) {
             (
                 ConnId(2),
                 ReqId(2),
-                Err(OpError("Harbor ended; ask #2 was dropped".into()))
+                Err(OpError("Harbor isn't running; ask #2 was dropped".into()))
             ),
         ]
     );
@@ -1124,4 +1124,211 @@ fn an_answering_stop_queues_no_report() {
     r.started(T0 + 20 * SEC, HARBOR, "Look at the tide tables again");
     let fx = r.stopped(T0 + 30 * SEC, HARBOR, "Checked.");
     assert_eq!(reports(&fx), 1, "{fx:?}");
+}
+
+// ---------- a received ask ends with its turn ----------
+
+/// Harbor (in `%5`) has received Kite's ask #1, typed at T0, its turn started at T0 + 1 s.
+fn harbor_answering() -> Rig {
+    let mut r = Rig::linked(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.fire(T0 + 500);
+    r.started(
+        T0 + SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    assert_eq!(r.row(1).status, AskStatus::Received);
+    r
+}
+
+fn the_failure(fx: &[Effect]) -> String {
+    match &replies(fx)[..] {
+        [(ConnId(1), _, Err(e))] => e.0.clone(),
+        other => panic!("not Kite's failure: {other:?}"),
+    }
+}
+
+fn reports(fx: &[Effect]) -> usize {
+    common::changes(fx)
+        .into_iter()
+        .filter(|c| matches!(c, Change::Report(_)))
+        .count()
+}
+
+#[test]
+fn a_failed_turn_fails_its_ask() {
+    let mut r = harbor_answering();
+    let fx = r.hook(
+        T0 + 5 * SEC,
+        HARBOR,
+        HookKind::TurnFailed {
+            error: "rate limited".into(),
+        },
+    );
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+    assert_eq!(the_failure(&fx), "ask #1 failed: Harbor's turn failed");
+    // In the hook's own commit.
+    assert!(
+        session_commit(&fx, HARBOR)
+            .iter()
+            .any(|c| matches!(c, Change::Ask(a) if a.status == AskStatus::Failed))
+    );
+    // The user's next turn answers nothing, and reports as any does.
+    r.started(T0 + 20 * SEC, HARBOR, "Look at the tide tables again");
+    let fx = r.stopped(T0 + 30 * SEC, HARBOR, "Checked.");
+    assert!(saved_asks(&fx).is_empty(), "{fx:?}");
+    assert_eq!(reports(&fx), 1, "{fx:?}");
+    assert_eq!(r.row(1).reply.as_deref(), Some("Harbor's turn failed"));
+}
+
+#[test]
+fn a_new_prompt_fails_an_unanswered_ask() {
+    let mut r = harbor_answering();
+    // A prompt that still holds its marker keeps it.
+    let fx = r.started(
+        T0 + 2 * SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    assert!(saved_asks(&fx).is_empty(), "{fx:?}");
+    assert_eq!(r.row(1).status, AskStatus::Received);
+    // Interrupted, then a prompt of the user's: it moved on.
+    let fx = r.started(T0 + 5 * SEC, HARBOR, "Look at the tide tables again");
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+    assert_eq!(
+        the_failure(&fx),
+        "ask #1 failed: Harbor moved on before answering"
+    );
+    let fx = r.stopped(T0 + 30 * SEC, HARBOR, "Checked.");
+    assert!(saved_asks(&fx).is_empty(), "{fx:?}");
+    assert_eq!(reports(&fx), 1, "{fx:?}");
+}
+
+#[test]
+fn a_clear_or_compact_fails_an_unanswered_ask() {
+    for source in [StartSource::Clear, StartSource::Compact] {
+        let mut r = harbor_answering();
+        let fx = r.hook(T0 + 5 * SEC, HARBOR, HookKind::SessionStarted { source });
+        assert_eq!(r.row(1).status, AskStatus::Failed, "{source:?}");
+        assert_eq!(
+            the_failure(&fx),
+            "ask #1 failed: Harbor moved on before answering",
+            "{source:?}"
+        );
+    }
+}
+
+/// A late receipt takes its ask only before the ask would be stale (M1).
+#[test]
+fn a_late_receipt_only_before_stale() {
+    for (claimed, revived) in [
+        (T0 - STALE_AFTER_MS + 1, true),
+        (T0 - STALE_AFTER_MS, false),
+    ] {
+        let mut snap = harbor_idle();
+        let mut failed = ask_row(1, to(KITE), "Kite", to(HARBOR), "Is it?", claimed - SEC);
+        failed.status = AskStatus::Failed;
+        failed.reply = Some(NO_RECEIPT.into());
+        failed.claimed_at = Some(UtcMs(claimed));
+        failed.answered_at = Some(UtcMs(claimed + 20 * SEC));
+        snap.asks = vec![failed];
+        snap.next_ids.ask = 2;
+        let mut r = Rig::linked(snap);
+        r.started(T0, HARBOR, &framed(1, "Kite", "Is it?"));
+        let want = if revived {
+            AskStatus::Received
+        } else {
+            AskStatus::Failed
+        };
+        assert_eq!(r.row(1).status, want, "claimed at {claimed}");
+    }
+}
+
+// ---------- a peer that isn't running ----------
+
+/// Harbor (in `%5`, reconciled) has received Kite's ask #1, and Beacon's #2 waits.
+fn harbor_answering_reconciled() -> Rig {
+    let mut r = Rig::reconciled(harbor_idle());
+    r.ask(1, from(KITE), "Harbor", "Is the domain renewed?", 540);
+    r.ask(2, from(BEACON), "Harbor", "Which branch?", 540);
+    r.fire(T0 + 500);
+    r.started(
+        T0 + SEC,
+        HARBOR,
+        &framed(1, "Kite", "Is the domain renewed?"),
+    );
+    assert_eq!(
+        statuses(&r, &[1, 2]),
+        [AskStatus::Received, AskStatus::Pending]
+    );
+    r
+}
+
+#[test]
+fn a_closed_archived_or_slept_peer_ends_its_asks() {
+    let ops = [
+        ("close", Op::SessionClose { q: "Harbor".into() }),
+        (
+            "archive",
+            Op::SessionArchive {
+                qs: vec!["Harbor".into()],
+            },
+        ),
+        (
+            "sleep",
+            Op::SessionSleep {
+                qs: vec!["Harbor".into()],
+                idle_ms: None,
+                dry_run: false,
+            },
+        ),
+    ];
+    for (what, op) in ops {
+        let mut r = harbor_answering_reconciled();
+        let fx = r.op(9, CallerInfo::default(), op, T0 + 2 * SEC);
+        assert_eq!(
+            statuses(&r, &[1, 2]),
+            [AskStatus::Failed, AskStatus::Dropped],
+            "{what}: {fx:?}"
+        );
+        let mut heard: Vec<(ConnId, Result<Done, OpError>)> = replies(&fx)
+            .into_iter()
+            .filter(|(c, _, _)| c.0 != 9)
+            .map(|(c, _, r)| (c, r))
+            .collect();
+        heard.sort_by_key(|(c, _)| *c);
+        assert_eq!(
+            heard,
+            [
+                (
+                    ConnId(1),
+                    Err(OpError("ask #1 failed: Harbor ended".into()))
+                ),
+                (
+                    ConnId(2),
+                    Err(OpError("Harbor isn't running; ask #2 was dropped".into()))
+                ),
+            ],
+            "{what}"
+        );
+    }
+}
+
+/// Before the link is up, a peer that isn't running keeps its asks: the daemon's start
+/// hasn't looked at the tabs yet.
+#[test]
+fn asks_to_a_gone_peer_end_once_the_link_is_up() {
+    let mut snap = harbor_idle();
+    snap.pane_bindings.retain(|b| b.session_id != sid(HARBOR));
+    let mut sent = ask_row(1, to(KITE), "Kite", to(HARBOR), "Is it?", T0 - MIN);
+    sent.status = AskStatus::Received;
+    sent.claimed_at = Some(UtcMs(T0 - MIN));
+    snap.asks = vec![sent];
+    snap.next_ids.ask = 2;
+    let mut r = Rig::new(snap);
+    assert_eq!(r.row(1).status, AskStatus::Received);
+    let fx = r.link_up(T0 + SEC);
+    assert_eq!(r.row(1).status, AskStatus::Failed, "{fx:?}");
+    assert_eq!(r.row(1).reply.as_deref(), Some("Harbor ended"));
 }

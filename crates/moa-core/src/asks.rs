@@ -14,8 +14,9 @@
 //! An ask to a session moves at the end of every input ([`run`]): the oldest `pending` one to
 //! a free peer is claimed (`sent`) and typed into its tab, its Enter half a second later. The
 //! marker in the peer's next prompt is its receipt (`received`, [`receipt`]), and the full
-//! message that ends that turn its answer ([`answer`]); both go in the hook's own commit. A
-//! typed ask with no receipt in 20 s fails; a peer that dies ends its asks ([`peer_ended`]).
+//! message that ends that turn its answer ([`answer`]); a turn that ends any other way fails
+//! it ([`hooked`], all in the hook's own commit). A typed ask with no receipt in 20 s fails;
+//! a peer that stops running ends its asks ([`peer_ended`], [`end_unreachable`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,6 +25,7 @@ use serde_json::{Value, json};
 use crate::change::Change;
 use crate::core::{Tx, finish_op, fold_in, post_commit};
 use crate::effect::{Effect, LogLevel, TimerKey, rearm};
+use crate::hook::{HookKind, StartSource};
 use crate::live::{display_state, spike_state};
 use crate::model::{Ask, AskId, AskStatus, AskTarget, Session, SessionId};
 use crate::op::{ConnId, Done, OpError, ReqId};
@@ -408,6 +410,8 @@ fn to_label(state: &State, a: &Ask) -> String {
 ///
 /// - a request waiting on an ask that has ended is answered (its row ended by a hook or a
 ///   tab's exit in this input, or changed by a reload);
+/// - every open ask to a session that isn't live ends, while the link is up
+///   ([`end_unreachable`]);
 /// - an Enter that is due goes to its tab, while its ask is still `sent` there;
 /// - a `sent` ask with no receipt [`ASK_RECEIPT_MS`] after its claim fails ([`NO_RECEIPT`]);
 /// - when the ask's own wait (its [`Waits::Ask`] request) runs out on a `pending` ask, the
@@ -437,8 +441,11 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
         let more = answer_waiting(state, |p| ended.contains(&p.ask));
         fold_in(fx, more);
     }
-    press_enters(state, now.wall, fx);
     let writes = !state.writes_refused(now.wall);
+    if writes {
+        end_unreachable(state, now, fx);
+    }
+    press_enters(state, now.wall, fx);
     if writes {
         fail_unreceived(state, now, fx);
     }
@@ -659,12 +666,14 @@ fn marker_ids(prompt: &str) -> impl Iterator<Item = AskId> + '_ {
     })
 }
 
-/// The receipt session `id`'s prompt carries (A6 b), as the hook's commit saves it: the ask
-/// to `id` its marker names turns `received` when it is `sent`, or when it failed for want of
-/// a receipt (the dialog that held the pane closed) while nothing else to `id` is in flight
-/// and `id` waits on no ask to its asker: one ask in flight per peer, and no two agents
-/// waiting on each other, hold for a revived ask too. Any other prompt changes no ask.
-pub(crate) fn receipt(state: &State, id: SessionId, prompt: &str) -> Option<Change> {
+/// The receipt session `id`'s prompt carries at `at` (A6 b): the ask to `id` its marker names
+/// turns `received` when it is `sent`, or when it failed for want of a receipt (the dialog
+/// that held the pane closed) while `id` is live, nothing else to `id` is in flight, `id`
+/// waits on no ask to its asker, and it isn't stale yet ([`STALE_AFTER_MS`]): one ask in
+/// flight per peer, and no two agents waiting on each other, hold for a revived ask too, and
+/// a peer that isn't running would only end it again ([`end_unreachable`]). Any other prompt
+/// changes no ask.
+fn receipt(state: &State, id: SessionId, prompt: &str, at: UtcMs) -> Option<Change> {
     let me = AskTarget::Session(id);
     let named: Vec<&Ask> = marker_ids(prompt)
         .filter_map(|n| state.ask(n))
@@ -676,11 +685,12 @@ pub(crate) fn receipt(state: &State, id: SessionId, prompt: &str) -> Option<Chan
             status: AskStatus::Received,
             ..(*a).clone()
         },
-        None if state.in_flight_to(id).next().is_some() => return None,
+        None if !state.is_live(id) || state.in_flight_to(id).next().is_some() => return None,
         None => {
             let failed = named.iter().find(|a| {
                 a.status == AskStatus::Failed
                     && a.reply.as_deref() == Some(NO_RECEIPT)
+                    && after_claim(a, STALE_AFTER_MS).is_some_and(|stale| at < stale)
                     && a.from_session
                         .is_none_or(|by| open_ask(state, me, by).is_none())
             })?;
@@ -702,10 +712,11 @@ pub(crate) fn answering(state: &State, id: SessionId) -> Option<&Ask> {
         .find(|a| a.status == AskStatus::Received)
 }
 
-/// The answer a turn of session `id` that ended at `at` with `message` gives (A6 c), as the
-/// hook's commit saves it ([`ending`]): the ask it received turns `answered`, its reply the
-/// full message ([`NO_TEXT`] for an empty one).
-pub(crate) fn answer(state: &State, id: SessionId, message: &str, at: UtcMs) -> Option<Change> {
+/// The answer a turn of session `id` that ended at `at` with `message` gives (A6 c): the ask
+/// it received turns `answered`, its reply the full message ([`NO_TEXT`] for an empty one).
+/// A received ask is always its turn's: any other start or end of a turn ends it first
+/// ([`hooked`]).
+fn answer(state: &State, id: SessionId, message: &str, at: UtcMs) -> Option<Change> {
     let asked = answering(state, id)?.id;
     let reply = if message.trim().is_empty() {
         NO_TEXT.to_string()
@@ -715,24 +726,96 @@ pub(crate) fn answer(state: &State, id: SessionId, message: &str, at: UtcMs) -> 
     ending(state, asked, AskStatus::Answered, reply, at).map(Change::Ask)
 }
 
-/// The asks to session `id` that end with it at `at` (A8), as the commit that ends it or puts
-/// it to sleep saves them ([`ending`]): a `pending` one dropped, one in flight failed, each
-/// `<label> ended`. Its own asks to others go on.
-pub(crate) fn peer_ended(state: &State, id: SessionId, at: UtcMs) -> Vec<Change> {
+/// The asks a hook of session `id`, applied at `at`, moves, as the hook's own commit saves
+/// them ([`ending`]); their requests hear at the end of the input ([`run`]):
+///
+/// - a turn's start: the ask its marker names is received ([`receipt`]); one received before
+///   whose marker it doesn't hold fails, `<label> moved on before answering` (an interrupt,
+///   then a prompt of the user's);
+/// - a turn's end: the ask received is answered ([`answer`]);
+/// - a turn that fails: the ask received fails, `<label>'s turn failed`;
+/// - `/clear` or a compaction: the ask received fails, `<label> moved on before answering`;
+/// - the session's end: every open ask to it ends ([`peer_ended`]).
+pub(crate) fn hooked(state: &State, id: SessionId, kind: &HookKind, at: UtcMs) -> Vec<Change> {
+    let label = || state.label_of(AskTarget::Session(id));
+    let unanswered = |why: String| {
+        let a = answering(state, id)?;
+        ending(state, a.id, AskStatus::Failed, why, at).map(Change::Ask)
+    };
+    let moved_on = || unanswered(format!("{} moved on before answering", label()));
+    let change = match kind {
+        HookKind::TurnStarted { prompt } => match answering(state, id) {
+            Some(a) if marker_ids(prompt).any(|n| n == a.id) => None,
+            Some(_) => moved_on(),
+            None => receipt(state, id, prompt, at),
+        },
+        HookKind::TurnEnded { last_message } => answer(state, id, last_message, at),
+        HookKind::TurnFailed { .. } => unanswered(format!("{}'s turn failed", label())),
+        HookKind::SessionStarted {
+            source: StartSource::Clear | StartSource::Compact,
+        } => moved_on(),
+        HookKind::SessionEnded { .. } => return peer_ended(state, id, at),
+        _ => None,
+    };
+    change.into_iter().collect()
+}
+
+/// How each open ask to session `id` ends once the session isn't running (A8): a `pending`
+/// one is dropped, `<label> isn't running`; one in flight fails, `<label> ended`. The one
+/// wording for every way a peer goes: its end, its tab's exit, and [`run`]'s look at every
+/// peer that isn't live (close, sleep, archive, reconcile, …).
+fn gone_endings(state: &State, id: SessionId) -> Vec<(AskId, AskStatus, String)> {
     let me = AskTarget::Session(id);
-    let why = format!("{} ended", state.label_of(me));
+    let label = state.label_of(me);
     state
         .asks()
-        .filter(|a| a.to_session == Some(me))
-        .filter_map(|a| {
-            let status = match a.status {
-                AskStatus::Pending => AskStatus::Dropped,
-                _ => AskStatus::Failed,
-            };
-            ending(state, a.id, status, why.clone(), at)
+        .filter(|a| a.to_session == Some(me) && is_open(a.status))
+        .map(|a| match a.status {
+            AskStatus::Pending => (a.id, AskStatus::Dropped, format!("{label} isn't running")),
+            _ => (a.id, AskStatus::Failed, format!("{label} ended")),
         })
+        .collect()
+}
+
+/// The asks to session `id` that end with it at `at` ([`gone_endings`]), as the commit that
+/// ends it, or puts it to sleep when its tab exits, saves them ([`ending`]). Its own asks to
+/// others go on.
+pub(crate) fn peer_ended(state: &State, id: SessionId, at: UtcMs) -> Vec<Change> {
+    gone_endings(state, id)
+        .into_iter()
+        .filter_map(|(ask, status, why)| ending(state, ask, status, why, at))
         .map(Change::Ask)
         .collect()
+}
+
+/// Every open ask to a session that isn't live (A3) ends ([`gone_endings`]), in one commit of
+/// its own: the catch-all for every way a peer stops running without a hook or a tab's exit
+/// saying so in its own commit. Only while the link is up: before it, a daemon that is
+/// starting hasn't looked at its tabs, and a peer may be running still.
+fn end_unreachable(state: &mut State, now: &Now, fx: &mut Vec<Effect>) {
+    if state.tmux().conn().is_none() {
+        return;
+    }
+    let gone: BTreeSet<SessionId> = state
+        .asks()
+        .filter(|a| is_open(a.status))
+        .filter_map(|a| match a.to_session {
+            Some(AskTarget::Session(to)) if !state.is_live(to) => Some(to),
+            _ => None,
+        })
+        .collect();
+    if gone.is_empty() {
+        return;
+    }
+    let mut tx = Tx::new(now);
+    let mut replies = Vec::new();
+    for to in gone {
+        for (ask, status, why) in gone_endings(state, to) {
+            replies.extend(end(state, &mut tx, ask, status, why));
+        }
+    }
+    fold_in(fx, post_commit(state, tx));
+    fold_in(fx, replies);
 }
 
 /// Connection `conn` is gone: its waiting requests are dropped, and nothing else. Their asks
