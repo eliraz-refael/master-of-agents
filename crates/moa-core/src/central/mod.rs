@@ -798,12 +798,12 @@ fn opened(state: &mut State, now: &Now, result: Result<(String, Opened), String>
             fx
         }
         Err(why) => {
-            failed_wake(&mut state.central, &p, now);
             let line = format!(
                 "moa couldn't start a thread: {}",
                 why.lines().next().unwrap_or("")
             );
             let mut fx = vec![warn("moa's agent couldn't open a thread")];
+            fold_in(&mut fx, failed_wake(state, &p, now, &line));
             fx.extend(answer(p.waiter, Err(OpError(line.clone()))));
             fx.push(Effect::Publish(Publish::Event(CoreEvent::Error {
                 message: line,
@@ -1021,10 +1021,12 @@ fn prompt(state: &mut State, now: &Now, p: Pending, open: Open) -> Vec<Effect> {
     if let Err(e) = tx.commit(state, changes) {
         // Refused writes hold the next wake until they end; any other refusal would come
         // again at once.
+        let mut fx = Vec::new();
         if !state.writes_refused(now.wall) {
-            failed_wake(&mut state.central, &p, now);
+            fx = failed_wake(state, &p, now, &e.0);
         }
-        return answer(p.waiter, Err(e));
+        fx.extend(answer(p.waiter, Err(e)));
+        return fx;
     }
     let brief = open.brief.filter(|b| first && !b.is_empty());
     let yours = (!automatic).then(|| p.text.clone());
@@ -1095,11 +1097,17 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     moa.phase = phase;
     forget_run(moa);
     let pending = moa.pending.take();
-    if let Some(p) = &pending {
-        failed_wake(moa, p, now);
-    }
-    let mut waiters: Vec<Waiter> = pending.and_then(|p| p.waiter).into_iter().collect();
+    let mut waiters: Vec<Waiter> = pending
+        .as_ref()
+        .and_then(|p| p.waiter)
+        .into_iter()
+        .collect();
     let mut fx = vec![warn(logged)];
+    if let Some(p) = &pending {
+        let more = failed_wake(state, p, now, &format!("{logged}: {why}"));
+        fold_in(&mut fx, more);
+    }
+    let moa = &mut state.central;
     if let Some(turn) = &mut moa.turn
         && turn.exited.is_none()
     {
@@ -1131,12 +1139,21 @@ fn exited(state: &mut State, now: &Now, why: String) -> Vec<Effect> {
     fx
 }
 
-/// Pending prompt `p` never reached moa's agent. An automatic prompt's failed try (an ask's
-/// too: it stays `pending`, and is dropped at its wait as any is) holds back every automatic
-/// source for a gap ([`Moa::failed_at`]).
-fn failed_wake(moa: &mut Moa, p: &Pending, now: &Now) {
-    if p.source != Source::You {
-        moa.failed_at = Some(now.wall);
+/// Pending prompt `p` never reached moa's agent, as `why` says. An automatic prompt's failed
+/// try holds back every automatic source but an ask for a gap ([`Moa::failed_at`]). An ask's
+/// own prompt that fails fails its ask, `moa's turn failed: <why>` (A13): an ask isn't held
+/// by the gap, so it mustn't be tried again.
+fn failed_wake(state: &mut State, p: &Pending, now: &Now, why: &str) -> Vec<Effect> {
+    if p.source == Source::You {
+        return Vec::new();
+    }
+    state.central.failed_at = Some(now.wall);
+    match p.source {
+        Source::Ask(id) => {
+            let why = format!("moa's turn failed: {why}");
+            asks::moa_ended(state, now, id, Err(&why))
+        }
+        _ => Vec::new(),
     }
 }
 

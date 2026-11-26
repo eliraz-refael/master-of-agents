@@ -130,30 +130,32 @@ pub(crate) fn run(state: &mut State, now: &Now, fired: bool, fx: &mut Vec<Effect
     ));
 }
 
-/// The next automatic prompt, and when it is due: the oldest ask to moa, the day's opening
-/// (while due today) and a waiting yes at once, in that order, a wake-up when [`wake_due`]
-/// says, and none sooner than a gap after an automatic prompt failed
-/// ([`super::Moa::failed_at`]). The sooner goes; an ask carries only itself (A9), and whichever
-/// else it is carries what the others would. `/auto` holds no ask: someone waits for it.
-/// `None` while none waits, or moa's agent isn't [`free`].
+/// The next automatic prompt, and when it is due: the oldest ask to moa at once, first, held
+/// by neither `/auto` nor the gap after a failed prompt (someone waits for it, and an ask
+/// whose own prompt fails ends, so nothing loops); then the day's opening (while due today)
+/// and a waiting yes at once, in that order, and a wake-up when [`wake_due`] says, none of
+/// them sooner than a gap after an automatic prompt failed ([`super::Moa::failed_at`]). The
+/// sooner goes; an ask carries only itself (A9), and whichever else it is carries what the
+/// others would. `None` while none waits, or moa's agent isn't [`free`].
 fn due(state: &State, now: &Now) -> Option<(Source, UtcMs)> {
     if !free(state) {
         return None;
+    }
+    let at_once = UtcMs(i64::MIN);
+    if let Some(id) = asks::next_for_moa(state) {
+        return Some((Source::Ask(id), at_once));
     }
     let gap = state.config().moa.wake_gap_ms;
     let held = state
         .central
         .failed_at
         .map_or(i64::MIN, |f| f.0.saturating_add(gap));
-    let at_once = UtcMs(i64::MIN);
-    let ask = asks::next_for_moa(state).map(|id| (Source::Ask(id), at_once));
     let brief = opening::due_today(state, now).then_some((Source::Brief, at_once));
     let yes = state.yeses().next().map(|_| (Source::Yes, at_once));
     let wake = wake_due(state).map(|at| (Source::Wake, at));
     // The first of the soonest goes.
-    let next = ask
+    let next = brief
         .into_iter()
-        .chain(brief)
         .chain(yes)
         .chain(wake)
         .min_by_key(|(_, at)| *at);

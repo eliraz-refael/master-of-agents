@@ -88,7 +88,14 @@ fn the_plugin_ships_the_skill() {
     let description = lines[1]
         .strip_prefix("description: ")
         .expect("a description");
-    assert!(!description.trim().is_empty());
+    // A double-quoted YAML scalar, so its backticks and `[` read as text: nothing inside
+    // that would end or escape it.
+    let inner = description
+        .strip_prefix('"')
+        .and_then(|d| d.strip_suffix('"'))
+        .expect("a quoted description");
+    assert!(!inner.contains(['"', '\\']), "{inner}");
+    assert!(!inner.trim().is_empty());
     assert!(!body.trim().is_empty());
 }
 

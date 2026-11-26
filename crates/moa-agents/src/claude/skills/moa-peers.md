@@ -1,6 +1,6 @@
 ---
 name: moa-peers
-description: Ask another agent in this moa cockpit (or moa itself) something only it knows, and answer an ask that comes to you as a message starting `[moa · message from`.
+description: "Ask another agent in this moa cockpit (or moa itself) something only it knows, and answer an ask that comes to you as a message starting `[moa · message from`."
 ---
 
 # Asking your peers

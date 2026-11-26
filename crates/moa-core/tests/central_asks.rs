@@ -6,14 +6,14 @@ mod common;
 
 use common::asks::*;
 use common::central::{
-    body_of, caps, hear_at, play_at, prompts_sent, sent, started, toml, you_commit, you_row,
+    acps, body_of, caps, hear_at, play_at, prompts_sent, sent, started, toml, you_commit, you_row,
 };
 use common::timers;
 use moa_core::UtcMs;
 use moa_core::central::opening::BRIEFED_KEY;
 use moa_core::central::wire::{AcpCmd, AcpIn, StopReason, Update};
 use moa_core::change::Change;
-use moa_core::effect::{Effect, Input, TimerKey, handle_checked};
+use moa_core::effect::{Effect, Input, RefuseWrites, TimerKey, handle_checked};
 use moa_core::model::{Ask, AskStatus, AskTarget, Report, ReportKind};
 use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::state::{CallerInfo, Snapshot};
@@ -260,7 +260,7 @@ fn an_empty_answer_says_so() {
 }
 
 /// A9 (e): an ask moa took whose turn is gone (a restart of the daemon, moa's agent gone
-/// mid-turn) fails `moa restarted before answering`.
+/// mid-turn) fails `moa stopped before answering`.
 #[test]
 fn an_orphan_ask_to_moa_fails() {
     // The daemon starts with one received and one sent; a pending one waits for its turn.
@@ -286,7 +286,7 @@ fn an_orphan_ask_to_moa_fails() {
         assert_eq!(r.row(id).status, AskStatus::Failed, "{fx:?}");
         assert_eq!(
             r.row(id).reply.as_deref(),
-            Some("moa restarted before answering")
+            Some("moa stopped before answering")
         );
     }
     // The pending one goes to moa, whose agent starts for it.
@@ -311,12 +311,12 @@ fn an_orphan_ask_to_moa_fails() {
     assert_eq!(r.row(1).status, AskStatus::Failed);
     assert_eq!(
         r.row(1).reply.as_deref(),
-        Some("moa restarted before answering")
+        Some("moa stopped before answering")
     );
     assert_eq!(
         kite_hears(&fx),
         Err(OpError(
-            "ask #1 failed: moa restarted before answering".into()
+            "ask #1 failed: moa stopped before answering".into()
         ))
     );
 }
@@ -329,37 +329,145 @@ fn asks_go_before_the_brief() {
     snap.reports = vec![harbors_report(T0)];
     snap.next_ids.report = 2;
     let mut r = rig_unopened(snap);
-    // You are here: the opening goes, but its thread can't be opened, which holds every
-    // automatic prompt for a gap.
-    let page = Op::ConsolePage { before: 10, n: 5 };
-    let fx = r.op(9, you(), page, T0);
-    let generation = r.st.central().generation;
-    assert!(
-        fx.iter()
-            .any(|e| matches!(e, Effect::Acp(AcpCmd::Start { .. }))),
-        "{fx:?}"
+    // moa reads the report on its own once it settles.
+    let settled = T0 + r.st.config().moa.wake_settle_ms;
+    let fx = handle_checked(&mut r.st, Input::Timer(TimerKey::Wake), now(settled));
+    let fx = play_at(&mut r.st, now(settled), fx);
+    assert_eq!(body_of(you_row(&fx))["reports"], json!(1), "{fx:?}");
+    // Meanwhile you are here, Kite asks moa, and Harbor's next report is queued.
+    r.op(
+        9,
+        you(),
+        Op::ConsolePage { before: 10, n: 5 },
+        settled + SEC,
     );
-    hear(&mut r, T0, started(generation, caps(true, true, true)));
-    let refused = AcpIn::Opened {
-        generation,
-        result: Err("boom".into()),
+    let ask = Op::Ask {
+        to: "moa".into(),
+        text: "Is the domain renewed?".into(),
+        timeout_s: 540,
     };
-    let fx = hear(&mut r, T0, refused);
-    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
-    kite_asks_moa(&mut r);
-    // Once the gap is over, both are due: the ask goes, alone.
-    let gap = r.st.config().moa.wake_gap_ms;
-    let fx = handle_checked(&mut r.st, Input::Timer(TimerKey::Wake), now(T0 + gap));
-    let fx = play_at(&mut r.st, now(T0 + gap), fx);
+    r.op(KITE_CONN, from(KITE), ask, settled + 2 * SEC);
+    r.stopped(settled + 3 * SEC, HARBOR, "Harbor tidied the folder.");
+    // The wake-up's turn ends: both are due, and the ask goes, alone.
+    let fx = turn_ends(&mut r, settled + 10 * SEC, Ok(StopReason::EndTurn));
     assert_eq!(sent(&fx), KITES_ASK);
     assert!(body_of(you_row(&fx)).get("opening").is_none(), "{fx:?}");
     // The opening goes after it, carrying the report.
-    let fx = turn_ends(&mut r, T0 + gap + 10 * SEC, Ok(StopReason::EndTurn));
+    let fx = turn_ends(&mut r, settled + 20 * SEC, Ok(StopReason::EndTurn));
     let body = body_of(you_row(&fx));
     assert_eq!(body["opening"], json!(true), "{body}");
     assert_eq!(body["reports"], json!(1), "{body}");
     assert!(body.get("ask").is_none(), "{body}");
     assert!(sent(&fx).contains("Harbor tidied the folder."));
+}
+
+/// An automatic prompt failed, which holds the wake-ups for a gap: an ask goes at once all
+/// the same, rather than being dropped behind a gap it has nothing to do with.
+#[test]
+fn an_ask_skips_the_wake_gap() {
+    let mut r = rig_unopened(snapshot());
+    // You are here: the opening goes, but its thread can't be opened.
+    let fx = r.op(9, you(), Op::ConsolePage { before: 10, n: 5 }, T0);
+    let fx = fail_to_open(&mut r, fx);
+    assert!(r.st.central().failed_at.is_some(), "{fx:?}");
+    let ask = Op::Ask {
+        to: "moa".into(),
+        text: "Is the domain renewed?".into(),
+        timeout_s: 30,
+    };
+    let fx = r.op(KITE_CONN, from(KITE), ask, T0 + SEC);
+    let fx = play_at(&mut r.st, now(T0 + SEC), fx);
+    assert_eq!(sent(&fx), KITES_ASK);
+    assert_eq!(r.row(1).status, AskStatus::Received);
+}
+
+/// moa's agent, asked in `fx` to start and open a thread, starts and can't open it.
+fn fail_to_open(r: &mut Rig, fx: Vec<Effect>) -> Vec<Effect> {
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Acp(AcpCmd::Start { .. }))),
+        "{fx:?}"
+    );
+    let generation = r.st.central().generation;
+    hear(r, T0, started(generation, caps(true, true, true)));
+    let refused = AcpIn::Opened {
+        generation,
+        result: Err("boom".into()),
+    };
+    let fx = hear(r, T0, refused);
+    assert!(prompts_sent(&fx).is_empty(), "{fx:?}");
+    fx
+}
+
+/// An ask whose own prompt can't reach moa's agent fails, with why: it isn't tried again,
+/// gap or not.
+#[test]
+fn an_ask_whose_prompt_fails_fails() {
+    let mut r = rig();
+    let fx = kite_asks_moa(&mut r);
+    let fx = fail_to_open(&mut r, fx);
+    let why = "moa's turn failed: moa couldn't start a thread: boom";
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+    assert_eq!(r.row(1).reply.as_deref(), Some(why));
+    assert_eq!(
+        kite_hears(&fx),
+        Err(OpError(format!("ask #1 failed: {why}")))
+    );
+    assert!(acps(&fx).is_empty(), "nothing is tried again: {fx:?}");
+}
+
+/// A refused write as moa's ask turn ends loses no answer: the ending is held, and saved
+/// once writes are back, never failed as an ask whose turn is gone.
+#[test]
+fn a_refused_answer_is_saved_once_writes_are_back() {
+    let (mut r, _) = answering();
+    says(&mut r, T0 + 12 * SEC, "Renewed in May.");
+    let until = refuse_writes(&mut r, T0 + 13 * SEC);
+    let fx = turn_ends(&mut r, T0 + 15 * SEC, Ok(StopReason::EndTurn));
+    assert_eq!(r.row(1).status, AskStatus::Received);
+    assert!(replies(&fx).is_empty(), "{fx:?}");
+    assert_eq!(set_at(&fx), Some(UtcMs(until)));
+    // Another input meanwhile fails nothing.
+    let fx = r.fire(until - SEC);
+    assert!(replies(&fx).is_empty() && !persisted(&fx), "{fx:?}");
+    let fx = r.fire(until);
+    let row = r.row(1);
+    assert_eq!(row.status, AskStatus::Answered);
+    assert_eq!(row.reply.as_deref(), Some("Renewed in May."));
+    assert_eq!(row.answered_at, Some(UtcMs(T0 + 15 * SEC)));
+    assert_eq!(kite_hears(&fx).unwrap().text, "Renewed in May.");
+}
+
+/// From `ms` the store refuses writes, for a minute; everything saved so far is kept. When
+/// they come back.
+fn refuse_writes(r: &mut Rig, ms: i64) -> i64 {
+    let st = &r.st;
+    let mut snap = r.base.clone();
+    snap.asks = st.asks().cloned().collect();
+    snap.next_ids.ask = snap.asks.iter().map(|a| a.id.0 + 1).max().unwrap_or(1);
+    snap.reports = st.reports().cloned().collect();
+    snap.threads = st.threads().cloned().collect();
+    snap.feed_tail = st.feed_tail().cloned().collect();
+    snap.feed_keys = st
+        .threads()
+        .flat_map(|t| {
+            let keys = st.feed_keys(&t.thread_id).into_iter().flatten();
+            keys.map(|k| (t.thread_id.clone(), k.clone()))
+        })
+        .collect();
+    if let Some(last) = snap.feed_tail.last() {
+        snap.next_ids.feed = last.id + 1;
+    }
+    let until = ms + MIN;
+    let input = Input::Reload {
+        snapshot: Box::new(snap),
+        refuse_writes: Some(RefuseWrites {
+            until: UtcMs(until),
+            reason: "the disk is full".into(),
+        }),
+    };
+    handle_checked(&mut r.st, input, now(ms));
+    until
 }
 
 /// `/auto off` stops the wake-ups, not an ask: someone waits for it.
@@ -555,6 +663,9 @@ fn an_ask_to_moa_that_fails_to_start_is_dropped() {
             .any(|e| matches!(e, Effect::Acp(AcpCmd::Start { .. }))),
         "{fx:?}"
     );
+    // Beacon's waits behind Kite's, whose prompt starts moa's agent.
+    r.ask(3, from(BEACON), "moa", "Which branch?", 540);
+    assert_eq!(r.row(2).status, AskStatus::Pending);
     let generation = r.st.central().generation;
     let fx = hear(
         &mut r,
@@ -564,11 +675,24 @@ fn an_ask_to_moa_that_fails_to_start_is_dropped() {
             why: "no such program".into(),
         },
     );
-    assert_eq!(r.row(1).status, AskStatus::Dropped);
-    assert_eq!(r.row(1).reply.as_deref(), Some("moa isn't running"));
+    // Kite's own prompt failed; Beacon's can't be answered now.
+    let why = "moa's turn failed: moa's agent couldn't start: no such program";
+    assert_eq!(r.row(1).status, AskStatus::Failed);
+    assert_eq!(r.row(1).reply.as_deref(), Some(why));
     assert_eq!(
         kite_hears(&fx),
-        Err(OpError("moa isn't running; ask #1 was dropped".into()))
+        Err(OpError(format!("ask #1 failed: {why}")))
+    );
+    assert_eq!(r.row(2).status, AskStatus::Dropped);
+    assert_eq!(r.row(2).reply.as_deref(), Some("moa isn't running"));
+    let beacon: Vec<_> = replies(&fx)
+        .into_iter()
+        .filter(|(c, _, _)| *c == ConnId(3))
+        .map(|(_, _, r)| r)
+        .collect();
+    assert_eq!(
+        beacon,
+        [Err(OpError("moa isn't running; ask #2 was dropped".into()))]
     );
     let fx = r.op(
         KITE_CONN,
