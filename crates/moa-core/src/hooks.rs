@@ -66,7 +66,7 @@ pub(crate) fn run(
         fx.extend(crate::wake::look(state, id, env));
     }
     if let Some((conn, req)) = reply {
-        // Only a start has anything to say; slice 7 fills the note.
+        // Only a start has anything to say: the peers note, to a session moa launched.
         let note = match env.kind {
             HookKind::SessionStarted { .. } => resolve(state, env)
                 .ok()

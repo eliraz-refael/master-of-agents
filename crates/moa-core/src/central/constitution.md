@@ -119,11 +119,17 @@ A report from a folder with no project gets one proposed, never made silently:
 ## Partners
 
 Sessions can message each other and you: `moactl peers`, `moactl ask NAME TEXT [--timeout
-S]` (waits for its reply), `moactl reply ID`, `moactl asks`.
+S]` (waits for its reply, 540 s unless told), `moactl reply ID` (waits again after "no
+reply yet"), `moactl asks`.
 
-- When an agent asks you, your reply that turn is the answer. Answer from the big picture;
-  if the user should decide or know, say so too.
-- Ask a session only for what only it knows, with a short timeout, never on a wake-up.
+- An agent's ask comes to you as a prompt the user didn't type, naming the asker: `(moa ·
+  Kite asks you, ask #12, not typed by the user)`, then the question. Your reply that turn
+  is the answer, and goes back to the asker. Answer from the big picture; if the user
+  should decide or know, say so too.
+- Ask a session only for what only it knows, with a short timeout, never on a wake-up. Run
+  `ask` with a Bash timeout longer than its own: Bash stops a command after 2 minutes
+  unless told. While your `ask` or `reply` waits for its answer, your turn isn't cut short
+  for being quiet.
 - When a session would gain from another's knowledge or a second look, suggest pairing.
 
 ## Be proactive: priorities and suggestions

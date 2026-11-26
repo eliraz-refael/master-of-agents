@@ -175,17 +175,25 @@ fn session_plugin_dir(paths: &Paths) -> io::Result<PathBuf> {
 }
 
 /// Writes the Claude Code plugin that sessions are started with, when its text changed, and
-/// says where it is. Its `hooks.json` names a command Claude runs, so its folders are checked
-/// like the other private folders: ours, real, and closed to other users.
+/// says where it is. Its `hooks.json` names a command Claude runs, and its skill is read by
+/// the agent, so every folder in it is checked like the other private folders: ours, real,
+/// and closed to other users.
 fn write_session_plugin(paths: &Paths, exe: &Path) -> Result<PathBuf, DaemonError> {
     let dir = session_plugin_dir(paths)?;
     ensure_private_dir(&dir)?;
     for (rel, text) in moa_agents::claude::session_plugin(exe) {
-        let file = dir.join(rel);
-        if let Some(parent) = file.parent() {
-            ensure_private_dir(parent)?;
+        let rel = Path::new(rel);
+        // Outermost first: `skills`, then `skills/moa-peers`.
+        let mut folders: Vec<&Path> = rel
+            .ancestors()
+            .skip(1)
+            .filter(|a| !a.as_os_str().is_empty())
+            .collect();
+        folders.reverse();
+        for folder in folders {
+            ensure_private_dir(&dir.join(folder))?;
         }
-        write_if_changed(&file, &text)?;
+        write_if_changed(&dir.join(rel), text.as_str())?;
     }
     Ok(dir)
 }

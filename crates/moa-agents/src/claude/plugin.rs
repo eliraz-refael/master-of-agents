@@ -1,5 +1,6 @@
 //! The Claude Code plugin moa starts sessions with: it subscribes the hooks that tell the
-//! daemon what a session is doing. The daemon writes it, so edits are replaced.
+//! daemon what a session is doing, and carries the `moa-peers` skill. The daemon writes it,
+//! so edits are replaced.
 
 use std::path::Path;
 
@@ -21,9 +22,12 @@ const EVENTS: [(&str, Option<&str>); 12] = [
     ("CwdChanged", None),
 ];
 
-/// The plugin's files as (relative path, text): its manifest and its hooks. Every hook runs
-/// `<exe> hook claude`; only `SessionStart` waits (its answer is the session's identity), the
-/// rest are async so they never slow Claude Code down.
+/// The `moa-peers` skill: how to ask the other agents and moa, and how to answer (A12).
+const PEERS_SKILL: &str = include_str!("skills/moa-peers.md");
+
+/// The plugin's files as (relative path, text): its manifest, its hooks and its skill. Every
+/// hook runs `<exe> hook claude`; only `SessionStart` waits (its answer is the session's
+/// identity, and its peers note), the rest are async so they never slow Claude Code down.
 pub fn session_plugin(exe: &Path) -> Vec<(&'static str, String)> {
     let exe = exe.to_string_lossy();
     let waits =
@@ -53,5 +57,6 @@ pub fn session_plugin(exe: &Path) -> Vec<(&'static str, String)> {
     vec![
         (".claude-plugin/plugin.json", render(&manifest)),
         ("hooks/hooks.json", render(&json!({ "hooks": hooks }))),
+        ("skills/moa-peers/SKILL.md", PEERS_SKILL.to_string()),
     ]
 }
