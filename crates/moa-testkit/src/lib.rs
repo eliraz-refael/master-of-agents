@@ -38,6 +38,22 @@ pub enum FakeStep {
     Wait {
         file: String,
     },
+    /// Answer what is typed into the pane next, as Claude does an ask moa types: read the
+    /// pane's input until a bracketed paste ends and an Enter follows it, fire
+    /// `UserPromptSubmit` with the pasted text (its paste marks gone, its line breaks `\n`),
+    /// then `Stop` with `reply` as the turn's last message. A script with an `Answer` puts its
+    /// terminal in raw mode with bracketed paste on as it starts, as Claude's prompt box is,
+    /// so a paste that comes early is bracketed too.
+    Answer {
+        reply: String,
+    },
+    /// Run `argv` in the agent's folder with its environment, and wait for it to exit: as
+    /// Claude runs `moactl` from a Bash tool call. Its `{argv, code, stdout, stderr}` is a
+    /// line of `.fake-claude.run`, written before its stdout and stderr, then `exit <code>`,
+    /// are shown in the pane.
+    Run {
+        argv: Vec<String>,
+    },
     /// `/clear`: end the session, take a new id, start again.
     Clear,
     /// Quit cleanly.

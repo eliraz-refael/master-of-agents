@@ -1,7 +1,7 @@
 //! An in-process daemon on a `/tmp` root whose moa account runs `stub-acp` (and names
 //! `fake-claude` as its Claude), and what a test reads back from it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use moa_core::UtcMs;
 use moa_core::change::Change;
 use moa_core::config::BrainName;
 use moa_core::effect::TmuxIn;
-use moa_core::model::SessionId;
+use moa_core::model::{PaneBinding, SessionId};
 use moa_core::publish::Topic;
 use moa_core::tmux::notify::Notification;
 use moa_daemon::testing::FakeTime;
@@ -19,7 +19,10 @@ use moa_daemon::{CoreHandle, DaemonError, Ready, RunOptions, load_config, run};
 use moa_platform::{Paths, ensure_private_dir};
 use moa_store::Store;
 use moa_testkit::brain::{TYPICAL_NOW, TYPICAL_TZ};
-use moa_testkit::{StubStep, TempBrain, stub_log, stub_moa_toml, wait_for, write_stub_script};
+use moa_testkit::{
+    FakeStep, StubStep, TempBrain, fake_claude, stub_log, stub_moa_toml, test_bin, wait_for,
+    write_script, write_stub_script,
+};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -37,6 +40,22 @@ pub struct Rig {
     pub time: Arc<FakeTime>,
     /// The agent folder: the stub's script, log and files are here.
     pub agent: PathBuf,
+}
+
+/// A session's agent tab on the rig's terminal server ([`Rig::agent_tab`]).
+pub struct Tab {
+    pub id: SessionId,
+    /// The tab's pane, `%N`.
+    pub pane: String,
+    /// The agent's folder: its script, and the gates its `Wait` steps wait on.
+    pub dir: PathBuf,
+}
+
+impl Tab {
+    /// Opens the gate `file` the agent's script waits on.
+    pub fn open(&self, file: &str) {
+        std::fs::write(self.dir.join(file), "").expect("the gate opens");
+    }
 }
 
 /// A running daemon.
@@ -161,6 +180,94 @@ impl Rig {
         ids
     }
 
+    /// Runs tmux `args` on the rig's terminal server ([`super::create_server`]): its output,
+    /// trimmed.
+    pub fn tmux(&self, args: &[&str]) -> String {
+        let out = self
+            .tb
+            .tmux("default", args)
+            .unwrap_or_else(|e| panic!("tmux {args:?}: {e}"));
+        out.trim_end().to_string()
+    }
+
+    /// Seeded session `i` ([`Rig::seed_sessions`]'s ids), titled `title`, as moa launches
+    /// one: its agent, `fake-claude` playing `steps`, runs in a tab of its own on the terminal
+    /// server ([`super::create_server`]), its hooks reach the daemon through the `moa` binary,
+    /// and the tab is bound to it and tagged. Returns the tab, and the rows to save before the
+    /// daemon starts ([`Rig::write`]).
+    pub fn agent_tab(&self, i: u32, title: &str, steps: &[FakeStep]) -> (Tab, Vec<Change>) {
+        let id = session_id(i);
+        let dir = self.tb.root().join("work").join(title);
+        std::fs::create_dir_all(&dir).expect("the agent's folder");
+        write_script(&dir, steps);
+        let conversation = conversation_id(i);
+        let (pane, pid) = self.open_agent(id, &dir, &conversation);
+        let mut rows = session_rows(id, &conversation);
+        let Some(Change::Session(s)) = rows.first_mut() else {
+            panic!("session_rows starts with the session's row");
+        };
+        s.title = Some(title.into());
+        s.cwd = Some(dir.to_string_lossy().into_owned());
+        s.start_cwd = s.cwd.clone();
+        rows.push(self.bind(id, &pane, &pid));
+        (Tab { id, pane, dir }, rows)
+    }
+
+    /// Starts `fake-claude` on conversation `conversation` in a new tab in `dir`, as session
+    /// `id`'s agent with moa's session plugin, and tags the tab with `id`. Its pane and pid.
+    fn open_agent(&self, id: SessionId, dir: &Path, conversation: &str) -> (String, String) {
+        let root = self.tb.root();
+        let plugin = root.join("plugin");
+        // Every tab shares the one plugin: the first tab writes it.
+        if !plugin.exists() {
+            for (rel, text) in moa_agents::claude::session_plugin(&test_bin("moa")) {
+                let path = plugin.join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).expect("the plugin's folders");
+                std::fs::write(path, text).expect("the plugin's files");
+            }
+        }
+        let env = [
+            format!("MOA_ROOT={}", root.display()),
+            format!("MOA_SESSION={id}"),
+            "MOA_BRAIN=default".to_string(),
+            format!("CLAUDE_CODE_PLUGIN_DIRS={}", plugin.display()),
+        ];
+        let (dir, claude) = (dir.to_string_lossy(), fake_claude());
+        let mut args = vec!["new-window", "-d", "-t", "=moa:", "-c", &dir];
+        for var in &env {
+            args.extend(["-e", var]);
+        }
+        let claude = claude.to_string_lossy();
+        args.extend(["-P", "-F", "#{pane_id} #{pane_pid}"]);
+        args.extend([&*claude, "--session-id", conversation]);
+        let opened = self.tmux(&args);
+        let (pane, pid) = opened.split_once(' ').expect("a pane and its pid");
+        let tag = id.to_string();
+        self.tmux(&["set-option", "-p", "-t", pane, "@moa_session", &tag]);
+        (pane.to_string(), pid.to_string())
+    }
+
+    /// Session `id`'s binding to `pane` (pid `pid`) on the terminal server, tracked: moa
+    /// started its agent.
+    fn bind(&self, id: SessionId, pane: &str, pid: &str) -> Change {
+        let server = self.tmux(&[
+            "display-message",
+            "-p",
+            "#{pid} #{start_time} #{socket_path}",
+        ]);
+        let server: Vec<&str> = server.splitn(3, ' ').collect();
+        Change::PaneBinding(PaneBinding {
+            session_id: id,
+            server_pid: server[0].parse().unwrap(),
+            server_start: server[1].parse().unwrap(),
+            socket: server[2].into(),
+            pane_id: pane.into(),
+            pane_pid: pid.parse().unwrap(),
+            bound_at: UtcMs(1),
+            tracked: true,
+        })
+    }
+
     /// The `meta` row `key`'s value, if it is saved.
     pub fn meta(&self, key: &str) -> Option<String> {
         let store = self.store();
@@ -239,13 +346,33 @@ impl Up {
         c
     }
 
+    /// A client that says it is session `id`, as `moactl` run in its tab does.
+    pub fn session_client(&self, id: SessionId) -> Client {
+        self.client_as(&id.to_string())
+    }
+
+    /// Links the daemon to its terminal server ([`super::create_server`]).
+    pub fn link(&self) {
+        let linked = self.client().call("tmux.ensure", json!({}));
+        assert_eq!(
+            linked["result"]["data"],
+            json!({"running": true}),
+            "{linked}"
+        );
+    }
+
     /// A client that says it is moa's own agent, as `moactl` run by moa's agent does.
     pub fn moa_client(&self) -> Client {
+        self.client_as("moa")
+    }
+
+    /// A client whose `hello` names `moa_session` as its caller.
+    fn client_as(&self, moa_session: &str) -> Client {
         let mut c = Client::connect(&self.sock);
         let hello = json!({
             "client": "test",
             "build": moa_platform::build_id(),
-            "caller": {"moa_session": "moa"},
+            "caller": {"moa_session": moa_session},
         });
         c.call("hello", hello);
         c

@@ -209,13 +209,17 @@ async fn a_live_hook_drains_lines_spooled_while_the_daemon_was_up() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_start_is_answered_with_a_null_context() {
+async fn session_start_is_answered_with_the_peers_note() {
+    // The line names its session in `MOA_SESSION`: moa launched its agent.
     let d = boot_with(seed_db, |_| {}).await;
     let mut c = Client::connect(&d.sock);
     c.write(&with_id(7, &hook_line("SessionStart", ago(1000), 1)));
     let reply = c.read().expect("a reply");
     assert_eq!(reply["id"], 7);
-    assert_eq!(reply["result"], json!({"context": null}));
+    assert_eq!(
+        reply["result"],
+        json!({"context": moa_core::peers::PEERS_NOTE})
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
