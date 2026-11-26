@@ -488,6 +488,7 @@ In a sandbox (`MOA_ROOT=/tmp/…`):
 2. Break `moa.toml` (an unclosed quote) and save. The console says it kept the last one. Fix
    it and save again.
 
-**Restart needed:** one last time. The daemon running now predates slice 9, so it can't
-re-exec. The first `moa` after this lands restarts it ("the daemon restarted itself"). After
-that, upgrades happen in place.
+**Restart needed:** nothing for the spike, which stays as it is until slice 10's switch.
+A v1 sandbox daemon that predates slice 9 can't re-exec, so the first `moa` in that sandbox
+after this lands restarts it by itself ("the daemon restarted itself"). After that, sandbox
+upgrades happen in place.
