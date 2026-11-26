@@ -166,9 +166,15 @@ fn vnode_watch(kq: &OwnedFd, path: &Path, follow: bool, fflags: u32) -> io::Resu
     Ok(fd)
 }
 
-/// Watch directory `dir` for entries added, removed or renamed in it.
+/// Watch directory `dir` for entries added, removed or renamed in it, and for being removed
+/// or renamed itself (an install that swaps a whole folder).
 pub fn vnode_watch_dir(kq: &OwnedFd, dir: &Path) -> io::Result<OwnedFd> {
-    vnode_watch(kq, dir, true, libc::NOTE_WRITE)
+    vnode_watch(
+        kq,
+        dir,
+        true,
+        libc::NOTE_WRITE | libc::NOTE_DELETE | libc::NOTE_RENAME,
+    )
 }
 
 /// Watch the entry at `path` (a symlink itself, not its target) for being written,

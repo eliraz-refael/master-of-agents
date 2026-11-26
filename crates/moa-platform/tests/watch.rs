@@ -83,6 +83,22 @@ async fn a_symlink_retarget_fires() {
     fires(&mut w).await;
 }
 
+/// An install that swaps the program's whole folder: the old one renamed away, a new one
+/// renamed into its place.
+#[tokio::test]
+async fn a_swapped_directory_fires() {
+    let t = tmp();
+    for d in ["bin", "bin.new"] {
+        std::fs::create_dir(t.path().join(d)).unwrap();
+        std::fs::write(t.path().join(d).join("moa"), d).unwrap();
+    }
+    let bin = t.path().join("bin");
+    let mut w = PathWatch::new(&exe_chain(&bin.join("moa"))).unwrap();
+    std::fs::rename(&bin, t.path().join("bin.old")).unwrap();
+    std::fs::rename(t.path().join("bin.new"), &bin).unwrap();
+    fires(&mut w).await;
+}
+
 #[tokio::test]
 async fn a_directory_link_retarget_fires() {
     let t = tmp();

@@ -243,10 +243,17 @@ impl Core {
                     Stepped::Done
                 }
                 Item::Upgrade { why, reply } => {
+                    let mark = held.len();
                     let stepped = self.step(Input::Upgrade(why), &mut batch, &mut held);
                     if let Some(reply) = reply {
                         let waiting = moa_core::upgrade::status(&self.state).is_some();
-                        held.push(Held::Upgrading(reply, waiting));
+                        // Before the exec this step may have asked for, which ends the
+                        // daemon: the asker hears first.
+                        let at = held[mark..]
+                            .iter()
+                            .position(|h| matches!(h, Held::Exec))
+                            .map_or(held.len(), |i| mark + i);
+                        held.insert(at, Held::Upgrading(reply, waiting));
                     }
                     stepped
                 }

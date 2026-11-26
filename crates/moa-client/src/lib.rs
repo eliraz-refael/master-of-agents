@@ -479,7 +479,14 @@ impl Client {
     pub async fn ask_upgrade(&mut self, if_stale: bool) -> Result<Option<UpgradeOk>, ClientError> {
         let params = serde_json::to_value(UpgradeParams { if_stale }).map_err(io::Error::other)?;
         match self.wire.request("upgrade", params).await {
-            Ok(reply) => Ok(serde_json::from_value(reply).ok()),
+            Ok(reply) => match serde_json::from_value::<UpgradeOk>(reply.clone()) {
+                Ok(ok) => Ok(Some(ok)),
+                // A daemon from before live updates answers a bare `upgrade` with `{}`.
+                Err(_) if reply.is_object() && reply.get("upgrading").is_none() => Ok(None),
+                Err(e) => Err(invalid(format!(
+                    "moa sent a reply this client can't read: {e}"
+                ))),
+            },
             Err(ClientError::Rpc(e)) if e.code == code::INVALID_PARAMS => Ok(None),
             Err(e) => Err(e),
         }
@@ -1133,6 +1140,22 @@ mod tests {
         let (id, _, _) = request(&mut conn).await.unwrap();
         conn.send(encode_result(&id, &reply)).await.unwrap();
         while request(&mut conn).await.is_some() {}
+    }
+
+    /// Only a reply with no `upgrading` (or a refusal of the params) is a daemon from before
+    /// live updates: any other reply this client can't read is an error, not a stop.
+    #[tokio::test]
+    async fn an_unreadable_upgrade_reply_is_an_error() {
+        for reply in [json!({"upgrading": "yes"}), json!("upgrading")] {
+            let (_dir, opts, listener) = listening();
+            tokio::spawn(stuck_daemon(listener, reply.clone()));
+            let mut client = Client::connect(opts).await.unwrap();
+            let err = match client.ask_upgrade(true).await {
+                Err(e) => e,
+                Ok(got) => panic!("{reply} read as {got:?}"),
+            };
+            assert!(err.to_string().contains("can't read"), "{err}");
+        }
     }
 
     /// Only an upgrade that waits for moa's turn says moa is finishing a turn; one that
