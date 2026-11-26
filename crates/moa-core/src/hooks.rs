@@ -662,7 +662,12 @@ fn transition(before: &Session, env: &HookEnvelope) -> Session {
 fn activity_text(session: &Session, kind: &HookKind) -> Option<String> {
     let what = match kind {
         HookKind::TurnStarted { prompt } => {
-            let line: String = prompt.replace('\n', " ").chars().take(90).collect();
+            // The prompt comes whole now: read only the 90 characters kept.
+            let line: String = prompt
+                .chars()
+                .take(90)
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
             format!("› {line}")
         }
         HookKind::SessionEnded { .. } if session.asleep_at.is_some() => return None,

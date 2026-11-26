@@ -241,13 +241,13 @@ pub enum Verb {
     Ask {
         to: String,
         text: String,
-        #[arg(long, default_value_t = 540)]
+        #[arg(long, default_value_t = moa_core::asks::ASK_WAIT_DEFAULT_MS / 1_000)]
         timeout: i64,
     },
     /// Wait again for the reply to an ask.
     Reply {
         id: i64,
-        #[arg(long, default_value_t = 540)]
+        #[arg(long, default_value_t = moa_core::asks::ASK_WAIT_DEFAULT_MS / 1_000)]
         timeout: i64,
     },
     /// Recent asks between agents.
