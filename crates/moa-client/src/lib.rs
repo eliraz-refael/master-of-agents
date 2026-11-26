@@ -129,6 +129,16 @@ fn stopped_line(wrote: bool) -> &'static str {
     }
 }
 
+/// Whether the daemon stopped under a request: it refused it as stopping (its core had
+/// already stopped), or the connection ended before its reply.
+fn stopped_under(e: &ClientError) -> bool {
+    match e {
+        ClientError::Stopped { .. } => true,
+        ClientError::Rpc(e) => e.code == code::STOPPING,
+        _ => false,
+    }
+}
+
 /// The first line a daemon started with `--notify-ready` prints.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ReadyLine {
@@ -379,6 +389,8 @@ pub struct Client {
     hello: HelloOk,
     /// How it connected: what reaching the daemon again after an upgrade takes.
     opts: ClientOptions,
+    /// It follows topics: a new connection wouldn't, so it never takes one.
+    subscribed: bool,
 }
 
 impl Client {
@@ -449,6 +461,7 @@ impl Client {
             wire,
             hello,
             opts: opts.clone(),
+            subscribed: false,
         })
     }
 
@@ -541,10 +554,21 @@ impl Client {
         })
     }
 
+    /// Sends `op` and waits for its reply. When the daemon stops under it (refusing it as
+    /// stopping, or ending the connection) and comes back as the same process, it upgraded
+    /// in place: its wind-down answered everything its core had run, so `op` never ran, and
+    /// it is sent once more, to the new image ([`Client::rejoin`]).
     pub async fn call(&mut self, op: Op) -> Result<Done, ClientError> {
+        match self.call_once(&op).await {
+            Err(e) if stopped_under(&e) && self.rejoin().await => self.call_once(&op).await,
+            done => done,
+        }
+    }
+
+    async fn call_once(&mut self, op: &Op) -> Result<Done, ClientError> {
         // A send that failed never reached the daemon; only a missing reply leaves a write
         // in doubt.
-        let id = self.wire.send_op(&op).await?;
+        let id = self.wire.send_op(op).await?;
         let reply = match self.wire.reply(id).await {
             Err(ClientError::Stopped { .. }) => {
                 return Err(ClientError::Stopped { wrote: op.writes() });
@@ -554,8 +578,39 @@ impl Client {
         decode(reply)
     }
 
+    /// `status`, sent again to the new image of a daemon that upgraded under it, as
+    /// [`Client::call`] does.
     pub async fn status(&mut self) -> Result<StatusOk, ClientError> {
-        decode(self.wire.request("status", json!({})).await?)
+        match self.wire.request("status", json!({})).await {
+            Err(e) if stopped_under(&e) && self.rejoin().await => {
+                decode(self.wire.request("status", json!({})).await?)
+            }
+            reply => decode(reply?),
+        }
+    }
+
+    /// After the daemon stopped under a request: connects again (the socket stays open
+    /// across an upgrade, so this waits in its backlog for the new image) and says hello.
+    /// `true`, with this client now on the new connection, when the same process answers:
+    /// it upgraded in place. Otherwise (it stopped, or another daemon answers) nothing
+    /// changes. Never for a client that follows topics.
+    async fn rejoin(&mut self) -> bool {
+        if self.subscribed {
+            return false;
+        }
+        let Ok(sock) = self.opts.paths.socket(self.opts.brain.as_str()) else {
+            return false;
+        };
+        let Ok(stream) = connect_soon(&sock, BIND_WAIT).await else {
+            return false;
+        };
+        match timeout(self.opts.upgrade_wait, Client::greet(stream, &self.opts)).await {
+            Ok(Ok(new)) if new.hello.pid == self.hello.pid => {
+                *self = new;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Asks the daemon to stop and returns once its process has exited. An error when the
@@ -585,6 +640,7 @@ impl Client {
             since: None,
         };
         let params = serde_json::to_value(&params).map_err(io::Error::other)?;
+        self.subscribed = true;
         decode(self.wire.request("subscribe", params).await?)
     }
 
@@ -1228,6 +1284,45 @@ mod tests {
             ),
             Err(e) => panic!("{e}"),
             Ok(_) => panic!("nobody answered"),
+        }
+    }
+
+    /// A daemon that refuses its first `status` as stopping, then answers the next
+    /// connection as process `next`.
+    async fn stopping_daemon(listener: UnixListener, pid: u32, next: u32) {
+        let mut conn = greeted(&listener, pid, "old").await;
+        let (id, _, _) = request(&mut conn).await.unwrap();
+        let e = RpcError {
+            code: code::STOPPING,
+            message: "moa is stopping; try again".into(),
+        };
+        conn.send(moa_proto::encode_error(Some(&id), &e))
+            .await
+            .unwrap();
+        drop(conn);
+        let mut conn = greeted(&listener, next, "new").await;
+        while let Some((id, method, _)) = request(&mut conn).await {
+            assert_eq!(method, "status");
+            let ok = json!({"brain": "default", "build": "new", "pid": next, "launches": 0,
+                "sessions": {}, "caller": "you"});
+            conn.send(encode_result(&id, &ok)).await.unwrap();
+        }
+    }
+
+    /// A call the daemon refused as stopping goes again once the same process answers (it
+    /// upgraded in place); another process's answer leaves the refusal as it was.
+    #[tokio::test]
+    async fn a_stopping_refusal_is_sent_again_only_to_the_same_process() {
+        let me = std::process::id();
+        for (next, again) in [(me, true), (dead_pid(), false)] {
+            let (_dir, opts, listener) = listening();
+            tokio::spawn(stopping_daemon(listener, me, next));
+            let mut client = Client::connect(opts).await.unwrap();
+            match (client.status().await, again) {
+                (Ok(s), true) => assert_eq!(s.build, "new"),
+                (Err(ClientError::Rpc(e)), false) => assert_eq!(e.code, code::STOPPING),
+                (got, _) => panic!("{:?}", got.map(|s| s.pid)),
+            }
         }
     }
 

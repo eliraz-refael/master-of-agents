@@ -69,6 +69,9 @@ pub enum StubStep {
     HangHard,
     /// Exit at once.
     Die,
+    /// From here on the stub ignores `SIGTERM`, and notes each one by making
+    /// `<cwd>/.stub-acp.termed`: its host's stop then takes until its `SIGKILL`.
+    IgnoreTerm,
 }
 
 /// Write `steps` as `<dir>/.stub-acp.jsonl`, the script stub-acp reads from its cwd.

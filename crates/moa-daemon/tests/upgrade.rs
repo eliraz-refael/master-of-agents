@@ -14,9 +14,11 @@ use std::sync::atomic::Ordering;
 use common::Client;
 use common::hooks::{ago, hook_notice};
 use common::rig::{Rig, Up, WAIT, answer, end, gate, prompt, say, session_stop};
+use moa_core::config::BrainName;
+use moa_core::state::CallerInfo;
 use moa_core::upgrade::{BUILD_KEY, NOTICE_NOTHING};
 use moa_platform::pid_alive;
-use moa_testkit::wait_for;
+use moa_testkit::{StubStep, wait_for};
 use serde_json::{Value, json};
 
 /// What `status` says while an upgrade waits for moa's turn to end.
@@ -369,5 +371,50 @@ async fn an_upgrade_in_place_says_nothing_to_do() {
         rig.feed()
     );
     assert_eq!(activity_notices(&rig), [NOTICE_NOTHING]);
+    up.stop().await;
+}
+
+/// L8, Review Focus 4: a call that reaches the old image during its wind-down, after its
+/// core has stopped, is answered by the new image rather than refused. moa's agent ignores
+/// `SIGTERM`, so stopping it holds the wind-down open until its `SIGKILL` (2 s later): the
+/// `status` is sent once the agent has had its `SIGTERM`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_during_the_wind_down_is_answered_by_the_next_image() {
+    let rig = Rig::new(&[StubStep::IgnoreTerm, say("done", "m1"), end()]).with_exe();
+    let up = rig.start().await;
+    let mut c = up.client();
+    assert_eq!(answer(&prompt(&mut c, "hello")), "done");
+
+    let mut client = moa_client::Client::connect(moa_client::ClientOptions {
+        paths: rig.paths.clone(),
+        brain: BrainName::default_brain(),
+        client: "upgrade-test",
+        caller: CallerInfo::default(),
+        autostart: None,
+        on_mismatch: moa_client::OnMismatch::Accept,
+        build: moa_platform::build_id().into(),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
+    })
+    .await
+    .expect("a client");
+    assert_eq!(
+        upgrade(&up, json!({})),
+        json!({"upgrading": true, "waiting_for_moa": false})
+    );
+    // The core has ended its loop and is stopping moa's agent: the window.
+    let termed = rig.agent.join(".stub-acp.termed");
+    wait_for(WAIT, || termed.exists().then_some(())).expect("moa's agent is being stopped");
+    let status = tokio::spawn(async move { client.status().await });
+
+    let inherited = up.handoff().await;
+    let up = rig.restart(inherited).await;
+    let status = tokio::time::timeout(WAIT, status)
+        .await
+        .expect("the status is answered within 10 s")
+        .expect("no panic");
+    match status {
+        Ok(s) => assert_eq!(s.pid, std::process::id()),
+        Err(e) => panic!("refused during the wind-down: {e}"),
+    }
     up.stop().await;
 }

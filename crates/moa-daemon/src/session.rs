@@ -148,6 +148,10 @@ fn reply_line(id: &Id, result: Result<moa_core::op::Done, OpError>, bare: bool) 
     match result {
         Ok(done) if bare => encode_result(id, &done.data),
         Ok(done) => encode_result(id, &done),
+        // The core's word that it had stopped before running it.
+        Err(OpError(message)) if message == STOPPING => {
+            encode_error(Some(id), &rpc(code::STOPPING, &message))
+        }
         Err(OpError(message)) => encode_error(Some(id), &rpc(code::FAILED, &message)),
     }
 }
@@ -388,7 +392,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
     async fn upgrade(&mut self, id: &Id, if_stale: bool) -> Flow {
         let ok = if !if_stale || self.program.stale() {
             let Some(waiting) = self.core.upgrade(Why::Asked).await else {
-                return self.refuse(id, code::FAILED, STOPPING).await;
+                return self.refuse(id, code::STOPPING, STOPPING).await;
             };
             tracing::info!(conn = self.conn.0, waiting, "asked to upgrade");
             UpgradeOk {
@@ -413,7 +417,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             .map(|g| g.caller.clone())
             .unwrap_or_default();
         let Some(data) = self.core.status(caller).await else {
-            return self.refuse(id, code::FAILED, STOPPING).await;
+            return self.refuse(id, code::STOPPING, STOPPING).await;
         };
         let ok = StatusOk {
             brain: data.brain,
@@ -474,7 +478,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
         let Some((req, result)) = reply else {
             // The core cleared its connections: it has stopped.
             if let Some((_, id)) = self.pending.take() {
-                self.refuse(&id, code::FAILED, STOPPING).await;
+                self.refuse(&id, code::STOPPING, STOPPING).await;
             }
             return Flow::Close;
         };
@@ -506,7 +510,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
         // Still owed a line (the request reached a core that had already ended, or the core
         // hung): every request gets exactly one.
         if let Some((_, id)) = self.pending.take() {
-            let line = encode_error(Some(&id), &rpc(code::FAILED, STOPPING));
+            let line = encode_error(Some(&id), &rpc(code::STOPPING, STOPPING));
             let _ = tokio::time::timeout(FLUSH_TIME, self.framed.send(line)).await;
         }
     }

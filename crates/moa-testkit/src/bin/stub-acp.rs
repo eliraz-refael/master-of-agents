@@ -43,6 +43,8 @@ const CHILD: &str = "--child";
 const CHILD_STUBBORN: &str = "--child-stubborn";
 /// The file in the stub's cwd that holds its child's pid.
 const CHILD_PID: &str = ".stub-acp.child";
+/// The file in the stub's cwd that says it got a `SIGTERM` it ignored (`IgnoreTerm`).
+const TERMED: &str = ".stub-acp.termed";
 /// The argument that names a recording to replay.
 const REPLAY: &str = "--replay";
 /// The argument that makes the stub a stand-in for `moactl` ([`call`]).
@@ -241,6 +243,17 @@ impl Stub {
                 StubStep::Stderr { line } => eprintln!("{line}"),
                 StubStep::SpawnStubborn => {
                     self.spawn_child(CHILD_STUBBORN)?;
+                }
+                StubStep::IgnoreTerm => {
+                    let mut term =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .map_err(fail)?;
+                    let termed = self.dir.join(TERMED);
+                    tokio::spawn(async move {
+                        while term.recv().await.is_some() {
+                            let _ = fs::write(&termed, "");
+                        }
+                    });
                 }
                 StubStep::Spawn => {
                     let child = self.spawn_child(CHILD)?;
