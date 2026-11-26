@@ -5,6 +5,8 @@
 //!
 //! Or it replays a recording (`moa_testkit::recording`): the one `--replay <file>` names, else
 //! the cwd's `REPLAY_FILE`. Either wins over a script, which is then ignored.
+//!
+//! Or, as `stub-acp --call ...`, it stands in for `moactl` ([`call`]).
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -40,6 +42,8 @@ const CHILD_STUBBORN: &str = "--child-stubborn";
 const CHILD_PID: &str = ".stub-acp.child";
 /// The argument that names a recording to replay.
 const REPLAY: &str = "--replay";
+/// The argument that makes the stub a stand-in for `moactl` ([`call`]).
+const CALL: &str = "--call";
 
 /// How a turn ended: with a stop reason, or failed (`Fail`) with the error its prompt is
 /// answered with.
@@ -325,6 +329,54 @@ async fn sleep_for_good() -> Result<(), Error> {
     Ok(())
 }
 
+/// `stub-acp --call <socket> <build> <method> <params>`: a stand-in for `moactl`, for a `Run`
+/// step against a daemon that runs inside a test, where the real `moactl` is another build
+/// (the daemon would refuse it, and it would ask the daemon to restart). It says hello on
+/// `socket` as `build`, as the caller `MOA_SESSION` names (moa's agent is `moa`), sends
+/// `method` with `params` (JSON) and waits for its reply, however long: its text on stdout
+/// and exit 0, or its error on stderr and exit 1, as `moactl` does.
+fn call(args: &[String]) -> ! {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+
+    let [socket, build, method, params] = args else {
+        out_of_step("--call needs a socket, a build, a method and its params");
+    };
+    let params: Value =
+        serde_json::from_str(params).unwrap_or_else(|e| out_of_step(format!("params: {e}")));
+    let stream = UnixStream::connect(socket).unwrap_or_else(|e| out_of_step(e));
+    let mut lines = BufReader::new(stream.try_clone().unwrap_or_else(|e| out_of_step(e)));
+    let mut out = stream;
+    let mut request = |id: i64, method: &str, params: Value| -> Value {
+        let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(out, "{line}").unwrap_or_else(|e| out_of_step(e));
+        loop {
+            let mut got = String::new();
+            match lines.read_line(&mut got) {
+                Ok(0) => out_of_step("the daemon closed the connection"),
+                Ok(_) => {}
+                Err(e) => out_of_step(e),
+            }
+            let got: Value = serde_json::from_str(&got).unwrap_or_else(|e| out_of_step(e));
+            if got["id"] == json!(id) {
+                return got;
+            }
+        }
+    };
+    let caller = std::env::var("MOA_SESSION").ok();
+    let hello = json!({"client": "stub-acp", "build": build, "caller": {"moa_session": caller}});
+    let greeted = request(1, "hello", hello);
+    if greeted["error"].is_object() {
+        out_of_step(&greeted["error"]["message"]);
+    }
+    let reply = request(2, method, params);
+    if let Some(text) = reply["result"]["text"].as_str() {
+        println!("{text}");
+        std::process::exit(0)
+    }
+    out_of_step(reply["error"]["message"].as_str().unwrap_or("no reply"))
+}
+
 /// Ends a replay that can't go on, saying why.
 fn out_of_step(why: impl std::fmt::Display) -> ! {
     eprintln!("{why}");
@@ -429,6 +481,7 @@ async fn main() -> Result<(), Error> {
             publish_pid(&cwd, std::process::id()).expect("publish the pid");
             return sleep_for_good().await;
         }
+        Some(CALL) => call(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some(REPLAY) => {
             let file = std::env::args_os()
                 .nth(2)
