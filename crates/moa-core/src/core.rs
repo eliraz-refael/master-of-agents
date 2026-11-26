@@ -36,6 +36,7 @@ use crate::tmux::mailbox::{HookMsg, Mailbox};
 use crate::tmux::notify::Notification;
 use crate::tmux::panes::parse_panes;
 use crate::tmux::status;
+use crate::upgrade;
 use crate::wake;
 use crate::{Now, UtcMs};
 
@@ -63,6 +64,9 @@ pub fn handle(state: &mut State, input: Input, now: Now) -> Vec<Effect> {
     // moa's turn that hangs is cancelled, then cut short (K6); before the wake's check, which
     // a restart shuts.
     watchdog::run(state, &now, watchdog_fired, &mut fx);
+    // A wanted upgrade goes once moa is between turns (L4); before the wake's check, which
+    // it shuts, so no automatic prompt starts a turn it would have to wait for.
+    upgrade::run(state, &now, &mut fx);
     // And moa's agent is woken with the session reports once they settle (K4).
     channel::run(state, &now, wake_fired, &mut fx);
     // The terminals are the topology's: a listing's, a terminal's own tag, a session's tag
@@ -745,6 +749,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
             }],
         },
         Input::Acp(heard) => central::heard(state, now, heard),
+        Input::Upgrade(why) => upgrade::want(state, why, now),
         // Answered once the ask ends or its wait runs out (A4), or at once when refused.
         Input::Client {
             conn,

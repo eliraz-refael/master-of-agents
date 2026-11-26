@@ -77,6 +77,41 @@ fn control_methods_decode() {
     );
 }
 
+/// An old client's bare `upgrade` (no params, `null` or `{}`) means `if_stale: false`; an old
+/// daemon's `{}` reply doesn't read as an `UpgradeOk`.
+#[test]
+fn upgrade_decodes_old_and_new() {
+    let call = |params: Option<Value>| {
+        let mut line = json!({"jsonrpc":"2.0","id":1,"method":"upgrade"});
+        if let Some(p) = params {
+            line["params"] = p;
+        }
+        match decode(line).unwrap() {
+            Incoming::Request { call, .. } => call,
+            other => panic!("{other:?}"),
+        }
+    };
+    let bare = Call::Upgrade { if_stale: false };
+    assert_eq!(call(None), bare);
+    assert_eq!(call(Some(Value::Null)), bare);
+    assert_eq!(call(Some(json!({}))), bare);
+    assert_eq!(
+        call(Some(json!({"if_stale": true}))),
+        Call::Upgrade { if_stale: true }
+    );
+    let bad = decode(json!({"jsonrpc":"2.0","id":1,"method":"upgrade","params":{"if_stale":"x"}}));
+    assert_eq!(bad.unwrap_err().1.code, code::INVALID_PARAMS);
+
+    assert!(serde_json::from_value::<UpgradeOk>(json!({})).is_err());
+    let ok: UpgradeOk = serde_json::from_value(json!({"upgrading": true})).unwrap();
+    assert!(ok.upgrading && !ok.waiting_for_moa && ok.exe.is_none());
+    let hello: HelloOk = serde_json::from_value(
+        json!({"brain":"default","build":"b","rev":1,"matched":true,"pid":7}),
+    )
+    .unwrap();
+    assert_eq!(hello.exe, None, "a daemon from before live updates");
+}
+
 #[test]
 fn ui_panel_decodes() {
     let got = decode(json!({"jsonrpc":"2.0","id":1,"method":"ui.panel",
@@ -264,7 +299,8 @@ fn mismatch_allows_only_the_four() {
         build: "b".into(),
         caller: CallerInfo::default(),
     });
-    for c in [&hello, &Call::Status, &Call::Upgrade, &Call::Shutdown] {
+    let upgrade = Call::Upgrade { if_stale: true };
+    for c in [&hello, &Call::Status, &upgrade, &Call::Shutdown] {
         assert!(allowed_on_mismatch(c), "{c:?}");
     }
     let sub = Call::Subscribe(Subscribe {

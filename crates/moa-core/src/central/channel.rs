@@ -76,8 +76,9 @@ pub fn may_send(state: &State) -> bool {
 
 /// moa's agent is free for an automatic prompt: it is off or ready (not failed to start, not
 /// starting), with no prompt under way, no live turn, no request waiting for your answer, no
-/// thread replaying and no restart reopening one. A turn whose agent exited is over for this:
-/// the prompt's start takes it, as any prompt's does.
+/// thread replaying, no restart reopening one and no upgrade waiting for the turn to end
+/// ([`crate::upgrade`]). A turn whose agent exited is over for this: the prompt's start
+/// takes it, as any prompt's does.
 fn free(state: &State) -> bool {
     let moa = &state.central;
     // A request waits for you only within a live turn, which shuts the gate too; `asking`
@@ -92,6 +93,7 @@ fn free(state: &State) -> bool {
         && moa.asking.is_empty()
         && moa.replaying.is_none()
         && moa.restarting.is_none()
+        && !crate::upgrade::wanted(state)
 }
 
 /// The channel's check at the end of every input: an automatic prompt that is due goes when

@@ -437,6 +437,12 @@ fn answer_waiting(state: &mut State, which: impl Fn(&Parked) -> bool) -> Vec<Eff
         .collect()
 }
 
+/// Every waiting request, answered as [`answer_waiting`] does (an open ask: "no reply yet"),
+/// and forgotten: before the daemon upgrades ([`crate::upgrade`]), so no asker is cut off.
+pub(crate) fn answer_all_waiting(state: &mut State) -> Vec<Effect> {
+    answer_waiting(state, |_| true)
+}
+
 /// What the asker hears of an ask that ended (A13), or `None` while it is open: the full
 /// answer, or why it failed or was dropped.
 fn answer_of(state: &State, a: &Ask) -> Option<Result<Done, OpError>> {

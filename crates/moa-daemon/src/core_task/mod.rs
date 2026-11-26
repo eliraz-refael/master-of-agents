@@ -24,6 +24,7 @@ use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
 use moa_core::tmux::cmd::Cmd;
+use moa_core::upgrade::Why;
 use moa_platform::{lock, spool};
 use moa_store::actor::{Fault, StoreHandle};
 use moa_store::{Store, StoreError};
@@ -132,6 +133,11 @@ enum Item {
         caller: CallerInfo,
         reply: oneshot::Sender<StatusData>,
     },
+    /// `Input::Upgrade`, answered with whether the upgrade waits for moa's turn.
+    Upgrade {
+        why: Why,
+        reply: Option<oneshot::Sender<bool>>,
+    },
     Barrier(oneshot::Sender<()>),
     Committed(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
@@ -167,6 +173,10 @@ enum Held {
     },
     /// The answer so far, and the caller, so a reload can compute it again.
     Status(oneshot::Sender<StatusData>, StatusData, CallerInfo),
+    /// Whether an upgrade waits for moa's turn.
+    Upgrading(oneshot::Sender<bool>, bool),
+    /// moa is between turns: the daemon upgrades ([`CoreHandle::exec_wanted`]).
+    Exec,
     /// A view of saved state for the terminal server, or (tokened) an `open`'s new window.
     Tmux {
         conn: u64,
@@ -196,6 +206,8 @@ pub struct CoreHandle {
     finished: watch::Receiver<Option<Result<(), String>>>,
     /// Closes when the core task is gone, cleanup included.
     ended: watch::Receiver<()>,
+    /// Goes up once the core says the daemon should upgrade.
+    exec: watch::Receiver<bool>,
     panic_next: Arc<AtomicU32>,
     /// Where a hook the core can't take is kept for the next start.
     spool: Option<PathBuf>,
@@ -272,6 +284,7 @@ impl CoreHandle {
         let stats = Arc::new(Stats::default());
         let (finished_tx, finished) = watch::channel(None);
         let (ended_tx, ended) = watch::channel(());
+        let (exec_tx, exec) = watch::channel(false);
         let panic_next = Arc::new(AtomicU32::new(0));
         let (inbox, inbox_rx) = mpsc::unbounded_channel();
         let state = State::new(opts.brain, opts.config).with_deps(opts.deps);
@@ -359,6 +372,7 @@ impl CoreHandle {
             spool: spool.clone(),
             panic_next: panic_next.clone(),
             finished_tx,
+            exec_tx,
             _ended: ended_tx,
         };
         let _ = inbox.send(Item::Input(Input::Startup(Box::new(snapshot))));
@@ -376,6 +390,7 @@ impl CoreHandle {
             stats,
             finished,
             ended,
+            exec,
             panic_next,
             spool: spool.clone(),
             drains: spool.is_some().then_some(drains),
@@ -646,6 +661,30 @@ impl CoreHandle {
             if let Some((conn, req)) = reply {
                 reply_to(&self.conns, conn, req, Err(OpError(STOPPING.into())));
             }
+        }
+    }
+
+    /// The daemon should upgrade (`Input::Upgrade`). Answered in drain order, after the
+    /// drain's commit, with whether the upgrade waits for moa's turn; `None` when the core
+    /// has stopped.
+    pub async fn upgrade(&self, why: Why) -> Option<bool> {
+        let (reply, answer) = oneshot::channel();
+        let reply = Some(reply);
+        self.inbox.send(Item::Upgrade { why, reply }).ok()?;
+        answer.await.ok()
+    }
+
+    /// [`CoreHandle::upgrade`], with no answer waited for.
+    pub fn want_upgrade(&self, why: Why) {
+        let _ = self.inbox.send(Item::Upgrade { why, reply: None });
+    }
+
+    /// Resolves once the core has said the daemon should upgrade (`Effect::Exec`): moa is
+    /// between turns, and everyone waiting on an ask has heard so. Never, if it doesn't.
+    pub async fn exec_wanted(&self) {
+        let mut rx = self.exec.clone();
+        if rx.wait_for(|wanted| *wanted).await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 

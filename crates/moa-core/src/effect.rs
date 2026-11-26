@@ -101,6 +101,8 @@ pub enum Input {
     StartDrained,
     /// What moa's agent, or its host, said.
     Acp(AcpIn),
+    /// The daemon should upgrade into the build its program now has ([`crate::upgrade`]).
+    Upgrade(crate::upgrade::Why),
 }
 
 /// What the tmux link reports. `conn` numbers the link's connections; anything from an
@@ -231,6 +233,10 @@ pub enum Effect {
     /// answer to a permission request once its row says so ([`AcpCmd::held`]): each waits
     /// for the commit and is dropped with a failed one. Every other command runs at once.
     Acp(AcpCmd),
+    /// moa is between turns and an upgrade is wanted: the daemon winds down as for a
+    /// shutdown and re-execs itself, keeping its socket and lock ([`crate::upgrade`]). Once,
+    /// after the commit, and after the replies before it.
+    Exec,
 }
 
 impl Effect {

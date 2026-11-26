@@ -66,6 +66,10 @@ pub fn options(
         ready,
         events_capacity: 256,
         uid_override: None,
+        exe: moa_daemon::daemon_exe().expect("the test's program"),
+        build: moa_platform::build_id().to_string(),
+        exec: moa_daemon::Exec::Test(tokio::sync::mpsc::channel(1).0),
+        inherited: None,
     }
 }
 

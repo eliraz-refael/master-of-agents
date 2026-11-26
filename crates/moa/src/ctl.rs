@@ -1,11 +1,11 @@
-//! `moactl <verb>` (also `moa <verb>`), `moa status` and `moa shutdown`: the command line's
-//! side of a brain's daemon. Every failure is one plain line on stderr and exit 1.
+//! `moactl <verb>` (also `moa <verb>`), `moa status`, `moa shutdown` and `moa upgrade`: the
+//! command line's side of a brain's daemon. Every failure is one plain line on stderr and exit 1.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Args;
-use moa_client::{Client, ClientError, ClientOptions, OnMismatch, own_exe};
+use moa_client::{Client, ClientError, ClientOptions, OnMismatch, UPGRADE_WAIT, own_exe};
 use moa_core::config::{BrainName, Config, caller_store};
 use moa_core::live::DisplayState;
 use moa_core::op::{Done, Op};
@@ -280,6 +280,38 @@ pub fn shutdown(args: &BrainArgs) -> ExitCode {
         println!("moa {brain}: stopped");
         Ok(())
     }))
+}
+
+/// `moa upgrade`: the daemon upgrades in place into the build its program now has, once moa
+/// is between turns, keeping its pid.
+pub fn upgrade(args: &BrainArgs) -> ExitCode {
+    finish(running(args, false, false, |brain, client| async move {
+        let mut client = client;
+        let old = client.hello().build.clone();
+        let asked = client.ask_upgrade(false).await.map_err(|e| e.to_string())?;
+        match asked {
+            Some(ok) if ok.upgrading => {
+                let new = client
+                    .await_upgrade(UPGRADE_WAIT)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                println!("moa upgraded ({old} → {})", new.hello().build);
+                Ok(())
+            }
+            Some(_) => Err(format!("moa {brain} didn't upgrade")),
+            // A daemon from before live updates stops instead.
+            None => {
+                println!("moa {brain}: stopped; the next moa command starts the new build");
+                Ok(())
+            }
+        }
+    }))
+}
+
+/// Prints this program's build, as a daemon asks a new program before it upgrades into it.
+pub fn print_build_id() -> ExitCode {
+    println!("{}", build_id());
+    ExitCode::SUCCESS
 }
 
 /// Connects to the brain's daemon without starting one and runs `then` on it. Both callers

@@ -1698,6 +1698,7 @@ mod tests {
                             rev: 0,
                             matched: true,
                             pid: std::process::id(),
+                            exe: None,
                         },
                     ),
                     Call::Subscribe(_) => {

@@ -1,4 +1,4 @@
-use moa_proto::{Call, CoreEvent, HelloOk, Patch, SnapshotMsg, StatusOk};
+use moa_proto::{Call, CoreEvent, HelloOk, Patch, SnapshotMsg, StatusOk, UpgradeOk};
 use schemars::schema_for;
 use serde_json::json;
 
@@ -8,6 +8,7 @@ fn protocol_schema() {
         "Call": schema_for!(Call),
         "HelloOk": schema_for!(HelloOk),
         "StatusOk": schema_for!(StatusOk),
+        "UpgradeOk": schema_for!(UpgradeOk),
         "SnapshotMsg": schema_for!(SnapshotMsg),
         "Patch": schema_for!(Patch),
         "CoreEvent": schema_for!(CoreEvent),

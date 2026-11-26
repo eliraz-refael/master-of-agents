@@ -99,6 +99,8 @@ pub const RESERVED_BRAIN_NAMES: &[&str] = &[
     "daemon",
     "status",
     "shutdown",
+    "upgrade",
+    "build-id",
     "sql",
     "service",
     "panel",

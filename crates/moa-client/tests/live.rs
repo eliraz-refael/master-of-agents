@@ -84,6 +84,7 @@ where
             rev: 0,
             matched: true,
             pid: std::process::id(),
+            exe: None,
         };
         server.answer(&id, &ok).await;
         script(server).await;

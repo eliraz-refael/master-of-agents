@@ -33,6 +33,7 @@ pub mod terminals;
 pub mod text;
 pub mod time;
 pub mod tmux;
+pub mod upgrade;
 mod wake;
 
 pub use crate::core::handle;

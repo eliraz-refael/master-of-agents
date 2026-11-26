@@ -65,6 +65,8 @@ pub(super) struct Core {
     pub(super) spool: Option<PathBuf>,
     pub(super) panic_next: Arc<AtomicU32>,
     pub(super) finished_tx: watch::Sender<Option<Result<(), String>>>,
+    /// Goes up when the daemon should upgrade.
+    pub(super) exec_tx: watch::Sender<bool>,
     /// Dropped with the core, which is what [`CoreHandle::ended`] waits for.
     pub(super) _ended: watch::Sender<()>,
 }
@@ -239,6 +241,14 @@ impl Core {
                     let data = self.state.status(&caller, self.clock.wall());
                     held.push(Held::Status(reply, data, caller));
                     Stepped::Done
+                }
+                Item::Upgrade { why, reply } => {
+                    let stepped = self.step(Input::Upgrade(why), &mut batch, &mut held);
+                    if let Some(reply) = reply {
+                        let waiting = moa_core::upgrade::status(&self.state).is_some();
+                        held.push(Held::Upgrading(reply, waiting));
+                    }
+                    stepped
                 }
                 Item::Barrier(reply) => {
                     held.push(Held::Barrier(reply));
@@ -419,6 +429,8 @@ impl Core {
                 Effect::Tmux { conn, cmds, token } => held.push(Held::Tmux { conn, cmds, token }),
                 // A prompt goes once its row is saved.
                 Effect::Acp(cmd) => held.push(Held::Acp(cmd)),
+                // After the replies before it, which the wind-down still delivers.
+                Effect::Exec => held.push(Held::Exec),
                 // Handled above.
                 Effect::SetTimer { .. }
                 | Effect::CancelTimer(_)
@@ -572,6 +584,12 @@ impl Core {
                 Held::Status(reply, data, _) => {
                     let _ = reply.send(data);
                 }
+                Held::Upgrading(reply, waiting) => {
+                    let _ = reply.send(waiting);
+                }
+                Held::Exec => {
+                    self.exec_tx.send_replace(true);
+                }
                 Held::Tmux { conn, cmds, token } => {
                     if token.is_none() {
                         self.stats.views_released.fetch_add(1, Ordering::SeqCst);
@@ -685,5 +703,6 @@ fn kind(input: &Input) -> &'static str {
         Input::Hook { .. } => "Hook",
         Input::StartDrained => "StartDrained",
         Input::Acp(_) => "Acp",
+        Input::Upgrade(_) => "Upgrade",
     }
 }

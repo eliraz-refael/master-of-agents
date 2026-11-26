@@ -23,13 +23,13 @@ use moa_core::state::CallerInfo;
 use moa_platform::{Paths, PathsError, Spawner, ensure_private_dir, pid_alive};
 use moa_proto::{
     Hello, HelloOk, Id, MAX_LINE, RpcError, ServerLine, SnapshotMsg, StatusOk, Subscribe, Topic,
-    code, decode_server_line,
+    UpgradeOk, UpgradeParams, code, decode_server_line,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::codec::{Framed, LinesCodec, LinesCodecError};
 
 mod live;
@@ -37,19 +37,23 @@ pub use live::*;
 
 /// How long a started daemon has to say `ready`.
 const READY_WAIT: Duration = Duration::from_secs(10);
-/// How long a daemon told to `upgrade` has to exit.
+/// How long a daemon told to stop has to exit.
 const EXIT_WAIT: Duration = Duration::from_secs(10);
 const EXIT_POLL: Duration = Duration::from_millis(50);
 /// How long to retry connecting to a daemon another starter holds the brain for: it may not
 /// have bound its socket yet.
 const BIND_WAIT: Duration = Duration::from_secs(2);
-/// How long to read to the end of a connection after `shutdown` or `upgrade`.
+/// How long to read to the end of a connection after `shutdown`.
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
+/// How long a client waits for a daemon to upgrade in place: moa may be finishing a turn.
+pub const UPGRADE_WAIT: Duration = Duration::from_secs(30);
+/// How often it tries to reach the upgraded daemon.
+const UPGRADE_STEP: Duration = Duration::from_millis(100);
 
 /// What to do when the daemon is a different build from this client.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OnMismatch {
-    /// Ask it to `upgrade` (it exits), start a fresh one, and say hello again. Once: a
+    /// Ask it to stop, start a fresh one, and say hello again. Once: a
     /// daemon that still doesn't match is an error.
     Restart,
     /// Keep it; the caller sees `hello().matched == false`.
@@ -95,6 +99,9 @@ pub enum ClientError {
     /// operation ran. `wrote` is set when the request was a write: it may be saved already.
     #[error("{}", stopped_line(*.wrote))]
     Stopped { wrote: bool },
+    /// The daemon's upgrade still waits for moa's turn to end (L4).
+    #[error("moa is finishing a turn; it upgrades right after. Try again in a moment.")]
+    StillInTurn,
 }
 
 fn stopped_line(wrote: bool) -> &'static str {
@@ -294,7 +301,7 @@ impl Wire {
         }
     }
 
-    /// Sends `shutdown` or `upgrade` and reads to the end of the connection: the daemon
+    /// Sends `method` (`shutdown`) and reads to the end of the connection: the daemon
     /// closes it after replying, so an end of stream is the expected answer. An error line
     /// is the daemon refusing; a connection that stays open is an error too.
     async fn stop(&mut self, method: &str) -> Result<(), ClientError> {
@@ -337,6 +344,8 @@ async fn wait_for_exit(pid: u32, limit: Duration) -> bool {
 pub struct Client {
     wire: Wire,
     hello: HelloOk,
+    /// How it connected: what reaching the daemon again after an upgrade takes.
+    opts: ClientOptions,
 }
 
 impl Client {
@@ -364,7 +373,7 @@ impl Client {
                 }));
             }
             restarted = true;
-            client.upgrade(&opts).await?;
+            client.stop_for_restart(&opts).await?;
         }
     }
 
@@ -377,13 +386,18 @@ impl Client {
         };
         let params = serde_json::to_value(&hello).map_err(io::Error::other)?;
         let hello = decode(wire.request("hello", params).await?)?;
-        Ok(Client { wire, hello })
+        Ok(Client {
+            wire,
+            hello,
+            opts: opts.clone(),
+        })
     }
 
-    /// Asks the daemon to stop for a restart and waits until its process is gone.
-    async fn upgrade(mut self, opts: &ClientOptions) -> Result<(), ClientError> {
+    /// Asks the daemon to stop for a restart and waits until its process is gone. A
+    /// `shutdown`, so that a daemon that upgrades in place still stops here.
+    async fn stop_for_restart(mut self, opts: &ClientOptions) -> Result<(), ClientError> {
         let pid = self.hello.pid;
-        self.wire.stop("upgrade").await?;
+        self.wire.stop("shutdown").await?;
         drop(self);
         if !wait_for_exit(pid, EXIT_WAIT).await {
             return Err(start_error(
@@ -397,6 +411,55 @@ impl Client {
 
     pub fn hello(&self) -> &HelloOk {
         &self.hello
+    }
+
+    /// Asks the daemon to upgrade in place (L1): always, or, with `if_stale`, only when its
+    /// program is no longer the build it runs. `None` from a daemon from before live
+    /// updates, which stops instead.
+    pub async fn ask_upgrade(&mut self, if_stale: bool) -> Result<Option<UpgradeOk>, ClientError> {
+        let params = serde_json::to_value(UpgradeParams { if_stale }).map_err(io::Error::other)?;
+        let reply = self.wire.request("upgrade", params).await?;
+        Ok(serde_json::from_value(reply).ok())
+    }
+
+    /// After the daemon said it is upgrading: waits, up to `limit` ([`UPGRADE_WAIT`]), for
+    /// its next image, and says hello to it. The old image ends this connection once it has
+    /// wound down, between moa's turns; the connections made after that wait in the socket's
+    /// backlog for the next image, which keeps the pid. The caller reads the build it now
+    /// runs from [`Client::hello`]. [`ClientError::StillInTurn`] when moa's turn outlasts
+    /// `limit`; `NotRunning` when no next image came (its start failed).
+    pub async fn await_upgrade(self, limit: Duration) -> Result<Client, ClientError> {
+        let deadline = Instant::now() + limit;
+        let Client { mut wire, opts, .. } = self;
+        let ended = timeout_at(deadline, async {
+            while let Ok(Some(_)) = wire.read().await {}
+        })
+        .await;
+        if ended.is_err() {
+            return Err(ClientError::StillInTurn);
+        }
+        drop(wire);
+        let sock = opts.paths.socket(opts.brain.as_str())?;
+        loop {
+            let tried = timeout_at(deadline, async {
+                let stream = UnixStream::connect(&sock).await?;
+                Client::greet(stream, &opts).await
+            })
+            .await;
+            match tried {
+                Ok(Ok(client)) => return Ok(client),
+                // Nothing listens, or the connection went: the next image may still be
+                // starting.
+                Ok(Err(ClientError::Io(e))) if is_absent(&e) || is_gone(&e) => {}
+                Ok(Err(ClientError::Stopped { .. })) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(ClientError::StillInTurn),
+            }
+            if Instant::now() + UPGRADE_STEP >= deadline {
+                return Err(ClientError::NotRunning(opts.brain.clone()));
+            }
+            sleep(UPGRADE_STEP).await;
+        }
     }
 
     pub async fn call(&mut self, op: Op) -> Result<Done, ClientError> {
@@ -765,6 +828,7 @@ mod tests {
                 rev: 0,
                 matched: true,
                 pid,
+                exe: None,
             };
             framed.send(encode_result(&id, &ok)).await.unwrap();
             for _ in 0..then_read {

@@ -44,6 +44,11 @@ enum Command {
     Pick(panel::PickArgs),
     /// Stop the brain's moa.
     Shutdown(ctl::BrainArgs),
+    /// Upgrade the brain's moa to the build installed now, once moa is between turns.
+    Upgrade(ctl::BrainArgs),
+    /// Print this program's build.
+    #[command(hide = true)]
+    BuildId,
     /// A read-only SQL shell on a brain: one statement, or one per line on stdin.
     Sql(sql::SqlArgs),
     /// Talk to moa's own agent: `console prompt`, `console cancel` or `console feed`.
@@ -87,6 +92,8 @@ fn main() -> ExitCode {
         Some(Command::Daemon(args)) => return daemon::daemon(&args),
         Some(Command::Status(args)) => return ctl::status(&args),
         Some(Command::Shutdown(args)) => return ctl::shutdown(&args),
+        Some(Command::Upgrade(args)) => return ctl::upgrade(&args),
+        Some(Command::BuildId) => return ctl::print_build_id(),
         Some(Command::Panel(args)) => panel::panel(&args),
         Some(Command::Pick(args)) => panel::pick(&args),
         Some(Command::Sql(args)) => sql::sql(&args),

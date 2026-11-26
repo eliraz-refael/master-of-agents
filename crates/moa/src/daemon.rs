@@ -6,8 +6,8 @@ use clap::Args;
 use jiff::tz::TimeZone;
 use moa_core::config::BrainName;
 use moa_daemon::clock::SystemClock;
-use moa_daemon::{DaemonError, Ready, RunOptions, load_config, run};
-use moa_platform::{Paths, WallAlarm, ZoneWatch};
+use moa_daemon::{DaemonError, Exec, Ready, RunOptions, daemon_exe, load_config, run};
+use moa_platform::{Inherited, Paths, WallAlarm, ZoneWatch, build_id, take_inherited};
 
 /// How many events a slow console may fall behind by before it is sent a fresh snapshot.
 const EVENTS_CAPACITY: usize = 256;
@@ -47,6 +47,12 @@ fn fail(notify: bool, line: &str) -> ExitCode {
 }
 
 pub fn daemon(args: &DaemonArgs) -> ExitCode {
+    // Before any thread starts (the runtime's): an upgrade's previous image handed over its
+    // socket and lock in the environment.
+    let inherited = match take_inherited() {
+        Ok(i) => i,
+        Err(e) => return fail(args.notify_ready, &e.to_string()),
+    };
     install_panic_hook();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -55,10 +61,10 @@ pub fn daemon(args: &DaemonArgs) -> ExitCode {
         Ok(rt) => rt,
         Err(e) => return fail(args.notify_ready, &format!("can't start: {e}")),
     };
-    runtime.block_on(go(args))
+    runtime.block_on(go(args, inherited))
 }
 
-async fn go(args: &DaemonArgs) -> ExitCode {
+async fn go(args: &DaemonArgs, inherited: Option<Inherited>) -> ExitCode {
     let notify = args.notify_ready;
     let brain = match BrainName::parse(&args.brain) {
         Ok(b) => b,
@@ -90,6 +96,10 @@ async fn go(args: &DaemonArgs) -> ExitCode {
             None
         }
     };
+    let exe = match daemon_exe() {
+        Ok(exe) => exe,
+        Err(e) => return fail(notify, &format!("can't tell where moa runs from: {e}")),
+    };
     let opts = RunOptions {
         paths,
         brain,
@@ -105,6 +115,10 @@ async fn go(args: &DaemonArgs) -> ExitCode {
         },
         events_capacity: EVENTS_CAPACITY,
         uid_override: None,
+        exe,
+        build: build_id().to_string(),
+        exec: Exec::Real,
+        inherited,
     };
     match run(opts).await {
         Ok(()) => ExitCode::SUCCESS,

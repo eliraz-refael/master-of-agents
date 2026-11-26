@@ -248,6 +248,40 @@ fn json_prints_data() {
     assert_eq!(v.as_array().expect("an array").len(), 3, "{v}");
 }
 
+/// `moa upgrade` upgrades the daemon in place: the same process runs on, its program read
+/// again (here the same build), and `moa build-id` names that build.
+#[test]
+fn moa_upgrade_keeps_the_pid() {
+    let r = typical();
+    ok(&r.moactl(&["brief"]));
+    let before = r.moa(&["status"]);
+    ok(&before);
+    let build = build_of(&before);
+
+    let o = r.moa(&["upgrade"]);
+    ok(&o);
+    assert_eq!(out(&o), format!("moa upgraded ({build} → {build})\n"));
+    let after = r.moa(&["status"]);
+    ok(&after);
+    assert_eq!(pid_of(&after), pid_of(&before));
+    let id = r.moa(&["build-id"]);
+    ok(&id);
+    assert_eq!(out(&id), format!("{build}\n"));
+    ok(&r.moactl(&["brief"]));
+}
+
+/// The build `moa status` names.
+fn build_of(status: &Output) -> String {
+    out(status)
+        .split("build ")
+        .nth(1)
+        .expect("a build in the status")
+        .split(',')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
 #[test]
 fn a_rebuilt_client_restarts_the_daemon_on_its_build() {
     let r = typical();
@@ -266,17 +300,7 @@ fn a_rebuilt_client_restarts_the_daemon_on_its_build() {
     let after = r.run_as(&other_dir.join("moa"), &["status"], &[]);
     ok(&after);
     assert_ne!(pid_of(&after), pid_of(&before));
-    let build = |o: &Output| {
-        out(o)
-            .split("build ")
-            .nth(1)
-            .unwrap()
-            .split(',')
-            .next()
-            .unwrap()
-            .to_string()
-    };
-    assert_ne!(build(&after), build(&before));
+    assert_ne!(build_of(&after), build_of(&before));
 }
 
 #[test]
