@@ -203,11 +203,12 @@ impl Rig {
         let conversation = conversation_id(i);
         let (pane, pid) = self.open_agent(id, &dir, &conversation);
         let mut rows = session_rows(id, &conversation);
-        if let Some(Change::Session(s)) = rows.first_mut() {
-            s.title = Some(title.into());
-            s.cwd = Some(dir.to_string_lossy().into_owned());
-            s.start_cwd = s.cwd.clone();
-        }
+        let Some(Change::Session(s)) = rows.first_mut() else {
+            panic!("session_rows starts with the session's row");
+        };
+        s.title = Some(title.into());
+        s.cwd = Some(dir.to_string_lossy().into_owned());
+        s.start_cwd = s.cwd.clone();
         rows.push(self.bind(id, &pane, &pid));
         (Tab { id, pane, dir }, rows)
     }
@@ -217,10 +218,13 @@ impl Rig {
     fn open_agent(&self, id: SessionId, dir: &Path, conversation: &str) -> (String, String) {
         let root = self.tb.root();
         let plugin = root.join("plugin");
-        for (rel, text) in moa_agents::claude::session_plugin(&test_bin("moa")) {
-            let path = plugin.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).expect("the plugin's folders");
-            std::fs::write(path, text).expect("the plugin's files");
+        // Every tab shares the one plugin: the first tab writes it.
+        if !plugin.exists() {
+            for (rel, text) in moa_agents::claude::session_plugin(&test_bin("moa")) {
+                let path = plugin.join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).expect("the plugin's folders");
+                std::fs::write(path, text).expect("the plugin's files");
+            }
         }
         let env = [
             format!("MOA_ROOT={}", root.display()),
@@ -344,14 +348,7 @@ impl Up {
 
     /// A client that says it is session `id`, as `moactl` run in its tab does.
     pub fn session_client(&self, id: SessionId) -> Client {
-        let mut c = Client::connect(&self.sock);
-        let hello = json!({
-            "client": "test",
-            "build": moa_platform::build_id(),
-            "caller": {"moa_session": id.to_string()},
-        });
-        c.call("hello", hello);
-        c
+        self.client_as(&id.to_string())
     }
 
     /// Links the daemon to its terminal server ([`super::create_server`]).
@@ -366,11 +363,16 @@ impl Up {
 
     /// A client that says it is moa's own agent, as `moactl` run by moa's agent does.
     pub fn moa_client(&self) -> Client {
+        self.client_as("moa")
+    }
+
+    /// A client whose `hello` names `moa_session` as its caller.
+    fn client_as(&self, moa_session: &str) -> Client {
         let mut c = Client::connect(&self.sock);
         let hello = json!({
             "client": "test",
             "build": moa_platform::build_id(),
-            "caller": {"moa_session": "moa"},
+            "caller": {"moa_session": moa_session},
         });
         c.call("hello", hello);
         c

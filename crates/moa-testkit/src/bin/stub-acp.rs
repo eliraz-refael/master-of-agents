@@ -370,8 +370,11 @@ fn call(args: &[String]) -> ! {
         out_of_step(&greeted["error"]["message"]);
     }
     let reply = request(2, method, params);
-    if let Some(text) = reply["result"]["text"].as_str() {
-        println!("{text}");
+    if let Some(result) = reply["result"].as_object() {
+        match result.get("text").and_then(Value::as_str) {
+            Some(text) => println!("{text}"),
+            None => println!("{}", result.get("data").unwrap_or(&Value::Null)),
+        }
         std::process::exit(0)
     }
     out_of_step(reply["error"]["message"].as_str().unwrap_or("no reply"))
