@@ -1286,6 +1286,7 @@ mod tests {
             autostart: (!placed).then(|| "/nonexistent/moa/bin/moa".into()),
             on_mismatch: OnMismatch::Accept,
             build: "test".into(),
+            upgrade_wait: moa_client::UPGRADE_WAIT,
         };
         let opts = PanelOptions {
             client,
@@ -1698,6 +1699,7 @@ mod tests {
                             rev: 0,
                             matched: true,
                             pid: std::process::id(),
+                            exe: None,
                         },
                     ),
                     Call::Subscribe(_) => {
@@ -1738,6 +1740,7 @@ mod tests {
             autostart: None,
             on_mismatch: OnMismatch::Accept,
             build: "b".into(),
+            upgrade_wait: moa_client::UPGRADE_WAIT,
         };
         (dir, client, Heard { subscribed, closed })
     }

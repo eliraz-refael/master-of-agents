@@ -5,6 +5,7 @@
 mod acp;
 pub mod clock;
 pub mod core_task;
+mod follow;
 pub mod inspect;
 pub mod logging;
 mod run;
@@ -17,6 +18,6 @@ mod tmux;
 
 pub use core_task::{CoreHandle, CoreOptions, DRAIN_CAP, DaemonError, Stats};
 pub use moa_core::state::StatusData;
-pub use run::{Ready, RunOptions, load_config, run};
-pub use session::{peer_allowed, serve};
+pub use run::{Exec, Ready, RunOptions, daemon_exe, load_config, run};
+pub use session::{Program, peer_allowed, serve};
 pub use tmux::{TmuxLink, tmux_env};

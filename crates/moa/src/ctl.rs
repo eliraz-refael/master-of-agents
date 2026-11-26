@@ -1,11 +1,11 @@
-//! `moactl <verb>` (also `moa <verb>`), `moa status` and `moa shutdown`: the command line's
-//! side of a brain's daemon. Every failure is one plain line on stderr and exit 1.
+//! `moactl <verb>` (also `moa <verb>`), `moa status`, `moa shutdown` and `moa upgrade`: the
+//! command line's side of a brain's daemon. Every failure is one plain line on stderr and exit 1.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Args;
-use moa_client::{Client, ClientError, ClientOptions, OnMismatch, own_exe};
+use moa_client::{Client, ClientError, ClientOptions, OnMismatch, UPGRADE_WAIT, Upgraded, own_exe};
 use moa_core::config::{BrainName, Config, caller_store};
 use moa_core::live::DisplayState;
 use moa_core::op::{Done, Op};
@@ -74,6 +74,7 @@ impl Here {
             autostart: None,
             on_mismatch: OnMismatch::Accept,
             build: build_id().into(),
+            upgrade_wait: UPGRADE_WAIT,
         }
     }
 }
@@ -193,7 +194,8 @@ fn verb(m: &Moactl) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs `op` on `brain`'s daemon, starting it (or restarting it on another build) first.
+/// Runs `op` on `brain`'s daemon, starting it first, or upgrading it when its program is
+/// now this build (L1).
 pub(crate) fn send(here: &Here, brain: BrainName, op: Op) -> Result<Done, String> {
     let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let mut opts = here.options(brain);
@@ -280,6 +282,49 @@ pub fn shutdown(args: &BrainArgs) -> ExitCode {
         println!("moa {brain}: stopped");
         Ok(())
     }))
+}
+
+/// `moa upgrade`: the daemon upgrades in place into the build its program now has, once moa
+/// is between turns, keeping its pid. A daemon from before live updates stops instead, and
+/// the next command starts the new build.
+pub fn upgrade(args: &BrainArgs) -> ExitCode {
+    finish(running(args, false, false, |brain, client| async move {
+        let mut client = client;
+        let old = client.hello().build.clone();
+        let asked = client.ask_upgrade(false).await.map_err(|e| e.to_string())?;
+        let Some(ok) = asked else {
+            client.shutdown().await.map_err(|e| e.to_string())?;
+            println!("moa {brain}: stopped; the next moa command starts the new build");
+            return Ok(());
+        };
+        if !ok.upgrading {
+            return Err(format!("moa {brain} didn't upgrade"));
+        }
+        let back = client
+            .await_upgrade(ok.waiting_for_moa, UPGRADE_WAIT)
+            .await
+            .map_err(|e| match e {
+                // `moa upgrade` starts nothing: running it again would find nothing to upgrade.
+                ClientError::UpgradeStopped => {
+                    format!("moa {brain} stopped while upgrading; run moa to start it again")
+                }
+                e => e.to_string(),
+            })?;
+        match back {
+            Upgraded::InPlace(new) => println!("moa upgraded ({old} → {})", new.hello().build),
+            Upgraded::Restarted(new) => println!(
+                "moa {brain} restarted instead of upgrading in place ({old} → {})",
+                new.hello().build
+            ),
+        }
+        Ok(())
+    }))
+}
+
+/// Prints this program's build, as a daemon asks a new program before it upgrades into it.
+pub fn print_build_id() -> ExitCode {
+    println!("{}", build_id());
+    ExitCode::SUCCESS
 }
 
 /// Connects to the brain's daemon without starting one and runs `then` on it. Both callers

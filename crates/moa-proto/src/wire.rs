@@ -35,6 +35,36 @@ pub struct HelloOk {
     pub rev: u64,
     pub matched: bool,
     pub pid: u32,
+    /// The daemon's program: the path it runs, watches and upgrades into (`MOA_EXE`). A
+    /// daemon from before live updates sends none.
+    #[serde(default)]
+    pub exe: Option<String>,
+}
+
+/// `upgrade`'s params. An old client's bare `upgrade` is `if_stale: false`, and `false` is
+/// sent as `{}`: a daemon from before live updates refuses any field it doesn't know
+/// (`INVALID_PARAMS`), but takes `{}` (as a stop).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct UpgradeParams {
+    /// Upgrade only when the daemon's program is no longer the build it runs; otherwise the
+    /// reply names that program.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub if_stale: bool,
+}
+
+/// `upgrade`'s reply. A daemon from before live updates answers a bare `upgrade` with `{}`
+/// and stops instead (a reply this can't be read from, with no `upgrading`, is that), and
+/// refuses one with `if_stale` (`INVALID_PARAMS`).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct UpgradeOk {
+    /// The daemon upgrades in place, once moa is between turns; its pid stays.
+    pub upgrading: bool,
+    /// The upgrade waits for moa's turn to end.
+    #[serde(default)]
+    pub waiting_for_moa: bool,
+    /// When it doesn't upgrade: the program that runs this brain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
@@ -53,6 +83,9 @@ pub struct StatusOk {
     /// How many panels moa started or restarted while this daemon ran.
     #[serde(default)]
     pub panel_starts: u32,
+    /// `waiting for moa's turn` while an upgrade waits; `null` otherwise.
+    #[serde(default)]
+    pub upgrade: Option<String>,
 }
 
 /// Which topics a connection follows. `since` is the rev the client already holds.
@@ -94,7 +127,7 @@ pub enum Call {
     Hello(Hello),
     Status,
     Shutdown,
-    Upgrade,
+    Upgrade { if_stale: bool },
     Subscribe(Subscribe),
     Op(Op),
 }
@@ -118,8 +151,8 @@ impl JsonSchema for Call {
         let forms = vec![
             form("hello", g.subschema_for::<Hello>(), true),
             form("status", none.clone(), false),
-            form("shutdown", none.clone(), false),
-            form("upgrade", none, false),
+            form("shutdown", none, false),
+            form("upgrade", g.subschema_for::<UpgradeParams>(), false),
             form("subscribe", g.subschema_for::<Subscribe>(), true),
             g.subschema_for::<Op>().to_value(),
         ];
@@ -214,7 +247,16 @@ pub fn decode_incoming(line: &str) -> Result<Incoming, (Option<Id>, RpcError)> {
         "subscribe" => Call::Subscribe(serde_json::from_value(params).map_err(bad)?),
         "status" => empty(params).map(|_| Call::Status)?,
         "shutdown" => empty(params).map(|_| Call::Shutdown)?,
-        "upgrade" => empty(params).map(|_| Call::Upgrade)?,
+        // Missing and `null` params are the bare `upgrade` an old client sends.
+        "upgrade" => {
+            let p: UpgradeParams = match params {
+                Value::Null => UpgradeParams::default(),
+                params => serde_json::from_value(params).map_err(bad)?,
+            };
+            Call::Upgrade {
+                if_stale: p.if_stale,
+            }
+        }
         m if Op::METHODS.contains(&m) => {
             Call::Op(serde_json::from_value(json!({"method": m, "params": params})).map_err(bad)?)
         }
@@ -235,7 +277,7 @@ pub fn decode_incoming(line: &str) -> Result<Incoming, (Option<Id>, RpcError)> {
 pub fn allowed_on_mismatch(call: &Call) -> bool {
     matches!(
         call,
-        Call::Hello(_) | Call::Status | Call::Upgrade | Call::Shutdown
+        Call::Hello(_) | Call::Status | Call::Upgrade { .. } | Call::Shutdown
     )
 }
 

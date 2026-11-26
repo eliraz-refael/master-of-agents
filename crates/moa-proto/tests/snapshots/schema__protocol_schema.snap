@@ -57,7 +57,7 @@ expression: all
             "const": "upgrade"
           },
           "params": {
-            "$ref": "#/$defs/NoParams"
+            "$ref": "#/$defs/UpgradeParams"
           }
         },
         "required": [
@@ -133,6 +133,16 @@ expression: all
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpgradeParams": {
+        "description": "`upgrade`'s params. An old client's bare `upgrade` is `if_stale: false`, and `false` is\nsent as `{}`: a daemon from before live updates refuses any field it doesn't know\n(`INVALID_PARAMS`), but takes `{}` (as a stop).",
+        "type": "object",
+        "properties": {
+          "if_stale": {
+            "description": "Upgrade only when the daemon's program is no longer the build it runs; otherwise the\nreply names that program.",
+            "type": "boolean"
           }
         }
       },
@@ -1970,6 +1980,14 @@ expression: all
         "type": "integer",
         "format": "uint32",
         "minimum": 0
+      },
+      "exe": {
+        "description": "The daemon's program: the path it runs, watches and upgrades into (`MOA_EXE`). A\ndaemon from before live updates sends none.",
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
       }
     },
     "required": [
@@ -2036,6 +2054,14 @@ expression: all
         "format": "uint32",
         "minimum": 0,
         "default": 0
+      },
+      "upgrade": {
+        "description": "`waiting for moa's turn` while an upgrade waits; `null` otherwise.",
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
       }
     },
     "required": [
@@ -2070,6 +2096,33 @@ expression: all
         ]
       }
     }
+  },
+  "UpgradeOk": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "UpgradeOk",
+    "description": "`upgrade`'s reply. A daemon from before live updates answers a bare `upgrade` with `{}`\nand stops instead (a reply this can't be read from, with no `upgrading`, is that), and\nrefuses one with `if_stale` (`INVALID_PARAMS`).",
+    "type": "object",
+    "properties": {
+      "upgrading": {
+        "description": "The daemon upgrades in place, once moa is between turns; its pid stays.",
+        "type": "boolean"
+      },
+      "waiting_for_moa": {
+        "description": "The upgrade waits for moa's turn to end.",
+        "type": "boolean",
+        "default": false
+      },
+      "exe": {
+        "description": "When it doesn't upgrade: the program that runs this brain.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "upgrading"
+    ]
   },
   "SnapshotMsg": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

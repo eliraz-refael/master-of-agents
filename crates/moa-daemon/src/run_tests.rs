@@ -51,15 +51,22 @@ async fn up_with(
         int: signal(SignalKind::interrupt()).unwrap(),
         hup: signal(SignalKind::hangup()).unwrap(),
     };
-    let daemon = tokio::spawn(keep_up(
-        core.clone(),
-        listener,
-        sock.clone(),
-        BrainName::default_brain(),
-        moa_platform::current_uid(),
-        None,
+    let up = Up {
+        lock: File::create(brain.dir.path().join("t.lock")).unwrap(),
+        listener: Arc::new(listener),
+        sock: sock.clone(),
+        core: core.clone(),
         sigs,
-    ));
+    };
+    let exe = daemon_exe().unwrap();
+    let build = moa_platform::build_id().to_string();
+    let follow = Follow::new(exe.clone(), build.clone());
+    let program = Arc::new(Program { exe, build });
+    let daemon = tokio::spawn(async move {
+        let uid = moa_platform::current_uid();
+        let ended = keep_up(up, BrainName::default_brain(), program, uid, None, follow).await;
+        ended.map(|handoff| assert!(handoff.is_none(), "no upgrade here"))
+    });
 
     (core, sock, daemon)
 }
@@ -373,6 +380,10 @@ async fn a_brain_dir_that_is_a_symlink_is_refused() {
         ready: Ready::Nothing,
         events_capacity: 16,
         uid_override: None,
+        exe: daemon_exe().expect("the test's program"),
+        build: moa_platform::build_id().to_string(),
+        exec: Exec::Test(tokio::sync::mpsc::channel(1).0),
+        inherited: None,
     };
     let err = tokio::time::timeout(Duration::from_secs(10), run(opts))
         .await

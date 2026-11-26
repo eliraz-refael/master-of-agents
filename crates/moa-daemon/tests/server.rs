@@ -9,7 +9,7 @@ use moa_core::config::BrainName;
 use moa_core::op::{Op, ReqId};
 use moa_core::state::{CallerInfo, Deps};
 use moa_daemon::testing::FakeTime;
-use moa_daemon::{CoreHandle, CoreOptions, DaemonError, Ready, run, serve};
+use moa_daemon::{CoreHandle, CoreOptions, DaemonError, Exec, Program, Ready, run, serve};
 use moa_platform::Paths;
 use moa_proto::code;
 use moa_testkit::brain::{TYPICAL_TZ, TypicalBrain};
@@ -68,6 +68,10 @@ async fn a_mismatched_build_may_only_hello_status_upgrade_shutdown_and_hook() {
     );
     let s = c.call("status", json!({}));
     assert_eq!(s["result"]["build"], json!(moa_platform::build_id()));
+    // Its own program is current, so the daemon doesn't upgrade: the other install is told
+    // which program runs this brain.
+    let u = c.call("upgrade", json!({"if_stale": true}));
+    assert_eq!(u["result"]["upgrading"], json!(false), "{u}");
     // A hook is dropped without a reply, even one with an id: the next status is the next
     // line we read.
     c.write(r#"{"jsonrpc":"2.0","method":"hook","params":{}}"#);
@@ -128,10 +132,15 @@ async fn a_lagging_subscriber_gets_a_fresh_snapshot() {
     // A small pipe, so the session stalls on a write while we don't read.
     let (client, server) = duplex(256);
     let stop = CancellationToken::new();
+    let program = Program {
+        exe: moa_daemon::daemon_exe().expect("the test's program"),
+        build: moa_platform::build_id().into(),
+    };
     tokio::spawn(serve(
         server,
         core.clone(),
         BrainName::default_brain(),
+        std::sync::Arc::new(program),
         CancellationToken::new(),
         stop.clone(),
     ));
@@ -306,11 +315,12 @@ async fn the_socket_dir_is_private() {
     assert_eq!(mode & 0o777, 0o700);
 }
 
-async fn stops_cleanly(method: &str) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_stops_cleanly() {
     let d = boot().await;
     let mut c = Client::connect(&d.sock);
     c.hello();
-    let r = c.call(method, json!({}));
+    let r = c.call("shutdown", json!({}));
     assert_eq!(r["result"], json!({}));
     let ended = timeout(Duration::from_secs(10), d.done)
         .await
@@ -320,14 +330,31 @@ async fn stops_cleanly(method: &str) {
     assert!(!d.sock.exists(), "the socket file is removed");
 }
 
+/// `upgrade` winds down as `shutdown` does, then hands the socket and the lock to the next
+/// image (here, the test) instead of removing the socket file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shutdown_stops_cleanly() {
-    stops_cleanly("shutdown").await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn upgrade_stops_cleanly() {
-    stops_cleanly("upgrade").await;
+async fn upgrade_hands_over_cleanly() {
+    let (tx, mut handoffs) = tokio::sync::mpsc::channel(1);
+    let d = boot_with(|_| {}, move |o| o.exec = Exec::Test(tx)).await;
+    let mut c = Client::connect(&d.sock);
+    c.hello();
+    let r = c.call("upgrade", json!({}));
+    assert_eq!(
+        r["result"],
+        json!({"upgrading": true, "waiting_for_moa": false})
+    );
+    let inherited = timeout(Duration::from_secs(10), handoffs.recv())
+        .await
+        .expect("a handoff within 10 s")
+        .expect("the daemon handed over");
+    assert_eq!(inherited.from_build, moa_platform::build_id());
+    assert_eq!(c.read(), None, "the connection ends at the handoff");
+    let ended = timeout(Duration::from_secs(10), d.done)
+        .await
+        .expect("run ends within 10 s")
+        .expect("run didn't panic");
+    assert!(ended.is_ok(), "{ended:?}");
+    assert!(d.sock.exists(), "the socket file stays for the next image");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

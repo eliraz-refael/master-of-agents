@@ -3,7 +3,9 @@
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,18 +15,20 @@ use moa_core::config::{BrainName, CONSTITUTION_NAME, Config, UiConfig};
 use moa_core::model::AgentKind;
 use moa_core::state::{Deps, PanelLaunch};
 use moa_platform::fs::write_if_changed;
-use moa_platform::{Paths, WallTimer, ZoneWatch, ensure_private_dir, which};
+use moa_platform::{Inherited, Paths, WallTimer, ZoneWatch, ensure_private_dir, which};
 use moa_tmux::conf;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::clock::Clock;
 use crate::core_task::{CoreHandle, CoreOptions, DaemonError};
+use crate::follow::Follow;
 use crate::logging;
 use crate::server::accept_loop;
+use crate::session::Program;
 use crate::supervise::supervise;
 use crate::tmux::{TmuxLink, tmux_env};
 
@@ -47,6 +51,15 @@ pub enum Ready {
     Nothing,
 }
 
+/// How the daemon hands its socket and lock to the next build when it upgrades (L5).
+pub enum Exec {
+    /// Replace this process with the daemon's program, keeping both open.
+    Real,
+    /// Send them to a test instead, which starts the next image itself: a test can never
+    /// replace its own process.
+    Test(mpsc::Sender<Inherited>),
+}
+
 pub struct RunOptions {
     pub paths: Paths,
     pub brain: BrainName,
@@ -60,6 +73,17 @@ pub struct RunOptions {
     /// Tests: pretend to be another user, to see that this one is turned away.
     #[doc(hidden)]
     pub uid_override: Option<u32>,
+    /// The daemon's program ([`daemon_exe`]): what it watches, runs its panels and hooks
+    /// from, and becomes when it upgrades.
+    pub exe: PathBuf,
+    /// This image's build: `moa_platform::build_id()`. The daemon is stale once its
+    /// program's build differs.
+    pub build: String,
+    /// How an upgrade hands over to the next build.
+    pub exec: Exec,
+    /// What the previous image handed over, when this one is its upgrade
+    /// (`moa_platform::take_inherited`): its socket and lock are taken instead of made.
+    pub inherited: Option<Inherited>,
 }
 
 /// Reads `moa.toml` (no file is the default config), with folders in their canonical form
@@ -89,9 +113,11 @@ pub(crate) fn fill_launchers(config: &mut Config, path: Option<&OsStr>) {
 
 /// Everything that has to work before the daemon says `ready`.
 struct Up {
-    /// Held for the daemon's life: the lock is released when this closes.
-    _lock: File,
-    listener: UnixListener,
+    /// Held for the daemon's life: the lock is released when this closes, or handed to the
+    /// next image by an upgrade.
+    lock: File,
+    /// Shared with the accept loop.
+    listener: Arc<UnixListener>,
     sock: PathBuf,
     core: CoreHandle,
     sigs: Signals,
@@ -133,10 +159,17 @@ fn tmux_link(
 }
 
 /// The daemon's own program, read once and handed to everything that runs it (the session
-/// plugin's hooks, the panels): its real path, as `moa_client::own_exe` gives it. Linux
-/// names a binary replaced under a running daemon `<path> (deleted)`; the program to run is
-/// the one now at `<path>`.
-fn daemon_exe() -> io::Result<PathBuf> {
+/// plugin's hooks, the panels), watched for new builds and upgraded into (L2): `MOA_EXE`, the
+/// path the client that started it ran, links kept, when that is a full path that exists.
+/// Otherwise its real path. Linux names a binary replaced under a running daemon
+/// `<path> (deleted)`; the program to run is the one now at `<path>`.
+pub fn daemon_exe() -> io::Result<PathBuf> {
+    if let Some(exe) = std::env::var_os("MOA_EXE").map(PathBuf::from)
+        && exe.is_absolute()
+        && exe.exists()
+    {
+        return Ok(exe);
+    }
     let exe = undeleted(std::env::current_exe()?);
     // A replaced binary's new path may be missing for a moment: the path as read, then.
     Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
@@ -198,6 +231,46 @@ fn write_session_plugin(paths: &Paths, exe: &Path) -> Result<PathBuf, DaemonErro
     Ok(dir)
 }
 
+/// The brain's lock, taken: the one the previous image handed over (the same open file, so
+/// it is still ours), or a new one.
+fn take_lock(
+    paths: &Paths,
+    brain: &BrainName,
+    inherited: Option<File>,
+) -> Result<File, DaemonError> {
+    let lock = match inherited {
+        Some(lock) => lock,
+        None => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(paths.lock(brain.as_str()))?,
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(DaemonError::AlreadyRunning(brain.clone())),
+        Err(TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// The listening socket: the one the previous image handed over, still bound and with the
+/// connections made meanwhile in its backlog, or a new one at `sock`, whatever was there
+/// before being stale (the lock is held).
+fn listen(sock: &Path, inherited: Option<StdUnixListener>) -> Result<UnixListener, DaemonError> {
+    if let Some(listener) = inherited {
+        listener.set_nonblocking(true)?;
+        return Ok(UnixListener::from_std(listener)?);
+    }
+    match std::fs::remove_file(sock) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(UnixListener::bind(sock)?)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn bring_up(
     paths: &Paths,
@@ -207,6 +280,8 @@ async fn bring_up(
     clock: Arc<dyn Clock>,
     alarm: Box<dyn WallTimer>,
     events_capacity: usize,
+    exe: &Path,
+    inherited: Option<Inherited>,
 ) -> Result<Up, DaemonError> {
     let b = brain.as_str();
     if config.brain(brain).is_none() {
@@ -220,41 +295,29 @@ async fn bring_up(
     }
     ensure_private_dir(&paths.log_dir())?;
 
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(paths.lock(b))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(DaemonError::AlreadyRunning(brain.clone())),
-        Err(TryLockError::Error(e)) => return Err(e.into()),
-    }
-
-    // Holding the lock, whatever is at the socket's path is stale.
-    match std::fs::remove_file(&sock) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-    let listener = UnixListener::bind(&sock)?;
+    let (listener, lock, from) = match inherited {
+        Some(i) => (Some(i.listener), Some(i.lock), Some(i.from_build)),
+        None => (None, None, None),
+    };
+    let lock = take_lock(paths, brain, lock)?;
+    let listener = listen(&sock, listener)?;
     // From here a failure leaves no socket file behind.
     let up = async {
         let term = signal(SignalKind::terminate())?;
         let int = signal(SignalKind::interrupt())?;
         let hup = signal(SignalKind::hangup())?;
         logging::init(&paths.log(b))?;
-        tracing::info!("moa daemon starting for brain {b}");
+        match &from {
+            Some(from) => tracing::info!("moa daemon upgraded from build {from} for brain {b}"),
+            None => tracing::info!("moa daemon starting for brain {b}"),
+        }
         if !config.skipped_tables.is_empty() {
             tracing::warn!(
                 "moa.toml has tables moa doesn't know, which it skips: {}",
                 config.skipped_tables.join(", ")
             );
         }
-        let exe = daemon_exe()?;
-        let launch = panel_launch(paths, &exe);
+        let launch = panel_launch(paths, exe);
         // T21: until the switch-over, only a sandbox's own server is ever touched.
         let tmux = if paths.is_sandboxed() {
             Some(tmux_link(paths, b, &config.ui, &launch)?)
@@ -262,7 +325,7 @@ async fn bring_up(
             tracing::info!("the terminal link waits for the switch-over");
             None
         };
-        let session_plugin = write_session_plugin(paths, &exe)?;
+        let session_plugin = write_session_plugin(paths, exe)?;
         // The client passes the real home on only from a sandbox, for moa's agent's login.
         let agent_home = std::env::var_os("MOA_AGENT_HOME")
             .map(PathBuf::from)
@@ -308,8 +371,8 @@ async fn bring_up(
     .await;
     match up {
         Ok((core, sigs)) => Ok(Up {
-            _lock: lock,
-            listener,
+            lock,
+            listener: Arc::new(listener),
             sock,
             core,
             sigs,
@@ -381,19 +444,28 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         ready,
         events_capacity,
         uid_override,
+        exe,
+        build,
+        exec,
+        inherited,
     } = opts;
     // Hash this binary now: a binary replaced before the first hello must not make this old
     // daemon claim the new build.
     let _ = tokio::task::spawn_blocking(moa_platform::build_id).await;
 
-    let up = bring_up(&paths, &brain, config, tz, clock, alarm, events_capacity).await;
-    let Up {
-        _lock,
-        listener,
-        sock,
-        core,
-        sigs,
-    } = match up {
+    let up = bring_up(
+        &paths,
+        &brain,
+        config,
+        tz,
+        clock,
+        alarm,
+        events_capacity,
+        &exe,
+        inherited,
+    )
+    .await;
+    let up = match up {
         Ok(up) => up,
         Err(e) => {
             if matches!(ready, Ready::Stdout) {
@@ -402,35 +474,102 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
             return Err(e);
         }
     };
-    announce_ready(ready, &sock, &core);
-    tracing::info!("ready on {}", sock.display());
+    // Armed before `ready`, so a new build put in place right after it is heard.
+    let follow = Follow::new(exe.clone(), build.clone());
+    announce_ready(ready, &up.sock, &up.core);
+    tracing::info!("ready on {}", up.sock.display());
 
     let my_uid = uid_override.unwrap_or_else(moa_platform::current_uid);
-    keep_up(core, listener, sock, brain, my_uid, zone, sigs).await
+    let program = Arc::new(Program { exe, build });
+    match keep_up(up, brain.clone(), program.clone(), my_uid, zone, follow).await? {
+        None => Ok(()),
+        Some(handoff) => hand_over(handoff, &brain, &program, exec),
+    }
 }
 
-/// Accepts clients and watches for the end, then winds down. `Ok` after a signal or a
-/// `shutdown`; `Err` when the core can't go on.
-async fn keep_up(
-    core: CoreHandle,
-    listener: UnixListener,
+/// What an upgrade hands the next image: the listening socket and the brain's lock, both
+/// still open.
+struct Handoff {
+    /// A copy of the listener's descriptor.
+    listener: OwnedFd,
+    lock: File,
     sock: PathBuf,
+}
+
+/// Hands the socket and the lock to the next image of the daemon (L5): its program,
+/// re-exec'd with them, or the test that stands in for it. A failed exec ends the daemon
+/// (L7): the next client starts a fresh one.
+fn hand_over(
+    handoff: Handoff,
+    brain: &BrainName,
+    program: &Program,
+    exec: Exec,
+) -> Result<(), DaemonError> {
+    let Handoff {
+        listener,
+        lock,
+        sock,
+    } = handoff;
+    match exec {
+        Exec::Real => {
+            tracing::info!("upgrading into {}", program.exe.display());
+            let args = ["daemon", "--brain", brain.as_str()];
+            let e = moa_platform::reexec(
+                &program.exe,
+                &args,
+                listener.as_fd(),
+                lock.as_fd(),
+                &program.build,
+            );
+            tracing::error!("the upgrade couldn't start {}: {e}", program.exe.display());
+            remove_socket(&sock);
+            Err(e.into())
+        }
+        Exec::Test(tx) => {
+            let inherited = Inherited {
+                listener: StdUnixListener::from(listener),
+                lock,
+                from_build: program.build.clone(),
+            };
+            if tx.try_send(inherited).is_err() {
+                tracing::warn!("nobody took the handoff");
+            }
+            tracing::info!("handed over");
+            Ok(())
+        }
+    }
+}
+
+/// Accepts clients, follows the program and watches for the end, then winds down: one wind
+/// down, whether the daemon stops or upgrades. `Ok(None)` after a signal or a `shutdown`, the
+/// socket file removed; `Ok(Some)` at the core's word to upgrade, with what the next image
+/// takes over; `Err` when the core can't go on.
+async fn keep_up(
+    up: Up,
     brain: BrainName,
+    program: Arc<Program>,
     my_uid: u32,
     mut zone: Option<ZoneWatch>,
-    mut sigs: Signals,
-) -> Result<(), DaemonError> {
+    follow: Follow,
+) -> Result<Option<Handoff>, DaemonError> {
+    let Up {
+        lock,
+        listener,
+        sock,
+        core,
+        mut sigs,
+    } = up;
     // `stop` ends the accept loop (and is what `shutdown` cancels); `close` ends the
     // sessions, and only after the core is done, so each gets its reply or the stopping
     // line first.
     let stop = CancellationToken::new();
     let close = CancellationToken::new();
     let sessions = TaskTracker::new();
-    let listener = Arc::new(listener);
     let accept = tokio::spawn(supervise(
         "accept loop",
         {
-            let (core, brain, stop, close, sessions) = (
+            let (listener, core, brain, stop, close, sessions) = (
+                listener.clone(),
                 core.clone(),
                 brain.clone(),
                 stop.clone(),
@@ -442,6 +581,7 @@ async fn keep_up(
                     listener.clone(),
                     core.clone(),
                     brain.clone(),
+                    program.clone(),
                     stop.clone(),
                     close.clone(),
                     sessions.clone(),
@@ -457,27 +597,32 @@ async fn keep_up(
     // Hooks that gave up while the daemon started (a line bigger than the socket's buffer,
     // written before anything accepted it) spooled their lines after the drain at start.
     core.drain_spool();
+    let following = tokio::spawn(follow.run(core.clone()));
 
     let outcome = loop {
         tokio::select! {
             _ = sigs.term.recv() => {
                 tracing::info!("SIGTERM: stopping");
-                break Ok(());
+                break Ok(End::Stop);
             }
             _ = sigs.int.recv() => {
                 tracing::info!("SIGINT: stopping");
-                break Ok(());
+                break Ok(End::Stop);
             }
             _ = sigs.hup.recv() => tracing::info!("SIGHUP ignored"),
             _ = stop.cancelled() => {
                 tracing::info!("asked to stop");
-                break Ok(());
+                break Ok(End::Stop);
+            }
+            () = core.exec_wanted() => {
+                tracing::info!("upgrading: winding down");
+                break Ok(End::Upgrade);
             }
             ended = core.finished() => {
                 if let Err(e) = &ended {
                     tracing::error!("the core stopped the daemon: {e}");
                 }
-                break ended;
+                break ended.map(|()| End::Stop);
             }
             changed = zone_changed(&mut zone) => match changed {
                 Ok(()) => {
@@ -498,8 +643,10 @@ async fn keep_up(
 
     // Stop accepting, then let the core finish: after a fatal stop `finished()` has spoken
     // but the core is still answering its queue, so wait for its end either way.
+    following.abort();
     stop.cancel();
-    // Lines still in the kernel's accept backlog are dropped here: an accepted window.
+    // At a stop, lines still in the kernel's accept backlog are dropped with the socket: an
+    // accepted window. At an upgrade they wait there for the next image.
     accept.abort();
     let wound_down = tokio::time::timeout(STOP_WAIT, async {
         core.stop().await;
@@ -524,9 +671,31 @@ async fn keep_up(
             SESSIONS_WAIT.as_millis()
         );
     }
+    let outcome = match outcome {
+        // The next image gets a copy of the listener: tokio keeps its own until it drops.
+        Ok(End::Upgrade) => match listener.as_fd().try_clone_to_owned() {
+            Ok(listener) => {
+                return Ok(Some(Handoff {
+                    listener,
+                    lock,
+                    sock,
+                }));
+            }
+            Err(e) => Err(e.into()),
+        },
+        outcome => outcome,
+    };
     remove_socket(&sock);
     tracing::info!("stopped");
-    outcome
+    outcome.map(|_| None)
+}
+
+/// Why `keep_up`'s loop ended.
+enum End {
+    /// A signal or `shutdown`.
+    Stop,
+    /// The core wants the daemon upgraded.
+    Upgrade,
 }
 
 #[cfg(test)]

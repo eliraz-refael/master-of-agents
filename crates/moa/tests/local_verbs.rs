@@ -177,6 +177,7 @@ async fn local_verbs_work_and_survive_a_reload() {
         autostart: None,
         on_mismatch: OnMismatch::Restart,
         build: build_id_of(Path::new(MOA)).expect("a build id"),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
     })
     .await
     .unwrap_or_else(|e| panic!("no daemon to ask ({})", kind(&e)));

@@ -74,6 +74,10 @@ async fn twenty_verbs_launch_nothing() {
         ready: Ready::Channel(tx),
         events_capacity: 256,
         uid_override: None,
+        exe: moa_daemon::daemon_exe().expect("the test's program"),
+        build: moa_platform::build_id().to_string(),
+        exec: moa_daemon::Exec::Test(tokio::sync::mpsc::channel(1).0),
+        inherited: None,
     }));
     match timeout(Duration::from_secs(10), rx).await {
         Ok(Ok(_)) => {}
@@ -89,6 +93,7 @@ async fn twenty_verbs_launch_nothing() {
         autostart: None,
         on_mismatch: OnMismatch::Restart,
         build: moa_platform::build_id().into(),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
     })
     .await
     .expect("connects to the running daemon");

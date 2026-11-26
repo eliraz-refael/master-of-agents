@@ -322,6 +322,8 @@ pub struct StatusData {
     pub tmux_restarts: u32,
     /// How many panels moa started or restarted while this daemon ran (L7).
     pub panel_starts: u32,
+    /// [`crate::upgrade::WAITING`] while an upgrade waits for moa's turn.
+    pub upgrade: Option<String>,
 }
 
 /// The terminal server the daemon is linked to: its tmux version and generation.
@@ -449,6 +451,9 @@ pub struct State {
     /// The requests waiting for asks' answers, and the asks' timer. Kept in memory: a
     /// reload keeps the requests, which are its connections'.
     pub(crate) asks_mem: AsksMem,
+    /// The upgrade wanted, until the daemon re-execs ([`crate::upgrade`]). Kept in memory:
+    /// a reload keeps it.
+    pub(crate) upgrade: Option<crate::upgrade::Want>,
 }
 
 impl State {
@@ -505,6 +510,7 @@ impl State {
             session_events: VecDeque::new(),
             last_event: 0,
             asks_mem: AsksMem::default(),
+            upgrade: None,
         }
     }
 
@@ -569,6 +575,7 @@ impl State {
             tmux,
             tmux_restarts: self.tmux.restarts,
             panel_starts: self.panel_starts,
+            upgrade: crate::upgrade::status(self).map(String::from),
         }
     }
 

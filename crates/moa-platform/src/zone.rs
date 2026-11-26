@@ -2,11 +2,15 @@
 
 use std::io;
 #[cfg(target_os = "linux")]
-use std::{ffi::OsString, os::fd::OwnedFd, path::Path};
+use std::path::Path;
 
+#[cfg(target_os = "macos")]
 use tokio::io::unix::AsyncFd;
 
+#[cfg(target_os = "macos")]
 use crate::sys;
+#[cfg(target_os = "linux")]
+use crate::watch::PathWatch;
 
 /// Resolves when the system time zone may have changed.
 #[derive(Debug)]
@@ -14,9 +18,7 @@ pub struct ZoneWatch {
     #[cfg(target_os = "macos")]
     fd: AsyncFd<sys::NotifyFd>,
     #[cfg(target_os = "linux")]
-    fd: AsyncFd<OwnedFd>,
-    #[cfg(target_os = "linux")]
-    name: OsString,
+    watch: PathWatch,
 }
 
 impl ZoneWatch {
@@ -43,19 +45,18 @@ impl ZoneWatch {
     #[doc(hidden)]
     pub fn file(dir: &Path, name: &str) -> io::Result<ZoneWatch> {
         Ok(ZoneWatch {
-            fd: sys::register_readable(sys::notify_open(dir)?)?,
-            name: name.into(),
+            watch: PathWatch::new(&[(dir.to_path_buf(), name.into())])?,
         })
     }
 
     /// Resolves after one or more changes since the last call. Cancel-safe.
     pub async fn changed(&mut self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        return self.watch.changed().await;
+        #[cfg(target_os = "macos")]
         loop {
             let mut guard = self.fd.readable().await?;
-            #[cfg(target_os = "macos")]
             let changed = sys::notify_drain(self.fd.get_ref());
-            #[cfg(target_os = "linux")]
-            let changed = sys::notify_drain(self.fd.get_ref(), &self.name);
             // Drained to WouldBlock, so the readiness is spent either way.
             guard.clear_ready();
             if changed? {

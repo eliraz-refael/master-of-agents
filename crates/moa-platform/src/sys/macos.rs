@@ -1,8 +1,11 @@
-//! macOS: a kqueue wall-clock timer and the timezone notification.
+//! macOS: a kqueue wall-clock timer, kqueue watches on files and directories, and the
+//! timezone notification.
 
 use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt as _;
+use std::path::Path;
 use std::time::SystemTime;
 
 use super::{check, set_cloexec, set_cloexec_nonblock, since_epoch};
@@ -35,7 +38,7 @@ fn new_kqueue() -> io::Result<OwnedFd> {
     let raw = check(unsafe { libc::kqueue() })?;
     // SAFETY: `raw` is a fresh descriptor that nothing else owns.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-    set_cloexec(&fd)?;
+    set_cloexec(&fd, true)?;
     Ok(fd)
 }
 
@@ -133,6 +136,86 @@ pub fn alarm_drain(fd: &OwnedFd) -> io::Result<bool> {
     let r = unsafe { libc::kevent(fd.as_raw_fd(), std::ptr::null(), 0, &mut ev, 1, &zero) };
     let n = check(r)?;
     Ok(n > 0 && ev.filter == libc::EVFILT_TIMER && ev.flags & libc::EV_ERROR == 0)
+}
+
+/// A kqueue for file and directory watches, close-on-exec. Its `kevent` calls never wait.
+pub fn vnode_queue() -> io::Result<OwnedFd> {
+    new_kqueue()
+}
+
+/// Opens `path` for events only and registers it on `kq` for `fflags`, cleared on each
+/// delivery. With `follow` false a final symlink is watched itself, not its target. Closing
+/// the returned descriptor removes the registration.
+fn vnode_watch(kq: &OwnedFd, path: &Path, follow: bool, fflags: u32) -> io::Result<OwnedFd> {
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut flags = libc::O_EVTONLY | libc::O_CLOEXEC;
+    if !follow {
+        flags |= libc::O_SYMLINK;
+    }
+    // SAFETY: `c` is a valid C string; `open` returns a new descriptor or -1.
+    let raw = check(unsafe { libc::open(c.as_ptr(), flags) })?;
+    // SAFETY: `raw` is a fresh descriptor that nothing else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut ev = kevent_zeroed();
+    ev.ident = raw as libc::uintptr_t;
+    ev.filter = libc::EVFILT_VNODE;
+    ev.flags = libc::EV_ADD | libc::EV_CLEAR;
+    ev.fflags = fflags;
+    change(kq, &ev)?;
+    Ok(fd)
+}
+
+/// Watch directory `dir` for entries added, removed or renamed in it, and for being removed
+/// or renamed itself (an install that swaps a whole folder).
+pub fn vnode_watch_dir(kq: &OwnedFd, dir: &Path) -> io::Result<OwnedFd> {
+    vnode_watch(
+        kq,
+        dir,
+        true,
+        libc::NOTE_WRITE | libc::NOTE_DELETE | libc::NOTE_RENAME,
+    )
+}
+
+/// Watch the entry at `path` (a symlink itself, not its target) for being written,
+/// extended, changed in its attributes, removed or renamed.
+pub fn vnode_watch_entry(kq: &OwnedFd, path: &Path) -> io::Result<OwnedFd> {
+    let fflags = libc::NOTE_WRITE
+        | libc::NOTE_DELETE
+        | libc::NOTE_RENAME
+        | libc::NOTE_ATTRIB
+        | libc::NOTE_EXTEND;
+    vnode_watch(kq, path, false, fflags)
+}
+
+/// Read every pending event on `kq`: true if there was at least one.
+pub fn vnode_drain(kq: &OwnedFd) -> io::Result<bool> {
+    let zero = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let mut any = false;
+    loop {
+        let mut evs = [kevent_zeroed(); 16];
+        // SAFETY: no change list, room for `evs.len()` events in a live array, and a zero
+        // timeout so it never blocks.
+        let r = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                evs.as_mut_ptr(),
+                evs.len() as libc::c_int,
+                &zero,
+            )
+        };
+        match check(r) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+            Ok(0) => return Ok(any),
+            Ok(_) => any = true,
+        }
+    }
 }
 
 unsafe extern "C" {

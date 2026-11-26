@@ -7,6 +7,9 @@
 //! the cwd's `REPLAY_FILE`. Either wins over a script, which is then ignored.
 //!
 //! Or, as `stub-acp --call ...`, it stands in for `moactl` ([`call`]).
+//!
+//! Or, as `stub-acp build-id`, it prints its build id as `moa build-id` does, so a copy of it
+//! can stand in for a new build of moa that a daemon under test probes before it upgrades.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -44,6 +47,8 @@ const CHILD_PID: &str = ".stub-acp.child";
 const REPLAY: &str = "--replay";
 /// The argument that makes the stub a stand-in for `moactl` ([`call`]).
 const CALL: &str = "--call";
+/// The argument that makes the stub print its build id, as `moa build-id` does.
+const BUILD_ID: &str = "build-id";
 
 /// How a turn ended: with a stop reason, or failed (`Fail`) with the error its prompt is
 /// answered with.
@@ -485,6 +490,10 @@ async fn main() -> Result<(), Error> {
             return sleep_for_good().await;
         }
         Some(CALL) => call(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some(BUILD_ID) => {
+            println!("{}", moa_platform::build_id());
+            return Ok(());
+        }
         Some(REPLAY) => {
             let file = std::env::args_os()
                 .nth(2)

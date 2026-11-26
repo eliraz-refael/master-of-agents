@@ -1,0 +1,302 @@
+//! Slice 9: the daemon upgrades itself in place, between moa's turns, keeping its socket and
+//! its lock (L4, L5). Each daemon runs inside its test's process, so its upgrade hands both
+//! to the test (`Exec::Test`), which starts the next image with them ([`Rig::restart`]).
+//!
+//! The daemon's program is a copy of `stub-acp`, which answers `build-id` as moa does
+//! ([`Rig::with_exe`]): a new build is a copy with another time renamed over it.
+
+mod common;
+
+use std::os::unix::fs::MetadataExt as _;
+use std::path::Path;
+use std::sync::atomic::Ordering;
+
+use common::Client;
+use common::hooks::{ago, hook_notice};
+use common::rig::{Rig, Up, WAIT, answer, end, gate, prompt, say, session_stop};
+use moa_platform::pid_alive;
+use moa_testkit::wait_for;
+use serde_json::{Value, json};
+
+/// What `status` says while an upgrade waits for moa's turn to end.
+const WAITING: &str = "waiting for moa's turn";
+
+/// The socket file's inode: the same file, never made again.
+fn inode(sock: &Path) -> u64 {
+    std::fs::metadata(sock).expect("the socket file").ino()
+}
+
+fn hello() -> Value {
+    json!({"client": "test", "build": moa_platform::build_id(), "caller": {}})
+}
+
+/// Asks `up` to upgrade; its reply's result.
+fn upgrade(up: &Up, params: Value) -> Value {
+    let reply = up.client().call("upgrade", params);
+    reply["result"].clone()
+}
+
+fn status_upgrade(up: &Up) -> Value {
+    up.client().call("status", json!({}))["result"]["upgrade"].clone()
+}
+
+/// Waits until `status` says the upgrade waits for moa's turn.
+fn wait_waiting(up: &Up) {
+    wait_for(WAIT, || {
+        (status_upgrade(up) == json!(WAITING)).then_some(())
+    })
+    .unwrap_or_else(|| panic!("the upgrade never waited: {}", status_upgrade(up)));
+}
+
+/// How many new builds of its program the daemon found (`found`) or skipped as
+/// half-written. Read from its counters, not its log: the log is the process's first
+/// daemon's, and a test may share its process with others.
+fn builds(up: &Up, found: bool) -> u64 {
+    let stats = up.core.stats();
+    let n = match found {
+        true => &stats.builds_found,
+        false => &stats.builds_skipped,
+    };
+    n.load(Ordering::SeqCst)
+}
+
+/// `moa upgrade`: the daemon hands its listening socket to its next image. A connection from
+/// before the handoff ends; one made during it waits in the socket's backlog and is answered
+/// by the next image. The socket file is the same one throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn moa_upgrade_hands_over_the_socket() {
+    let rig = Rig::new(&[]).with_exe();
+    let up = rig.start().await;
+    let sock = up.sock.clone();
+    let ino = inode(&sock);
+    let mut before = Client::connect(&sock);
+    let greeted = before.call("hello", hello());
+    let exe = rig.exe().display().to_string();
+    assert_eq!(greeted["result"]["exe"], json!(exe), "{greeted}");
+
+    assert_eq!(
+        upgrade(&up, json!({})),
+        json!({"upgrading": true, "waiting_for_moa": false})
+    );
+    let build = rig.build();
+    let inherited = up.handoff().await;
+    assert_eq!(inherited.from_build, build);
+    assert_eq!(
+        before.read(),
+        None,
+        "a connection from before the handoff ends"
+    );
+
+    let mut during = Client::connect(&sock);
+    let id = during.send("hello", hello());
+    let up = rig.restart(inherited).await;
+    assert_eq!(up.sock, sock);
+    let greeted = during.reply(id);
+    assert_eq!(greeted["result"]["matched"], json!(true), "{greeted}");
+    assert_eq!(greeted["result"]["pid"], json!(std::process::id()));
+    assert_eq!(inode(&sock), ino, "the socket file was never made again");
+    up.stop().await;
+}
+
+/// While moa is in a turn the upgrade waits, and `status` says so; the turn's end lets it go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_upgrade_waits_for_moas_turn() {
+    let rig = Rig::new(&[say("done", "m1"), gate("g1"), end()]).with_exe();
+    let up = rig.start().await;
+    assert_eq!(status_upgrade(&up), Value::Null);
+    let mut you = up.client();
+    let turn = you.send(
+        "console.prompt",
+        json!({"text": "take your time", "wait": true}),
+    );
+    rig.wait_saved("moa", "done");
+
+    assert_eq!(
+        upgrade(&up, json!({})),
+        json!({"upgrading": true, "waiting_for_moa": true})
+    );
+    assert_eq!(status_upgrade(&up), json!(WAITING));
+    assert!(!up.handed_over());
+
+    rig.open("g1");
+    assert_eq!(answer(&you.reply(turn)), "done");
+    let inherited = up.handoff().await;
+    rig.restart(inherited).await.stop().await;
+}
+
+/// A parked `ask` and a parked `reply` both hear A13's "no reply yet" before the handoff:
+/// nobody waiting on an ask is cut off, and `moactl reply` waits again on the next image.
+/// The ask is to moa, mid-turn: once the upgrade waits, moa's channel holds it, so the turn's
+/// end lets the upgrade go rather than the ask.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parked_asks_hear_no_reply_yet_first() {
+    let rig = Rig::new(&[say("done", "m1"), gate("g1"), end()]).with_exe();
+    let ids = rig.seed_sessions(2);
+    let up = rig.start().await;
+    let mut you = up.client();
+    let turn = you.send(
+        "console.prompt",
+        json!({"text": "take your time", "wait": true}),
+    );
+    rig.wait_saved("moa", "done");
+    let mut kite = up.session_client(ids[0]);
+    let ask = kite.send(
+        "ask",
+        json!({"to": "moa", "text": "Is the domain renewed?"}),
+    );
+    up.core.barrier().await;
+    let mut other = up.session_client(ids[1]);
+    let again = other.send("reply", json!({"id": 1}));
+    up.core.barrier().await;
+
+    assert_eq!(
+        upgrade(&up, json!({})),
+        json!({"upgrading": true, "waiting_for_moa": true})
+    );
+    rig.open("g1");
+    assert_eq!(answer(&you.reply(turn)), "done");
+    let want = "no reply yet from moa; `moactl reply 1` waits again";
+    assert_eq!(answer(&kite.reply(ask)), want);
+    assert_eq!(answer(&other.reply(again)), want);
+    let inherited = up.handoff().await;
+    assert_eq!(
+        rig.logged("session/prompt").len(),
+        1,
+        "the ask waits for the next image"
+    );
+    rig.restart(inherited).await.stop().await;
+}
+
+/// A new build renamed over the daemon's program: the daemon upgrades into it once the
+/// change has settled and the new program has said its build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rebuild_upgrades() {
+    let rig = Rig::new(&[]).with_exe();
+    let up = rig.start().await;
+    let old = rig.build();
+    rig.rebuild(1);
+    let inherited = up.handoff().await;
+    assert_eq!(inherited.from_build, old);
+    assert_ne!(rig.build(), old);
+    let up = rig.restart(inherited).await;
+    assert_eq!(status_upgrade(&up), Value::Null);
+    up.stop().await;
+}
+
+/// Review Focus 1: a program caught half-written can't say its build, so nothing winds down;
+/// the whole copy after it upgrades.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_half_written_binary_is_skipped() {
+    let rig = Rig::new(&[]).with_exe();
+    let up = rig.start().await;
+    rig.half_rebuild();
+    wait_for(WAIT, || (builds(&up, false) == 1).then_some(()))
+        .expect("the half-written program is skipped");
+    assert_eq!(builds(&up, true), 0);
+    assert!(!up.handed_over());
+    assert_eq!(status_upgrade(&up), Value::Null);
+
+    rig.rebuild(2);
+    let inherited = up.handoff().await;
+    rig.restart(inherited).await.stop().await;
+}
+
+/// Review Focus 2: two rebuilds while moa thinks make one upgrade, after the turn, into the
+/// latest build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebuilds_while_moa_thinks_exec_once() {
+    let rig = Rig::new(&[say("done", "m1"), gate("g1"), end()]).with_exe();
+    let up = rig.start().await;
+    let old = rig.build();
+    let mut you = up.client();
+    let turn = you.send(
+        "console.prompt",
+        json!({"text": "take your time", "wait": true}),
+    );
+    rig.wait_saved("moa", "done");
+
+    rig.rebuild(1);
+    wait_waiting(&up);
+    rig.rebuild(2);
+    wait_for(WAIT, || (builds(&up, true) == 2).then_some(())).expect("the second build is found");
+    assert!(!up.handed_over());
+
+    rig.open("g1");
+    assert_eq!(answer(&you.reply(turn)), "done");
+    // Once: `handoff` checks that nothing more was handed over.
+    let inherited = up.handoff().await;
+    assert_eq!(inherited.from_build, old);
+    let latest = rig.build();
+    let up = rig.restart(inherited).await;
+    let status = up.client().call("status", json!({}));
+    assert_eq!(status["result"]["upgrade"], Value::Null, "{status}");
+    assert_ne!(latest, old);
+    up.stop().await;
+}
+
+/// Review Focus 4: a hook sent between the old image's last accept and the new one's start
+/// waits in the socket's backlog, and the new image records it, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hook_during_the_handoff_is_kept() {
+    let rig = Rig::new(&[]).with_exe();
+    rig.seed_sessions(1);
+    let up = rig.start().await;
+    let sock = up.sock.clone();
+    upgrade(&up, json!({}));
+    let inherited = up.handoff().await;
+
+    let line = session_stop(1, ago(0), "the Beacon tests pass");
+    Client::connect(&sock).write(&hook_notice(&line));
+    let up = rig.restart(inherited).await;
+    up.wait_queued(1);
+    up.core.barrier().await;
+    assert_eq!(up.moa_state()["queued"], json!(1));
+    up.stop().await;
+}
+
+/// `upgrade {if_stale: true}` to a daemon whose program is still its own build: no upgrade,
+/// and the reply names the program, for the client to say which install runs this brain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upgrade_if_stale_on_a_current_daemon_says_no() {
+    let rig = Rig::new(&[]).with_exe();
+    let up = rig.start().await;
+    let exe = rig.exe().display().to_string();
+    assert_eq!(
+        upgrade(&up, json!({"if_stale": true})),
+        json!({"upgrading": false, "waiting_for_moa": false, "exe": exe})
+    );
+    up.core.barrier().await;
+    assert!(!up.handed_over());
+    assert_eq!(status_upgrade(&up), Value::Null);
+    up.stop().await;
+}
+
+/// Spec §6.15.2, "the thread resumes": the handoff stops moa's agent, and the next prompt
+/// resumes today's thread on a new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn moas_thread_resumes_after_the_handoff() {
+    let rig = Rig::new(&[say("first", "m1"), end(), say("second", "m2"), end()]).with_exe();
+    let up = rig.start().await;
+    let mut c = up.client();
+    assert_eq!(answer(&prompt(&mut c, "hello")), "first");
+    let thread = rig.threads();
+    assert_eq!(thread.len(), 1);
+    let pid = rig.logged("initialize")[0]["pid"]
+        .as_u64()
+        .and_then(|p| u32::try_from(p).ok())
+        .expect("the stub's pid");
+
+    upgrade(&up, json!({}));
+    let inherited = up.handoff().await;
+    wait_for(WAIT, || (!pid_alive(pid)).then_some(()))
+        .unwrap_or_else(|| panic!("moa's agent {pid} still runs"));
+
+    let up = rig.restart(inherited).await;
+    let mut c = up.client();
+    assert_eq!(answer(&prompt(&mut c, "again")), "second");
+    let resumed = rig.logged("session/resume");
+    assert_eq!(resumed.len(), 1, "{resumed:?}");
+    assert_eq!(resumed[0]["params"]["sessionId"], thread[0].as_str());
+    assert_eq!(rig.threads(), thread);
+    up.stop().await;
+}

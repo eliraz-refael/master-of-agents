@@ -6,6 +6,7 @@
 //! either: the model is a `watch` (a slow reader sees the latest, as one patch), events are
 //! a bounded `broadcast` (a slow reader gets a fresh snapshot instead of the ones it missed).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,10 +17,11 @@ use moa_core::hook::HookLine;
 use moa_core::op::{ConnId, Done, Op, OpError, PAGE_MAX, ReqId};
 use moa_core::publish::FeedRow;
 use moa_core::state::CallerInfo;
+use moa_core::upgrade::Why;
 use moa_proto::{
     Call, CoreEvent, Hello, HelloOk, Id, Incoming, Model, Patch, RpcError, StatusOk, Subscribe,
-    Topic, allowed_on_mismatch, code, decode_incoming, encode_error, encode_notice, encode_result,
-    snapshot_of,
+    Topic, UpgradeOk, allowed_on_mismatch, code, decode_incoming, encode_error, encode_notice,
+    encode_result, snapshot_of,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
@@ -39,6 +41,23 @@ const FLUSH_TIME: Duration = Duration::from_secs(1);
 
 const MISMATCH: &str = "this moa is a different build; run the command again to restart it";
 
+/// The daemon's program, as `hello` and `upgrade` tell it.
+#[derive(Clone, Debug)]
+pub struct Program {
+    /// The path it runs from and upgrades into (`MOA_EXE`).
+    pub exe: PathBuf,
+    /// The build this image runs: the daemon is stale once `exe`'s build differs.
+    pub build: String,
+}
+
+impl Program {
+    /// Whether `exe` is now another build than this image's. One that can't be read (being
+    /// replaced, or gone) isn't: there is nothing to upgrade into yet.
+    fn stale(&self) -> bool {
+        moa_platform::build_id_of(&self.exe).is_ok_and(|b| b != self.build)
+    }
+}
+
 /// Whether a peer with this uid may talk to a daemon run by `my_uid`.
 pub fn peer_allowed(peer_uid: u32, my_uid: u32) -> bool {
     peer_uid == my_uid
@@ -56,7 +75,7 @@ fn method_of(call: &Call) -> &'static str {
         Call::Hello(_) => "hello",
         Call::Status => "status",
         Call::Shutdown => "shutdown",
-        Call::Upgrade => "upgrade",
+        Call::Upgrade { .. } => "upgrade",
         Call::Subscribe(_) => "subscribe",
         Call::Op(op) => op.method(),
     }
@@ -144,7 +163,8 @@ struct Session<S> {
     framed: Framed<S, LinesCodec>,
     core: CoreHandle,
     brain: BrainName,
-    /// Cancelled by `shutdown`/`upgrade`: the daemon stops accepting and winds down.
+    program: Arc<Program>,
+    /// Cancelled by `shutdown`: the daemon stops accepting and winds down.
     shutdown: CancellationToken,
     /// Cancelled once the core has ended: only then may a session cut a write short or
     /// leave without its reply. Before that a session closes when the core drops its
@@ -162,12 +182,13 @@ struct Session<S> {
 }
 
 /// Serves one connection until it closes, the core ends (its reply channel drops, after
-/// what it holds is delivered) or `close` is cancelled. A `shutdown` or `upgrade` request
-/// cancels `shutdown` once its reply is written.
+/// what it holds is delivered) or `close` is cancelled. A `shutdown` request cancels
+/// `shutdown` once its reply is written; an `upgrade` is the core's to start.
 pub async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: S,
     core: CoreHandle,
     brain: BrainName,
+    program: Arc<Program>,
     shutdown: CancellationToken,
     close: CancellationToken,
 ) {
@@ -181,6 +202,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
         framed: Framed::new(stream, LinesCodec::new_with_max_length(moa_proto::MAX_LINE)),
         core,
         brain,
+        program,
         shutdown,
         close,
         conn,
@@ -312,7 +334,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
         match call {
             Call::Hello(hello) => self.hello(&id, hello).await,
             Call::Status => self.status(&id).await,
-            Call::Shutdown | Call::Upgrade => {
+            Call::Upgrade { if_stale } => self.upgrade(&id, if_stale).await,
+            Call::Shutdown => {
                 let flow = self.say(encode_result(&id, &json!({}))).await;
                 tracing::info!(conn = self.conn.0, "asked to stop");
                 self.shutdown.cancel();
@@ -354,6 +377,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             rev,
             matched,
             pid: std::process::id(),
+            exe: Some(self.program.exe.display().to_string()),
+        };
+        self.say(encode_result(id, &ok)).await
+    }
+
+    /// `upgrade` (L1): unless `if_stale` and the program is still this image's build, the
+    /// core upgrades the daemon once moa is between turns, and the reply says whether it
+    /// waits for that. Otherwise the reply names the program, which runs this brain.
+    async fn upgrade(&mut self, id: &Id, if_stale: bool) -> Flow {
+        let ok = if !if_stale || self.program.stale() {
+            let Some(waiting) = self.core.upgrade(Why::Asked).await else {
+                return self.refuse(id, code::FAILED, STOPPING).await;
+            };
+            tracing::info!(conn = self.conn.0, waiting, "asked to upgrade");
+            UpgradeOk {
+                upgrading: true,
+                waiting_for_moa: waiting,
+                exe: None,
+            }
+        } else {
+            UpgradeOk {
+                upgrading: false,
+                waiting_for_moa: false,
+                exe: Some(self.program.exe.display().to_string()),
+            }
         };
         self.say(encode_result(id, &ok)).await
     }
@@ -377,6 +425,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<S> {
             tmux: data.tmux,
             tmux_restarts: data.tmux_restarts,
             panel_starts: data.panel_starts,
+            upgrade: data.upgrade,
         };
         self.say(encode_result(id, &ok)).await
     }
@@ -567,6 +616,10 @@ mod tests {
             framed: Framed::new(server, LinesCodec::new()),
             core,
             brain: BrainName::default_brain(),
+            program: Arc::new(Program {
+                exe: PathBuf::from("/nonexistent/moa"),
+                build: "b".into(),
+            }),
             shutdown: CancellationToken::new(),
             close: CancellationToken::new(),
             conn,

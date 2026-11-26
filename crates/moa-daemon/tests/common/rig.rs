@@ -15,16 +15,16 @@ use moa_core::model::{PaneBinding, SessionId};
 use moa_core::publish::Topic;
 use moa_core::tmux::notify::Notification;
 use moa_daemon::testing::FakeTime;
-use moa_daemon::{CoreHandle, DaemonError, Ready, RunOptions, load_config, run};
-use moa_platform::{Paths, ensure_private_dir};
+use moa_daemon::{CoreHandle, DaemonError, Exec, Ready, RunOptions, load_config, run};
+use moa_platform::{Inherited, Paths, ensure_private_dir};
 use moa_store::Store;
 use moa_testkit::brain::{TYPICAL_NOW, TYPICAL_TZ};
 use moa_testkit::{
-    FakeStep, StubStep, TempBrain, fake_claude, stub_log, stub_moa_toml, test_bin, wait_for,
-    write_script, write_stub_script,
+    FakeStep, StubStep, TempBrain, fake_claude, stub_acp, stub_log, stub_moa_toml, test_bin,
+    wait_for, write_script, write_stub_script,
 };
 use serde_json::{Value, json};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -40,6 +40,9 @@ pub struct Rig {
     pub time: Arc<FakeTime>,
     /// The agent folder: the stub's script, log and files are here.
     pub agent: PathBuf,
+    /// The daemon's program, when it is a copy of `stub-acp` ([`Rig::with_exe`]); else the
+    /// test's own.
+    pub exe: Option<PathBuf>,
 }
 
 /// A session's agent tab on the rig's terminal server ([`Rig::agent_tab`]).
@@ -63,6 +66,8 @@ pub struct Up {
     pub sock: PathBuf,
     pub core: CoreHandle,
     pub done: JoinHandle<Result<(), DaemonError>>,
+    /// Where the daemon hands its socket and lock when it upgrades ([`Up::handoff`]).
+    pub handoffs: mpsc::Receiver<Inherited>,
 }
 
 impl Rig {
@@ -86,12 +91,71 @@ impl Rig {
             paths,
             time,
             agent,
+            exe: None,
+        }
+    }
+
+    /// The daemon's program becomes a copy of `stub-acp` in the root, `bin/moa`, which
+    /// answers `build-id` as moa does: [`Rig::rebuild`] replaces it with a new build.
+    pub fn with_exe(mut self) -> Rig {
+        let dir = self.tb.root().join("bin");
+        std::fs::create_dir_all(&dir).expect("the program's folder");
+        let exe = dir.join("moa");
+        std::fs::copy(stub_acp(), &exe).expect("a copy of stub-acp");
+        set_mtime(&exe, 0);
+        self.exe = Some(exe);
+        self
+    }
+
+    /// The daemon's program ([`Rig::with_exe`]).
+    pub fn exe(&self) -> &Path {
+        self.exe.as_deref().expect("a rig made with_exe")
+    }
+
+    /// Puts a new build in the program's place as an install does: a whole copy written
+    /// beside it, its time `n` seconds on, then renamed over it.
+    pub fn rebuild(&self, n: u64) {
+        let new = self.exe().with_extension("new");
+        std::fs::copy(stub_acp(), &new).expect("a copy of stub-acp");
+        set_mtime(&new, n);
+        std::fs::rename(&new, self.exe()).expect("the new build is put in place");
+    }
+
+    /// Puts a half-written program in its place: an empty file, renamed over it.
+    pub fn half_rebuild(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        let new = self.exe().with_extension("new");
+        std::fs::write(&new, "").expect("an empty file");
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
+            .expect("it is runnable");
+        std::fs::rename(&new, self.exe()).expect("it is put in place");
+    }
+
+    /// The build of the daemon's program as it is now.
+    pub fn build(&self) -> String {
+        match &self.exe {
+            Some(exe) => moa_platform::build_id_of(exe).expect("the program's build"),
+            None => moa_platform::build_id().to_string(),
         }
     }
 
     /// Starts the daemon and waits until it is ready.
     pub async fn start(&self) -> Up {
+        self.start_from(None).await
+    }
+
+    /// Starts the next image of a daemon that upgraded, with what it handed over.
+    pub async fn restart(&self, inherited: Inherited) -> Up {
+        self.start_from(Some(inherited)).await
+    }
+
+    async fn start_from(&self, inherited: Option<Inherited>) -> Up {
         let (tx, rx) = oneshot::channel();
+        let (handoff, handoffs) = mpsc::channel(1);
+        let exe = match &self.exe {
+            Some(exe) => exe.clone(),
+            None => moa_daemon::daemon_exe().expect("the test's program"),
+        };
         let done = tokio::spawn(run(RunOptions {
             paths: self.paths.clone(),
             brain: BrainName::default_brain(),
@@ -103,13 +167,22 @@ impl Rig {
             ready: Ready::Core(tx),
             events_capacity: 256,
             uid_override: None,
+            exe,
+            build: self.build(),
+            exec: Exec::Test(handoff),
+            inherited,
         }));
         let (sock, core) = match timeout(WAIT, rx).await {
             Ok(Ok(up)) => up,
             Ok(Err(_)) => panic!("run ended before ready: {:?}", done.await),
             Err(_) => panic!("run was not ready after 10 s"),
         };
-        Up { sock, core, done }
+        Up {
+            sock,
+            core,
+            done,
+            handoffs,
+        }
     }
 
     /// The stub's log lines for `method`, oldest first.
@@ -340,6 +413,35 @@ impl Rig {
 }
 
 impl Up {
+    /// Waits for the daemon to upgrade: what it handed over, once its `run` has ended.
+    pub async fn handoff(self) -> Inherited {
+        let Up {
+            done, mut handoffs, ..
+        } = self;
+        let inherited = timeout(WAIT, handoffs.recv())
+            .await
+            .expect("the daemon hands over within 10 s")
+            .expect("the daemon handed over");
+        let ended = timeout(WAIT, done)
+            .await
+            .expect("the old image ends")
+            .expect("no panic");
+        assert!(ended.is_ok(), "{ended:?}");
+        assert!(
+            matches!(
+                handoffs.try_recv(),
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ),
+            "the daemon handed over once"
+        );
+        inherited
+    }
+
+    /// Whether the daemon has handed over yet.
+    pub fn handed_over(&self) -> bool {
+        !self.handoffs.is_empty()
+    }
+
     pub fn client(&self) -> Client {
         let mut c = Client::connect(&self.sock);
         c.hello();
@@ -438,6 +540,17 @@ impl Up {
             .expect("no panic");
         assert!(ended.is_ok(), "{ended:?}");
     }
+}
+
+/// Sets `path`'s modification time to `n` seconds after a fixed moment: a build id changes
+/// with it.
+fn set_mtime(path: &Path, n: u64) {
+    let at = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + n);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(at))
+        .expect("the time is set");
 }
 
 /// An answer chunk of message `id`.

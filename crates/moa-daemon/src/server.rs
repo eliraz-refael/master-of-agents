@@ -11,23 +11,28 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::core_task::CoreHandle;
-use crate::session::{peer_allowed, serve};
+use crate::session::{Program, peer_allowed, serve};
 
 /// Pause after a failed `accept` (out of descriptors, say), so a persistent error doesn't spin.
 const ACCEPT_RETRY: Duration = Duration::from_millis(200);
 
 /// Accepts until `stop`; sessions get `stop` as their shutdown token and `close` to end on. A connection from another user is closed and logged.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn accept_loop(
     listener: Arc<UnixListener>,
     core: CoreHandle,
     brain: BrainName,
+    program: Arc<Program>,
     stop: CancellationToken,
     close: CancellationToken,
     sessions: TaskTracker,
     my_uid: u32,
 ) {
     loop {
+        // `stop` first: once the daemon stops accepting, what waits in the backlog stays
+        // there, for the next image when it upgrades.
         let accepted = tokio::select! {
+            biased;
             _ = stop.cancelled() => return,
             r = listener.accept() => r,
         };
@@ -50,6 +55,7 @@ pub(crate) async fn accept_loop(
                     stream,
                     core.clone(),
                     brain.clone(),
+                    program.clone(),
                     stop.clone(),
                     close.clone(),
                 ));
