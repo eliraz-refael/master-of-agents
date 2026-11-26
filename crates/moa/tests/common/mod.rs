@@ -399,6 +399,7 @@ pub fn panels(tb: &TempBrain) -> Vec<Value> {
         autostart: None,
         on_mismatch: OnMismatch::Accept,
         build: moa_platform::build_id_of(Path::new(MOA)).unwrap(),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -282,25 +282,105 @@ fn build_of(status: &Output) -> String {
         .to_string()
 }
 
-#[test]
-fn a_rebuilt_client_restarts_the_daemon_on_its_build() {
-    let r = typical();
-    let other_dir = r.tb.root().join("other");
-    fs::create_dir_all(&other_dir).unwrap();
+/// Another install: a copy of `moa` in `<root>/other`, with `moactl` beside it.
+fn other_install(r: &Rig) -> PathBuf {
+    let dir = r.tb.root().join("other");
+    fs::create_dir_all(&dir).unwrap();
     // Another path is another build id.
-    fs::copy(MOA, other_dir.join("moa")).unwrap();
-    symlink(other_dir.join("moa"), other_dir.join("moactl")).unwrap();
+    fs::copy(MOA, dir.join("moa")).unwrap();
+    symlink(dir.join("moa"), dir.join("moactl")).unwrap();
+    dir
+}
 
+/// L1's refusal, as another install's `moactl` prints it: the daemon runs `moa` (the rig's
+/// `moactl` has no `moa` beside it, so its real path), and this one is `<other>/moa`.
+fn refused_line(other: &Path) -> String {
+    format!(
+        "moa: brain 'default' is run by {}; this moa is {}. Use that one, or stop the daemon \
+         first: moa shutdown\n",
+        fs::canonicalize(MOA).unwrap().display(),
+        other.join("moa").display()
+    )
+}
+
+/// L1: a client from another install never stops the daemon; it is refused.
+#[test]
+fn another_install_is_refused_not_restarted() {
+    let r = typical();
+    let other = other_install(&r);
     ok(&r.moactl(&["brief"]));
     let before = r.moa(&["status"]);
     ok(&before);
 
-    let o = r.run_as(&other_dir.join("moactl"), &["brief"], &[]);
-    ok(&o);
-    let after = r.run_as(&other_dir.join("moa"), &["status"], &[]);
+    let o = r.run_as(&other.join("moactl"), &["brief"], &[]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(err(&o), refused_line(&other));
+    assert_eq!(out(&o), "");
+    let after = r.run_as(&other.join("moa"), &["status"], &[]);
     ok(&after);
-    assert_ne!(pid_of(&after), pid_of(&before));
-    assert_ne!(build_of(&after), build_of(&before));
+    assert_eq!(pid_of(&after), pid_of(&before));
+    assert_eq!(build_of(&after), build_of(&before));
+}
+
+/// Review Focus 3: calls alternating between two installs on one root never restart the
+/// daemon: one pid throughout, and every call from the other install is refused.
+#[test]
+fn two_installs_never_restart_each_other() {
+    let r = typical();
+    let other = other_install(&r);
+    ok(&r.moactl(&["brief"]));
+    let pid = pid_of(&r.moa(&["status"]));
+    for i in 0..10 {
+        if i % 2 == 0 {
+            ok(&r.moactl(&["task", "ls"]));
+        } else {
+            let o = r.run_as(&other.join("moactl"), &["task", "ls"], &[]);
+            assert_eq!(o.status.code(), Some(1), "call {i}");
+            assert_eq!(err(&o), refused_line(&other), "call {i}");
+        }
+        let status = r.moa(&["status"]);
+        ok(&status);
+        assert_eq!(pid_of(&status), pid, "call {i}");
+    }
+}
+
+/// The program a started daemon runs and upgrades into (`MOA_EXE`, as its hello names it).
+fn daemon_exe(r: &Rig) -> Option<String> {
+    let opts = moa_client::ClientOptions {
+        paths: r.tb.paths(),
+        brain: moa_core::config::BrainName::default_brain(),
+        client: "ctl-test",
+        caller: moa_core::state::CallerInfo::default(),
+        autostart: None,
+        on_mismatch: moa_client::OnMismatch::Accept,
+        build: String::new(),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let client = moa_client::Client::connect(opts).await.expect("running");
+        client.hello().exe.clone()
+    })
+}
+
+/// L2: autostart hands the daemon the path that was run, links kept, so it follows a
+/// profile link across upgrades. Run as `moactl`, the `moa` beside it is that path.
+#[test]
+fn autostart_passes_the_path_you_ran() {
+    let r = typical();
+    let moa = r.tb.root().join("bin/moa");
+    symlink(MOA, &moa).unwrap();
+    let ran = moa.display().to_string();
+
+    ok(&r.run_as(&moa, &["task", "ls"], &[]));
+    assert_eq!(daemon_exe(&r).as_deref(), Some(ran.as_str()));
+    ok(&r.moa(&["shutdown"]));
+
+    ok(&r.moactl(&["brief"]));
+    assert_eq!(daemon_exe(&r).as_deref(), Some(ran.as_str()));
 }
 
 #[test]

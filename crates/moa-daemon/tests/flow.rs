@@ -93,6 +93,7 @@ async fn twenty_verbs_launch_nothing() {
         autostart: None,
         on_mismatch: OnMismatch::Restart,
         build: moa_platform::build_id().into(),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
     })
     .await
     .expect("connects to the running daemon");

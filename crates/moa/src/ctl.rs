@@ -74,6 +74,7 @@ impl Here {
             autostart: None,
             on_mismatch: OnMismatch::Accept,
             build: build_id().into(),
+            upgrade_wait: UPGRADE_WAIT,
         }
     }
 }
@@ -193,7 +194,8 @@ fn verb(m: &Moactl) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs `op` on `brain`'s daemon, starting it (or restarting it on another build) first.
+/// Runs `op` on `brain`'s daemon, starting it first, or upgrading it when its program is
+/// now this build (L1).
 pub(crate) fn send(here: &Here, brain: BrainName, op: Op) -> Result<Done, String> {
     let exe = own_exe().map_err(|e| format!("can't find this program: {e}"))?;
     let mut opts = here.options(brain);

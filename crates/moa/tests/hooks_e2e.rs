@@ -50,6 +50,7 @@ impl Recorder {
             autostart: None,
             on_mismatch: OnMismatch::Accept,
             build: build_id_of(Path::new(MOA)).unwrap(),
+            upgrade_wait: moa_client::UPGRADE_WAIT,
         };
         let (ready, subscribed) = mpsc::channel();
         let rows = Arc::clone(&seen);

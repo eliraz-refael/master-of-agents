@@ -51,8 +51,10 @@ pub const UPGRADE_WAIT: Duration = Duration::from_secs(30);
 /// What to do when the daemon is a different build from this client.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OnMismatch {
-    /// Ask it to stop, start a fresh one, and say hello again. Once: a
-    /// daemon that still doesn't match is an error.
+    /// Follow the upgrade policy (L1): a daemon whose program is now this build upgrades in
+    /// place; one run by another install is left running and refused; one from before live
+    /// updates is stopped and a fresh one started, once (a daemon that still doesn't match
+    /// is an error).
     Restart,
     /// Keep it; the caller sees `hello().matched == false`.
     Accept,
@@ -66,11 +68,14 @@ pub struct ClientOptions {
     pub client: &'static str,
     pub caller: CallerInfo,
     /// The `moa` executable to start when no daemon answers; `None` never starts one.
-    /// Pass [`own_exe`], so a `moactl` symlink never becomes the daemon's `argv[0]`.
+    /// Pass [`own_exe`]: the path that was run, so the daemon follows it (L2), and never a
+    /// `moactl` link, which isn't a daemon.
     pub autostart: Option<PathBuf>,
     pub on_mismatch: OnMismatch,
     /// This client's build id (`moa_platform::build_id()`), compared with the daemon's.
     pub build: String,
+    /// How long `Restart` waits for a daemon upgrading in place ([`UPGRADE_WAIT`]).
+    pub upgrade_wait: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,9 +186,25 @@ pub fn daemon_env(
     env
 }
 
-/// This executable's real path, for [`ClientOptions::autostart`].
+/// This moa's program, for [`ClientOptions::autostart`] (L2): the path it was run as, links
+/// kept (`moa_platform::invoked_exe`), so a daemon started through a profile link follows
+/// that link across upgrades. Run as `moactl`, it is the `moa` beside it when that is this
+/// same program (`moactl daemon` isn't the daemon), else this program's real path.
 pub fn own_exe() -> io::Result<PathBuf> {
-    std::fs::canonicalize(std::env::current_exe()?)
+    let real = || -> io::Result<PathBuf> { std::fs::canonicalize(std::env::current_exe()?) };
+    let ran = moa_platform::invoked_exe();
+    if !ran.is_absolute() {
+        return real();
+    }
+    if ran.file_name().is_some_and(|n| n == "moactl") {
+        let moa = ran.with_file_name("moa");
+        let real = real()?;
+        return Ok(match std::fs::canonicalize(&moa) {
+            Ok(m) if m == real => moa,
+            _ => real,
+        });
+    }
+    Ok(ran)
 }
 
 /// Whether an I/O error means the other end has gone.
@@ -384,9 +405,34 @@ impl Client {
                     message: "moa was restarted and is still a different build".into(),
                 }));
             }
-            restarted = true;
-            client.stop_for_restart(&opts).await?;
+            match client.follow_policy(&opts).await? {
+                Some(client) => return Ok(client),
+                // A daemon from before live updates stopped: start this build's, once.
+                None => restarted = true,
+            }
         }
+    }
+
+    /// L1, for a daemon on another build: asks it to upgrade if its program is no longer
+    /// the build it runs, and waits for it to come back on this build. A daemon run by
+    /// another install (it isn't stale, or came back on another build) is left running and
+    /// refused. `None` once a daemon from before live updates has stopped for a restart.
+    async fn follow_policy(mut self, opts: &ClientOptions) -> Result<Option<Client>, ClientError> {
+        let Some(ok) = self.ask_upgrade(true).await? else {
+            self.stop_for_restart(opts).await?;
+            return Ok(None);
+        };
+        if !ok.upgrading {
+            let exe = ok.exe.or_else(|| self.hello.exe.clone());
+            return Err(another_install(opts, exe));
+        }
+        let (Upgraded::InPlace(back) | Upgraded::Restarted(back)) = self
+            .await_upgrade(ok.waiting_for_moa, opts.upgrade_wait)
+            .await?;
+        if back.hello.build != opts.build {
+            return Err(another_install(opts, back.hello.exe.clone()));
+        }
+        Ok(Some(back))
     }
 
     async fn greet(stream: UnixStream, opts: &ClientOptions) -> Result<Client, ClientError> {
@@ -405,8 +451,8 @@ impl Client {
         })
     }
 
-    /// Asks the daemon to stop for a restart and waits until its process is gone. A
-    /// `shutdown`, so that a daemon that upgrades in place still stops here.
+    /// Asks a daemon from before live updates to stop for a restart and waits until its
+    /// process is gone: a `shutdown`, which every daemon takes.
     async fn stop_for_restart(mut self, opts: &ClientOptions) -> Result<(), ClientError> {
         let pid = self.hello.pid;
         self.wire.stop().await?;
@@ -549,6 +595,24 @@ impl Client {
     }
 }
 
+/// L1's refusal: the brain's daemon runs `daemon_exe`, another install than this client's.
+fn another_install(opts: &ClientOptions, daemon_exe: Option<String>) -> ClientError {
+    let theirs = daemon_exe.unwrap_or_else(|| "another moa".into());
+    let ours = opts
+        .autostart
+        .clone()
+        .unwrap_or_else(moa_platform::invoked_exe);
+    ClientError::Rpc(RpcError {
+        code: code::BUILD_MISMATCH,
+        message: format!(
+            "moa: brain '{}' is run by {theirs}; this moa is {}. Use that one, or stop the \
+             daemon first: moa shutdown",
+            opts.brain.as_str(),
+            ours.display()
+        ),
+    })
+}
+
 fn start_error(paths: &Paths, brain: &BrainName, line: &str) -> ClientError {
     let log = paths.stderr_log(brain.as_str());
     ClientError::Start(format!("{line} (log: {})", log.display()))
@@ -617,9 +681,11 @@ async fn start(opts: &ClientOptions, exe: &Path, sock: &Path) -> Result<UnixStre
         .mode(0o600)
         .open(paths.stderr_log(b))?;
     let mut cmd = Command::new(exe);
+    // The daemon runs, watches and upgrades into the path it was started from (L2).
     cmd.args(["daemon", "--brain", b, "--notify-ready"])
         .env_clear()
         .envs(daemon_env(std::env::vars_os(), paths))
+        .env("MOA_EXE", exe)
         .current_dir(paths.state_dir())
         .process_group(0)
         .stdin(Stdio::null())
@@ -872,6 +938,7 @@ mod tests {
             autostart: None,
             on_mismatch: OnMismatch::Accept,
             build: "b".into(),
+            upgrade_wait: UPGRADE_WAIT,
         };
         Fake { _dir: dir, opts }
     }
@@ -977,6 +1044,7 @@ mod tests {
             autostart: None,
             on_mismatch: OnMismatch::Accept,
             build: "b".into(),
+            upgrade_wait: UPGRADE_WAIT,
         };
         (dir, opts, listener)
     }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
-use moa_client::{Client, ClientOptions, OnMismatch, own_exe};
+use moa_client::{Client, ClientOptions, OnMismatch, UPGRADE_WAIT, own_exe};
 use moa_core::config::{BrainName, RESERVED_BRAIN_NAMES};
 use moa_core::op::Op;
 use moa_core::state::CallerInfo;
@@ -25,8 +25,9 @@ use crate::ctl::runtime;
 
 /// How long each answer from the daemon may take (T5).
 const ANSWER_WAIT: Duration = Duration::from_secs(10);
-/// How long connecting may take in all, a start or a restart included.
-const CONNECT_WAIT: Duration = Duration::from_secs(30);
+/// How long connecting may take in all, a start, a restart or an upgrade's wait for moa's
+/// turn included: longer than that wait, so the client's own words about it are what is said.
+const CONNECT_WAIT: Duration = UPGRADE_WAIT.saturating_add(ANSWER_WAIT);
 const NOT_SWITCHED_OVER: &str = "moa v1 isn't switched over yet; try moa --sandbox";
 const NO_TMUX: &str = "moa needs tmux 3.4 or newer; install it and run moa again";
 
@@ -262,6 +263,7 @@ async fn connect(paths: &Paths, brain: BrainName, log: &Path) -> Result<Client, 
         autostart: Some(exe),
         on_mismatch: OnMismatch::Restart,
         build: build_id().into(),
+        upgrade_wait: UPGRADE_WAIT,
     };
     timeout(CONNECT_WAIT, Client::connect(opts))
         .await

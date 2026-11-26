@@ -97,6 +97,7 @@ where
         autostart: None,
         on_mismatch: OnMismatch::Accept,
         build: "b".into(),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
     };
     (dir, opts)
 }

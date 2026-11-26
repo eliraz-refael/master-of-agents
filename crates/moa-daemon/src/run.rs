@@ -161,8 +161,8 @@ fn tmux_link(
 /// The daemon's own program, read once and handed to everything that runs it (the session
 /// plugin's hooks, the panels), watched for new builds and upgraded into (L2): `MOA_EXE`, the
 /// path the client that started it ran, links kept, when that is a full path that exists.
-/// Otherwise its real path, as `moa_client::own_exe` gives it. Linux names a binary replaced
-/// under a running daemon `<path> (deleted)`; the program to run is the one now at `<path>`.
+/// Otherwise its real path. Linux names a binary replaced under a running daemon
+/// `<path> (deleted)`; the program to run is the one now at `<path>`.
 pub fn daemon_exe() -> io::Result<PathBuf> {
     if let Some(exe) = std::env::var_os("MOA_EXE").map(PathBuf::from)
         && exe.is_absolute()
