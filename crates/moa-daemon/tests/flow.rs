@@ -67,6 +67,7 @@ async fn twenty_verbs_launch_nothing() {
         paths: paths.clone(),
         brain: BrainName::default_brain(),
         config: load_config(&paths).expect("a config"),
+        config_text: None,
         tz: TimeZone::posix(TYPICAL_TZ).unwrap(),
         clock: time.clone(),
         alarm: Box::new(time.alarm()),

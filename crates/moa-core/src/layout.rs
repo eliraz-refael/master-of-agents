@@ -267,7 +267,8 @@ pub struct Layouts {
     /// The presets the file doesn't have, then the file's entries in its order (the spike's
     /// merge, so a deleted preset comes back).
     pub entries: IndexMap<String, Value>,
-    /// Why the file doesn't parse. The presets alone are used, and nothing is written over it.
+    /// Why the file doesn't parse. Nothing is written over it, and the layouts are the last
+    /// good read's (the presets alone, when none was good; `ops::layout::refresh`).
     pub file_error: Option<String>,
 }
 

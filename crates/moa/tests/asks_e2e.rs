@@ -10,9 +10,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use moa_platform::ensure_private_dir;
-use moa_testkit::{
-    FakeStep, StubStep, TempBrain, Terminal, stub_moa_toml, wait_for, write_stub_script,
-};
+use moa_testkit::{FakeStep, StubStep, TempBrain, Terminal, wait_for, write_stub_script};
 use serde_json::{Value, json};
 
 use common::*;
@@ -41,14 +39,7 @@ struct Cockpit {
 }
 
 fn cockpit(moa: &[StubStep]) -> Cockpit {
-    let base = stub_moa_toml();
-    let toml = base.replacen(
-        "moa_account = \"acct-a\"\n",
-        "moa_account = \"acct-a\"\nopen_account = \"acct-a\"\n",
-        1,
-    );
-    assert_ne!(toml, base, "open_account isn't set: {base}");
-    let tb = TempBrain::new(Some(&toml));
+    let tb = TempBrain::new(Some(&stub_moa_toml_opening_sessions()));
     // moa opened the day already: attaching opens nothing here (D2).
     tb.opened_today();
     let agent = tb.paths().agent_dir(B);
@@ -218,13 +209,6 @@ fn runs(dir: &Path) -> Vec<Value> {
 fn ran(dir: &Path, n: usize) -> Value {
     let done = wait_for(SHOWS, || runs(dir).get(n).cloned());
     done.unwrap_or_else(|| panic!("run {n} in {} never ended: {:?}", dir.display(), runs(dir)))
-}
-
-fn say(text: &str, id: &str) -> StubStep {
-    StubStep::Say {
-        text: text.into(),
-        id: Some(id.into()),
-    }
 }
 
 /// The roadmap's "done when": Kite asks Harbor and prints Harbor's answer; Harbor asks moa,

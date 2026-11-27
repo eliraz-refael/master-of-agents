@@ -760,6 +760,17 @@ impl Config {
     }
 }
 
+/// The log's warning about the top-level tables of `moa.toml` moa doesn't know and skips,
+/// said at start and at each reload; `None` when there are none.
+pub fn skipped_warning(config: &Config) -> Option<String> {
+    (!config.skipped_tables.is_empty()).then(|| {
+        format!(
+            "moa.toml has tables moa doesn't know, which it skips: {}",
+            config.skipped_tables.join(", ")
+        )
+    })
+}
+
 /// The agent store of whoever is calling: `CLAUDE_CONFIG_DIR`, else `<home>/.claude`.
 pub fn caller_store(claude_config_dir: Option<&OsStr>, home: &Path) -> PathBuf {
     match claude_config_dir {

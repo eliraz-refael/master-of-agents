@@ -668,17 +668,6 @@ fn a_panel_tmux_kills_logs_one_plain_end_line() {
     assert!(ends[0].starts_with("stopped"), "{ends:?}\n{written}");
 }
 
-/// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
-/// panel behind.
-struct Reaped(std::process::Child);
-
-impl Drop for Reaped {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// L14: a panel whose terminal goes with no signal at all (its pty's master closed; the pty
 /// isn't its controlling terminal, so nothing sends SIGHUP) ends by itself, with one end
 /// line, rather than spinning in the terminal's read and ignoring SIGTERM.

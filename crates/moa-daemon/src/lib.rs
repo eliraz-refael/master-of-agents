@@ -4,6 +4,7 @@
 
 mod acp;
 pub mod clock;
+mod config_watch;
 pub mod core_task;
 mod follow;
 pub mod inspect;
@@ -12,12 +13,17 @@ mod run;
 pub mod scheduler;
 mod server;
 mod session;
+mod settled;
 pub mod supervise;
 pub mod testing;
 mod tmux;
 
 pub use core_task::{CoreHandle, CoreOptions, DRAIN_CAP, DaemonError, Stats};
 pub use moa_core::state::StatusData;
-pub use run::{Exec, ProbeWait, Ready, RunOptions, daemon_exe, load_config, run};
+pub use run::{
+    ConfigText, Exec, ProbeWait, Ready, RunOptions, daemon_exe, load_config, load_config_with_text,
+    run,
+};
 pub use session::{Program, peer_allowed, serve};
+pub use settled::SETTLE;
 pub use tmux::{TmuxLink, tmux_env};

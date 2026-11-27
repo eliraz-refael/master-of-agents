@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::clock::Clock;
+use crate::config_watch::{ConfigFile, ConfigWatch};
 use crate::core_task::{CoreHandle, CoreOptions, DaemonError};
 use crate::follow::Follow;
 pub use crate::follow::ProbeWait;
@@ -66,6 +67,9 @@ pub struct RunOptions {
     pub paths: Paths,
     pub brain: BrainName,
     pub config: Config,
+    /// The `moa.toml` text `config` was read from ([`load_config_with_text`]). `None` when it
+    /// wasn't read from the file (tests): the watch takes the file as it is when armed.
+    pub config_text: Option<ConfigText>,
     pub tz: TimeZone,
     pub clock: Arc<dyn Clock>,
     pub alarm: Box<dyn WallTimer>,
@@ -94,11 +98,21 @@ pub struct RunOptions {
 /// and every Claude account's launcher filled in where `PATH` has one. Shared by
 /// `moa daemon` and the client that starts it.
 pub fn load_config(paths: &Paths) -> Result<Config, DaemonError> {
+    load_config_with_text(paths).map(|(config, _)| config)
+}
+
+/// The `moa.toml` text a config was read from; `None` when there was no file.
+#[derive(Clone, Debug)]
+pub struct ConfigText(pub(crate) Option<String>);
+
+/// [`load_config`], and the text it read, so the daemon's watch on the file starts from what
+/// its config holds: a save between the read and the watch is still heard (L8).
+pub fn load_config_with_text(paths: &Paths) -> Result<(Config, ConfigText), DaemonError> {
     let text = paths.read_config()?;
     let mut config =
         Config::from_file_text(text.as_deref(), paths.home(), moa_platform::canonical)?;
     fill_launchers(&mut config, std::env::var_os("PATH").as_deref());
-    Ok(config)
+    Ok((config, ConfigText(text)))
 }
 
 /// H16: a Claude account with no `launcher` uses the `claude` on `path`, looked for once,
@@ -125,6 +139,8 @@ struct Up {
     sock: PathBuf,
     core: CoreHandle,
     sigs: Signals,
+    /// The config files, followed once the daemon is up.
+    config_watch: ConfigWatch,
 }
 
 /// The signals the daemon answers.
@@ -291,6 +307,7 @@ async fn bring_up(
     paths: &Paths,
     brain: &BrainName,
     config: Config,
+    config_text: Option<ConfigText>,
     tz: TimeZone,
     clock: Arc<dyn Clock>,
     alarm: Box<dyn WallTimer>,
@@ -327,11 +344,8 @@ async fn bring_up(
             Some(from) => tracing::info!("moa daemon upgraded from build {from} for brain {b}"),
             None => tracing::info!("moa daemon starting for brain {b}"),
         }
-        if !config.skipped_tables.is_empty() {
-            tracing::warn!(
-                "moa.toml has tables moa doesn't know, which it skips: {}",
-                config.skipped_tables.join(", ")
-            );
+        if let Some(warning) = moa_core::config::skipped_warning(&config) {
+            tracing::warn!("{warning}");
         }
         let launch = panel_launch(paths, exe);
         // T21: until the switch-over, only a sandbox's own server is ever touched.
@@ -377,6 +391,18 @@ async fn bring_up(
             scope_file: paths.config_dir().join(format!("{b}.md")),
             constitution_file: paths.config_dir().join(format!("{CONSTITUTION_NAME}.md")),
         };
+        // Armed before the core reads the others at its start, so a save from then on is
+        // heard; `moa.toml` is compared with the text `config` was read from.
+        let mut config_watch = ConfigWatch::new(
+            paths.clone(),
+            config_text,
+            vec![
+                (ConfigFile::MoaToml, paths.config_file()),
+                (ConfigFile::Layouts, deps.layouts_file.clone()),
+                (ConfigFile::Instructions, deps.scope_file.clone()),
+                (ConfigFile::Instructions, deps.constitution_file.clone()),
+            ],
+        );
         let core = CoreHandle::start(CoreOptions {
             brain: brain.clone(),
             config,
@@ -392,16 +418,18 @@ async fn bring_up(
             facts: Some(facts),
         })
         .await?;
-        Ok::<_, DaemonError>((core, Signals { term, int, hup }))
+        config_watch.check(&core);
+        Ok::<_, DaemonError>((core, Signals { term, int, hup }, config_watch))
     }
     .await;
     match up {
-        Ok((core, sigs)) => Ok(Up {
+        Ok((core, sigs, config_watch)) => Ok(Up {
             lock,
             listener: Arc::new(listener),
             sock,
             core,
             sigs,
+            config_watch,
         }),
         Err(e) => {
             remove_socket(&sock);
@@ -463,6 +491,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         paths,
         brain,
         config,
+        config_text,
         tz,
         clock,
         alarm,
@@ -484,6 +513,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         &paths,
         &brain,
         config,
+        config_text,
         tz,
         clock,
         alarm,
@@ -568,10 +598,10 @@ fn hand_over(
     }
 }
 
-/// Accepts clients, follows the program and watches for the end, then winds down: one wind
-/// down, whether the daemon stops or upgrades. `Ok(None)` after a signal or a `shutdown`, the
-/// socket file removed; `Ok(Some)` at the core's word to upgrade, with what the next image
-/// takes over; `Err` when the core can't go on.
+/// Accepts clients, follows the program and the config files and watches for the end, then
+/// winds down: one wind down, whether the daemon stops or upgrades. `Ok(None)` after a signal
+/// or a `shutdown`, the socket file removed; `Ok(Some)` at the core's word to upgrade, with
+/// what the next image takes over; `Err` when the core can't go on.
 async fn keep_up(
     up: Up,
     brain: BrainName,
@@ -586,6 +616,7 @@ async fn keep_up(
         sock,
         core,
         mut sigs,
+        config_watch,
     } = up;
     // `stop` ends the accept loop (and is what `shutdown` cancels); `close` ends the
     // sessions, and only after the core is done, so each gets its reply or the stopping
@@ -626,6 +657,7 @@ async fn keep_up(
     // written before anything accepted it) spooled their lines after the drain at start.
     core.drain_spool();
     let following = tokio::spawn(follow.run(core.clone()));
+    let reloading = tokio::spawn(config_watch.run(core.clone()));
 
     let outcome = loop {
         tokio::select! {
@@ -672,6 +704,7 @@ async fn keep_up(
     // Stop accepting, then let the core finish: after a fatal stop `finished()` has spoken
     // but the core is still answering its queue, so wait for its end either way.
     following.abort();
+    reloading.abort();
     stop.cancel();
     // At a stop, lines still in the kernel's accept backlog are dropped with the socket: an
     // accepted window. At an upgrade they wait there for the next image.

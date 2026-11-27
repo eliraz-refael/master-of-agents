@@ -1,0 +1,134 @@
+//! Following the config files (L8, §6.15.4): `moa.toml`, `layouts.json`, the brain's scope
+//! file and moa's constitution, all in the config folder, are read again when saved.
+//!
+//! One watch hears the four ([`Settled`]), so an editor's several steps are one save. Once a
+//! save has settled, each file whose bytes changed since it was last looked at is told to
+//! the core: `moa.toml` read whole as at start ([`load_config`]), or why it can't be; the
+//! others only as changed, since the core reads them itself. A save that leaves a file as it
+//! was (a touch) is told nothing.
+
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+
+use moa_core::config_reload::Unread;
+use moa_core::effect::Input;
+use moa_platform::{Paths, exe_chain};
+
+use crate::core_task::CoreHandle;
+use crate::run::{ConfigText, load_config_with_text};
+use crate::settled::Settled;
+
+/// Which of the config files a path is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ConfigFile {
+    MoaToml,
+    Layouts,
+    /// The brain's scope file or moa's constitution: both are moa's instructions.
+    Instructions,
+}
+
+/// One watched file, and its bytes when it was last looked at (`None`: none, or unreadable).
+struct Seen {
+    file: ConfigFile,
+    path: PathBuf,
+    bytes: Option<Vec<u8>>,
+}
+
+pub(crate) struct ConfigWatch {
+    paths: Paths,
+    files: Vec<Seen>,
+    watch: Settled,
+}
+
+impl ConfigWatch {
+    /// Watches `files`, each as it is now: `moa.toml` as `toml` says the daemon's config read
+    /// it, when it says, so a save since is heard at once. Their folders are made when
+    /// missing, so a file saved there later is heard. Inside the runtime, and before the
+    /// daemon says it is ready.
+    pub(crate) fn new(
+        paths: Paths,
+        toml: Option<ConfigText>,
+        files: Vec<(ConfigFile, PathBuf)>,
+    ) -> ConfigWatch {
+        for dir in files.iter().filter_map(|(_, path)| path.parent()) {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                tracing::warn!("the config folder can't be made: {}", e.kind());
+            }
+        }
+        // Each file's symlink chain, as it is at each arming: a file linked from a dotfiles
+        // folder is heard when its target is saved, and when the link is retargeted.
+        let watched: Vec<PathBuf> = files.iter().map(|(_, path)| path.clone()).collect();
+        let files = files
+            .into_iter()
+            .map(|(file, path)| Seen {
+                file,
+                bytes: match (file, &toml) {
+                    (ConfigFile::MoaToml, Some(ConfigText(text))) => {
+                        text.clone().map(String::into_bytes)
+                    }
+                    _ => std::fs::read(&path).ok(),
+                },
+                path,
+            })
+            .collect();
+        let watch = Settled::new(
+            "its config files",
+            "they're read again when it starts",
+            move || watched.iter().flat_map(|path| exe_chain(path)).collect(),
+        );
+        ConfigWatch {
+            paths,
+            files,
+            watch,
+        }
+    }
+
+    /// Follows the files until the task is cancelled.
+    pub(crate) async fn run(mut self, core: CoreHandle) {
+        loop {
+            self.watch.next().await;
+            self.check(&core);
+        }
+    }
+
+    /// Tells the core of each file whose bytes changed: the scope file and the constitution
+    /// together, once. Also run once as the core has started, before the daemon is ready,
+    /// for a file saved between the daemon's read of it and the watch.
+    pub(crate) fn check(&mut self, core: &CoreHandle) {
+        let mut instructions = false;
+        for seen in &mut self.files {
+            let bytes = std::fs::read(&seen.path).ok();
+            if bytes == seen.bytes {
+                continue;
+            }
+            seen.bytes = bytes;
+            match seen.file {
+                ConfigFile::MoaToml => {
+                    tracing::info!("moa.toml was saved; reading it again");
+                    // No file is the default config only at start: one removed keeps the
+                    // last.
+                    let read = match load_config_with_text(&self.paths) {
+                        Ok((_, ConfigText(None))) => {
+                            seen.bytes = None;
+                            Err(Unread::Gone)
+                        }
+                        Ok((config, ConfigText(text))) => {
+                            // What the config handed over was read from: a save between
+                            // the two reads is still told.
+                            seen.bytes = text.map(String::into_bytes);
+                            Ok(config)
+                        }
+                        Err(e) => Err(Unread::Error(e.to_string())),
+                    };
+                    core.stats().configs_read.fetch_add(1, Ordering::SeqCst);
+                    core.input(Input::Config(read));
+                }
+                ConfigFile::Layouts => core.input(Input::LayoutsChanged),
+                ConfigFile::Instructions => instructions = true,
+            }
+        }
+        if instructions {
+            core.input(Input::InstructionsChanged);
+        }
+    }
+}

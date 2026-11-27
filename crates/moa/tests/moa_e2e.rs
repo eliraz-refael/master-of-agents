@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::process::{Child, Stdio};
+use std::path::Path;
 
 use moa_platform::ensure_private_dir;
 use moa_testkit::{StubStep, TempBrain, stub_moa_toml, wait_for, write_stub_script};
@@ -12,17 +12,6 @@ use common::*;
 
 /// Names the brain, as a terminal outside any session must (no `moa.toml` account is guessed).
 const BRAIN: &[(&str, &str)] = &[("MOA_BRAIN", B)];
-
-fn say(text: &str, id: &str) -> StubStep {
-    StubStep::Say {
-        text: text.into(),
-        id: Some(id.into()),
-    }
-}
-
-fn end() -> StubStep {
-    StubStep::End { stop: None }
-}
 
 /// A root whose moa runs the stub, with `steps` as its script.
 fn rig(steps: &[StubStep]) -> TempBrain {
@@ -132,16 +121,12 @@ fn the_thread_survives_a_daemon_restart() {
 #[test]
 fn a_cancel_from_another_terminal_ends_a_hang() {
     let tb = rig(&[say("thinking", "m1"), StubStep::Hang]);
-    let asker: Child = std::process::Command::new(MOA)
-        .args(["console", "prompt", "take your time"])
-        .env_clear()
-        .envs(tb.env())
-        .env("MOA_BRAIN", B)
-        .current_dir(tb.root())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let asker = spawn_exe(
+        &tb,
+        Path::new(MOA),
+        &["console", "prompt", "take your time"],
+        BRAIN,
+    );
 
     // Its first words are saved: the turn has begun and waits for the cancel.
     let begun = wait_for(SHOWS, || {
@@ -155,7 +140,7 @@ fn a_cancel_from_another_terminal_ends_a_hang() {
 
     assert_eq!(ok(&tb, &["console", "cancel"]), "cancelling moa's turn\n");
 
-    let o = asker.wait_with_output().unwrap();
+    let o = asker.ended();
     assert_eq!(
         out(&o),
         "moa's turn ended early: cancelled\n",

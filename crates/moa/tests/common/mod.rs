@@ -3,13 +3,17 @@
 #![allow(dead_code)]
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Child, Command as StdCommand, ExitStatus, Output, Stdio};
 use std::time::Duration;
 
 use assert_cmd::Command;
-use moa_testkit::{FakeStep, TempBrain, Terminal, fake_claude, stub_log, wait_for, write_script};
+use moa_testkit::{
+    FakeStep, StubStep, TempBrain, Terminal, fake_claude, stub_log, stub_moa_toml, wait_for,
+    write_script,
+};
 use serde_json::{Map, Value};
 
 pub mod screen;
@@ -62,12 +66,16 @@ pub fn open_exe(
 }
 
 /// A copy of `moa` at `<root>/install/moa`: an install of its own, as a user's is, which
-/// [`rebuild`] can replace.
+/// [`rebuild`] can replace. The root's [`moactl`] is linked to it from now on, so a
+/// `moactl` call is this install's too.
 pub fn install_copy(tb: &TempBrain) -> PathBuf {
     let dir = tb.root().join("install");
     std::fs::create_dir_all(&dir).unwrap();
     let exe = dir.join("moa");
     std::fs::copy(MOA, &exe).unwrap();
+    let ctl = moactl(tb);
+    std::fs::remove_file(&ctl).unwrap();
+    symlink(&exe, &ctl).unwrap();
     exe
 }
 
@@ -87,6 +95,87 @@ pub fn rebuild(exe: &Path) {
     std::fs::rename(&next, exe).unwrap();
 }
 
+/// What a panel says while moa is another build it can't follow.
+pub const MISMATCH: &str = "from another build of moa";
+
+/// The cockpit run from an install of its own ([`install_copy`]), with a projects panel in
+/// a tab of its own started from it too, beside the tree, console and plan panels moa placed.
+pub struct Installed {
+    // Dropped before `tb`, as a test's own terminal is.
+    pub term: Terminal,
+    pub exe: PathBuf,
+    /// Every panel's pane, the projects panel's last.
+    pub panes: Vec<String>,
+    pub tb: TempBrain,
+}
+
+/// [`installed_in`] a root with the fake account, on a terminal of [`TERM_SIZE`].
+pub fn installed() -> Installed {
+    let tb = TempBrain::new(None);
+    moa_toml_with_fake_account(&tb);
+    installed_in(tb, TERM_SIZE)
+}
+
+/// The cockpit on `tb`, a root already set up, run from an install of its own on a terminal
+/// of `size` ([`Installed`]).
+#[track_caller]
+pub fn installed_in(tb: TempBrain, size: (u16, u16)) -> Installed {
+    let exe = install_copy(&tb);
+    let term = cockpit_up_from(&tb, &exe, size);
+    let projects = panel_tab_from(&tb, &exe, "projects");
+    shows(&tb, &projects, &["▦ projects"]);
+    let mut panes: Vec<String> = cockpit_panes(&tb).into_iter().map(|p| p.id).collect();
+    panes.push(projects);
+    Installed {
+        term,
+        exe,
+        panes,
+        tb,
+    }
+}
+
+impl Installed {
+    /// Each pane's process.
+    pub fn pids(&self) -> Vec<String> {
+        let pid_of = |pane: &str| {
+            tmux(
+                &self.tb,
+                &["display-message", "-p", "-t", pane, "#{pane_pid}"],
+            )
+        };
+        self.panes.iter().map(|p| pid_of(p)).collect()
+    }
+
+    /// Waits until the daemon runs `build` and every panel is linked to it: each pane has
+    /// its `panels` row, which only a panel on the daemon's build has (it says which panel
+    /// it is after a matching hello). Then no pane says it is from another build.
+    #[track_caller]
+    pub fn all_linked_on(&self, build: &str) {
+        let linked = |rows: &[Value]| {
+            self.panes
+                .iter()
+                .all(|p| rows.iter().any(|r| r["pane"] == p.as_str()))
+        };
+        let seen = wait_for(SHOWS, || {
+            let upgraded = status_json(&self.tb)["build"] == build;
+            (upgraded && linked(&panels_on(&self.tb, build))).then_some(())
+        });
+        assert!(
+            seen.is_some(),
+            "not every panel linked on {build}: {:?}\n{:#?}\n{}\n{}",
+            self.panes,
+            panels_on(&self.tb, build),
+            std::fs::read_to_string(self.tb.paths().log_dir().join("panel.log"))
+                .unwrap_or_default(),
+            what_happened(&self.tb, &self.term)
+        );
+        for pane in &self.panes {
+            let screen = screen_of(&self.tb, pane);
+            assert!(!screen.contains(MISMATCH), "{pane}:\n{screen}");
+        }
+    }
+}
+
 /// `exe build-id`: the build `exe` is.
 pub fn build_of(tb: &TempBrain, exe: &Path) -> String {
     let o = run_exe(tb, exe, &["build-id"], &[]);
@@ -94,17 +183,79 @@ pub fn build_of(tb: &TempBrain, exe: &Path) -> String {
     out(&o).trim().to_string()
 }
 
-/// `exe args…` to the end, with the root's environment plus `extra`.
-pub fn run_exe(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
-    Command::new(exe)
-        .args(args)
+/// `exe args…` as a test runs it: in the root, with only the root's environment plus
+/// `extra`.
+fn command(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> StdCommand {
+    let mut cmd = StdCommand::new(exe);
+    cmd.args(args)
         .env_clear()
         .envs(tb.env())
         .envs(extra.iter().copied())
-        .current_dir(tb.root())
+        .current_dir(tb.root());
+    cmd
+}
+
+/// `exe args…` to the end, with the root's environment plus `extra`.
+pub fn run_exe(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
+    Command::from_std(command(tb, exe, args, extra))
         .timeout(Duration::from_secs(30))
         .output()
         .unwrap()
+}
+
+/// `exe args…` started, with the root's environment plus `extra`, no input, and its output
+/// kept for [`Reaped::ended`]. Killed if the test lets go of it before it ends.
+pub fn spawn_exe(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> Reaped {
+    let child = command(tb, exe, args, extra)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("start {} {args:?}: {e}", exe.display()));
+    Reaped(child)
+}
+
+/// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
+/// process behind.
+pub struct Reaped(pub Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Reaped {
+    /// Waits until the child has exited ([`SHOWS`]); what it printed, when [`spawn_exe`]
+    /// kept it. A child still running then is a failure.
+    #[track_caller]
+    pub fn ended(mut self) -> Output {
+        let done = wait_for(SHOWS, || self.0.try_wait().unwrap());
+        let Some(status) = done else {
+            let _ = self.0.kill();
+            let status = self.0.wait().unwrap();
+            let o = self.output(status);
+            panic!("it never ended: {}{}", out(&o), err(&o));
+        };
+        self.output(status)
+    }
+
+    fn output(&mut self, status: ExitStatus) -> Output {
+        let mut stdout = Vec::new();
+        if let Some(pipe) = self.0.stdout.as_mut() {
+            pipe.read_to_end(&mut stdout).unwrap();
+        }
+        let mut stderr = Vec::new();
+        if let Some(pipe) = self.0.stderr.as_mut() {
+            pipe.read_to_end(&mut stderr).unwrap();
+        }
+        Output {
+            status,
+            stdout,
+            stderr,
+        }
+    }
 }
 
 /// `moa args…` to the end, with the root's environment plus `extra`.
@@ -156,7 +307,8 @@ pub fn shutdown(tb: &TempBrain) {
     assert!(o.status.success(), "{}{}", out(&o), err(&o));
 }
 
-/// `moactl`, linked to `moa` as an install would.
+/// `moactl`, linked to `moa` as an install would (to the root's own install, once
+/// [`install_copy`] made one).
 pub fn moactl(tb: &TempBrain) -> PathBuf {
     let bin = tb.root().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -851,6 +1003,18 @@ pub fn session_pane(tb: &TempBrain, term: &Terminal, id: &str) -> String {
     found.unwrap_or_else(|| panic!("no tab runs {id}\n{}", what_happened(tb, term)))
 }
 
+/// Waits until `pane` shows `text`, its words in order whatever the lines it wraps over
+/// ([`names`]).
+#[track_caller]
+pub fn shows_wrapped(tb: &TempBrain, pane: &str, text: &str) {
+    let seen = wait_for(SHOWS, || names(&screen_of(tb, pane), text).then_some(()));
+    assert!(
+        seen.is_some(),
+        "{pane} never showed {text:?}\n{}",
+        tab_shows(tb, pane)
+    );
+}
+
 /// Waits until `pane` shows every one of `texts`.
 #[track_caller]
 pub fn shows(tb: &TempBrain, pane: &str, texts: &[&str]) {
@@ -1161,4 +1325,30 @@ pub fn stub_logged(tb: &TempBrain, method: &str) -> Vec<Value> {
         .into_iter()
         .filter(|l| l["method"] == method)
         .collect()
+}
+
+/// [`stub_moa_toml`], opening sessions with `acct-a` too: moa's agent is the stub, and each
+/// session's is fake-claude.
+pub fn stub_moa_toml_opening_sessions() -> String {
+    let base = stub_moa_toml();
+    let toml = base.replacen(
+        "moa_account = \"acct-a\"\n",
+        "moa_account = \"acct-a\"\nopen_account = \"acct-a\"\n",
+        1,
+    );
+    assert_ne!(toml, base, "open_account isn't set: {base}");
+    toml
+}
+
+/// The stub's answer chunk `text`, with message id `id`.
+pub fn say(text: &str, id: &str) -> StubStep {
+    StubStep::Say {
+        text: text.into(),
+        id: Some(id.into()),
+    }
+}
+
+/// The end of the stub's turn.
+pub fn end() -> StubStep {
+    StubStep::End { stop: None }
 }

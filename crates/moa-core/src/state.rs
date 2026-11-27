@@ -543,6 +543,11 @@ impl State {
         &self.config
     }
 
+    /// Replaces the config with one read again ([`crate::config_reload`]).
+    pub(crate) fn set_config(&mut self, config: Config) {
+        self.config = config;
+    }
+
     /// Set while the store can't be written to; see [`RefuseWrites`].
     pub fn refuse_writes(&self) -> Option<&RefuseWrites> {
         self.refuse_writes.as_ref()

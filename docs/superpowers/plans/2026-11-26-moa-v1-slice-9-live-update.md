@@ -166,8 +166,8 @@ p1 also carries this plan. The branch `v1/slice-9` holds the plan until p1 start
 | L4 | **The wait.** `moa_core::upgrade`: `Input::Upgrade(Why::{Rebuilt, Asked})` sets `state.upgrade = Some(Want{why, since})`; a second one changes nothing. `upgrade::run` at the end of every input: wanted, not yet sent, `!central.busy()`, `central.restarting.is_none()` → reply A13's no-reply-yet text to every parked ask/reply wait and drop them, then `Effect::Exec` once. `status` gains `"upgrade": "waiting for moa's turn" \| null`. | §6.15.2 "waits until moa is between turns". |
 | L5 | **The exec.** `Effect::Exec` reaches the shell through `CoreHandle::exec_wanted()` (a `watch`), as another `keep_up` select branch. The wind-down is shutdown's: stop accepting without closing the listener, `core.stop()` and `core.ended()` (flush, link `clean_up`), close and wait for sessions, adapter stopped. Then `RunOptions.exec` hands off: `Exec::Real` clears `FD_CLOEXEC` on the listener and lock fds and calls `moa_platform::reexec(exe, ["daemon", "--brain", B], Inherit{listener, lock, from_build})`, which sets `MOA_LISTEN_FDS=<fd>`, `MOA_LOCK_FD=<fd>`, `MOA_REEXEC_FROM=<old build>` and `exec`s. It returns only an error, which is logged, and the daemon exits 1. `Exec::Test(tx)` sends the owned listener and lock to the test instead. | §6.15.2; daemon tests can't exec their own process. |
 | L6 | **Adopting.** `moa daemon` reads and removes the three variables before the tokio runtime starts (`moa_platform::take_inherited() -> Option<Inherited>`, with the unsafe `from_raw_fd` and `remove_var` under `// SAFETY:` and single-threaded). Then `RunOptions.inherited: Option<Inherited>`. `bring_up` with one re-checks `try_lock` on the adopted lock fd (same open file, so it succeeds), sets CLOEXEC again, takes the listener (`set_nonblocking`, `UnixListener::from_std`), and never removes or binds the socket path. | §6.15.2 "same pid; no connection is refused". |
-| L7 | **Notices.** The shell computes `UpgradeFacts{ reexec: bool, plugin_changed: bool, reattach: bool }` at bring-up: `write_session_plugin` returns whether it changed anything, and `conf::needs_reattach(old, new)` checks `moa_tmux` lines setting `default-terminal`, `terminal-overrides` or `terminal-features`. It passes them in `CoreOptions`. At `StartDrained`'s reconcile answer, if `meta.daemon.build != build_id()`, the core writes the L5 notice once, with N = live Claude sessions (the singular form for one; none falls through to the next text; re-attach is skipped when the link found no tmux server), and saves `meta.daemon.build` in the same commit. A refused commit retries at the next input. | §6.15.5. |
-| L8 | **Config reload.** The shell watches the config dir for `moa.toml`, `layouts.json`, `<brain>.md` and `constitution.md`. moa.toml: `load_config` in the shell, then `Input::Config(Result<Config, String>)`; the core refuses an `Err`, or a config without its brain, with the L6 text (`CoreEvent::Error`), and otherwise replaces `State.config` and emits `Effect::TmuxConf` (the shell rewrites `moa_tmux` and sends `TmuxCmd::Source`, which re-runs `set_up`'s `source-file`). layouts.json: `Input::LayoutsChanged` → `ops::layout::read`, publish `Topic::Layouts` (a bad file keeps the last, with an error line). Scope or constitution: `Input::InstructionsChanged` → the L6 line through `Tx::ui_each`. | §6.15.4. |
+| L7 | **Notices.** The shell computes `UpgradeFacts{ reexec: bool, plugin_changed: bool, reattach: bool }` at bring-up: `write_session_plugin` returns whether it changed anything, and `conf::needs_reattach(old, new)` checks `moa_tmux` lines setting `default-terminal`, `terminal-overrides` or `terminal-features`. It passes them in `CoreOptions`. At `StartDrained`'s reconcile answer, if `meta.daemon.build != build_id()`, the core writes the L5 notice once, with N = live Claude sessions (the singular form for one; none falls through to the next text; re-attach is skipped when the link found no tmux server), and saves `meta.daemon.build` in the same commit. A refused commit retries at the next input. *As built (Task 7):* the e2e drives `plugin_changed` by writing an older plugin text to disk before the session starts; no env-gated hook, since the environment survives the re-exec. | §6.15.5. |
+| L8 | **Config reload.** The shell watches the config dir for `moa.toml`, `layouts.json`, `<brain>.md` and `constitution.md`. moa.toml: `load_config` in the shell, then `Input::Config(Result<Config, Unread>)` (`Unread::{Error(String), Gone}`); the core refuses an `Error`, or a config without its brain, with the L6 text (`CoreEvent::Error`), and otherwise replaces `State.config` and emits `Effect::TmuxConf` when `[ui]` changed (the shell rewrites `moa_tmux` and sends `TmuxCmd::Source`, which re-runs `set_up`'s `source-file`). A changed `moa_account`, or that account's `launcher`/`acp`, reaches moa's running agent at its next start; the reload doesn't restart it (`/account` does that). A removed moa.toml (`Unread::Gone`) keeps the last config, with its own line. layouts.json: `Input::LayoutsChanged` → `ops::layout::read`, publish `Topic::Layouts` (a bad file keeps the last, with an error line). Scope or constitution: `Input::InstructionsChanged` → the L6 line through `Tx::ui_each`. | §6.15.4. |
 
 ## Global Constraints
 
@@ -432,7 +432,7 @@ The roadmap's constraints apply, as do every earlier slice plan's. Also:
 
 **Interfaces:**
 - Produces:
-  - `Input::{Config(Result<Config, String>), LayoutsChanged, InstructionsChanged}`;
+  - `Input::{Config(Result<Config, Unread>), LayoutsChanged, InstructionsChanged}`;
   - `Effect::TmuxConf`;
   - `TmuxCmd::Source`.
 
@@ -464,18 +464,17 @@ The roadmap's constraints apply, as do every earlier slice plan's. Also:
 - [ ] **Step 1: Failing tests** (the real binary in a tmux sandbox, the real clock):
   - **`a_rebuild_updates_everything_in_place`** (the roadmap's "done when"):
     - the cockpit is started through a temp install; a fake-claude session fires a hook
-      every 100 ms; a loop runs `moactl status` against the brain;
+      every 100 ms; a loop runs `<install>/moa status` against the brain (*amended:* `moactl` has no `status` verb);
     - `rebuild` the install;
     - **expected:**
       - `status` shows the same pid and the new build;
-      - every `moactl status` in the loop succeeded;
+      - every `moa status` in the loop succeeded;
       - every hook the session fired is in its events, none missing;
       - each panel's build matches, in the same pane and pid;
       - the console shows `moa upgraded: nothing to do`.
   - **`moa_upgrade_says_so`:** `moa upgrade` prints `moa upgraded (<old> → <new>)`.
   - **`a_running_session_hears_about_new_hooks`:** after a rebuild that changes the plugin
-    (an env-gated test-only hook added), the console shows the `1 running session uses …` line.
-    If no clean seam exists, pin it at the core level (Task 5) and amend L7.
+    the console shows the `1 running session uses …` line. *Amended (as built):* the environment survives the re-exec, so no env-gated hook could differ between builds; the test writes an older plugin text to disk before the session starts, and the new build's start rewrites it through the real path.
 - [ ] **Step 2: Run them.** They fail where the wiring is missing.
 - [ ] **Step 3: Fix what fails.** Each test waits on something visible. Make each fail once
   on purpose.

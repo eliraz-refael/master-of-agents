@@ -1,6 +1,6 @@
-//! `layout.list`, `layout.show` and `layout.set` (L3). Each reads `layouts.json` again first,
-//! so a hand edit counts at the next layout op with no watcher, and publishes `layouts` when
-//! that changed it. Nothing is saved in the brain: `set` writes the file through the daemon.
+//! `layout.list`, `layout.show` and `layout.set` (L3). Each reads `layouts.json` again first
+//! ([`refresh`]), and publishes `layouts` when that changed it. Nothing is saved in the brain:
+//! `set` writes the file through the daemon.
 
 use serde_json::{Value, json};
 
@@ -24,10 +24,21 @@ pub(crate) fn read(state: &State) -> Layouts {
     }
 }
 
+/// The file read again into the state. One that doesn't read keeps the layouts the last good
+/// read gave, with its error (L8): what is built from them stays as it was, and `set` still
+/// writes nothing over the file until it reads again.
+pub(crate) fn refresh(state: &mut State) {
+    let read = read(state);
+    match read.file_error {
+        Some(why) => state.layouts.file_error = Some(why),
+        None => state.layouts = read,
+    }
+}
+
 /// Runs a layout op: the file read again, then the op, then `layouts` if it changed, then
 /// the reply.
 pub(crate) fn run(state: &mut State, conn: ConnId, req: ReqId, op: Op) -> Vec<Effect> {
-    state.layouts = read(state);
+    refresh(state);
     let mut fx = Vec::new();
     let result = match op {
         Op::LayoutList(_) => Ok(list(state)),

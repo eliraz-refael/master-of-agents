@@ -58,6 +58,7 @@ async fn up_with(
         sock: sock.clone(),
         core: core.clone(),
         sigs,
+        config_watch: ConfigWatch::new(Paths::with_root(brain.dir.path()), None, Vec::new()),
     };
     let exe = daemon_exe().unwrap();
     let build = moa_platform::build_id().to_string();
@@ -374,6 +375,7 @@ async fn a_brain_dir_that_is_a_symlink_is_refused() {
         paths: paths.clone(),
         brain: BrainName::default_brain(),
         config,
+        config_text: None,
         tz: TimeZone::posix(TYPICAL_TZ).unwrap(),
         clock: time.clone(),
         alarm: Box::new(time.alarm()),
