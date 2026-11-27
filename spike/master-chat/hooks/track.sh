@@ -30,6 +30,15 @@ elif [ -n "${MOA_ONLY_UNDER:-}" ]; then
   moa_under "$cwd" "$MOA_ONLY_UNDER" || tracked "$db" || exit 0
 fi
 [ -f "$db" ] || exit 0
+# v1-forward begin
+# Switched over (moa switch wrote the flag): v1 takes the event, for the brain picked above.
+# With v1 gone the event is dropped: the spike's brain is frozen.
+if [ -f "$HOME/.local/state/moa/v1-live" ]; then
+  v1=$(head -n 1 "$HOME/.local/state/moa/v1-live")
+  [ -x "$v1" ] || exit 0
+  MOA_DB="$db" exec "$v1" hook claude --from-spike <<<"$in"
+fi
+# v1-forward end
 event=$(jq -r '.hook_event_name // empty' <<<"$in")
 text=""
 case "$event" in

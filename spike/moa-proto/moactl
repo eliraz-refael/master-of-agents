@@ -1,2 +1,11 @@
 #!/bin/bash
+# v1-forward begin
+# Switched over (moa switch wrote the flag): the moactl beside v1's moa takes it.
+if [ -f "$HOME/.local/state/moa/v1-live" ]; then
+  v1=$(head -n 1 "$HOME/.local/state/moa/v1-live")
+  ctl="${v1%/*}/moactl"
+  [ -x "$ctl" ] || { echo "moa v1 isn't where the switch left it; run moa switch back" >&2; exit 1; }
+  exec "$ctl" "$@"
+fi
+# v1-forward end
 exec python3 "$(dirname "$(readlink -f "$0")")/moactl.py" "$@"
