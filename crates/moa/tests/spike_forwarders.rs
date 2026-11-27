@@ -393,15 +393,7 @@ fn track_with_the_flag_forwards_the_payload() {
     let before = (dump(&r.db), dump(&work));
     let store = r.home.join(".claude-acct-a");
     let [start, ..] = turn(ids::S3_WAITING, &r.home.join("private/lantern"));
-    let o = r.hook(
-        &r.spike.join(TRACK),
-        &start,
-        &[
-            ("MOA_TRACK", OsStr::new("1")),
-            ("MOA_DB", os(&r.db)),
-            ("CLAUDE_CONFIG_DIR", os(&store)),
-        ],
-    );
+    let o = r.hook(&r.spike.join(TRACK), &start, &tracked(&r.db, &store));
     assert!(o.status.success(), "{o:?}");
     assert_silent(&o);
 
@@ -421,15 +413,40 @@ fn track_with_the_flag_forwards_the_payload() {
     );
     assert!(o.status.success(), "{o:?}");
 
-    let hook = |payload: &str, db: &Path| Call {
+    let hook = |payload: &str, db: &Path, brain: &str| Call {
         name: "moa".into(),
         argv: vec!["hook".into(), "claude".into(), "--from-spike".into()],
         stdin: format!("{payload}\n"),
         moa_db: db.to_string_lossy().into_owned(),
-        moa_brain: String::new(),
+        moa_brain: brain.into(),
     };
-    assert_eq!(r.calls(), [hook(&start, &r.db), hook(&routed, &work)]);
+    // v1 picks the brain from MOA_DB (--from-spike); the session's MOA_BRAIN passes as is.
+    assert_eq!(
+        r.calls(),
+        [hook(&start, &r.db, ""), hook(&routed, &work, "")]
+    );
     assert_eq!((dump(&r.db), dump(&work)), before);
+}
+
+#[test]
+fn track_with_the_flag_forwards_for_a_brain_with_no_spike_db() {
+    let r = rig();
+    r.flag(&r.v1.join("moa"));
+    let work = r.home.join(".local/share/moa/work/brain.db");
+    let [routed, ..] = turn(NEW_SID, &r.root().join("elsewhere"));
+    let store = r.home.join(".claude-acct-a");
+    let mut env = tracked(&r.db, &store).to_vec();
+    env.push(("MOA_ACCOUNT_BRAIN", OsStr::new("work")));
+    let o = r.hook(&r.spike.join(TRACK), &routed, &env);
+    assert!(o.status.success(), "{o:?}");
+    assert_silent(&o);
+    let calls = r.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(
+        (calls[0].moa_db.as_str(), calls[0].moa_brain.as_str()),
+        (&*work.to_string_lossy(), "")
+    );
+    assert!(!work.exists());
 }
 
 #[test]
@@ -438,15 +455,8 @@ fn track_with_the_flag_and_no_v1_writes_nothing() {
     r.flag(&r.root().join("gone/moa"));
     let before = dump(&r.db);
     for payload in turn(ids::S3_WAITING, &r.home.join("private/lantern")) {
-        let o = r.hook(
-            &r.spike.join(TRACK),
-            &payload,
-            &[
-                ("MOA_TRACK", OsStr::new("1")),
-                ("MOA_DB", os(&r.db)),
-                ("CLAUDE_CONFIG_DIR", os(&r.home.join(".claude-acct-a"))),
-            ],
-        );
+        let store = r.home.join(".claude-acct-a");
+        let o = r.hook(&r.spike.join(TRACK), &payload, &tracked(&r.db, &store));
         assert_eq!(o.status.code(), Some(0), "{o:?}");
         assert_silent(&o);
     }
