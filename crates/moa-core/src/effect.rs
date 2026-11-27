@@ -103,6 +103,14 @@ pub enum Input {
     Acp(AcpIn),
     /// The daemon should upgrade into the build its program now has ([`crate::upgrade`]).
     Upgrade(crate::upgrade::Why),
+    /// `moa.toml` was saved: the shell read it, and this is the config it holds, or why it
+    /// can't be had ([`crate::config_reload`]).
+    Config(Result<crate::config::Config, String>),
+    /// `layouts.json` was saved: the core reads it again.
+    LayoutsChanged,
+    /// The brain's scope file or moa's constitution was saved: they apply from moa's next
+    /// thread.
+    InstructionsChanged,
 }
 
 /// What the tmux link reports. `conn` numbers the link's connections; anything from an
@@ -237,6 +245,10 @@ pub enum Effect {
     /// shutdown and re-execs itself, keeping its socket and lock ([`crate::upgrade`]). Once,
     /// after the commit, and after the replies before it.
     Exec,
+    /// `[ui]` changed: the daemon writes moa's tmux config again from the config it now has,
+    /// and has the terminal server source it, as a connect does ([`crate::config_reload`]).
+    /// Saves nothing and says nothing of saved state, so it runs at once.
+    TmuxConf,
 }
 
 impl Effect {
@@ -254,6 +266,7 @@ impl Effect {
                 | Effect::CancelTimer(_)
                 | Effect::Log(_)
                 | Effect::TmuxConnect { .. }
+                | Effect::TmuxConf
                 | Effect::Tmux {
                     token: Some(
                         TmuxToken::Refresh

@@ -442,7 +442,8 @@ impl Core {
                 Effect::SetTimer { .. }
                 | Effect::CancelTimer(_)
                 | Effect::Log(_)
-                | Effect::TmuxConnect { .. } => {}
+                | Effect::TmuxConnect { .. }
+                | Effect::TmuxConf => {}
             }
         }
         Stepped::Done
@@ -480,6 +481,7 @@ impl Core {
                 token: Some(token),
             } => self.to_link(conn, cmds, Some(token)),
             Effect::Acp(cmd) => self.to_agent(cmd),
+            Effect::TmuxConf => self.tmux_conf(),
             _ => {}
         }
     }
@@ -494,6 +496,29 @@ impl Core {
                 let exited = AcpIn::Exited { generation, why };
                 let _ = inbox.send(Item::Input(Input::Acp(exited)));
             }
+        }
+    }
+
+    /// moa's tmux config written again from the config the core now has, and sourced on the
+    /// link's server, as a connect does: the link does both. Without a link (a real brain
+    /// before the switch-over) there is no file to write.
+    fn tmux_conf(&self) {
+        let Some(link) = &self.link else {
+            tracing::debug!("no terminal link: moa's tmux config isn't written");
+            return;
+        };
+        let deps = self.state.deps();
+        let text = moa_tmux::conf::moa_tmux(
+            self.state.brain().as_str(),
+            &self.state.config().ui,
+            &deps.panel,
+            &deps.home,
+        );
+        match link.send(TmuxCmd::Source { text }) {
+            Ok(()) => {
+                self.stats.tmux_sources.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(_) => tracing::debug!("the terminal link has ended: moa's tmux config waits"),
         }
     }
 
@@ -711,5 +736,8 @@ fn kind(input: &Input) -> &'static str {
         Input::StartDrained => "StartDrained",
         Input::Acp(_) => "Acp",
         Input::Upgrade(_) => "Upgrade",
+        Input::Config(_) => "Config",
+        Input::LayoutsChanged => "LayoutsChanged",
+        Input::InstructionsChanged => "InstructionsChanged",
     }
 }

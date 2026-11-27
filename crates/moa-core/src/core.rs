@@ -9,6 +9,7 @@ use crate::central::{self, Waiter};
 use crate::central::{opening, watchdog};
 use crate::change::Change;
 use crate::cockpit;
+use crate::config_reload;
 use crate::console;
 use crate::effect::{Down, Effect, Input, LogLevel, LogLine, Publish, TimerKey, TmuxIn, TmuxToken};
 use crate::hooks;
@@ -753,6 +754,9 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
         },
         Input::Acp(heard) => central::heard(state, now, heard),
         Input::Upgrade(why) => upgrade::want(state, why, now),
+        Input::Config(read) => config_reload::config(state, read),
+        Input::LayoutsChanged => config_reload::layouts(state),
+        Input::InstructionsChanged => config_reload::instructions(state, now),
         // Answered once the ask ends or its wait runs out (A4), or at once when refused.
         Input::Client {
             conn,

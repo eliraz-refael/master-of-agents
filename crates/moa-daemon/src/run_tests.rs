@@ -58,6 +58,7 @@ async fn up_with(
         sock: sock.clone(),
         core: core.clone(),
         sigs,
+        config_watch: ConfigWatch::new(Paths::with_root(brain.dir.path()), Vec::new()),
     };
     let exe = daemon_exe().unwrap();
     let build = moa_platform::build_id().to_string();

@@ -6,6 +6,7 @@ pub mod central;
 pub mod change;
 pub mod cockpit;
 pub mod config;
+pub mod config_reload;
 pub mod console;
 mod core;
 pub mod due;

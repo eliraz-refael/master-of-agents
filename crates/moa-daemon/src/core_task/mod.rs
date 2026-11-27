@@ -113,6 +113,10 @@ pub struct Stats {
     /// (`follow`); and those that couldn't, skipped as half-written.
     pub builds_found: AtomicU64,
     pub builds_skipped: AtomicU64,
+    /// Saves of `moa.toml` read again and handed to the core (`config_watch`), and the times
+    /// moa's tmux config was written again and sent to the terminal link to source.
+    pub configs_read: AtomicU64,
+    pub tmux_sources: AtomicU64,
     /// The kind of every input stepped, in order.
     #[cfg(test)]
     pub(crate) stepped: Mutex<Vec<&'static str>>,
@@ -716,6 +720,11 @@ impl CoreHandle {
     #[doc(hidden)]
     pub fn crash_core(&self) {
         let _ = self.inbox.send(Item::Crash);
+    }
+
+    /// An input the shell found out about by itself (a config file saved).
+    pub(crate) fn input(&self, input: Input) {
+        let _ = self.inbox.send(Item::Input(input));
     }
 
     /// What the terminal link reports. The link has its own way in; tests play it here.

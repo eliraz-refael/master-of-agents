@@ -4,6 +4,7 @@
 
 mod acp;
 pub mod clock;
+mod config_watch;
 pub mod core_task;
 mod follow;
 pub mod inspect;
@@ -12,6 +13,7 @@ mod run;
 pub mod scheduler;
 mod server;
 mod session;
+mod settled;
 pub mod supervise;
 pub mod testing;
 mod tmux;

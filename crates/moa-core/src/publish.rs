@@ -559,6 +559,17 @@ impl State {
         Some(self.put(vec![(topic, rows)]))
     }
 
+    /// Publishes, in one model, every topic whose rows differ from the ones last published:
+    /// after something no commit tells of changed what the rows are built from (a config).
+    pub(crate) fn publish_all_changed(&mut self) -> Option<Arc<Model>> {
+        let built: Vec<_> = Topic::ALL
+            .iter()
+            .map(|t| (*t, self.build(*t)))
+            .filter(|(t, rows)| self.model.topics.get(t).is_none_or(|last| **last != *rows))
+            .collect();
+        (!built.is_empty()).then(|| self.put(built))
+    }
+
     /// Publishes the `feed` topic when moa's `state` row differs from the one last published.
     /// Its other rows change only with a commit, which publishes them, or a load, which
     /// publishes everything: only the `state` row is compared, and the topic is built only

@@ -81,6 +81,10 @@ pub(crate) enum TmuxCmd {
         cmds: Vec<Cmd>,
         token: Option<TmuxToken>,
     },
+    /// moa's config changed (L8): `text` is written as `moa_tmux` when it differs, then
+    /// sourced on the server while a client is up, as a connect's setup does. A server linked
+    /// later sources the file as it connects.
+    Source { text: String },
     /// Take moa's hooks and `@moa_ctl` down, close the client, then answer.
     Stop(oneshot::Sender<()>),
     /// Tests only: the actor panics.
@@ -371,6 +375,7 @@ impl Actor {
                 Step::Cmd(Some(TmuxCmd::Send { conn, cmds, token })) => {
                     self.send(conn, cmds, token)
                 }
+                Step::Cmd(Some(TmuxCmd::Source { text })) => self.source(&text).await,
                 #[cfg(test)]
                 Step::Cmd(Some(TmuxCmd::Crash)) => panic!("a test crashed the terminal link"),
                 Step::Event(Some(ev)) => {
@@ -655,6 +660,27 @@ impl Actor {
         }
     }
 
+    /// Writes moa's tmux config as `text`, and sources it again on the server while a client
+    /// is up: the same `source-file` a connect's setup runs ([`source_cmd`]). A refusal is
+    /// logged; a client that has gone is heard through its events.
+    async fn source(&mut self, text: &str) {
+        let moa_tmux = &self.sh.link.moa_tmux;
+        if let Err(e) = moa_platform::fs::write_if_changed(moa_tmux, text) {
+            tracing::warn!("moa's tmux config couldn't be written: {}", e.kind());
+            return;
+        }
+        let State::Up(up) = &self.state else {
+            return;
+        };
+        match run_bounded(&up.client, &source_cmd(moa_tmux)).await {
+            Ok(_) => tracing::info!("moa's tmux config was sourced again"),
+            Err(e) => tracing::warn!(
+                "source-file failed after a config change: {}",
+                first_line(&e.to_string())
+            ),
+        }
+    }
+
     /// Passes `ev` on to the core. `false` when the client must go: a ping failed, which
     /// proves nothing about the server (it is going, or gone), so its answer stays here.
     fn event(&mut self, ev: Event) -> bool {
@@ -725,13 +751,18 @@ async fn set_up(
     moa_tmux: &Path,
     by: Instant,
 ) -> Result<(), CmdError> {
-    let source = Cmd::new("source-file").arg(moa_tmux.to_string_lossy().into_owned());
+    let source = source_cmd(moa_tmux);
     let name = Cmd::new("set-option").args(["-g", "@moa_ctl", info.client.0.as_str()]);
     // A refusal was logged; only a loss stops the setup.
     linking(client, &source, by).await?;
     reap_stale(client, &info.client, by).await?;
     linking(client, &name, by).await?;
     Ok(())
+}
+
+/// Sources moa's tmux config: at every connect, and again when the config changes.
+fn source_cmd(moa_tmux: &Path) -> Cmd {
+    Cmd::new("source-file").arg(moa_tmux.to_string_lossy().into_owned())
 }
 
 /// One step of a connect's setup: its output, or `None` when tmux refused it, which is
