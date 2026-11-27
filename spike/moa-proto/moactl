@@ -4,7 +4,7 @@
 if [ -f "$HOME/.local/state/moa/v1-live" ]; then
   v1=$(head -n 1 "$HOME/.local/state/moa/v1-live")
   ctl="${v1%/*}/moactl"
-  [ -x "$ctl" ] || { echo "moa v1 isn't where the switch left it; run moa switch back" >&2; exit 1; }
+  [ -x "$ctl" ] && ! [ "$ctl" -ef "$0" ] || { echo "moa v1 isn't where the switch left it; run moa switch back" >&2; exit 1; }
   exec "$ctl" "$@"
 fi
 # v1-forward end

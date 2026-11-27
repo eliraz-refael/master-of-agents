@@ -11,7 +11,7 @@ set -euo pipefail
 # frozen brains.
 if [ -f "$HOME/.local/state/moa/v1-live" ]; then
   v1=$(head -n 1 "$HOME/.local/state/moa/v1-live")
-  [ -x "$v1" ] || { echo "moa v1 isn't where the switch left it; run moa switch back" >&2; exit 1; }
+  [ -x "$v1" ] && ! [ "$v1" -ef "$0" ] || { echo "moa v1 isn't where the switch left it; run moa switch back" >&2; exit 1; }
   exec "$v1" "$@"
 fi
 # v1-forward end

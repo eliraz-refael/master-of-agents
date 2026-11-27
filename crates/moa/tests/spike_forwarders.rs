@@ -9,10 +9,11 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use moa_testkit::{Scenario, SpikeFixture, ids};
 use serde_json::json;
@@ -20,6 +21,9 @@ use tempfile::TempDir;
 
 /// What the spike's `moactl` and launcher say when the flag names no v1.
 const NO_V1: &str = "moa v1 isn't where the switch left it; run moa switch back";
+
+/// How long one script may run: a forwarder that loops fails its test instead of hanging it.
+const LIMIT: Duration = Duration::from_secs(10);
 
 /// A conversation no fixture brain has seen.
 const NEW_SID: &str = "3f6b8a21-9c4d-4e57-b0a2-6d1e7f9c8b35";
@@ -205,19 +209,23 @@ impl Rig {
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("TMUX_TMPDIR", &self.tmux)
-            .current_dir(self.root())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .current_dir(self.root());
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let mut child = cmd
-            .spawn()
+        // assert_cmd kills the child at the time limit and returns its status.
+        let started = Instant::now();
+        let o = assert_cmd::Command::from_std(cmd)
+            .write_stdin(stdin)
+            .timeout(LIMIT)
+            .output()
             .unwrap_or_else(|e| panic!("run {}: {e}", exe.display()));
-        // A script that exits without reading its stdin closes the pipe: not an error here.
-        let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
-        child.wait_with_output().unwrap()
+        assert!(
+            !(o.status.signal() == Some(9) && started.elapsed() >= LIMIT),
+            "{} {args:?} never ended within {LIMIT:?} (killed): {o:?}",
+            exe.display()
+        );
+        o
     }
 
     /// Run the hook `script` as its installed command does (`bash <track.sh>`, from
@@ -595,6 +603,32 @@ fn the_launcher_with_the_flag_and_no_v1_says_so() {
     assert_eq!(o.status.code(), Some(1), "{o:?}");
     assert_eq!(String::from_utf8_lossy(&o.stderr), format!("{NO_V1}\n"));
     assert_eq!(o.stdout, b"");
+    assert_eq!(r.calls(), []);
+    r.assert_nothing_created();
+}
+
+#[test]
+fn a_flag_naming_the_spikes_own_launcher_is_no_v1() {
+    let r = rig();
+    r.flag(&r.spike.join(LAUNCHER));
+    for (script, args) in [(LAUNCHER, &["work"][..]), (MOACTL, &["task", "ls"])] {
+        let o = r.run(&r.spike.join(script), args, "", &[("MOA_DB", os(&r.db))]);
+        assert_eq!(o.status.code(), Some(1), "{script}: {o:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&o.stderr),
+            format!("{NO_V1}\n"),
+            "{script}"
+        );
+        assert_eq!(o.stdout, b"", "{script}");
+    }
+    let before = dump(&r.db);
+    let store = r.home.join(".claude-acct-a");
+    for payload in turn(ids::S3_WAITING, &r.home.join("private/lantern")) {
+        let o = r.hook(&r.spike.join(TRACK), &payload, &tracked(&r.db, &store));
+        assert_eq!(o.status.code(), Some(0), "{o:?}");
+        assert_silent(&o);
+    }
+    assert_eq!(dump(&r.db), before);
     assert_eq!(r.calls(), []);
     r.assert_nothing_created();
 }
