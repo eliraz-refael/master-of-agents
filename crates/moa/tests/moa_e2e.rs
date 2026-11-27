@@ -13,17 +13,6 @@ use common::*;
 /// Names the brain, as a terminal outside any session must (no `moa.toml` account is guessed).
 const BRAIN: &[(&str, &str)] = &[("MOA_BRAIN", B)];
 
-fn say(text: &str, id: &str) -> StubStep {
-    StubStep::Say {
-        text: text.into(),
-        id: Some(id.into()),
-    }
-}
-
-fn end() -> StubStep {
-    StubStep::End { stop: None }
-}
-
 /// A root whose moa runs the stub, with `steps` as its script.
 fn rig(steps: &[StubStep]) -> TempBrain {
     let tb = TempBrain::new(Some(&stub_moa_toml()));

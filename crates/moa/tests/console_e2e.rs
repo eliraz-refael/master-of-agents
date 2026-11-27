@@ -86,15 +86,7 @@ impl Console {
     /// over ([`names`]).
     #[track_caller]
     fn shows_wrapped(&self, text: &str) {
-        let seen = wait_for(SHOWS, || {
-            names(&screen_of(&self.tb, &self.pane), text).then_some(())
-        });
-        assert!(
-            seen.is_some(),
-            "{} never showed {text:?}\n{}",
-            self.pane,
-            tab_shows(&self.tb, &self.pane)
-        );
+        shows_wrapped(&self.tb, &self.pane, text);
     }
 
     /// Waits for the stub's answer to its permission request; its `optionId`.
@@ -138,17 +130,6 @@ impl Console {
         });
         assert_eq!(done["code"], 0, "{done}");
     }
-}
-
-fn say(text: &str, id: &str) -> StubStep {
-    StubStep::Say {
-        text: text.into(),
-        id: Some(id.into()),
-    }
-}
-
-fn end() -> StubStep {
-    StubStep::End { stop: None }
 }
 
 #[test]
@@ -350,14 +331,7 @@ const SUGGESTION_BUTTONS: &str = "[yes] [later] [no]";
 #[test]
 fn a_suggestion_card_answered_with_a_button() {
     // Opening a session needs an account to open it with.
-    let base = stub_moa_toml();
-    let toml = base.replacen(
-        "moa_account = \"acct-a\"\n",
-        "moa_account = \"acct-a\"\nopen_account = \"acct-a\"\n",
-        1,
-    );
-    assert_ne!(toml, base, "open_account isn't set: {base}");
-    let c = console_with(&toml, &[]);
+    let c = console_with(&stub_moa_toml_opening_sessions(), &[]);
     let kite = open_session(&c.tb, &c.term, "kite", "Kite", None).id;
     // The stub reads its script at each prompt: this one is the next turn's.
     let archive = format!("archive {kite}");
