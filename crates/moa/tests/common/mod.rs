@@ -3,9 +3,10 @@
 #![allow(dead_code)]
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Child, Command as StdCommand, ExitStatus, Output, Stdio};
 use std::time::Duration;
 
 use assert_cmd::Command;
@@ -182,17 +183,79 @@ pub fn build_of(tb: &TempBrain, exe: &Path) -> String {
     out(&o).trim().to_string()
 }
 
-/// `exe args…` to the end, with the root's environment plus `extra`.
-pub fn run_exe(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
-    Command::new(exe)
-        .args(args)
+/// `exe args…` as a test runs it: in the root, with only the root's environment plus
+/// `extra`.
+fn command(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> StdCommand {
+    let mut cmd = StdCommand::new(exe);
+    cmd.args(args)
         .env_clear()
         .envs(tb.env())
         .envs(extra.iter().copied())
-        .current_dir(tb.root())
+        .current_dir(tb.root());
+    cmd
+}
+
+/// `exe args…` to the end, with the root's environment plus `extra`.
+pub fn run_exe(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
+    Command::from_std(command(tb, exe, args, extra))
         .timeout(Duration::from_secs(30))
         .output()
         .unwrap()
+}
+
+/// `exe args…` started, with the root's environment plus `extra`, no input, and its output
+/// kept for [`Reaped::ended`]. Killed if the test lets go of it before it ends.
+pub fn spawn_exe(tb: &TempBrain, exe: &Path, args: &[&str], extra: &[(&str, &str)]) -> Reaped {
+    let child = command(tb, exe, args, extra)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("start {} {args:?}: {e}", exe.display()));
+    Reaped(child)
+}
+
+/// A child that is killed (SIGKILL) and reaped when dropped, so a test that fails leaves no
+/// process behind.
+pub struct Reaped(pub Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Reaped {
+    /// Waits until the child has exited ([`SHOWS`]); what it printed, when [`spawn_exe`]
+    /// kept it. A child still running then is a failure.
+    #[track_caller]
+    pub fn ended(mut self) -> Output {
+        let done = wait_for(SHOWS, || self.0.try_wait().unwrap());
+        let Some(status) = done else {
+            let _ = self.0.kill();
+            let status = self.0.wait().unwrap();
+            let o = self.output(status);
+            panic!("it never ended: {}{}", out(&o), err(&o));
+        };
+        self.output(status)
+    }
+
+    fn output(&mut self, status: ExitStatus) -> Output {
+        let mut stdout = Vec::new();
+        if let Some(pipe) = self.0.stdout.as_mut() {
+            pipe.read_to_end(&mut stdout).unwrap();
+        }
+        let mut stderr = Vec::new();
+        if let Some(pipe) = self.0.stderr.as_mut() {
+            pipe.read_to_end(&mut stderr).unwrap();
+        }
+        Output {
+            status,
+            stdout,
+            stderr,
+        }
+    }
 }
 
 /// `moa args…` to the end, with the root's environment plus `extra`.

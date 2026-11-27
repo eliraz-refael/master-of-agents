@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::process::{Child, Command, Output, Stdio};
+use std::process::Output;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,9 +26,16 @@ const HELLO: &str = "hello there";
 const WAITING: &str = "waiting for moa's turn";
 /// The gate in moa's agent's folder that ends its held turn.
 const GATE: &str = "gate";
-/// How many hooks the ticking session fires, 100 ms apart: far more than a test runs for,
-/// so it is still firing when each test is done.
+/// How many hooks a ticking session fires, 100 ms apart: far more than a test runs for, so
+/// it is still firing when each test is done.
 const TICKS: usize = 600;
+/// The ticking sessions. A hook is lost only if it lands in the handoff, which lasts some
+/// tens of milliseconds: one session's hooks land there in about three runs of four, three
+/// sessions' in nearly every run.
+const TICKERS: [&str; 3] = ["kite", "harbor", "lark"];
+/// The `moa status` loops run side by side: a call in flight as the old image winds down
+/// asks the new one again, in the handoff.
+const STATUS_LOOPS: usize = 2;
 
 /// The cockpit run from its install, and its console's pane.
 struct Up {
@@ -119,36 +126,15 @@ impl Up {
     /// `<install>/moa upgrade`, started; it is running once `status` says the upgrade waits
     /// for moa's turn, which nothing else asked for.
     #[track_caller]
-    fn start_upgrade(&self) -> Child {
+    fn start_upgrade(&self) -> Reaped {
         assert!(
             status_json(self.tb())["upgrade"].is_null(),
             "an upgrade is wanted already"
         );
-        let child = Command::new(&self.i.exe)
-            .arg("upgrade")
-            .env_clear()
-            .envs(self.tb().env())
-            .current_dir(self.tb().root())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("start moa upgrade");
+        let child = spawn_exe(self.tb(), &self.i.exe, &["upgrade"], &[]);
         self.upgrade_waits();
         child
     }
-}
-
-/// Waits until `child` has exited; what it printed.
-#[track_caller]
-fn ended(mut child: Child) -> Output {
-    let done = wait_for(SHOWS, || child.try_wait().unwrap().map(|_| ()));
-    if done.is_none() {
-        let _ = child.kill();
-        let o = child.wait_with_output().unwrap();
-        panic!("{:?} never ended: {}{}", o.status, out(&o), err(&o));
-    }
-    child.wait_with_output().unwrap()
 }
 
 /// fake-claude's script for a session that starts, then fires a `UserPromptSubmit` every
@@ -191,10 +177,15 @@ fn ticked_through(tb: &TempBrain, term: &Terminal, id: &str, n: usize) {
         let t = ticks(tb, id);
         (t.len() >= n && whole(&t)).then_some(())
     });
+    let t = ticks(tb, id);
+    let missing: Vec<usize> = (1..=t.last().copied().unwrap_or(0))
+        .filter(|k| t.binary_search(k).is_err())
+        .collect();
     assert!(
         seen.is_some(),
-        "the ticks never reached {n} whole: {:?}\n{}",
-        ticks(tb, id),
+        "the ticks never reached {n} whole: {} in, up to {:?}, missing {missing:?}\n{}",
+        t.len(),
+        t.last(),
         what_happened(tb, term)
     );
 }
@@ -209,21 +200,27 @@ impl Drop for StopOnDrop<'_> {
 }
 
 /// The roadmap's "done when": a rebuild while the cockpit runs updates everything in place,
-/// and nothing is lost. A session fires a hook every 100 ms, and `moa status` (from the
-/// install, as a user runs it) runs back to back throughout. After the rebuild:
+/// and nothing is lost. Sessions each fire a hook every 100 ms ([`TICKERS`]), and `moa
+/// status` (from the install, as a user runs it) runs back to back throughout
+/// ([`STATUS_LOOPS`]). After the rebuild:
 /// - `moa status` shows the same pid, on the new build;
 /// - every `moa status` succeeded, each answered by that pid, and none on the old build
 ///   after one on the new;
-/// - every hook the session fired is in its events, none missing, and it fired on after
-///   the upgrade;
+/// - every hook each session fired is in its events, none missing, and each fired on after
+///   the upgrade (a hook lost in the handoff is a gap below the later ones);
 /// - each panel is linked on the new build, in the same pane, as the same process;
 /// - the console says `moa upgraded: nothing to do`.
 #[test]
 fn a_rebuild_updates_everything_in_place() {
     let r = up(&[say(HELLO, "m0"), end()]);
     let (tb, term) = (r.tb(), &r.i.term);
-    let kite = open_session_with(tb, term, "kite", "Kite", None, &ticking()).id;
-    ticked_through(tb, term, &kite, 3);
+    let tickers: Vec<String> = TICKERS
+        .iter()
+        .map(|name| open_session_with(tb, term, name, name, None, &ticking()).id)
+        .collect();
+    for id in &tickers {
+        ticked_through(tb, term, id, 3);
+    }
     let old = build_of(tb, &r.i.exe);
     let pid = r.pid();
     let pids = r.i.pids();
@@ -231,19 +228,20 @@ fn a_rebuild_updates_everything_in_place() {
     let replies: Mutex<Vec<Output>> = Mutex::new(Vec::new());
     let stop = AtomicBool::new(false);
     let new = std::thread::scope(|s| {
-        s.spawn(|| {
-            while !stop.load(Ordering::SeqCst) {
-                let o = run_exe(tb, &r.i.exe, &["status", "--json"], &[]);
-                replies.lock().unwrap().push(o);
-            }
-        });
+        for _ in 0..STATUS_LOOPS {
+            s.spawn(|| {
+                while !stop.load(Ordering::SeqCst) {
+                    let o = run_exe(tb, &r.i.exe, &["status", "--json"], &[]);
+                    replies.lock().unwrap().push(o);
+                }
+            });
+        }
         let _stop = StopOnDrop(&stop);
         rebuild(&r.i.exe);
         let new = build_of(tb, &r.i.exe);
         assert_ne!(new, old, "the rebuild is a new build");
-        r.i.all_linked_on(&new);
-        r.shows(&["moa upgraded: nothing to do"]);
-        // The loop has been answered by the new build too.
+        // Until the loop is answered by the new build, nothing else calls moa: a call lost
+        // in the handoff is the loop's.
         let on_new = |o: &Output| {
             serde_json::from_str::<Value>(&out(o)).is_ok_and(|s| s["build"] == new.as_str())
         };
@@ -256,14 +254,19 @@ fn a_rebuild_updates_everything_in_place() {
     let replies = replies.into_inner().unwrap();
 
     // Every status call was answered, by the one daemon, which never went back.
+    let failed: Vec<String> = replies
+        .iter()
+        .filter(|o| !o.status.success())
+        .map(|o| out(o) + &err(o))
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{} of {} status calls failed: {failed:?}",
+        failed.len(),
+        replies.len()
+    );
     let mut on_new = false;
     for o in &replies {
-        assert!(
-            o.status.success(),
-            "a status call failed: {}{}",
-            out(o),
-            err(o)
-        );
         let s: Value = serde_json::from_str(&out(o)).unwrap();
         assert_eq!(s["pid"], pid, "{s}");
         on_new |= s["build"] == new.as_str();
@@ -271,8 +274,12 @@ fn a_rebuild_updates_everything_in_place() {
         assert_eq!(s["build"], want.as_str(), "{s}");
     }
     // The hooks: the session kept firing past the upgrade, and every one is in.
-    let upgraded_at = ticks(tb, &kite).len();
-    ticked_through(tb, term, &kite, upgraded_at + 3);
+    for id in &tickers {
+        let upgraded_at = ticks(tb, id).len();
+        ticked_through(tb, term, id, upgraded_at + 3);
+    }
+    r.i.all_linked_on(&new);
+    r.shows(&["moa upgraded: nothing to do"]);
 
     let after = status_json(tb);
     assert_eq!(after["pid"], pid, "the daemon upgraded in place");
@@ -304,7 +311,7 @@ fn moa_upgrade_says_so() {
 
     r.open_gate();
 
-    let o = ended(upgrade);
+    let o = upgrade.ended();
     assert!(o.status.success(), "{}{}", out(&o), err(&o));
     assert_eq!(out(&o), format!("moa upgraded ({old} → {new})\n"));
     r.shows(&["thought it over", "moa upgraded: nothing to do"]);
@@ -325,7 +332,7 @@ fn moa_upgrade_says_when_moa_stopped_instead() {
 
     r.open_gate();
 
-    let o = ended(upgrade);
+    let o = upgrade.ended();
     assert_eq!(o.status.code(), Some(1), "{}{}", out(&o), err(&o));
     assert_eq!(
         err(&o),
