@@ -7,13 +7,12 @@
 //! others only as changed, since the core reads them itself. A save that leaves a file as it
 //! was (a touch) is told nothing.
 
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use moa_core::config_reload::Unread;
 use moa_core::effect::Input;
-use moa_platform::Paths;
+use moa_platform::{Paths, exe_chain};
 
 use crate::core_task::CoreHandle;
 use crate::run::{ConfigText, load_config_with_text};
@@ -51,15 +50,14 @@ impl ConfigWatch {
         toml: Option<ConfigText>,
         files: Vec<(ConfigFile, PathBuf)>,
     ) -> ConfigWatch {
-        let entries: Vec<(PathBuf, OsString)> = files
-            .iter()
-            .filter_map(|(_, path)| Some((path.parent()?.to_path_buf(), path.file_name()?.into())))
-            .collect();
-        for (dir, _) in &entries {
+        for dir in files.iter().filter_map(|(_, path)| path.parent()) {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 tracing::warn!("the config folder can't be made: {}", e.kind());
             }
         }
+        // Each file's symlink chain, as it is at each arming: a file linked from a dotfiles
+        // folder is heard when its target is saved, and when the link is retargeted.
+        let watched: Vec<PathBuf> = files.iter().map(|(_, path)| path.clone()).collect();
         let files = files
             .into_iter()
             .map(|(file, path)| Seen {
@@ -76,7 +74,7 @@ impl ConfigWatch {
         let watch = Settled::new(
             "its config files",
             "they're read again when it starts",
-            move || entries.clone(),
+            move || watched.iter().flat_map(|path| exe_chain(path)).collect(),
         );
         ConfigWatch {
             paths,
@@ -110,8 +108,16 @@ impl ConfigWatch {
                     // No file is the default config only at start: one removed keeps the
                     // last.
                     let read = match load_config_with_text(&self.paths) {
-                        Ok((_, ConfigText(None))) => Err(Unread::Gone),
-                        Ok((config, _)) => Ok(config),
+                        Ok((_, ConfigText(None))) => {
+                            seen.bytes = None;
+                            Err(Unread::Gone)
+                        }
+                        Ok((config, ConfigText(text))) => {
+                            // What the config handed over was read from: a save between
+                            // the two reads is still told.
+                            seen.bytes = text.map(String::into_bytes);
+                            Ok(config)
+                        }
                         Err(e) => Err(Unread::Error(e.to_string())),
                     };
                     core.stats().configs_read.fetch_add(1, Ordering::SeqCst);

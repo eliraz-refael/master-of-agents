@@ -81,7 +81,7 @@ pub(crate) enum TmuxCmd {
         cmds: Vec<Cmd>,
         token: Option<TmuxToken>,
     },
-    /// moa's config changed (L8): `text` is written as `moa_tmux` when it differs, then
+    /// moa's config changed (L8): `text` is written as `moa_tmux` when it differs, and then
     /// sourced on the server while a client is up, as a connect's setup does. A server linked
     /// later sources the file as it connects.
     Source { text: String },
@@ -665,9 +665,15 @@ impl Actor {
     /// logged; a client that has gone is heard through its events.
     async fn source(&mut self, text: &str) {
         let moa_tmux = &self.sh.link.moa_tmux;
-        if let Err(e) = moa_platform::fs::write_if_changed(moa_tmux, text) {
-            tracing::warn!("moa's tmux config couldn't be written: {}", e.kind());
-            return;
+        match moa_platform::fs::write_if_changed(moa_tmux, text) {
+            // A `[ui]` change the file doesn't show (`terminal_idle_hours`): the server has
+            // it already, from the connect's source or the last one here.
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(e) => {
+                tracing::warn!("moa's tmux config couldn't be written: {}", e.kind());
+                return;
+            }
         }
         let State::Up(up) = &self.state else {
             return;

@@ -21,10 +21,11 @@
 use crate::Now;
 use crate::config::{Config, skipped_warning};
 use crate::core::{Tx, post_commit};
-use crate::effect::{Effect, LogLevel, LogLine, Publish};
+use crate::effect::{Effect, LogLevel, Publish};
 use crate::ops;
 use crate::publish::{CoreEvent, Topic};
 use crate::state::State;
+use crate::tmux::link::log;
 
 /// What the console says when the scope file or the constitution was saved.
 pub const INSTRUCTIONS_CHANGED: &str =
@@ -74,7 +75,7 @@ pub(crate) fn config(state: &mut State, read: Result<Config, Unread>) -> Vec<Eff
                 // The error may name folders: the log keeps to the fact.
                 log(
                     LogLevel::Warn,
-                    "moa.toml can't be had; moa kept the last one",
+                    "moa.toml can't be had; moa kept the last one".into(),
                 ),
                 Effect::Publish(Publish::Event(CoreEvent::Error { message })),
             ];
@@ -84,13 +85,8 @@ pub(crate) fn config(state: &mut State, read: Result<Config, Unread>) -> Vec<Eff
         return Vec::new();
     }
     let ui_changed = config.ui != state.config().ui;
-    let mut fx = vec![log(LogLevel::Info, "moa.toml was read again")];
-    fx.extend(skipped_warning(&config).map(|message| {
-        Effect::Log(LogLine {
-            level: LogLevel::Warn,
-            message,
-        })
-    }));
+    let mut fx = vec![log(LogLevel::Info, "moa.toml was read again".into())];
+    fx.extend(skipped_warning(&config).map(|message| log(LogLevel::Warn, message)));
     state.set_config(config);
     fx.extend(
         state
@@ -111,7 +107,7 @@ pub(crate) fn layouts(state: &mut State) -> Vec<Effect> {
     if let Some(why) = &state.layouts.file_error {
         fx.push(log(
             LogLevel::Warn,
-            "layouts.json has an error; moa kept the last one",
+            "layouts.json has an error; moa kept the last one".into(),
         ));
         fx.push(Effect::Publish(Publish::Event(CoreEvent::Error {
             message: layouts_kept(why),
@@ -134,14 +130,7 @@ pub(crate) fn instructions(state: &mut State, now: &Now) -> Vec<Effect> {
         Ok(()) => post_commit(state, tx),
         Err(_) => vec![log(
             LogLevel::Warn,
-            "moa's instructions changed, and the line that says so couldn't be saved",
+            "moa's instructions changed, and the line that says so couldn't be saved".into(),
         )],
     }
-}
-
-fn log(level: LogLevel, message: &str) -> Effect {
-    Effect::Log(LogLine {
-        level,
-        message: message.into(),
-    })
 }
