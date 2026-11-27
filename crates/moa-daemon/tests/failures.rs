@@ -55,6 +55,7 @@ async fn rig() -> Rig {
         events_capacity: 256,
         tmux: None,
         spool: None,
+        facts: None,
     };
     let core = within(CoreHandle::start(opts))
         .await
@@ -86,6 +87,7 @@ async fn rig_read_only() -> Rig {
             events_capacity: 256,
             tmux: None,
             spool: None,
+            facts: None,
         },
         store,
     ))
@@ -436,6 +438,7 @@ async fn a_panic_in_startup_fails_start() {
         events_capacity: 256,
         tmux: None,
         spool: None,
+        facts: None,
     }))
     .await;
     match started {

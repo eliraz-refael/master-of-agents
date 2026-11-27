@@ -14,8 +14,11 @@ use std::sync::atomic::Ordering;
 use common::Client;
 use common::hooks::{ago, hook_notice};
 use common::rig::{Rig, Up, WAIT, answer, end, gate, prompt, say, session_stop};
+use moa_core::config::BrainName;
+use moa_core::state::CallerInfo;
+use moa_core::upgrade::{BUILD_KEY, NOTICE_NOTHING};
 use moa_platform::pid_alive;
-use moa_testkit::wait_for;
+use moa_testkit::{StubStep, wait_for};
 use serde_json::{Value, json};
 
 /// What `status` says while an upgrade waits for moa's turn to end.
@@ -46,6 +49,11 @@ fn wait_waiting(up: &Up) {
         (status_upgrade(up) == json!(WAITING)).then_some(())
     })
     .unwrap_or_else(|| panic!("the upgrade never waited: {}", status_upgrade(up)));
+}
+
+/// How many inputs the core has stepped.
+fn inputs(up: &Up) -> u64 {
+    up.core.stats().inputs.load(Ordering::SeqCst)
 }
 
 /// How many new builds of its program the daemon found (`found`) or skipped as
@@ -144,9 +152,16 @@ async fn parked_asks_hear_no_reply_yet_first() {
         "ask",
         json!({"to": "moa", "text": "Is the domain renewed?"}),
     );
+    // A request sent isn't yet one the core has: a barrier fences only what has reached it.
+    // The ask has once its row is saved.
+    rig.wait_ask(1, "pending");
     up.core.barrier().await;
     let mut other = up.session_client(ids[1]);
+    // A `reply` saves nothing: it has reached the core once the core has stepped one more
+    // input (nothing else moves here, with time stopped and moa's turn held at its gate).
+    let before = inputs(&up);
     let again = other.send("reply", json!({"id": 1}));
+    wait_for(WAIT, || (inputs(&up) > before).then_some(())).expect("the reply reaches the core");
     up.core.barrier().await;
 
     assert_eq!(
@@ -299,4 +314,130 @@ async fn moas_thread_resumes_after_the_handoff() {
     assert_eq!(resumed[0]["params"]["sessionId"], thread[0].as_str());
     assert_eq!(rig.threads(), thread);
     up.stop().await;
+}
+
+/// The rows of activity whose text starts `moa upgraded`.
+fn activity_notices(rig: &Rig) -> Vec<String> {
+    let store = rig.store();
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT text FROM activity WHERE text LIKE 'moa upgraded%' ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// Waits until `meta.daemon.build` is `build`.
+fn wait_build_saved(rig: &Rig, build: &str) {
+    wait_for(WAIT, || {
+        (rig.meta(BUILD_KEY).as_deref() == Some(build)).then_some(())
+    })
+    .unwrap_or_else(|| panic!("{build} was never saved: {:?}", rig.meta(BUILD_KEY)));
+}
+
+/// L7: the first start saves its build and says nothing. An upgrade in place into a new
+/// build says so once: a `system` line in moa's thread and an activity row, in the commit
+/// that saves the new build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upgrade_in_place_says_nothing_to_do() {
+    let rig = Rig::new(&[say("first", "m1"), end()]).with_exe();
+    let up = rig.start().await;
+    let old = rig.build();
+    wait_build_saved(&rig, &old);
+    let mut c = up.client();
+    assert_eq!(answer(&prompt(&mut c, "hello")), "first");
+    assert!(
+        activity_notices(&rig).is_empty(),
+        "a first start isn't an upgrade"
+    );
+
+    rig.rebuild(1);
+    let inherited = up.handoff().await;
+    let new = rig.build();
+    assert_ne!(new, old);
+    let up = rig.restart(inherited).await;
+    wait_build_saved(&rig, &new);
+    let notices: Vec<(String, String)> = rig
+        .feed()
+        .into_iter()
+        .filter(|(_, text)| text.starts_with("moa upgraded"))
+        .collect();
+    assert_eq!(
+        notices,
+        [("system".to_string(), NOTICE_NOTHING.to_string())],
+        "{:?}",
+        rig.feed()
+    );
+    assert_eq!(activity_notices(&rig), [NOTICE_NOTHING]);
+    up.stop().await;
+}
+
+/// L8, Review Focus 4: a call that reaches the old image during its wind-down, after its
+/// core has stopped, is answered by the new image rather than refused. moa's agent ignores
+/// `SIGTERM`, so stopping it holds the wind-down open until its `SIGKILL` (2 s later): the
+/// `status` is sent once the agent has had its `SIGTERM`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_during_the_wind_down_is_answered_by_the_next_image() {
+    let rig = Rig::new(&[StubStep::IgnoreTerm, say("done", "m1"), end()]).with_exe();
+    let up = rig.start().await;
+    let mut c = up.client();
+    assert_eq!(answer(&prompt(&mut c, "hello")), "done");
+
+    let mut client = moa_client::Client::connect(moa_client::ClientOptions {
+        paths: rig.paths.clone(),
+        brain: BrainName::default_brain(),
+        client: "upgrade-test",
+        caller: CallerInfo::default(),
+        autostart: None,
+        on_mismatch: moa_client::OnMismatch::Accept,
+        build: moa_platform::build_id().into(),
+        upgrade_wait: moa_client::UPGRADE_WAIT,
+    })
+    .await
+    .expect("a client");
+    assert_eq!(
+        upgrade(&up, json!({})),
+        json!({"upgrading": true, "waiting_for_moa": false})
+    );
+    // The core has ended its loop and is stopping moa's agent: the window.
+    let termed = rig.agent.join(".stub-acp.termed");
+    wait_for(WAIT, || termed.exists().then_some(())).expect("moa's agent is being stopped");
+    let status = tokio::spawn(async move { client.status().await });
+
+    let inherited = up.handoff().await;
+    let up = rig.restart(inherited).await;
+    let status = tokio::time::timeout(WAIT, status)
+        .await
+        .expect("the status is answered within 10 s")
+        .expect("no panic");
+    match status {
+        Ok(s) => assert_eq!(s.pid, std::process::id()),
+        Err(e) => panic!("refused during the wind-down: {e}"),
+    }
+    up.stop().await;
+}
+
+/// A new program that says nothing within the first limit (a slow first launch) is asked
+/// once more, with a longer one, and the daemon upgrades into it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_first_launch_is_asked_once_more() {
+    let mut rig = Rig::new(&[]).with_exe();
+    rig.probe_wait = moa_daemon::ProbeWait {
+        first: std::time::Duration::from_millis(300),
+        again: WAIT,
+    };
+    let up = rig.start().await;
+    rig.slow_next_build_id(2_000);
+    rig.rebuild(1);
+    wait_for(WAIT, || (builds(&up, true) == 1).then_some(()))
+        .expect("the second, longer ask found the build");
+    assert_eq!(builds(&up, false), 0, "the slow first ask isn't a skip");
+    let inherited = up.handoff().await;
+    assert!(
+        !rig.exe().with_extension("slow").exists(),
+        "the slow launch was asked"
+    );
+    rig.restart(inherited).await.stop().await;
 }

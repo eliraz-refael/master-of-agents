@@ -70,6 +70,7 @@ pub fn options(
         build: moa_platform::build_id().to_string(),
         exec: moa_daemon::Exec::Test(tokio::sync::mpsc::channel(1).0),
         inherited: None,
+        probe_wait: moa_daemon::ProbeWait::default(),
     }
 }
 

@@ -2,8 +2,12 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
+mod common;
+
 use assert_cmd::Command;
-use moa_testkit::{TempBrain, Terminal};
+use moa_testkit::{TempBrain, Terminal, wait_for};
+
+use common::{build_of, panels_on};
 
 const MOA: &str = env!("CARGO_BIN_EXE_moa");
 
@@ -96,10 +100,11 @@ fn daemon_pid(tb: &TempBrain, exe: &Path) -> u64 {
     v["pid"].as_u64().expect("a pid")
 }
 
-/// V13, Review Focus 4: a panel that finds another build's daemon says so and leaves it
-/// running; restarting a daemon other panels use isn't a panel's call.
+/// V13, §6.15, Review Focus 4: a panel that finds another build's daemon follows it into
+/// the daemon's own program, in its own terminal, and leaves the daemon running: restarting
+/// a daemon other panels use isn't a panel's call.
 #[test]
-fn a_different_build_is_said_not_restarted() {
+fn a_different_build_is_followed_not_restarted() {
     let tb = TempBrain::new(None);
     // The same binary at another path is another build.
     let other = tb.root().join("moa-other");
@@ -119,9 +124,37 @@ fn a_different_build_is_said_not_restarted() {
         .map(OsString::from)
         .collect();
     let term = Terminal::spawn(Path::new(MOA), &args, &tb.env(), 100, 20).unwrap();
-    let line = "this panel is from another build of moa; close it and run moa panel again";
+    let log = tb.paths().log_dir().join("panel.log");
+    let theirs = build_of(&tb, &other);
+    let line = format!(
+        "panel tree in -: followed {} → {theirs}",
+        build_of(&tb, Path::new(MOA))
+    );
+    let followed = wait_for(Duration::from_secs(10), || {
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        written.contains(&line).then_some(())
+    });
     assert!(
-        term.wait_for_text(line, Duration::from_secs(10)),
+        followed.is_some(),
+        "{}\n{}",
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        term.tail(400)
+    );
+    // Linked to the daemon on its build: only a panel whose hello matched has a row.
+    let linked = wait_for(Duration::from_secs(10), || {
+        let rows = panels_on(&tb, &theirs);
+        rows.iter()
+            .any(|r| r["view"] == "tree" && r["pane"].is_null())
+            .then_some(())
+    });
+    assert!(linked.is_some(), "{}", term.tail(400));
+    assert!(
+        term.wait_for_text("▤ sessions", Duration::from_secs(10)),
+        "{}",
+        term.tail(400)
+    );
+    assert!(
+        !term.tail(4000).contains("from another build"),
         "{}",
         term.tail(400)
     );

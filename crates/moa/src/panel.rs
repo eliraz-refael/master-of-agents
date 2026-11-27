@@ -8,7 +8,7 @@ use jiff::tz::TimeZone;
 use moa_client::{OnMismatch, own_exe};
 use moa_core::panel::View;
 use moa_platform::current_uid;
-use moa_tui::run::{PanelOptions, claim_pane, run};
+use moa_tui::run::{Followed, PanelOptions, claim_pane, run};
 
 use crate::ctl::{Here, pick_brain, runtime};
 
@@ -101,6 +101,8 @@ pub fn panel(args: &PanelArgs) -> Result<(), String> {
         // Beside moa's own logs: what `see panel.log` points to.
         log: Some(here.paths.log_dir().join(PANEL_LOG)),
         once: args.once,
+        // Started in another panel's place to follow moa's build (§6.15).
+        followed: Followed::from_env(),
     };
     let runtime = runtime()?;
     let ended = runtime.block_on(run(opts));

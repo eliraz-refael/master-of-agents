@@ -160,19 +160,12 @@ impl Cockpit {
 
     /// Ask `id`'s `(status, reply)` as saved.
     fn ask(&self, id: i64) -> Option<(String, Option<String>)> {
-        self.rig
-            .store()
-            .conn()
-            .query_row("SELECT status, reply FROM asks WHERE id = ?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .ok()
+        self.rig.ask(id)
     }
 
     /// Waits until ask `id` is saved as `status`.
     fn wait_ask(&self, id: i64, status: &str) {
-        wait_for(WAIT, || (self.ask(id)?.0 == status).then_some(()))
-            .unwrap_or_else(|| panic!("ask #{id} never became {status}: {:?}", self.ask(id)));
+        self.rig.wait_ask(id, status);
     }
 
     /// Waits until ask `id` is typed (`sent`), lets the core finish that input (the Enter's

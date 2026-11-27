@@ -119,6 +119,7 @@ async fn go(args: &DaemonArgs, inherited: Option<Inherited>) -> ExitCode {
         build: build_id().to_string(),
         exec: Exec::Real,
         inherited,
+        probe_wait: moa_daemon::ProbeWait::default(),
     };
     match run(opts).await {
         Ok(()) => ExitCode::SUCCESS,

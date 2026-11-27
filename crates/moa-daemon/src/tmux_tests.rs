@@ -799,6 +799,7 @@ fn core_options(brain: &TypicalBrain, time: &Arc<FakeTime>) -> CoreOptions {
         events_capacity: 16,
         tmux: None,
         spool: None,
+        facts: None,
     }
 }
 

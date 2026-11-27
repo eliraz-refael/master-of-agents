@@ -24,7 +24,7 @@ use moa_core::op::{ConnId, Done, Op, OpError, ReqId};
 use moa_core::publish::{CoreEvent, Model};
 use moa_core::state::{CallerInfo, Deps, State, StatusData};
 use moa_core::tmux::cmd::Cmd;
-use moa_core::upgrade::Why;
+use moa_core::upgrade::{UpgradeFacts, Why};
 use moa_platform::{lock, spool};
 use moa_store::actor::{Fault, StoreHandle};
 use moa_store::{Store, StoreError};
@@ -85,6 +85,9 @@ pub struct CoreOptions {
     /// The brain's hook spool, drained at start and again when hooks may have been spooled
     /// while the daemon was up. `None` only in tests that opt out.
     pub spool: Option<PathBuf>,
+    /// What the shell found out about this start, for the upgrade's notice (L7). `None` in
+    /// tests that don't need one: then nothing is said or saved about builds.
+    pub facts: Option<UpgradeFacts>,
 }
 
 /// Counters for tests and the idle check. Startup counts as an input, a drain and (when it
@@ -291,7 +294,10 @@ impl CoreHandle {
         let (exec_tx, exec) = watch::channel(false);
         let panic_next = Arc::new(AtomicU32::new(0));
         let (inbox, inbox_rx) = mpsc::unbounded_channel();
-        let state = State::new(opts.brain, opts.config).with_deps(opts.deps);
+        let mut state = State::new(opts.brain, opts.config).with_deps(opts.deps);
+        if let Some(facts) = opts.facts.take() {
+            state = state.with_upgrade(facts);
+        }
         let (model_tx, model) = watch::channel(state.model());
         let (events, _) = broadcast::channel(opts.events_capacity.max(1));
         let (generation_tx, generation) = watch::channel(0);

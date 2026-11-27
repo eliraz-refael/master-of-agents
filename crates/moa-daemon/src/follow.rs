@@ -4,9 +4,10 @@
 //! so a rebuild renamed over it and a profile switch that retargets a link are both heard,
 //! with no polling. After a change the watch is armed again from the chain as it now is, and
 //! once changes have settled for [`SETTLE`] the program's build is read. A build other than
-//! this image's is asked for its build (`<exe> build-id`, at most [`PROBE_WAIT`]): a program
-//! caught half-written can't say it, and is skipped until the next change. One that does
-//! becomes `Input::Upgrade(Rebuilt)`, and the core takes it from there.
+//! this image's is asked for its build (`<exe> build-id`, [`ProbeWait`]): a program caught
+//! half-written can't say it, and is skipped until the next change. One that says nothing in
+//! time is asked once more, with longer (a first launch can be slow), then skipped too. One
+//! that says its build becomes `Input::Upgrade(Rebuilt)`, and the core takes it from there.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,21 +25,38 @@ use crate::core_task::CoreHandle;
 
 /// How long the program must stay unchanged before its build is read.
 const SETTLE: Duration = Duration::from_millis(500);
-/// How long the new program has to say its build.
-const PROBE_WAIT: Duration = Duration::from_secs(5);
 /// The most of the new program's answer that is read.
 const PROBE_MAX: u64 = 256;
 
+/// How long a new program has to say its build: `first`, and, when it said nothing in that
+/// time, `again`, asked once more at once (a first launch can be slow: a large program, a
+/// busy machine, the system checking a new binary).
+#[derive(Clone, Copy, Debug)]
+pub struct ProbeWait {
+    pub first: Duration,
+    pub again: Duration,
+}
+
+impl Default for ProbeWait {
+    fn default() -> ProbeWait {
+        ProbeWait {
+            first: Duration::from_secs(5),
+            again: Duration::from_secs(15),
+        }
+    }
+}
+
 pub(crate) struct Follow {
     exe: PathBuf,
+    wait: ProbeWait,
     /// This image's build.
     build: String,
     /// `None` once the watch couldn't be armed: the daemon goes on without one until its
     /// next start.
     watch: Option<PathWatch>,
     /// The last build that said its build and was wanted: each is wanted once. One that
-    /// couldn't say it (not executable yet, or too slow) is asked again on the next change,
-    /// which may leave its build as it was (a `chmod +x` keeps size and mtime).
+    /// couldn't say it (not executable yet, or too slow twice) is asked again on the next
+    /// change, which may leave its build as it was (a `chmod +x` keeps size and mtime).
     probed: Option<String>,
     /// The watch failed on the last change too: a second failure in a row turns it off,
     /// rather than arming it again and again.
@@ -48,10 +66,11 @@ pub(crate) struct Follow {
 impl Follow {
     /// Watches `exe`, the program of an image running `build`. Inside the runtime, and
     /// before the daemon says it is ready, so a change right after that is heard.
-    pub(crate) fn new(exe: PathBuf, build: String) -> Follow {
+    pub(crate) fn new(exe: PathBuf, build: String, wait: ProbeWait) -> Follow {
         let watch = arm(&exe);
         Follow {
             exe,
+            wait,
             build,
             watch,
             probed: None,
@@ -113,13 +132,24 @@ impl Follow {
             return;
         }
         let exe = self.exe.display();
-        if probe(&self.exe, &build).await {
+        let mut said = probe(&self.exe, &build, self.wait.first).await;
+        if said == Said::Nothing {
+            // It said nothing about itself: asked once more, with longer to answer.
+            tracing::info!("{exe} is slow to say its build; asking once more");
+            said = probe(&self.exe, &build, self.wait.again).await;
+        }
+        if said == Said::Build {
             self.probed = Some(build.clone());
             tracing::info!("{exe} is a new build ({build}); it takes over between moa's turns");
             core.stats().builds_found.fetch_add(1, Ordering::SeqCst);
             core.want_upgrade(Why::Rebuilt);
         } else {
-            tracing::warn!("upgrade skipped: {exe} isn't a whole moa yet");
+            match said {
+                Said::Nothing => {
+                    tracing::warn!("upgrade skipped: {exe} didn't say its build in time");
+                }
+                _ => tracing::warn!("upgrade skipped: {exe} isn't a whole moa yet"),
+            }
             core.stats().builds_skipped.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -139,22 +169,32 @@ fn arm(exe: &Path) -> Option<PathWatch> {
     }
 }
 
-/// Whether `exe build-id` prints `want` within [`PROBE_WAIT`]: the program is whole, and is
-/// the build its file says.
-async fn probe(exe: &Path, want: &str) -> bool {
-    match said(exe).await {
-        Ok(Some(out)) => out.trim() == want,
-        Ok(None) => false,
+/// What a new program said when asked for its build.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Said {
+    /// The build its file says: it is whole.
+    Build,
+    /// Another answer, or it couldn't start (half-written, not runnable yet).
+    Wrong,
+    /// Nothing within the limit: it says nothing about the program.
+    Nothing,
+}
+
+/// What `exe build-id` says within `limit`, against the build `want` its file says.
+async fn probe(exe: &Path, want: &str, limit: Duration) -> Said {
+    match said(exe, limit).await {
+        Ok(Some(out)) if out.trim() == want => Said::Build,
+        Ok(Some(_)) => Said::Wrong,
+        Ok(None) => Said::Nothing,
         Err(e) => {
             tracing::debug!("the new program didn't start: {}", e.kind());
-            false
+            Said::Wrong
         }
     }
 }
 
-/// What `exe build-id` printed; `None` when it took longer than [`PROBE_WAIT`] (it is
-/// stopped).
-async fn said(exe: &Path) -> io::Result<Option<String>> {
+/// What `exe build-id` printed; `None` when it took longer than `limit` (it is stopped).
+async fn said(exe: &Path, limit: Duration) -> io::Result<Option<String>> {
     let mut cmd = Command::new(exe);
     cmd.arg("build-id")
         .stdin(Stdio::null())
@@ -173,7 +213,7 @@ async fn said(exe: &Path) -> io::Result<Option<String>> {
         reaper.exited().await;
         read.map(|_| out)
     };
-    match tokio::time::timeout(PROBE_WAIT, answer).await {
+    match tokio::time::timeout(limit, answer).await {
         Ok(out) => out.map(Some),
         Err(_) => {
             reaper.kill_unless_exited(kill_term);

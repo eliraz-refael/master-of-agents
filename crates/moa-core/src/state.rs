@@ -454,6 +454,9 @@ pub struct State {
     /// The upgrade wanted, until the daemon re-execs ([`crate::upgrade`]). Kept in memory:
     /// a reload keeps it.
     pub(crate) upgrade: Option<crate::upgrade::Want>,
+    /// What this start says about the upgrade before it, if anything ([`crate::upgrade`],
+    /// L7). `None` when the shell gave no facts (tests that don't need them).
+    pub(crate) notice: Option<crate::upgrade::Notice>,
 }
 
 impl State {
@@ -511,12 +514,20 @@ impl State {
             last_event: 0,
             asks_mem: AsksMem::default(),
             upgrade: None,
+            notice: None,
         }
     }
 
     /// Replaces the outside dependencies; apply before `Startup`.
     pub fn with_deps(mut self, deps: Deps) -> State {
         self.deps = deps;
+        self
+    }
+
+    /// What the daemon's shell knows of this start, for the upgrade's notice (L7); apply
+    /// before `Startup`.
+    pub fn with_upgrade(mut self, facts: crate::upgrade::UpgradeFacts) -> State {
+        self.notice = Some(crate::upgrade::Notice::new(facts));
         self
     }
 

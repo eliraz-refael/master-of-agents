@@ -10,6 +10,8 @@
 //!
 //! Or, as `stub-acp build-id`, it prints its build id as `moa build-id` does, so a copy of it
 //! can stand in for a new build of moa that a daemon under test probes before it upgrades.
+//! When `<exe>.slow` exists it first sleeps the milliseconds it holds, and removes it: a
+//! slow first launch.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -43,6 +45,8 @@ const CHILD: &str = "--child";
 const CHILD_STUBBORN: &str = "--child-stubborn";
 /// The file in the stub's cwd that holds its child's pid.
 const CHILD_PID: &str = ".stub-acp.child";
+/// The file in the stub's cwd that says it got a `SIGTERM` it ignored (`IgnoreTerm`).
+const TERMED: &str = ".stub-acp.termed";
 /// The argument that names a recording to replay.
 const REPLAY: &str = "--replay";
 /// The argument that makes the stub a stand-in for `moactl` ([`call`]).
@@ -241,6 +245,17 @@ impl Stub {
                 StubStep::Stderr { line } => eprintln!("{line}"),
                 StubStep::SpawnStubborn => {
                     self.spawn_child(CHILD_STUBBORN)?;
+                }
+                StubStep::IgnoreTerm => {
+                    let mut term =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .map_err(fail)?;
+                    let termed = self.dir.join(TERMED);
+                    tokio::spawn(async move {
+                        while term.recv().await.is_some() {
+                            let _ = fs::write(&termed, "");
+                        }
+                    });
                 }
                 StubStep::Spawn => {
                     let child = self.spawn_child(CHILD)?;
@@ -491,6 +506,15 @@ async fn main() -> Result<(), Error> {
         }
         Some(CALL) => call(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some(BUILD_ID) => {
+            // A slow first launch: `<exe>.slow` holds how long, and is used up.
+            if let Some(slow) = std::env::current_exe()
+                .ok()
+                .map(|e| e.with_extension("slow"))
+                && let Ok(ms) = fs::read_to_string(&slow)
+            {
+                let _ = fs::remove_file(&slow);
+                tokio::time::sleep(Duration::from_millis(ms.trim().parse().unwrap_or(0))).await;
+            }
             println!("{}", moa_platform::build_id());
             return Ok(());
         }

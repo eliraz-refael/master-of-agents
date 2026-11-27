@@ -125,6 +125,7 @@ async fn a_lagging_subscriber_gets_a_fresh_snapshot() {
         events_capacity: 1,
         tmux: None,
         spool: None,
+        facts: None,
     })
     .await
     .expect("the core starts");

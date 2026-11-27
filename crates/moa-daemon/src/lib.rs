@@ -18,6 +18,6 @@ mod tmux;
 
 pub use core_task::{CoreHandle, CoreOptions, DRAIN_CAP, DaemonError, Stats};
 pub use moa_core::state::StatusData;
-pub use run::{Exec, Ready, RunOptions, daemon_exe, load_config, run};
+pub use run::{Exec, ProbeWait, Ready, RunOptions, daemon_exe, load_config, run};
 pub use session::{Program, peer_allowed, serve};
 pub use tmux::{TmuxLink, tmux_env};

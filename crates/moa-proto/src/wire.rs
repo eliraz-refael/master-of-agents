@@ -112,6 +112,10 @@ pub mod code {
     pub const BUILD_MISMATCH: i64 = -32001;
     pub const HELLO_FIRST: i64 = -32002;
     pub const TOO_LONG: i64 = -32003;
+    /// The daemon is stopping, or winding down to upgrade, and didn't run the request: the
+    /// core had already stopped when it came. An upgraded daemon (the same pid) takes it
+    /// again.
+    pub const STOPPING: i64 = -32004;
 }
 
 fn err(code: i64, message: impl Into<String>) -> RpcError {
