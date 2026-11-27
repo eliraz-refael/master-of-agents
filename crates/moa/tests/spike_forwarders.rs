@@ -30,9 +30,32 @@ const NEW_SID: &str = "3f6b8a21-9c4d-4e57-b0a2-6d1e7f9c8b35";
 
 /// The tools the spike runs. A missing one fails the test, as a missing tmux does.
 fn need(tool: &str) -> PathBuf {
-    moa_platform::which(tool, std::env::var_os("PATH").as_deref()).unwrap_or_else(|| {
-        panic!("{tool} not found on PATH (the spike needs it; or run inside `nix develop`)")
-    })
+    let found =
+        moa_platform::which(tool, std::env::var_os("PATH").as_deref()).unwrap_or_else(|| {
+            panic!("{tool} not found on PATH (the spike needs it; or run inside `nix develop`)")
+        });
+    if tool == "bash" {
+        bash_4_or_later(&found);
+    }
+    found
+}
+
+/// The spike's scripts need bash 4 or later: macOS's own `/bin/bash` 3.2 can't parse
+/// `track.sh`. A real Mac runs the hook with the bash on `PATH`, so the tests do too.
+fn bash_4_or_later(bash: &Path) {
+    let out = std::process::Command::new(bash)
+        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+        .output()
+        .expect("run bash");
+    let major: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    assert!(
+        major >= 4,
+        "{} is bash {major}; the spike needs bash 4 or later first on PATH (brew install bash)",
+        bash.display()
+    );
 }
 
 /// The repo's spike, which is only ever read.
