@@ -67,6 +67,9 @@ pub struct RunOptions {
     pub paths: Paths,
     pub brain: BrainName,
     pub config: Config,
+    /// The `moa.toml` text `config` was read from ([`load_config_with_text`]). `None` when it
+    /// wasn't read from the file (tests): the watch takes the file as it is when armed.
+    pub config_text: Option<ConfigText>,
     pub tz: TimeZone,
     pub clock: Arc<dyn Clock>,
     pub alarm: Box<dyn WallTimer>,
@@ -95,22 +98,21 @@ pub struct RunOptions {
 /// and every Claude account's launcher filled in where `PATH` has one. Shared by
 /// `moa daemon` and the client that starts it.
 pub fn load_config(paths: &Paths) -> Result<Config, DaemonError> {
+    load_config_with_text(paths).map(|(config, _)| config)
+}
+
+/// The `moa.toml` text a config was read from; `None` when there was no file.
+#[derive(Clone, Debug)]
+pub struct ConfigText(pub(crate) Option<String>);
+
+/// [`load_config`], and the text it read, so the daemon's watch on the file starts from what
+/// its config holds: a save between the read and the watch is still heard (L8).
+pub fn load_config_with_text(paths: &Paths) -> Result<(Config, ConfigText), DaemonError> {
     let text = paths.read_config()?;
     let mut config =
         Config::from_file_text(text.as_deref(), paths.home(), moa_platform::canonical)?;
     fill_launchers(&mut config, std::env::var_os("PATH").as_deref());
-    Ok(config)
-}
-
-/// The log's warning about the tables of `moa.toml` moa doesn't know, at start and at each
-/// reload.
-pub(crate) fn warn_skipped(config: &Config) {
-    if !config.skipped_tables.is_empty() {
-        tracing::warn!(
-            "moa.toml has tables moa doesn't know, which it skips: {}",
-            config.skipped_tables.join(", ")
-        );
-    }
+    Ok((config, ConfigText(text)))
 }
 
 /// H16: a Claude account with no `launcher` uses the `claude` on `path`, looked for once,
@@ -305,6 +307,7 @@ async fn bring_up(
     paths: &Paths,
     brain: &BrainName,
     config: Config,
+    config_text: Option<ConfigText>,
     tz: TimeZone,
     clock: Arc<dyn Clock>,
     alarm: Box<dyn WallTimer>,
@@ -341,7 +344,9 @@ async fn bring_up(
             Some(from) => tracing::info!("moa daemon upgraded from build {from} for brain {b}"),
             None => tracing::info!("moa daemon starting for brain {b}"),
         }
-        warn_skipped(&config);
+        if let Some(warning) = moa_core::config::skipped_warning(&config) {
+            tracing::warn!("{warning}");
+        }
         let launch = panel_launch(paths, exe);
         // T21: until the switch-over, only a sandbox's own server is ever touched.
         let (tmux, reattach) = if paths.is_sandboxed() {
@@ -386,9 +391,11 @@ async fn bring_up(
             scope_file: paths.config_dir().join(format!("{b}.md")),
             constitution_file: paths.config_dir().join(format!("{CONSTITUTION_NAME}.md")),
         };
-        // Armed before the core reads them at its start, so a save from then on is heard.
-        let config_watch = ConfigWatch::new(
+        // Armed before the core reads the others at its start, so a save from then on is
+        // heard; `moa.toml` is compared with the text `config` was read from.
+        let mut config_watch = ConfigWatch::new(
             paths.clone(),
+            config_text,
             vec![
                 (ConfigFile::MoaToml, paths.config_file()),
                 (ConfigFile::Layouts, deps.layouts_file.clone()),
@@ -411,6 +418,7 @@ async fn bring_up(
             facts: Some(facts),
         })
         .await?;
+        config_watch.check(&core);
         Ok::<_, DaemonError>((core, Signals { term, int, hup }, config_watch))
     }
     .await;
@@ -483,6 +491,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         paths,
         brain,
         config,
+        config_text,
         tz,
         clock,
         alarm,
@@ -504,6 +513,7 @@ pub async fn run(opts: RunOptions) -> Result<(), DaemonError> {
         &paths,
         &brain,
         config,
+        config_text,
         tz,
         clock,
         alarm,

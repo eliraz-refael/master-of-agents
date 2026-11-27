@@ -15,7 +15,7 @@ use moa_core::model::{PaneBinding, SessionId};
 use moa_core::publish::Topic;
 use moa_core::tmux::notify::Notification;
 use moa_daemon::testing::FakeTime;
-use moa_daemon::{CoreHandle, DaemonError, Exec, Ready, RunOptions, load_config, run};
+use moa_daemon::{CoreHandle, DaemonError, Exec, Ready, RunOptions, load_config_with_text, run};
 use moa_platform::{Inherited, Paths, ensure_private_dir};
 use moa_store::Store;
 use moa_testkit::brain::{TYPICAL_NOW, TYPICAL_TZ};
@@ -165,10 +165,12 @@ impl Rig {
             Some(exe) => exe.clone(),
             None => moa_daemon::daemon_exe().expect("the test's program"),
         };
+        let (config, config_text) = load_config_with_text(&self.paths).expect("a config");
         let done = tokio::spawn(run(RunOptions {
             paths: self.paths.clone(),
             brain: BrainName::default_brain(),
-            config: load_config(&self.paths).expect("a config"),
+            config,
+            config_text: Some(config_text),
             tz: TimeZone::posix(TYPICAL_TZ).unwrap(),
             clock: self.time.clone(),
             alarm: Box::new(self.time.alarm()),

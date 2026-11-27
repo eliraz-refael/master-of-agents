@@ -6,11 +6,12 @@ mod common;
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use common::create_server;
 use common::rig::{Rig, Up, WAIT};
-use moa_core::publish::Topic;
+use moa_core::config_reload::{INSTRUCTIONS_CHANGED, MOA_TOML_GONE};
+use moa_core::publish::{CoreEvent, Topic};
+use moa_daemon::SETTLE;
 use moa_testkit::{stub_moa_toml, wait_for};
 use serde_json::{Value, json};
 
@@ -66,7 +67,14 @@ async fn editing_moa_toml_reloads() {
     up.stop().await;
 }
 
-/// Two saves within the settle are read once, as the second left the file.
+/// Waits for something not to happen: well past the settle, so a read it would have let
+/// through has been made.
+async fn quiet() {
+    tokio::time::sleep(SETTLE * 3).await;
+}
+
+/// Two saves within the settle, with a gap between them shorter than it, are read once, as
+/// the second left the file. Without the settle the first would be read on its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn saving_twice_reloads_once() {
     let rig = Rig::new(&[]);
@@ -74,6 +82,7 @@ async fn saving_twice_reloads_once() {
     assert_eq!(brain_row(&up)["picker"], json!("popup"));
 
     save(&rig, &format!("{}[ui]\nmouse = false\n", stub_moa_toml()));
+    tokio::time::sleep(SETTLE * 3 / 10).await;
     save(
         &rig,
         &format!("{}[ui]\npicker = \"tab\"\n", stub_moa_toml()),
@@ -82,8 +91,70 @@ async fn saving_twice_reloads_once() {
         (brain_row(&up)["picker"] == json!("tab")).then_some(())
     })
     .unwrap_or_else(|| panic!("the save was never read: {}", brain_row(&up)));
-    // Quiet for longer than the settle: no second read comes.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    quiet().await;
     assert_eq!(counts(&up).0, 1);
+    up.stop().await;
+}
+
+/// `moa.toml` removed while moa runs keeps the last config, and says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_moa_toml_keeps_the_last() {
+    let rig = Rig::new(&[]);
+    let up = rig.start().await;
+    let mut events = up.core.events();
+    let accounts = brain_row(&up)["accounts"].clone();
+    assert_eq!(accounts, json!(["acct-a"]));
+
+    std::fs::remove_file(rig.paths.config_file()).expect("moa.toml is removed");
+    let said = wait_for(WAIT, || {
+        loop {
+            match events.try_recv() {
+                Ok(CoreEvent::Error { message }) => break Some(message),
+                Ok(_) => continue,
+                Err(_) => break None,
+            }
+        }
+    });
+    assert_eq!(said.as_deref(), Some(MOA_TOML_GONE));
+    assert_eq!(brain_row(&up)["accounts"], accounts);
+    assert_eq!(counts(&up).0, 1);
+    up.stop().await;
+}
+
+/// `layouts.json` saved by hand is published; the scope file and the constitution saved
+/// together say one line, that they apply from moa's next thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn layouts_and_instructions_reload() {
+    let rig = Rig::new(&[]);
+    let up = rig.start().await;
+    let dir = rig.paths.config_dir();
+    let layouts = || {
+        let model = up.core.model();
+        let model = model.borrow();
+        model.topics[&Topic::Layouts].contains_key("mine")
+    };
+    assert!(!layouts());
+    std::fs::write(
+        dir.join("layouts.json"),
+        r#"{"layouts": {"mine": {"panel": "tree"}}}"#,
+    )
+    .expect("layouts.json is saved");
+    wait_for(WAIT, || layouts().then_some(())).expect("the new layouts are published");
+
+    std::fs::write(dir.join("default.md"), "This brain keeps the garden.").expect("the scope");
+    std::fs::write(dir.join("constitution.md"), "# You are moa.").expect("the constitution");
+    let lines = || {
+        rig.store()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM activity WHERE text = ?1",
+                [INSTRUCTIONS_CHANGED],
+                |r| r.get::<_, i64>(0),
+            )
+            .expect("the activity rows")
+    };
+    wait_for(WAIT, || (lines() > 0).then_some(())).expect("the line is saved");
+    quiet().await;
+    assert_eq!(lines(), 1);
     up.stop().await;
 }

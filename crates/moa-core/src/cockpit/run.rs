@@ -405,7 +405,7 @@ fn start(state: &mut State, op: CockpitOp) -> Vec<Effect> {
             | CockpitOp::Sheet { .. }
             | CockpitOp::Unsheet { .. }
     ) {
-        state.layouts = crate::ops::layout::read(state);
+        crate::ops::layout::refresh(state);
         fx.extend(
             state
                 .publish_changed(Topic::Layouts)

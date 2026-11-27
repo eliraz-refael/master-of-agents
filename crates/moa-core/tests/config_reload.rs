@@ -10,12 +10,14 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use common::central::{acps, ended, first_turn, hear, opened_today, prompt, toml};
+use common::central::{acps, caps, ended, first_turn, hear, opened_today, prompt, started, toml};
 use common::*;
 use moa_core::central::wire::{AcpCmd, ThreadHow};
 use moa_core::config::{BrainName, Config};
-use moa_core::config_reload::{INSTRUCTIONS_CHANGED, kept_the_last, layouts_kept};
-use moa_core::effect::{Effect, Input, Publish, TimerKey, handle_checked};
+use moa_core::config_reload::{
+    INSTRUCTIONS_CHANGED, MOA_TOML_GONE, Unread, kept_the_last, layouts_kept,
+};
+use moa_core::effect::{Effect, Input, LogLevel, LogLine, Publish, TimerKey, handle_checked};
 use moa_core::model::EventKind;
 use moa_core::op::{NoParams, Op};
 use moa_core::publish::{CoreEvent, Topic};
@@ -68,8 +70,9 @@ fn moa_toml(accounts: &[&str], extra: &str) -> String {
 }
 
 /// What the daemon's shell hands over for `text`: the config, or its error's line.
-fn read(b: &TypicalBrain, text: &str) -> Result<Config, String> {
-    Config::from_file_text(Some(text), &b.home, |p| p.to_path_buf()).map_err(|e| e.to_string())
+fn read(b: &TypicalBrain, text: &str) -> Result<Config, Unread> {
+    Config::from_file_text(Some(text), &b.home, |p| p.to_path_buf())
+        .map_err(|e| Unread::Error(e.to_string()))
 }
 
 fn reload(b: &TypicalBrain, st: &mut State, text: &str) -> Vec<Effect> {
@@ -190,6 +193,111 @@ fn a_broken_moa_toml_keeps_the_last() {
     the_open(&fx);
 }
 
+/// A `moa.toml` removed while moa runs keeps the last config, with its own line: no file is
+/// the default config only at start.
+#[test]
+fn a_moa_toml_that_is_gone_keeps_the_last() {
+    let (b, mut st) = linked(&moa_toml(&["acct-a"], ""));
+    let before = st.config().clone();
+    let fx = handle_checked(&mut st, Input::Config(Err(Unread::Gone)), b.now());
+    assert_eq!(errors(&fx), [MOA_TOML_GONE]);
+    assert_eq!(MOA_TOML_GONE, "moa.toml is gone, so moa kept the last one");
+    assert_eq!(st.config(), &before);
+}
+
+/// The tables moa skips are logged at a reload as at start.
+#[test]
+fn a_reload_logs_the_tables_it_skips() {
+    let (b, mut st) = linked(&moa_toml(&["acct-a"], ""));
+    let fx = reload(
+        &b,
+        &mut st,
+        &moa_toml(
+            &["acct-a"],
+            "[plugins]
+x = 1
+",
+        ),
+    );
+    let warned: Vec<&str> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(LogLine {
+                level: LogLevel::Warn,
+                message,
+            }) => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        warned,
+        ["moa.toml has tables moa doesn't know, which it skips: plugins"]
+    );
+}
+
+/// L8 as amended: a reload that changes moa's account starts and stops nothing; moa's agent
+/// goes on as it runs, and its next start runs on the new account.
+#[test]
+fn moas_account_applies_from_its_next_start() {
+    let b = TypicalBrain::new();
+    let mut snapshot = b.snapshot();
+    opened_today(&mut snapshot, &b.now());
+    let mut st = loaded_with(&b, &toml("acct-a"), deps(&b), snapshot);
+    first_turn(&mut st, &b.now(), "th-1", false);
+    hear(&b, &mut st, ended(1, 1));
+
+    let fx = reload(&b, &mut st, &toml("acct-b"));
+    assert!(acps(&fx).is_empty(), "nothing starts or stops: {fx:?}");
+    assert_eq!(st.central().account.as_ref().unwrap().as_str(), "acct-a");
+    // The run under way still answers, in its thread.
+    let fx = prompt(&b, &mut st, 2, "still there?");
+    assert!(
+        matches!(&acps(&fx)[..], [AcpCmd::Prompt { thread, .. }] if thread == "th-1"),
+        "{fx:?}"
+    );
+    hear(&b, &mut st, ended(1, 2));
+
+    // Its agent stops; the next prompt starts it on acct-b.
+    let exited = moa_core::central::wire::AcpIn::Exited {
+        generation: 1,
+        why: "it stopped".into(),
+    };
+    hear(&b, &mut st, exited);
+    let fx = prompt(&b, &mut st, 3, "and now?");
+    let store = b.home.join(".claude-acct-b").display().to_string();
+    let start = acps(&fx).into_iter().find_map(|c| match c {
+        AcpCmd::Start { spec, .. } => Some(spec.clone()),
+        _ => None,
+    });
+    let spec = start.unwrap_or_else(|| panic!("a start: {fx:?}"));
+    assert!(
+        spec.env
+            .iter()
+            .any(|(k, v)| k == "CLAUDE_CONFIG_DIR" && *v == store),
+        "{:?}",
+        spec.env
+    );
+    assert_eq!(st.central().account.as_ref().unwrap().as_str(), "acct-b");
+    // acct-a's thread of today is never resumed on acct-b, whose store doesn't have it: only
+    // acct-b's own thread of today is (the typical brain has one).
+    let fx = hear(&b, &mut st, started(2, caps(true, true, true)));
+    let thread = match &acps(&fx)[..] {
+        [
+            AcpCmd::Open {
+                how: ThreadHow::Resume { thread },
+                ..
+            },
+        ] => thread.clone(),
+        other => panic!("a resume: {other:?}"),
+    };
+    assert_ne!(thread, "th-1");
+    let row = st
+        .threads()
+        .find(|t| t.thread_id == thread)
+        .expect("a saved thread");
+    assert_eq!(row.account, "acct-b");
+}
+
 /// A `moa.toml` that drops the brain this daemon runs is refused as a broken one is: the
 /// daemon can't run a brain the file doesn't have.
 #[test]
@@ -234,14 +342,54 @@ fn layouts_reload_and_publish() {
         layouts_kept("x"),
         "layouts.json has an error, so moa kept the last one: x"
     );
-    assert_eq!(published(&fx, Topic::Layouts), None, "{fx:?}");
-    // What the panels have is the last good file's.
+    // The panels keep the last good file's layouts, and see the file's error.
+    let rows = published(&fx, Topic::Layouts).expect("the error published");
+    assert!(rows.get("mine").is_some(), "{rows}");
+    assert_eq!(rows[""]["error"], json!(why), "{rows}");
+
+    // A layout op reads the file again, and keeps them too.
+    let fx = send(&b, &mut st, 1, Op::LayoutList(NoParams));
+    match &replies(&fx)[..] {
+        [(_, Ok(done))] => {
+            assert!(
+                done.text.lines().any(|l| l == "  mine: tree"),
+                "{}",
+                done.text
+            );
+            let error = format!("layouts.json has an error: {why}");
+            assert!(done.text.lines().any(|l| l == error), "{}", done.text);
+        }
+        other => panic!("a listing, got {other:?}"),
+    }
     let model = st.model();
     let shown = &model.topics[&Topic::Layouts];
-    assert!(
-        shown.contains_key("mine") && !shown.contains_key(""),
-        "{shown:?}"
+    assert!(shown.contains_key("mine"), "{shown:?}");
+    // Nor does `set` write over the file while it doesn't read.
+    let mine = json!({"panel": "plan"});
+    let fx = send(
+        &b,
+        &mut st,
+        2,
+        Op::LayoutSet {
+            name: "mine".into(),
+            layout: mine,
+        },
     );
+    assert!(matches!(&replies(&fx)[..], [(_, Err(_))]), "{fx:?}");
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::WriteFile { .. })),
+        "{fx:?}"
+    );
+
+    // Fixed, it reads again: the error goes.
+    save(
+        Path::new(LAYOUTS),
+        r#"{"layouts": {"mine": {"panel": "plan"}}}"#,
+    );
+    let fx = handle_checked(&mut st, Input::LayoutsChanged, b.now());
+    let rows = published(&fx, Topic::Layouts).expect("layouts published");
+    assert!(rows.get("").is_none(), "{rows}");
+    assert_eq!(errors(&fx), Vec::<&str>::new());
 }
 
 /// moa's instructions apply from its next thread, never mid-thread: the thread under way

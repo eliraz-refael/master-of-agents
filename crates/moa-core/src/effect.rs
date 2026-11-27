@@ -105,7 +105,7 @@ pub enum Input {
     Upgrade(crate::upgrade::Why),
     /// `moa.toml` was saved: the shell read it, and this is the config it holds, or why it
     /// can't be had ([`crate::config_reload`]).
-    Config(Result<crate::config::Config, String>),
+    Config(Result<crate::config::Config, crate::config_reload::Unread>),
     /// `layouts.json` was saved: the core reads it again.
     LayoutsChanged,
     /// The brain's scope file or moa's constitution was saved: they apply from moa's next

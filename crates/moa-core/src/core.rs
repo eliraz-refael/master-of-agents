@@ -141,7 +141,7 @@ fn decide(state: &mut State, input: Input, now: &Now) -> Vec<Effect> {
                 }
                 fx.push(Effect::Persist(changes));
             }
-            state.layouts = ops::layout::read(state);
+            ops::layout::refresh(state);
             fx.extend(publish_all(state));
             fx.extend(state.tmux.startup());
             fx

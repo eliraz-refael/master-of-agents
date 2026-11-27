@@ -13,7 +13,7 @@ use std::time::Duration;
 use moa_platform::PathWatch;
 
 /// How long the entries must stay unchanged before a change is heard.
-pub(crate) const SETTLE: Duration = Duration::from_millis(500);
+pub const SETTLE: Duration = Duration::from_millis(500);
 
 type Entries = Box<dyn Fn() -> Vec<(PathBuf, OsString)> + Send>;
 

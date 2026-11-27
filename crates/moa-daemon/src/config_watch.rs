@@ -11,11 +11,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
+use moa_core::config_reload::Unread;
 use moa_core::effect::Input;
 use moa_platform::Paths;
 
 use crate::core_task::CoreHandle;
-use crate::run::{load_config, warn_skipped};
+use crate::run::{ConfigText, load_config_with_text};
 use crate::settled::Settled;
 
 /// Which of the config files a path is.
@@ -41,10 +42,15 @@ pub(crate) struct ConfigWatch {
 }
 
 impl ConfigWatch {
-    /// Watches `files`, each as it is now. Their folders are made when missing, so a file
-    /// saved there later is heard. Inside the runtime, and before the daemon says it is
-    /// ready.
-    pub(crate) fn new(paths: Paths, files: Vec<(ConfigFile, PathBuf)>) -> ConfigWatch {
+    /// Watches `files`, each as it is now: `moa.toml` as `toml` says the daemon's config read
+    /// it, when it says, so a save since is heard at once. Their folders are made when
+    /// missing, so a file saved there later is heard. Inside the runtime, and before the
+    /// daemon says it is ready.
+    pub(crate) fn new(
+        paths: Paths,
+        toml: Option<ConfigText>,
+        files: Vec<(ConfigFile, PathBuf)>,
+    ) -> ConfigWatch {
         let entries: Vec<(PathBuf, OsString)> = files
             .iter()
             .filter_map(|(_, path)| Some((path.parent()?.to_path_buf(), path.file_name()?.into())))
@@ -58,7 +64,12 @@ impl ConfigWatch {
             .into_iter()
             .map(|(file, path)| Seen {
                 file,
-                bytes: std::fs::read(&path).ok(),
+                bytes: match (file, &toml) {
+                    (ConfigFile::MoaToml, Some(ConfigText(text))) => {
+                        text.clone().map(String::into_bytes)
+                    }
+                    _ => std::fs::read(&path).ok(),
+                },
                 path,
             })
             .collect();
@@ -83,8 +94,9 @@ impl ConfigWatch {
     }
 
     /// Tells the core of each file whose bytes changed: the scope file and the constitution
-    /// together, once.
-    fn check(&mut self, core: &CoreHandle) {
+    /// together, once. Also run once as the core has started, before the daemon is ready,
+    /// for a file saved between the daemon's read of it and the watch.
+    pub(crate) fn check(&mut self, core: &CoreHandle) {
         let mut instructions = false;
         for seen in &mut self.files {
             let bytes = std::fs::read(&seen.path).ok();
@@ -94,13 +106,16 @@ impl ConfigWatch {
             seen.bytes = bytes;
             match seen.file {
                 ConfigFile::MoaToml => {
-                    let read = load_config(&self.paths);
-                    if let Ok(config) = &read {
-                        warn_skipped(config);
-                    }
                     tracing::info!("moa.toml was saved; reading it again");
+                    // No file is the default config only at start: one removed keeps the
+                    // last.
+                    let read = match load_config_with_text(&self.paths) {
+                        Ok((_, ConfigText(None))) => Err(Unread::Gone),
+                        Ok((config, _)) => Ok(config),
+                        Err(e) => Err(Unread::Error(e.to_string())),
+                    };
                     core.stats().configs_read.fetch_add(1, Ordering::SeqCst);
-                    core.input(Input::Config(read.map_err(|e| e.to_string())));
+                    core.input(Input::Config(read));
                 }
                 ConfigFile::Layouts => core.input(Input::LayoutsChanged),
                 ConfigFile::Instructions => instructions = true,

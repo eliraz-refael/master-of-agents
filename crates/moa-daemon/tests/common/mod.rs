@@ -59,6 +59,7 @@ pub fn options(
         paths: paths.clone(),
         brain: BrainName::default_brain(),
         config,
+        config_text: None,
         tz: TimeZone::posix(TYPICAL_TZ).expect("a zone"),
         clock: time.clone(),
         alarm: Box::new(time.alarm()),

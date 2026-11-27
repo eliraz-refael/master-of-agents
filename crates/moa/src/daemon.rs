@@ -6,7 +6,7 @@ use clap::Args;
 use jiff::tz::TimeZone;
 use moa_core::config::BrainName;
 use moa_daemon::clock::SystemClock;
-use moa_daemon::{DaemonError, Exec, Ready, RunOptions, daemon_exe, load_config, run};
+use moa_daemon::{DaemonError, Exec, Ready, RunOptions, daemon_exe, load_config_with_text, run};
 use moa_platform::{Inherited, Paths, WallAlarm, ZoneWatch, build_id, take_inherited};
 
 /// How many events a slow console may fall behind by before it is sent a fresh snapshot.
@@ -74,7 +74,8 @@ async fn go(args: &DaemonArgs, inherited: Option<Inherited>) -> ExitCode {
         Ok(p) => p,
         Err(e) => return fail(notify, &e.to_string()),
     };
-    let config = match load_config(&paths) {
+    // With the text it was read from: the daemon's watch on moa.toml starts from it.
+    let (config, config_text) = match load_config_with_text(&paths) {
         Ok(c) => c,
         Err(e) => return fail(notify, &e.to_string()),
     };
@@ -104,6 +105,7 @@ async fn go(args: &DaemonArgs, inherited: Option<Inherited>) -> ExitCode {
         paths,
         brain,
         config,
+        config_text: Some(config_text),
         tz,
         clock: std::sync::Arc::new(SystemClock::new()),
         alarm: Box::new(alarm),
