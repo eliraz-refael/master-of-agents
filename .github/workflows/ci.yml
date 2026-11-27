@@ -25,7 +25,8 @@ jobs:
         run: |
           python3 -m py_compile spike/moa-proto/*.py
           for f in spike/moa-proto/moa spike/moa-proto/moactl spike/master-chat/*.sh spike/master-chat/hooks/*.sh spike/master-chat/master/hooks/*.sh; do bash -n "$f"; done
-      - run: sudo apt-get update && sudo apt-get install -y tmux && tmux -V
+      # jq and sqlite3 for the spike's forwarder tests (the image has python3)
+      - run: sudo apt-get update && sudo apt-get install -y tmux jq sqlite3 && tmux -V
       # reads rust-toolchain.toml (`rustup show` stopped installing in 1.28)
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -43,7 +44,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: brew install tmux && tmux -V
+      # the spike needs bash 4 or later (the image's /bin/bash is 3.2), as on a real Mac
+      - run: brew install tmux bash && tmux -V && command -v bash && bash -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]'
+      # the spike's forwarder tests need them; the image has both
+      - run: jq --version && sqlite3 --version
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5

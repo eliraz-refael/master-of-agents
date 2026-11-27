@@ -42,11 +42,11 @@
                 ./crates/moa-core/src/central/constitution.md
                 # the moa-peers skill the session plugin ships (`include_str!`)
                 ./crates/moa-agents/src/claude/skills/moa-peers.md
-                # read by a DDL check test; removed with the spike
                 # nextest's overrides (the hook budget test runs alone)
                 ./.config/nextest.toml
-                ./spike/master-chat/schema.sql
-                ./spike/moa-proto/picture.py
+                # the spike: a DDL check test reads its schema, and the forwarder tests run
+                # a copy of it; removed with the spike
+                ./spike
               ];
             };
             strictDeps = true;
@@ -114,9 +114,10 @@
             '';
           # The Linux sandbox has no time zone database and no /etc/localtime, which every
           # real system has; jiff reads TZDIR and TZ. --no-fail-fast reports every failure of
-          # a run, not just the first.
+          # a run, not just the first. The spike's forwarder tests run its scripts, which need
+          # jq, sqlite3 and python3.
           nextest = b.craneLib.cargoNextest (b.withArtifacts // {
-            nativeBuildInputs = [ b.pkgs.tmux ];
+            nativeBuildInputs = [ b.pkgs.tmux b.pkgs.jq b.pkgs.sqlite b.pkgs.python3 ];
             TZDIR = "${b.pkgs.tzdata}/share/zoneinfo";
             TZ = "UTC";
             cargoNextestExtraArgs = "--no-fail-fast";
@@ -129,6 +130,9 @@
           default = b.craneLib.devShell {
             packages = [
               b.pkgs.tmux
+              # the spike's scripts, run by the forwarder tests
+              b.pkgs.jq
+              b.pkgs.sqlite
               b.pkgs.cargo-nextest
               b.pkgs.cargo-insta
               (adapterFor system)

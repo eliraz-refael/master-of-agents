@@ -29,6 +29,17 @@ if [ -n "${MOA_ACCOUNT_BRAIN:-}" ]; then
 elif [ -n "${MOA_ONLY_UNDER:-}" ]; then
   moa_under "$cwd" "$MOA_ONLY_UNDER" || tracked "$db" || exit 0
 fi
+# v1-forward begin
+# Switched over (moa switch wrote the flag): v1 takes the event, for the brain picked above.
+# With v1 gone (or the flag naming the spike's own launcher) the event is dropped: the
+# spike's brain is frozen. Before the spike's own check for the brain's DB: a brain made
+# after the switch has none, and v1 still takes its events. v1 picks the brain from MOA_DB.
+if [ -f "$HOME/.local/state/moa/v1-live" ]; then
+  v1=$(head -n 1 "$HOME/.local/state/moa/v1-live")
+  [ -x "$v1" ] && ! [ "$v1" -ef "$(dirname "${BASH_SOURCE[0]}")/../../moa-proto/moa" ] || exit 0
+  MOA_DB="$db" exec "$v1" hook claude --from-spike <<<"$in"
+fi
+# v1-forward end
 [ -f "$db" ] || exit 0
 event=$(jq -r '.hook_event_name // empty' <<<"$in")
 text=""
