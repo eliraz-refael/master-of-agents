@@ -13,6 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use moa_testkit::{Scenario, SpikeFixture, ids};
@@ -30,32 +31,36 @@ const NEW_SID: &str = "3f6b8a21-9c4d-4e57-b0a2-6d1e7f9c8b35";
 
 /// The tools the spike runs. A missing one fails the test, as a missing tmux does.
 fn need(tool: &str) -> PathBuf {
-    let found =
-        moa_platform::which(tool, std::env::var_os("PATH").as_deref()).unwrap_or_else(|| {
-            panic!("{tool} not found on PATH (the spike needs it; or run inside `nix develop`)")
-        });
-    if tool == "bash" {
-        bash_4_or_later(&found);
-    }
-    found
+    moa_platform::which(tool, std::env::var_os("PATH").as_deref()).unwrap_or_else(|| {
+        panic!("{tool} not found on PATH (the spike needs it; or run inside `nix develop`)")
+    })
 }
 
-/// The spike's scripts need bash 4 or later: macOS's own `/bin/bash` 3.2 can't parse
-/// `track.sh`. A real Mac runs the hook with the bash on `PATH`, so the tests do too.
-fn bash_4_or_later(bash: &Path) {
-    let out = std::process::Command::new(bash)
-        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
-        .output()
-        .expect("run bash");
-    let major: u32 = String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0);
-    assert!(
-        major >= 4,
-        "{} is bash {major}; the spike needs bash 4 or later first on PATH (brew install bash)",
-        bash.display()
-    );
+/// The bash on `PATH`, checked once to be bash 4 or later. macOS's own `/bin/bash` 3.2
+/// can't parse `track.sh`; a real Mac runs the hook (`bash track.sh`) with the bash on
+/// `PATH`, and so does `Rig::hook`.
+fn bash() -> &'static Path {
+    static BASH: OnceLock<PathBuf> = OnceLock::new();
+    BASH.get_or_init(|| {
+        let bash = need("bash");
+        let out = Command::new(&bash)
+            .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+            .output()
+            .expect("run bash");
+        let major: u32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        assert!(
+            major >= 4,
+            "{} isn't bash 4 or later ({:?}, stderr {:?}); the spike needs one first on PATH \
+             (brew install bash)",
+            bash.display(),
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        );
+        bash
+    })
 }
 
 /// The repo's spike, which is only ever read.
@@ -81,7 +86,7 @@ fn copy_spike(from: &Path, to: &Path) {
         }
         let mut bytes = fs::read(&src).unwrap();
         if bytes.starts_with(b"#!/bin/bash\n") && !Path::new("/bin/bash").exists() {
-            let bash = format!("#!{}\n", need("bash").display());
+            let bash = format!("#!{}\n", bash().display());
             bytes.splice(..b"#!/bin/bash\n".len(), bash.into_bytes());
         }
         fs::write(&dst, bytes).unwrap();
@@ -133,7 +138,8 @@ struct Rig {
 }
 
 fn rig() -> Rig {
-    for tool in ["bash", "python3", "sqlite3", "jq"] {
+    bash();
+    for tool in ["python3", "sqlite3", "jq"] {
         need(tool);
     }
     let dir = tempfile::Builder::new()
@@ -254,7 +260,7 @@ impl Rig {
     /// Run the hook `script` as its installed command does (`bash <track.sh>`, from
     /// `moactl setup`), with `payload` on stdin.
     fn hook(&self, script: &Path, payload: &str, env: &[(&str, &OsStr)]) -> Output {
-        self.run(&need("bash"), &[script.to_str().unwrap()], payload, env)
+        self.run(bash(), &[script.to_str().unwrap()], payload, env)
     }
 
     /// How the stand-ins were called, in order.

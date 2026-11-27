@@ -45,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # the spike needs bash 4 or later (the image's /bin/bash is 3.2), as on a real Mac
-      - run: brew install tmux bash && tmux -V && bash --version | head -1
+      - run: brew install tmux bash && tmux -V && command -v bash && bash -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]'
       # the spike's forwarder tests need them; the image has both
       - run: jq --version && sqlite3 --version
       - run: rustup toolchain install
